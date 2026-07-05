@@ -25,6 +25,12 @@ First public release as a standalone, cross-platform engine.
   `find_package(stl2step)`; also usable via `add_subdirectory` / `FetchContent`.
 - `AGENTS.md` integration guide, a minimal C++ example, and a CTest smoke test.
 
+### Verified
+- Built and smoke-tested on macOS (AppleClang, OpenCASCADE 7.9.3) and Windows
+  (MSVC 2022 Build Tools, vcpkg OpenCASCADE 8.0.0). Both produce identical
+  conversion results (cube: 1 solid, 6 faces, 1000 mm^3, 0% volume delta). Linux
+  uses the same standard CMake + system-OCCT path exercised by CI.
+
 ### Changed (from the original single-file tool)
 - Refactored the monolithic `main()` into a reentrant library `Converter` plus a
   thin CLI, with no change to the conversion pipeline or numeric behavior.
