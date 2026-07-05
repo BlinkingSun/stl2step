@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- CI (Linux): install `libtbb-dev` alongside the OCCT packages — Ubuntu's
+  OpenCASCADE CMake config references TBB by absolute path, so linking failed
+  with "No rule to make target '/usr/lib/x86_64-linux-gnu/libtbb.so'".
+- CI: update `actions/checkout` v4 -> v5 to clear Node 20 deprecation warnings.
+
 ## [1.0.0]
 
 First public release as a standalone, cross-platform engine.

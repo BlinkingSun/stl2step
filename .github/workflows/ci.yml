@@ -13,12 +13,14 @@ jobs:
   linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenCASCADE + toolchain
+        # libtbb-dev: Ubuntu's OCCT CMake config links TBB by absolute .so path
+        # but the libocct-*-dev packages don't pull in the TBB dev package.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            cmake g++ \
+            cmake g++ libtbb-dev \
             libocct-foundation-dev libocct-modeling-data-dev \
             libocct-modeling-algorithms-dev libocct-data-exchange-dev
       - name: Configure
@@ -32,7 +34,7 @@ jobs:
   macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenCASCADE
         run: brew install opencascade
       - name: Configure
@@ -46,7 +48,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenCASCADE (vcpkg)
         run: vcpkg install opencascade
       - name: Configure
