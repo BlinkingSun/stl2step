@@ -1,0 +1,21 @@
+# Build output
+/build/
+build*/
+out/
+cmake-build-*/
+
+# CMake user files
+CMakeUserPresets.json
+
+# Conversion output / scratch
+*.step
+*.stp
+!tests/**/*.step   # keep any intentional test fixtures
+
+# Editor / OS cruft
+.vscode/
+.idea/
+.cache/
+compile_commands.json
+.DS_Store
+*.swp

@@ -1,0 +1,13 @@
+@PACKAGE_INIT@
+
+# Resolve the engine's dependencies before importing its targets, using the
+# bundled OpenCASCADE finder shipped alongside this config file.
+include(CMakeFindDependencyMacro)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+find_dependency(Threads)
+find_dependency(OpenCASCADE)
+
+include("${CMAKE_CURRENT_LIST_DIR}/stl2stepTargets.cmake")
+
+check_required_components(stl2step)
