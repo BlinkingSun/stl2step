@@ -35,8 +35,16 @@ target_compile_features(stl2step_core PUBLIC cxx_std_17)
 set_target_properties(stl2step_core PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
-    POSITION_INDEPENDENT_CODE ON
-    OUTPUT_NAME stl2step)
+    POSITION_INDEPENDENT_CODE ON)
+
+# On Windows an executable named `stl2step` also emits an import `stl2step.lib`,
+# which collides with the static library's `stl2step.lib` (LNK1149). Keep the
+# tidy `libstl2step.{a,so,dylib}` name on Unix; fall back to the target name
+# (`stl2step_core.lib`) on Windows. CMake consumers link the `stl2step::core`
+# target, so the on-disk name is transparent to them either way.
+if(NOT WIN32)
+    set_target_properties(stl2step_core PROPERTIES OUTPUT_NAME stl2step)
+endif()
 
 target_include_directories(stl2step_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
