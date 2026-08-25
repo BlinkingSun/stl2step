@@ -1318,10 +1318,30 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
     return true;
 }
 
-bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols&,
+bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols& tol,
                     SegmentWork& work) {
-    for (Provisional& prov : work.provisionals) {
+    // Shatter-class unclaimed provisionals stay Unclaimed so stage D emits
+    // islands (I1). Area floor is D5.2: epsPlane * diag (epsPlane already
+    // max(epsMesh, sewTol, 0.02)). 1–2 tris is the A2 shatter grain of a
+    // NYI curve (sphere/cone/torus facet); designed walls (S12-a, cube
+    // faces) have area ≫ this floor.
+    const double areaMin = tol.epsPlane * mv.diag;
+    const int nProv = static_cast<int>(work.provisionals.size());
+    std::vector<char> filletFlank(nProv, 0);
+    for (const Region& r : work.accepted) {
+        if (r.origin != Origin::FilletStrip) continue;
+        if (r.filletNbrA >= 0 && r.filletNbrA < nProv) filletFlank[r.filletNbrA] = 1;
+        if (r.filletNbrB >= 0 && r.filletNbrB < nProv) filletFlank[r.filletNbrB] = 1;
+    }
+    int nIsland = 0;
+    for (size_t pi = 0; pi < work.provisionals.size(); ++pi) {
+        Provisional& prov = work.provisionals[pi];
         if (prov.claim != ProvClaim::Unclaimed) continue;
+        const int n = static_cast<int>(prov.tris.size());
+        if (n <= 2 && prov.area <= areaMin && !filletFlank[static_cast<int>(pi)]) {
+            ++nIsland;
+            continue;
+        }
 
         Region reg;
         reg.type = SurfType::Plane;
@@ -1338,6 +1358,9 @@ bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols&
         work.accepted.push_back(reg);
         prov.claim = ProvClaim::CommittedPlane;
     }
+    if (p1DiagOn())
+        std::fprintf(stderr, "A3: committed=%zu island-skip=%d areaMin=%.5g\n",
+                     work.accepted.size(), nIsland, areaMin);
     sortRegions(work.accepted);
     return true;
 }
