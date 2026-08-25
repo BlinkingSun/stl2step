@@ -81,6 +81,15 @@ if(STL2STEP_BUILD_TESTS AND STL2STEP_BUILD_CLI)
 endif()
 
 # ---------------------------------------------------------------------------
+# Test / gate tree (corpus generator, censuses, region dumps, gate harnesses).
+# Each tool owns its own CMakeLists so the lanes that add them never collide
+# in this file.
+# ---------------------------------------------------------------------------
+if(STL2STEP_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
+
+# ---------------------------------------------------------------------------
 # Examples
 # ---------------------------------------------------------------------------
 if(STL2STEP_BUILD_EXAMPLES)

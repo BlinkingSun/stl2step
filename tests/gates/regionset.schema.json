@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "regionset.schema.json",
+  "$comment": "I1-I6, I8, I9 are cross-array invariants and are the checker's job (P0 check_regionset.py). This schema does not express them. I7 and I7b are two separate if/then rules keyed on closed360 inside Region.",
+  "title": "stl2step refit RegionSet dump",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "compRoot",
+    "regions",
+    "rejected",
+    "chains",
+    "triRegion",
+    "triIsland",
+    "nIslands",
+    "stats"
+  ],
+  "properties": {
+    "compRoot": { "type": "integer" },
+    "regions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Region" }
+    },
+    "rejected": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Region" }
+    },
+    "chains": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/BoundaryChain" }
+    },
+    "triRegion": {
+      "type": "array",
+      "items": { "type": "integer" }
+    },
+    "triIsland": {
+      "type": "array",
+      "items": { "type": "integer" }
+    },
+    "nIslands": { "type": "integer" },
+    "stats": { "$ref": "#/$defs/RefitStats" }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "ax3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["loc", "dir", "xdir"],
+      "properties": {
+        "loc": { "$ref": "#/$defs/vec3" },
+        "dir": { "$ref": "#/$defs/vec3" },
+        "xdir": { "$ref": "#/$defs/vec3" }
+      }
+    },
+    "Loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chainIdx", "reversed", "role"],
+      "properties": {
+        "chainIdx": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "reversed": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "role": {
+          "type": "string",
+          "enum": ["outer", "inner", "capLow", "capHigh"]
+        }
+      }
+    },
+    "Region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "type",
+        "origin",
+        "ax",
+        "radius",
+        "uMin",
+        "uMax",
+        "vMin",
+        "vMax",
+        "closed360",
+        "outwardNormal",
+        "tris",
+        "loops",
+        "maxVertexDev",
+        "rmsVertexDev",
+        "chordSagitta",
+        "nSides",
+        "dVolPredicted",
+        "maxVertexSnap",
+        "reject",
+        "builtAs",
+        "filletNbrA",
+        "filletNbrB"
+      ],
+      "properties": {
+        "id": { "type": "integer" },
+        "type": {
+          "type": "string",
+          "enum": ["plane", "cylinder", "cone", "sphere", "torus"]
+        },
+        "origin": {
+          "type": "string",
+          "enum": ["planeGrow", "cylGrow", "filletStrip"]
+        },
+        "ax": { "$ref": "#/$defs/ax3" },
+        "radius": { "type": "number" },
+        "uMin": { "type": "number" },
+        "uMax": { "type": "number" },
+        "vMin": { "type": "number" },
+        "vMax": { "type": "number" },
+        "closed360": { "type": "boolean" },
+        "outwardNormal": { "type": "boolean" },
+        "tris": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "loops": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Loop" }
+        },
+        "maxVertexDev": { "type": "number" },
+        "rmsVertexDev": { "type": "number" },
+        "chordSagitta": { "type": "number" },
+        "nSides": { "type": "integer" },
+        "dVolPredicted": { "type": "number" },
+        "maxVertexSnap": { "type": "number" },
+        "reject": {
+          "type": "string",
+          "enum": [
+            "none",
+            "gaussPlanarity",
+            "vertexResidual",
+            "chordConsistency",
+            "radiusSanity",
+            "span",
+            "filletConsensus",
+            "neighborNotAnalytic",
+            "stripWidth",
+            "torusNYI",
+            "coneNYI",
+            "sphereNYI",
+            "dirtyComponent",
+            "faceBuildFailed",
+            "chainUnstable"
+          ]
+        },
+        "builtAs": {
+          "type": "string",
+          "enum": [
+            "notBuilt",
+            "single",
+            "seamed360",
+            "twoHalves",
+            "explodedToFacets"
+          ]
+        },
+        "filletNbrA": { "type": "integer" },
+        "filletNbrB": { "type": "integer" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "closed360": { "const": false } },
+            "required": ["closed360"]
+          },
+          "then": {
+            "$comment": "I7",
+            "properties": {
+              "loops": {
+                "type": "array",
+                "allOf": [
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "outer" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "capLow" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 0,
+                    "maxContains": 0
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "capHigh" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 0,
+                    "maxContains": 0
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "closed360": { "const": true } },
+            "required": ["closed360"]
+          },
+          "then": {
+            "$comment": "I7b",
+            "properties": {
+              "loops": {
+                "type": "array",
+                "allOf": [
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "capLow" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "capHigh" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 1,
+                    "maxContains": 1
+                  },
+                  {
+                    "contains": {
+                      "type": "object",
+                      "properties": { "role": { "const": "outer" } },
+                      "required": ["role"]
+                    },
+                    "minContains": 0,
+                    "maxContains": 0
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "BoundaryChain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regA",
+        "regB",
+        "islandA",
+        "islandB",
+        "tangent",
+        "closedLoop",
+        "meshEdges",
+        "meshVerts"
+      ],
+      "properties": {
+        "regA": { "type": "integer" },
+        "regB": { "type": "integer" },
+        "islandA": { "type": "integer" },
+        "islandB": { "type": "integer" },
+        "tangent": { "type": "boolean" },
+        "closedLoop": { "type": "boolean" },
+        "meshEdges": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "meshVerts": {
+          "type": "array",
+          "items": { "type": "integer" }
+        }
+      }
+    },
+    "RefitStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planes",
+        "cylinders",
+        "fillets",
+        "rejected",
+        "facetIslands",
+        "facetTriangles",
+        "distinctRadii",
+        "maxVertexDev",
+        "maxEdgeTol",
+        "dVolPredicted"
+      ],
+      "properties": {
+        "planes": { "type": "integer" },
+        "cylinders": { "type": "integer" },
+        "fillets": { "type": "integer" },
+        "rejected": { "type": "integer" },
+        "facetIslands": { "type": "integer" },
+        "facetTriangles": { "type": "integer" },
+        "distinctRadii": { "type": "integer" },
+        "maxVertexDev": { "type": "number" },
+        "maxEdgeTol": { "type": "number" },
+        "dVolPredicted": { "type": "number" }
+      }
+    }
+  }
+}

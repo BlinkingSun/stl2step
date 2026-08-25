@@ -107,6 +107,25 @@ struct Options {
     // Overrides the STEP product name written into the file. Empty = the output
     // file's stem (e.g. "part" for "part.step").
     std::string productName;
+
+    // Recognise tessellated radii and near-flat regions and emit true analytic
+    // Geom_CylindricalSurface / Geom_Plane faces instead of triangle facets.
+    // Default false for the whole 1.x line; with smooth off the engine is
+    // bit-identical to 1.0.0.
+    bool smooth = false;
+
+    // Surface-fit tolerance in mm. 0 auto-derives from the bounding box, weld
+    // and sew tolerances. Only meaningful when smooth is true.
+    double smoothTolMM = 0.0;
+
+    // Near-flat normal gate in degrees (segmentation threshold). This is not
+    // unifyAngleDeg (0.001 deg, a coplanarity test on already-flat facets);
+    // 2.0 deg is a segmentation gate and the two are unrelated.
+    double smoothAngleDeg = 2.0;
+
+    // Recover plane-to-plane fillet strips as cylinders. Ignored when smooth
+    // is false.
+    bool smoothFillets = true;
 };
 
 // -------------------------------------------------------------------- logging
@@ -152,6 +171,26 @@ struct Result {
     double seconds = 0.0;         // wall-clock time of the whole conversion
 
     std::vector<std::string> warnings;  // every Warning emitted, in order
+
+    // These C++ members are always present and default to zero, so host code can
+    // read them unconditionally and ABI does not shift with a flag. The RESULT
+    // JSON is the opposite: toJson() emits the smooth* keys only when
+    // Options::smooth was true, so an off-path RESULT string stays
+    // character-identical to 1.0.0. Keys are omitted when the feature is off,
+    // never emitted as zeros.
+
+    int smoothPlanes = 0;              // planar regions recovered as Geom_Plane
+    int smoothCylinders = 0;           // cylindrical regions recovered
+    int smoothFillets = 0;             // fillet strips recovered as cylinders
+    int smoothDistinctRadii = 0;       // distinct cylinder radii accepted
+    int smoothRejected = 0;            // candidate regions rejected by gates
+    int smoothFacetFaces = 0;          // faceted faces left after smooth pass
+    int facesAfterSmooth = 0;          // total face count after smooth pass
+    int smoothSkippedComponents = 0;   // dirty components not refit
+
+    double smoothMaxDevMM = 0.0;       // max vertex deviation from fit (mm)
+    double smoothMaxEdgeTolMM = 0.0;   // max edge tolerance written (mm)
+    double smoothVolPredictedMM3 = 0.0; // predicted volume from analytic fits (mm^3)
 
     // The machine-readable payload the CLI prints after "RESULT ". Stable field
     // set and ordering; safe to parse. Does not include the "RESULT " prefix.
