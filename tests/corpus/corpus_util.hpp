@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -68,6 +69,35 @@ struct FacetedRegion {
     std::string note;
 };
 
+struct MeshComponentInfo {
+    int index = 0;
+    int triangleCount = 0;
+    int degenerateTriangles = 0;
+    int openEdges = 0;
+    int nonManifoldEdges = 0;
+    double meshVolume = 0;
+    bool clean() const {
+        return openEdges == 0 && nonManifoldEdges == 0 && degenerateTriangles == 0;
+    }
+};
+
+struct SurfaceCensus {
+    int plane = 0;
+    int cylinder = 0;
+    int planar_facets = 0;
+    int totalPlanes() const { return plane + planar_facets; }
+};
+
+struct LiveExpectation {
+    int component = 0;
+    std::string disposition = "PASS";
+    std::string escalateReason;
+    int faceCount = 0;
+    SurfaceCensus surfaceCensus;
+    double volumeBudgetMM3 = 0;
+    bool buildFaces = true;
+};
+
 struct Sidecar {
     std::string id;
     std::string description;
@@ -88,6 +118,8 @@ struct Sidecar {
     int expectedExit = 0;
     int expectedSolids = 1;
     int expectedOpenShells = 0;
+    std::vector<MeshComponentInfo> components;
+    std::vector<LiveExpectation> live;
 };
 
 struct MeshData {
@@ -186,6 +218,15 @@ inline double brepVolume(const TopoDS_Shape& shape) {
     return props.Mass();
 }
 
+inline bool isDegenerateTriangle(const MeshData& mesh, const std::array<int, 3>& t) {
+    if (t[0] == t[1] || t[1] == t[2] || t[0] == t[2]) return true;
+    return triArea(mesh.verts[t[0]], mesh.verts[t[1]], mesh.verts[t[2]]) < 1e-12;
+}
+
+inline double volumeBudgetMM3(double meshVolAbs, double dVolAbsSum = 0) {
+    return std::max(1e-4 * meshVolAbs, 3.0 * dVolAbsSum);
+}
+
 inline double meshVolume(const MeshData& mesh) {
     double vol = 0;
     for (const auto& t : mesh.tris) {
@@ -251,6 +292,71 @@ inline EdgeStats meshEdgeStats(const MeshData& mesh) {
         else if (kv.second > 2) s.nonManifold++;
     }
     return s;
+}
+
+inline std::vector<MeshComponentInfo> splitMeshComponents(const MeshData& mesh) {
+    const int n = static_cast<int>(mesh.tris.size());
+    if (n == 0) return {};
+    auto ekey = [](int a, int b) {
+        return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+    };
+    std::vector<int> parent(n);
+    for (int i = 0; i < n; ++i) parent[i] = i;
+    std::function<int(int)> find = [&](int x) {
+        return parent[x] == x ? x : (parent[x] = find(parent[x]));
+    };
+    auto unite = [&](int a, int b) {
+        const int ra = find(a), rb = find(b);
+        if (ra != rb) parent[rb] = ra;
+    };
+    std::map<std::pair<int, int>, std::vector<int>> edgeTris;
+    for (int ti = 0; ti < n; ++ti) {
+        const auto& t = mesh.tris[ti];
+        const int vs[3] = {t[0], t[1], t[2]};
+        for (int k = 0; k < 3; ++k) edgeTris[ekey(vs[k], vs[(k + 1) % 3])].push_back(ti);
+    }
+    for (const auto& kv : edgeTris) {
+        if (kv.second.size() == 2) unite(kv.second[0], kv.second[1]);
+    }
+    std::map<int, std::vector<int>> groups;
+    for (int ti = 0; ti < n; ++ti) groups[find(ti)].push_back(ti);
+    std::vector<int> roots;
+    roots.reserve(groups.size());
+    for (const auto& kv : groups) roots.push_back(kv.first);
+    std::sort(roots.begin(), roots.end());
+    std::vector<MeshComponentInfo> out;
+    out.reserve(roots.size());
+    for (size_t ci = 0; ci < roots.size(); ++ci) {
+        MeshComponentInfo comp;
+        comp.index = static_cast<int>(ci);
+        const auto& triIds = groups.at(roots[ci]);
+        comp.triangleCount = static_cast<int>(triIds.size());
+        MeshData sub;
+        std::map<int, int> remap;
+        auto mapV = [&](int g) {
+            auto it = remap.find(g);
+            if (it != remap.end()) return it->second;
+            const int id = static_cast<int>(sub.verts.size());
+            remap.emplace(g, id);
+            sub.verts.push_back(mesh.verts[g]);
+            return id;
+        };
+        for (int ti : triIds) {
+            const auto& t = mesh.tris[ti];
+            if (isDegenerateTriangle(mesh, t)) {
+                ++comp.degenerateTriangles;
+                continue;
+            }
+            sub.tris.push_back({mapV(t[0]), mapV(t[1]), mapV(t[2])});
+            comp.meshVolume += dot(mesh.verts[t[0]], cross(mesh.verts[t[1]], mesh.verts[t[2]])) /
+                               6.0;
+        }
+        const EdgeStats es = meshEdgeStats(sub);
+        comp.openEdges = es.open;
+        comp.nonManifoldEdges = es.nonManifold;
+        out.push_back(comp);
+    }
+    return out;
 }
 
 inline bool writeBinaryStl(const std::string& path, const MeshData& mesh, const char* label) {
@@ -344,7 +450,35 @@ inline std::string writeSidecarJson(const Sidecar& s) {
         if (i) os << ", ";
         os << "\"" << s.expectedRejects[i] << "\"";
     }
-    os << "]\n";
+    os << "],\n";
+    os << "  \"components\": [\n";
+    for (size_t i = 0; i < s.components.size(); ++i) {
+        const auto& c = s.components[i];
+        os << "    {\"index\": " << c.index << ", \"triangleCount\": " << c.triangleCount
+           << ", \"degenerateTriangles\": " << c.degenerateTriangles << ", \"openEdges\": "
+           << c.openEdges << ", \"nonManifoldEdges\": " << c.nonManifoldEdges
+           << ", \"meshVolume\": " << c.meshVolume << ", \"clean\": "
+           << (c.clean() ? "true" : "false") << "}"
+           << (i + 1 < s.components.size() ? "," : "") << "\n";
+    }
+    os << "  ],\n";
+    os << "  \"live\": [\n";
+    for (size_t i = 0; i < s.live.size(); ++i) {
+        const auto& l = s.live[i];
+        os << "    {\n";
+        os << "      \"component\": " << l.component << ",\n";
+        os << "      \"disposition\": \"" << l.disposition << "\",\n";
+        if (!l.escalateReason.empty())
+            os << "      \"escalateReason\": \"" << l.escalateReason << "\",\n";
+        if (!l.buildFaces) os << "      \"buildFaces\": false,\n";
+        os << "      \"faceCount\": " << l.faceCount << ",\n";
+        os << "      \"surfaceCensus\": {\"plane\": " << l.surfaceCensus.plane
+           << ", \"cylinder\": " << l.surfaceCensus.cylinder << ", \"planar_facets\": "
+           << l.surfaceCensus.planar_facets << "},\n";
+        os << "      \"volumeBudgetMM3\": " << l.volumeBudgetMM3 << "\n";
+        os << "    }" << (i + 1 < s.live.size() ? "," : "") << "\n";
+    }
+    os << "  ]\n";
     os << "}\n";
     return os.str();
 }

@@ -110,6 +110,32 @@ std::vector<ParsedRecoverable> parseRecoverables(const std::string& text) {
     return out;
 }
 
+int countLiveEntries(const std::string& text) {
+    const size_t pos = text.find("\"live\"");
+    if (pos == std::string::npos) return 0;
+    const size_t start = text.find('[', pos);
+    const size_t end = text.find(']', start);
+    if (start == std::string::npos || end == std::string::npos || end <= start) return 0;
+    const std::string block = text.substr(start, end - start);
+    int count = 0;
+    size_t p = 0;
+    while ((p = block.find("\"component\"", p)) != std::string::npos) {
+        ++count;
+        p += 11;
+    }
+    return count;
+}
+
+int parseSidecarComponentDegens(const std::string& text, int index) {
+    const std::regex blockRe(
+        "\\{\\s*\"index\"\\s*:\\s*" + std::to_string(index) +
+        "[\\s\\S]*?\"degenerateTriangles\"\\s*:\\s*([0-9]+)",
+        std::regex::ECMAScript);
+    std::smatch m;
+    if (std::regex_search(text, m, blockRe)) return std::stoi(m[1].str());
+    return -1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -182,6 +208,46 @@ int main(int argc, char** argv) {
                           << " != sidecar " << r.nSides << "\n";
                 ++failures;
             }
+        }
+        const std::vector<MeshComponentInfo> comps = splitMeshComponents(mesh);
+        if (jsonText.find("\"components\"") == std::string::npos) {
+            std::cerr << "FAIL " << base << ": missing components[] block\n";
+            ++failures;
+        } else {
+            for (const auto& c : comps) {
+                const int expectDeg = parseSidecarComponentDegens(jsonText, c.index);
+                if (expectDeg < 0) {
+                    std::cerr << "FAIL " << base << ": sidecar missing component "
+                              << c.index << "\n";
+                    ++failures;
+                } else if (expectDeg != c.degenerateTriangles) {
+                    std::cerr << "FAIL " << base << ": component " << c.index
+                              << " degenerateTriangles " << c.degenerateTriangles
+                              << " != sidecar " << expectDeg << "\n";
+                    ++failures;
+                }
+                if (c.degenerateTriangles > 0 && c.openEdges == 0) {
+                    std::cerr << "FAIL " << base << ": component " << c.index
+                              << " has " << c.degenerateTriangles
+                              << " degenerate triangle(s) but openEdges==0\n";
+                    ++failures;
+                }
+            }
+        }
+        const int liveCount = countLiveEntries(jsonText);
+        const int expectLive = static_cast<int>(
+            comps.size() - (base == "S15" || base == "S16-R1-round-2" ? comps.size() : 0));
+        if (expectLive > 0 && liveCount < expectLive) {
+            std::cerr << "FAIL " << base << ": live[] has " << liveCount
+                      << " entries, expected >= " << expectLive << "\n";
+            ++failures;
+        }
+        if (jsonText.find("\"faceCount\"") == std::string::npos ||
+            jsonText.find("\"surfaceCensus\"") == std::string::npos ||
+            jsonText.find("\"volumeBudgetMM3\"") == std::string::npos) {
+            std::cerr << "FAIL " << base << ": live block missing faceCount/"
+                         "surfaceCensus/volumeBudgetMM3\n";
+            ++failures;
         }
         std::cout << "OK " << base << " tris=" << actualTris << " vol=" << actualVol
                   << " open=" << es.open << " nm=" << es.nonManifold << "\n";

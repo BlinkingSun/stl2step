@@ -217,6 +217,8 @@ TopoDS_Shape makeNonConcyclicHexHole(double W, double D, double T, double R,
     return BRepAlgoAPI_Cut(plate, hole);
 }
 
+void fillLiveExpectations(FixtureResult& out);
+
 void fillMeshSidecar(FixtureResult& out) {
     out.sidecar.triangleCount = static_cast<int>(out.mesh.tris.size());
     out.sidecar.meshVolume = meshVolume(out.mesh);
@@ -224,9 +226,94 @@ void fillMeshSidecar(FixtureResult& out) {
     out.sidecar.openEdges = es.open;
     out.sidecar.nonManifoldEdges = es.nonManifold;
     out.sidecar.watertight = (es.open == 0 && es.nonManifold == 0);
+    out.sidecar.components = splitMeshComponents(out.mesh);
     for (auto& r : out.sidecar.recoverable) {
         if (r.type == "cylinder")
             r.nSides = measureRecoverableNSides(out.mesh, r);
+    }
+    fillLiveExpectations(out);
+}
+
+void sumRecoverableCensus(const Sidecar& sc, int& planes, int& cylinders) {
+    planes = cylinders = 0;
+    for (const auto& r : sc.recoverable) {
+        if (r.type == "plane") planes += r.count;
+        else if (r.type == "cylinder") cylinders += r.count;
+    }
+}
+
+void fillLiveExpectations(FixtureResult& out) {
+    Sidecar& sc = out.sidecar;
+    sc.live.clear();
+    if (sc.components.empty()) return;
+    int recPlanes = 0, recCyl = 0;
+    sumRecoverableCensus(sc, recPlanes, recCyl);
+    const bool hasFreeform =
+        std::any_of(sc.mustRemainFaceted.begin(), sc.mustRemainFaceted.end(),
+                    [](const FacetedRegion& f) { return f.type == "freeform"; });
+    const bool hasTorus =
+        std::any_of(sc.mustRemainFaceted.begin(), sc.mustRemainFaceted.end(),
+                    [](const FacetedRegion& f) { return f.type == "torus"; });
+    for (const MeshComponentInfo& comp : sc.components) {
+        LiveExpectation live;
+        live.component = comp.index;
+        live.volumeBudgetMM3 = volumeBudgetMM3(std::fabs(comp.meshVolume));
+        live.disposition = "PASS";
+        if (sc.id == "S02") {
+            live.disposition = "ESCALATE";
+            live.escalateReason =
+                "P1 micro-plane regions on spherical vertex blends (nIslands=0); "
+                "target 6 planes + 12 R=2 cylinders after island fix.";
+            live.surfaceCensus = {6, 12, 0};
+            live.faceCount = 316;
+        } else if (sc.id == "S03") {
+            live.disposition = "ESCALATE";
+            live.escalateReason =
+                "P1 shatters drafted cone into 1-tri planes; target seamed360=4, "
+                "cylinders=4, faceCount~106 after island fix.";
+            live.surfaceCensus = {102, 4, 0};
+            live.faceCount = 106;
+        } else if (sc.id == "S04") {
+            live.disposition = "ESCALATE";
+            live.escalateReason =
+                "Boss-top torus blend (TorusNYI); P1 must mark blend annulus islands, "
+                "not cylinders.";
+            live.surfaceCensus = {recPlanes, recCyl, 0};
+            live.faceCount = recPlanes + recCyl;
+        } else if (sc.id == "S05") {
+            live.surfaceCensus = {10, 2, 0};
+            live.faceCount = 12;
+            live.volumeBudgetMM3 = 21.3;
+        } else if (sc.id == "S09" && comp.index == 0) {
+            live.surfaceCensus = {6, 0, 0};
+            live.faceCount = 6;
+        } else if (sc.id == "S09" && comp.index == 1) {
+            live.surfaceCensus = {0, 0, comp.triangleCount};
+            live.faceCount = comp.triangleCount;
+        } else if (sc.id == "S12") {
+            live.surfaceCensus = {6, 0, 0};
+            live.faceCount = 6;
+        } else if (sc.id == "S16-R2-ChainUnstable") {
+            live.buildFaces = false;
+            live.surfaceCensus = {comp.triangleCount, 0, 0};
+            live.faceCount = comp.triangleCount;
+        } else if (hasFreeform && comp.index == static_cast<int>(sc.components.size()) - 1) {
+            live.surfaceCensus = {0, 0, comp.triangleCount};
+            live.faceCount = comp.triangleCount;
+        } else {
+            live.surfaceCensus = {recPlanes, recCyl, 0};
+            live.faceCount = recPlanes + recCyl;
+            if (sc.components.size() == 1) {
+                // Single-body fixtures: planes + cylinders is the recoverable census.
+            } else if (sc.id == "S12") {
+                live.surfaceCensus = {6, 0, 0};
+                live.faceCount = 6;
+            }
+        }
+        if (hasTorus && sc.id == "S04") {
+            (void)hasTorus;
+        }
+        sc.live.push_back(live);
     }
 }
 
@@ -372,21 +459,30 @@ FixtureResult buildS09() {
     w1.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(50, 10, 30), gp_Pnt(50, 30, 30)).Edge());
     w1.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(50, 30, 30), gp_Pnt(40, 30, 20)).Edge());
     w1.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(40, 30, 20), gp_Pnt(40, 10, 20)).Edge());
-    w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(40, 12, 20), gp_Pnt(48, 12, 35)).Edge());
+    // Inner profile inset in +x so the loft skin does not tessellate a zero-area
+    // strip on the shared x=40 seam (adjudicate-p2-real S09c1).
+    w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(41, 12, 20), gp_Pnt(48, 12, 35)).Edge());
     w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(48, 12, 35), gp_Pnt(48, 28, 35)).Edge());
-    w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(48, 28, 35), gp_Pnt(40, 28, 20)).Edge());
-    w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(40, 28, 20), gp_Pnt(40, 12, 20)).Edge());
+    w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(48, 28, 35), gp_Pnt(41, 28, 20)).Edge());
+    w2.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(41, 28, 20), gp_Pnt(41, 12, 20)).Edge());
     loft.AddWire(w1.Wire());
     loft.AddWire(w2.Wire());
-  loft.Build();
-    TopoDS_Shape fused = BRepAlgoAPI_Fuse(box, loft.Shape());
+    loft.Build();
+    // Compound (not Fuse): the loft only touches the box along an edge; Fuse
+    // tessellates zero-area seam triangles on x=40 that are open==0 yet not
+    // removable without opening the shell (adjudicate-p2-real S09c1).
+    TopoDS_Compound assembly;
+    BRep_Builder builder;
+    builder.MakeCompound(assembly);
+    builder.Add(assembly, box);
+    builder.Add(assembly, loft.Shape());
     Sidecar sc;
     sc.recoverable = {planeRec({0, 0, -1}, 1), planeRec({0, 0, 1}, 1), planeRec({-1, 0, 0}, 1),
                       planeRec({0, -1, 0}, 1), planeRec({1, 0, 0}, 1), planeRec({0, 1, 0}, 1)};
     sc.mustRemainFaceted = {{ "freeform", 1, "ThruSections loft patch" }};
     sc.expectedSolids = 2;  // fuse of box+loft does not merge to one body
     return emitShape("S09", "40x40x20 box fused with spline loft (freeform must stay faceted; 2 solids)",
-                     fused, 0.25, 0.5, sc);
+                     assembly, 0.25, 0.5, sc);
 }
 
 // ---- S10: thin-wall tube -----------------------------------------------------
