@@ -1,6 +1,8 @@
-# Build output
-/build/
-build*/
+# Build output. NOTE: the build pattern is ROOT-ANCHORED on purpose.
+# An unanchored 'build*/' also matched tests/gates/build_fixtures/ and
+# tests/gates/buildtest/, silently hiding committed test data from git
+# (FINDINGS-0 D5). Keep the leading slash.
+/build*/
 out/
 cmake-build-*/
 
