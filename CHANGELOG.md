@@ -12,6 +12,38 @@ All notable changes to this project are documented here. The format follows
   with "No rule to make target '/usr/lib/x86_64-linux-gnu/libtbb.so'".
 - CI: update `actions/checkout` v4 -> v5 to clear Node 20 deprecation warnings.
 
+## [1.1.0-unreleased]
+
+Optional analytic-surface recovery behind `--smooth`. No tag, no release.
+
+### Added
+- `--smooth` opt-in recovery of **planes**, **right circular cylinders**
+  (holes/bosses, N ≥ 6), and **plane–plane fillet strips** (1–3 rows) as
+  `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. Library
+  field: `Options::smooth`. Default **OFF** for the whole 1.x line.
+- Six CLI flags: `--smooth`, `--refit` (alias), `--no-smooth`,
+  `--smooth-tol <mm>`, `--smooth-angle <deg>`, `--no-smooth-fillets`.
+  Matching `Options` fields: `smooth`, `smoothTolMM` (0 = auto, mm),
+  `smoothAngleDeg` (default 2.0 deg), `smoothFillets` (default true;
+  `--no-smooth-fillets` clears it).
+- Eleven `Result` fields: `smoothPlanes`, `smoothCylinders`, `smoothFillets`,
+  `smoothDistinctRadii`, `smoothRejected`, `smoothFacetFaces`,
+  `facesAfterSmooth`, `smoothSkippedComponents`, `smoothMaxDevMM`,
+  `smoothMaxEdgeTolMM`, `smoothVolPredictedMM3`. C++ members are always
+  present and default to zero; RESULT `smooth*` keys are spliced only when
+  `smooth == true`, appended after `warnings` (omitted, never zero-valued,
+  on the off path).
+- Documented D6.4 limitations: a regular N≥6 prism (e.g. a hex socket) **is**
+  recovered as a cylinder; a symmetric 45° chamfer **is** recovered as a
+  fillet; an asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
+
+### Changed
+- Engine version string is `1.1.0-pre` (`STL2STEP_VERSION_*` macros). CMake
+  `project(... VERSION …)` is owned separately and is not part of this
+  changelog entry.
+- **`--smooth` off is byte-identical to 1.0.0** (STEP + RESULT), measured by
+  gate G0.1 at 22/22 on every corpus fixture.
+
 ## [1.0.0]
 
 First public release as a standalone, cross-platform engine.

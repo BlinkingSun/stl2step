@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(stl2step
-    VERSION 1.0.0
+    VERSION 1.1.0
     DESCRIPTION "Universal STL (mesh) -> STEP (B-Rep solid) conversion engine"
     LANGUAGES CXX)
 
@@ -28,7 +28,14 @@ find_package(OpenCASCADE REQUIRED)
 # ---------------------------------------------------------------------------
 # Engine library
 # ---------------------------------------------------------------------------
-add_library(stl2step_core src/stl2step.cpp)
+add_library(stl2step_core
+    src/stl2step.cpp
+    src/refit_math.cpp
+    src/refit_grow.cpp
+    src/refit_fillet.cpp
+    src/refit_chains.cpp
+    src/refit_segment.cpp
+    src/refit_build.cpp)
 add_library(stl2step::core ALIAS stl2step_core)
 
 target_compile_features(stl2step_core PUBLIC cxx_std_17)
@@ -78,6 +85,15 @@ if(STL2STEP_BUILD_TESTS AND STL2STEP_BUILD_CLI)
                          "${CMAKE_CURRENT_BINARY_DIR}/cube.step")
     set_tests_properties(convert_cube PROPERTIES
         PASS_REGULAR_EXPRESSION "\"ok\":true.*\"solids\":1.*\"volumeDeltaPct\":0")
+endif()
+
+# ---------------------------------------------------------------------------
+# Test / gate tree (corpus generator, censuses, region dumps, gate harnesses).
+# Each tool owns its own CMakeLists so the lanes that add them never collide
+# in this file.
+# ---------------------------------------------------------------------------
+if(STL2STEP_BUILD_TESTS)
+    add_subdirectory(tests)
 endif()
 
 # ---------------------------------------------------------------------------

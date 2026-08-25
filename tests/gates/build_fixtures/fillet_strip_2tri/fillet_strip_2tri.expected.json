@@ -1,0 +1,31 @@
+{
+  "faceCount": 3,
+  "surfaceCensus": {
+    "plane": 2,
+    "cylinder": 1
+  },
+  "rung": 1,
+  "rounds": 0,
+  "note": "2-tri (one-band) strip; both long chains tangent:true (constructed generators).",
+  "fixture": "fillet_strip_2tri",
+  "meshTriangles": 6,
+  "closed": false,
+  "volumeMM3": 24.0,
+  "dVolPredicted": -20.548667764616276,
+  "dVolPredAbs": 20.548667764616276,
+  "volumeBudgetMM3": 61.64600329384883,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "single"
+    },
+    {
+      "id": 1,
+      "builtAs": "single"
+    },
+    {
+      "id": 2,
+      "builtAs": "single"
+    }
+  ]
+}

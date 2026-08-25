@@ -1,0 +1,9 @@
+{
+  "id": "S11",
+  "rejected": [
+    "filletConsensus"
+  ],
+  "forbidOrigin": [
+    "filletStrip"
+  ]
+}

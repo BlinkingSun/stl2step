@@ -1,0 +1,24 @@
+{
+  "faceCount": 4,
+  "surfaceCensus": {
+    "plane": 1,
+    "planar_facets": 3
+  },
+  "maxEdgeTolMM": 0.05,
+  "rung": 1,
+  "rounds": 0,
+  "note": "Mixed analytic|faceted chain is a shared mesh edge; chords kept verbatim.",
+  "fixture": "s09_mixed",
+  "meshTriangles": 5,
+  "closed": false,
+  "volumeMM3": -120.0,
+  "dVolPredicted": 0.0,
+  "dVolPredAbs": 0.0,
+  "volumeBudgetMM3": 0.012,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "single"
+    }
+  ]
+}

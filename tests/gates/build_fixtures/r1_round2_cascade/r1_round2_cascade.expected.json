@@ -1,0 +1,31 @@
+{
+  "faceCount": 15,
+  "surfaceCensus": {
+    "planar_facets": 14,
+    "plane": 1
+  },
+  "rung": 3,
+  "rounds": 2,
+  "note": "First explode forces annular cap rebuild; second explode in round 2. Distinct caps on both cylinders.",
+  "fixture": "r1_round2_cascade",
+  "meshTriangles": 20,
+  "closed": true,
+  "volumeMM3": 162.3797714710236,
+  "dVolPredicted": -230.31931848914184,
+  "dVolPredAbs": 230.31931848914184,
+  "volumeBudgetMM3": 690.9579554674256,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "explodedToFacets"
+    },
+    {
+      "id": 1,
+      "builtAs": "explodedToFacets"
+    },
+    {
+      "id": 2,
+      "builtAs": "single"
+    }
+  ]
+}

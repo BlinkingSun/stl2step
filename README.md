@@ -35,16 +35,24 @@ part.stl  ──►  weld ─► split into solids ─► build B-Rep (parallel)
 
 ## What it is and isn't
 
-A mesh carries no analytic geometry, so a mesh→B-Rep conversion **cannot invent
-curvature that the tessellation threw away**. stl2step is faithful, not magical:
+A mesh carries no analytic geometry of its own. By default stl2step is faithful
+to the tessellation; analytic recovery is an **opt-in** flag.
 
 - **Flat faces** are recovered exactly — coplanar triangles merge into one planar
   face with proper edges. This is the big win for downstream CAM.
-- **Curved surfaces** stay *faceted* at the STL's resolution (each triangle a
-  tiny planar face). That is correct and lossless with respect to the input, and
-  is fine for heightmap/slice CAM, measurement, and import. It is **not** a
-  surface-refit / reverse-engineering tool — it will not turn a faceted cylinder
-  back into an analytic cylinder.
+- **`--smooth` is OFF by default for the whole 1.x line.** Curved surfaces stay
+  *faceted* at the STL's resolution. With the flag off, STEP + RESULT are
+  **byte-identical to 1.0.0** — measured by gate G0.1 at 22/22 on every corpus
+  fixture.
+- **`--smooth` on** recovers, in v1: **planes**, **right circular cylinders**
+  (holes/bosses, N ≥ 6), and **plane–plane fillet strips** (1–3 rows), emitted as
+  true `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. It does
+  **not** recover cones, spheres, or tori (reported, left faceted), does not
+  reconstruct freeform/NURBS, and **skips refit on any component that needs the
+  sewing repair path**.
+- **Documented limitations, not bugs.** A regular N≥6 prism (e.g. a hex socket)
+  **is** recovered as a cylinder. A symmetric 45° chamfer **is** recovered as a
+  fillet. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
 - Output is always written in **millimetres**. STL is unitless, so tell the
   engine the input units (see `--units` / `Options::inchInput` / `Options::scale`).
 
@@ -114,6 +122,7 @@ stl2step part.stl                         # writes part.step next to the input
 stl2step part.stl -o out/part.step        # explicit output
 stl2step part.stl --units in              # STL modelled in inches -> scaled to mm
 stl2step part.stl --no-verify             # fastest: skip the re-read self-check
+stl2step part.stl --smooth                # recover planes, cylinders, fillets
 stl2step part.stl --schema AP242 --threads 4
 ```
 
@@ -146,6 +155,12 @@ Run `stl2step --help` for the full option list.
 | `--no-solid` | Emit shells only |
 | `--force-sew` | Route every body through the repair path |
 | `--no-verify` | Skip re-reading the output (see below) |
+| `--smooth` | Recognise radii and flat regions; emit analytic surfaces (default OFF for 1.x) |
+| `--refit` | Alias for `--smooth` |
+| `--no-smooth` | Keep faceted mesh surfaces (default) |
+| `--smooth-tol <mm>` | Surface-fit tolerance in mm (default: auto) |
+| `--smooth-angle <deg>` | Near-flat normal gate for segmentation (default 2.0) |
+| `--no-smooth-fillets` | Skip recovery of fillet strips as cylinders |
 | `--threads <n>` | Worker threads (default: all cores) |
 | `--quiet` | Suppress progress (RESULT + errors only) |
 
@@ -229,6 +244,26 @@ The `RESULT {json}` object (also `Result::toJson()`) has a stable field set:
 | `watertight` | bool | Every component closed with consistent winding |
 | `seconds` | number | Wall-clock time |
 | `warnings` | string[] | Every warning emitted |
+
+When `--smooth` is on, the following `smooth*` keys are **appended after
+`warnings`**. They are present **only when `smooth == true`**; they are omitted
+(never emitted as zeros) when the flag is off, so an off-path RESULT string
+stays character-identical to 1.0.0. The C++ `Result` members are always present
+and default to zero.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `smoothPlanes` | int | Planar regions recovered as `Geom_Plane` |
+| `smoothCylinders` | int | Cylindrical regions recovered |
+| `smoothFillets` | int | Fillet strips recovered as cylinders |
+| `smoothDistinctRadii` | int | Distinct cylinder radii accepted |
+| `smoothRejected` | int | Candidate regions rejected by gates |
+| `smoothFacetFaces` | int | Faceted faces left after the smooth pass |
+| `facesAfterSmooth` | int | Total face count after the smooth pass |
+| `smoothSkippedComponents` | int | Dirty components not refit |
+| `smoothMaxDevMM` | number | Max vertex deviation from fit (mm) |
+| `smoothMaxEdgeTolMM` | number | Max edge tolerance written (mm) |
+| `smoothVolPredictedMM3` | number | Predicted volume from analytic fits (mm³) |
 
 **Exit codes:** `0` clean · `2` STEP written but with warnings (open shell,
 volume mismatch, …) · `1` failed, no output written.

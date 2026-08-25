@@ -1,0 +1,23 @@
+{
+  "faceCount": 8,
+  "surfaceCensus": {
+    "planar_facets": 8
+  },
+  "rung": 3,
+  "rounds": 1,
+  "note": "Closed triangular prism; 3-sided closed360 forces MakeFace/seam failure; R1 explode; shell stays closed.",
+  "fixture": "r1_success",
+  "meshTriangles": 8,
+  "closed": true,
+  "volumeMM3": 103.9230465888977,
+  "dVolPredicted": -147.40436383305078,
+  "dVolPredAbs": 147.40436383305078,
+  "volumeBudgetMM3": 442.21309149915237,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "explodedToFacets",
+      "rung": 3
+    }
+  ]
+}

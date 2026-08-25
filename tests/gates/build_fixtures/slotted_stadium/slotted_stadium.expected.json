@@ -1,0 +1,35 @@
+{
+  "faceCount": 4,
+  "surfaceCensus": {
+    "cylinder": 2,
+    "plane": 2
+  },
+  "rung": 1,
+  "rounds": 0,
+  "note": "Two ~180\u00b0 partials + connecting flats sharing generators; G1 tangent on cyl|flat.",
+  "fixture": "slotted_stadium",
+  "meshTriangles": 20,
+  "closed": false,
+  "volumeMM3": 455.76450347900385,
+  "dVolPredicted": -22.547918076739435,
+  "dVolPredAbs": 22.547918076739435,
+  "volumeBudgetMM3": 67.6437542302183,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "single"
+    },
+    {
+      "id": 1,
+      "builtAs": "single"
+    },
+    {
+      "id": 2,
+      "builtAs": "single"
+    },
+    {
+      "id": 3,
+      "builtAs": "single"
+    }
+  ]
+}

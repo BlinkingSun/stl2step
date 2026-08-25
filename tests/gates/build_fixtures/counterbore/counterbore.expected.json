@@ -1,0 +1,31 @@
+{
+  "faceCount": 3,
+  "surfaceCensus": {
+    "cylinder": 2,
+    "plane": 1
+  },
+  "rung": 1,
+  "rounds": 0,
+  "note": "Annular cap has outer (outer cyl CapHigh) and inner (inner cyl CapLow) wires.",
+  "fixture": "counterbore",
+  "meshTriangles": 36,
+  "closed": false,
+  "volumeMM3": 436.47678565979004,
+  "dVolPredicted": -107.61625556282246,
+  "dVolPredAbs": 107.61625556282246,
+  "volumeBudgetMM3": 322.8487666884674,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "seamed360"
+    },
+    {
+      "id": 1,
+      "builtAs": "seamed360"
+    },
+    {
+      "id": 2,
+      "builtAs": "single"
+    }
+  ]
+}

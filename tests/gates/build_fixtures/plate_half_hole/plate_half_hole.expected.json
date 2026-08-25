@@ -1,0 +1,28 @@
+{
+  "faceCount": 19,
+  "surfaceCensus": {
+    "cylinder": 1,
+    "plane": 1,
+    "planar_facets": 17
+  },
+  "rung": 1,
+  "rounds": 0,
+  "note": "Isolated ~180\u00b0 partial depression on a plate; not S05 slot. One manifold solid.",
+  "fixture": "plate_half_hole",
+  "meshTriangles": 32,
+  "closed": true,
+  "volumeMM3": 274.74516296386724,
+  "dVolPredicted": -5.010648461497652,
+  "dVolPredAbs": 5.010648461497652,
+  "volumeBudgetMM3": 15.031945384492957,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "single"
+    },
+    {
+      "id": 1,
+      "builtAs": "single"
+    }
+  ]
+}
