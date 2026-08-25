@@ -179,6 +179,9 @@ def main() -> int:
     args = ap.parse_args()
 
     dumps_dir = args.dumps_dir or (args.repo / "_team" / "p1-dumps")
+    # The frozen dump dir always existed in the lane worktree; on an assembled
+    # branch it is a fresh build-dir path that regeneration has to create.
+    dumps_dir.mkdir(parents=True, exist_ok=True)
     sidecars = args.sidecars
     compose_dump = args.compose_dump
     if compose_dump is None:
@@ -231,6 +234,15 @@ def main() -> int:
                         if c.get("clean")
                     ]
                 except (OSError, json.JSONDecodeError, KeyError):
+                    comps = []
+            if not comps and compose_dump is not None and compose_dump.is_file():
+                # No frozen dump for this fixture: derive the clean-component set
+                # live from the in-tree regiondump. Without this the gate SKIPs
+                # every fixture whenever _team/p1-dumps is absent - which is the
+                # normal state of an assembled branch - and reports a vacuous pass.
+                try:
+                    comps = envelope_clean(compose_dump, stl)
+                except Exception:
                     comps = []
         if not comps:
             rows.append(f"SKIP {name}: no clean components")
@@ -363,6 +375,16 @@ def main() -> int:
         print("\nFAILURES:", file=sys.stderr)
         for f in failures:
             print(f, file=sys.stderr)
+        return 1
+    if n_pass == 0:
+        # Nothing was actually scored. A gate that skips every fixture and exits
+        # 0 reports "green" for a surface it never touched - the exact false
+        # pass this re-gate exists to prevent.
+        print(
+            f"\nVACUOUS: {n_skip} skipped, 0 scored. The live re-gate scored "
+            f"nothing - check --dumps-dir / --compose-dump.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
