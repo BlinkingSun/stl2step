@@ -1,0 +1,7 @@
+{
+  "id": "S12-b",
+  "rejected": [
+    "vertexResidual"
+  ],
+  "rejectedExactly": true
+}

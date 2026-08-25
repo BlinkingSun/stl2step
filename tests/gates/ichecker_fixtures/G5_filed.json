@@ -1,0 +1,191 @@
+{
+  "compRoot": 0,
+  "regions": [
+    {
+      "id": 0,
+      "type": "plane",
+      "origin": "planeGrow",
+      "ax": {
+        "loc": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "dir": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "xdir": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "radius": 0.0,
+      "uMin": 0.0,
+      "uMax": 0.0,
+      "vMin": 0.0,
+      "vMax": 0.0,
+      "closed360": false,
+      "outwardNormal": true,
+      "tris": [
+        0,
+        1,
+        2
+      ],
+      "loops": [
+        {
+          "chainIdx": [
+            0
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "outer"
+        },
+        {
+          "chainIdx": [
+            1
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "inner"
+        }
+      ],
+      "maxVertexDev": 0.0,
+      "rmsVertexDev": 0.0,
+      "chordSagitta": 0.0,
+      "nSides": 0,
+      "dVolPredicted": 0.0,
+      "maxVertexSnap": 0.0,
+      "reject": "none",
+      "builtAs": "notBuilt",
+      "filletNbrA": -1,
+      "filletNbrB": -1
+    }
+  ],
+  "rejected": [
+    {
+      "id": 50,
+      "type": "cylinder",
+      "origin": "cylGrow",
+      "ax": {
+        "loc": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "dir": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "xdir": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "radius": 5.0,
+      "uMin": 0.0,
+      "uMax": 0.0,
+      "vMin": 0.0,
+      "vMax": 0.0,
+      "closed360": false,
+      "outwardNormal": true,
+      "tris": [
+        9
+      ],
+      "loops": [
+        {
+          "chainIdx": [
+            0
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "outer"
+        }
+      ],
+      "maxVertexDev": 0.0,
+      "rmsVertexDev": 0.0,
+      "chordSagitta": 0.1,
+      "nSides": 4,
+      "dVolPredicted": 0.0,
+      "maxVertexSnap": 0.0,
+      "reject": "span",
+      "builtAs": "notBuilt",
+      "filletNbrA": -1,
+      "filletNbrB": -1
+    }
+  ],
+  "chains": [
+    {
+      "regA": 0,
+      "regB": -1,
+      "islandA": -1,
+      "islandB": -1,
+      "tangent": false,
+      "closedLoop": true,
+      "meshEdges": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "meshVerts": [
+        0,
+        1,
+        2,
+        3
+      ]
+    },
+    {
+      "regA": 0,
+      "regB": -1,
+      "islandA": -1,
+      "islandB": 0,
+      "tangent": false,
+      "closedLoop": true,
+      "meshEdges": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "meshVerts": [
+        4,
+        5,
+        6,
+        7
+      ]
+    }
+  ],
+  "triRegion": [
+    0,
+    0,
+    0,
+    -1
+  ],
+  "triIsland": [
+    -1,
+    -1,
+    -1,
+    0
+  ],
+  "nIslands": 1,
+  "stats": {
+    "planes": 1,
+    "cylinders": 0,
+    "fillets": 0,
+    "rejected": 1,
+    "facetIslands": 1,
+    "facetTriangles": 1,
+    "distinctRadii": 0,
+    "maxVertexDev": 0.0,
+    "maxEdgeTol": 0.0,
+    "dVolPredicted": 0.0
+  }
+}
