@@ -22,6 +22,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "stl2step/stl2step.hpp"
+#include "refit.hpp"
 
 #include <algorithm>
 #include <array>
@@ -50,6 +51,7 @@
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
+#include <BRepLib.hxx>
 #include <GProp_GProps.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
@@ -90,6 +92,11 @@
 #endif
 
 namespace stl2step {
+
+namespace refit {
+void fitAnalyticTolerances(const TopoDS_Shape& shape);
+}
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -271,6 +278,7 @@ Result Converter::run() {
     double scale = opt.scale * (opt.inchInput ? 25.4 : 1.0);
     double weldTol = opt.weldTol, sewTolArg = opt.sewTol, unifyAngleDeg = opt.unifyAngleDeg;
     bool unify = opt.unify, makeSolids = opt.makeSolids, verify = opt.verify, forceSew = opt.forceSew;
+    bool smooth = opt.smooth;
 
     std::string inPath = opt.input;
     std::string outPath = opt.output;
@@ -483,10 +491,64 @@ Result Converter::run() {
         unsigned nOuter = (unsigned)std::min<size_t>({ (size_t)hw, order.size(), (size_t)10 });
         unsigned nInner = std::max(1u, hw / std::max(1u, nOuter));
 
+        auto isClean = [&](const CompStat& cs) {
+            return !forceSew && cs.open == 0 && cs.conflict == 0 && cs.nonManifold == 0;
+        };
+        auto fillMeshView = [&](const CompStat& cs, refit::MeshView& mv) {
+            mv.pts = pts.data();
+            mv.tris = reinterpret_cast<const int(*)[3]>(tris.data());
+            mv.compTris = cs.tris.data();
+            mv.compVtx = cs.vtx.data();
+            mv.compEdges = cs.edges.data();
+            mv.triEdges = cs.triEdges.data();
+            mv.triDirs = cs.triDirs.data();
+            mv.nTri = cs.tris.size();
+            mv.nVtx = cs.vtx.size();
+            mv.nEdge = cs.edges.size();
+            mv.diag = diag;
+            mv.weldTol = weldTol;
+            mv.sewTol = sewTol;
+        };
+
+        std::unordered_map<int, refit::RegionSet> refitPlans;
+        refit::RefitStats refitTotals;
+        int smoothSkippedComponents = 0;
+        double dVolPredSigned = 0, dVolPredAbs = 0;
+        if (smooth && !forceSew) {
+            refit::SegmentParams segp;
+            segp.epsPlane = opt.smoothTolMM;
+            segp.thetaPlaneDeg = opt.smoothAngleDeg;
+            segp.doFillets = opt.smoothFillets;
+            std::mutex planMu;
+            parallelFor(hw, order.size(), [&](size_t idx) {
+                int root = order[idx];
+                const CompStat& cs = comps.at(root);
+                if (!isClean(cs)) {
+                    std::lock_guard<std::mutex> lk(planMu);
+                    smoothSkippedComponents++;
+                    return;
+                }
+                refit::MeshView mv{};
+                fillMeshView(cs, mv);
+                refit::RegionSet rs;
+                rs.compRoot = root;
+                refit::segment(mv, segp, rs, nullptr);
+                std::lock_guard<std::mutex> lk(planMu);
+                refitPlans.emplace(root, std::move(rs));
+            });
+            if (smoothSkippedComponents > 0)
+                note("  smooth    %d component(s) skipped (dirty mesh, repaired path)\n",
+                     smoothSkippedComponents);
+        }
+
         struct CompOut {
             std::vector<TopoDS_Shape> parts;
+            std::vector<TopoDS_Face> keepShapes;
+            refit::RefitStats refitSt{};
+            double refitDVolAbs = 0;
             int solids = 0, openShells = 0;
             long long skipped = 0;
+            bool usedRefit = false;
         };
         std::vector<CompOut> outs(order.size());
         std::atomic<size_t> nextComp{ 0 };
@@ -508,6 +570,55 @@ Result Converter::run() {
                 BRepBuilderAPI_MakeEdge me(verts[cs.edges[i].first], verts[cs.edges[i].second]);
                 if (me.IsDone()) { edges[i] = me.Edge(); edgeOk[i] = 1; }
             });
+            std::vector<TopoDS_Face> built;
+            bool usedRefit = false;
+            auto pit = refitPlans.find(root);
+            if (pit != refitPlans.end()) {
+                refit::MeshView mv{};
+                fillMeshView(cs, mv);
+                refit::RegionSet rs = pit->second;
+                std::vector<TopoDS_Face> rf;
+                bool ok = refit::buildFaces(mv, rs, verts, rf,
+                                           [&](const std::string& m) { warn(m); })
+                    && !rf.empty();
+                if (ok) {
+                    TopoDS_Shell probe;
+                    BRep_Builder pb;
+                    pb.MakeShell(probe);
+                    for (auto& f : rf) pb.Add(probe, f);
+                    ok = BRep_Tool::IsClosed(probe);
+                    if (ok) {
+                        try {
+                            BRepCheck_Analyzer an(probe, Standard_True, Standard_True);
+                            ok = an.IsValid();
+                        } catch (const Standard_Failure&) { ok = false; }
+                    }
+                    if (ok) {
+                        usedRefit = true;
+                        built = std::move(rf);
+                        out.keepShapes = built;
+                        out.usedRefit = true;
+                        out.refitSt = rs.stats;
+                        for (const auto& reg : rs.regions)
+                            out.refitDVolAbs += std::fabs(reg.dVolPredicted);
+                    }
+                }
+                if (!ok)
+                    warn("smooth: analytic rebuild reverted on one component -- kept faceted");
+            }
+            if (!usedRefit) {
+            if (pit != refitPlans.end()) {
+                // R2 must be verbatim: P2 UpdateVertex's TShapes in place.
+                parallelFor(subThreads, nV, [&](size_t i) {
+                    BRep_Builder bb;
+                    bb.MakeVertex(verts[i], gp_Pnt(pts[cs.vtx[i]]), Precision::Confusion());
+                });
+                parallelFor(subThreads, nE, [&](size_t i) {
+                    BRepBuilderAPI_MakeEdge me(verts[cs.edges[i].first], verts[cs.edges[i].second]);
+                    if (me.IsDone()) { edges[i] = me.Edge(); edgeOk[i] = 1; }
+                    else edgeOk[i] = 0;
+                });
+            }
             std::vector<TopoDS_Face> faces(nT);
             std::vector<uint8_t> faceOk(nT, 0);
             std::atomic<long long> skipped{ 0 };
@@ -534,10 +645,10 @@ Result Converter::run() {
                 faceOk[k] = 1;
             });
             out.skipped = skipped;
-            std::vector<TopoDS_Face> built;
             built.reserve(nT);
             for (size_t k = 0; k < nT; k++)
                 if (faceOk[k]) built.push_back(faces[k]);
+            }
 
             // Phase 2: shell -> solid (serial per component; child-list mutation).
             BRep_Builder B;
@@ -573,12 +684,12 @@ Result Converter::run() {
                 }
             };
 
-            bool clean = !forceSew && cs.open == 0 && cs.conflict == 0 && cs.nonManifold == 0;
+            bool clean = isClean(cs);
             if (clean) {
                 TopoDS_Shell sh;
                 B.MakeShell(sh);
                 for (auto& f : built) B.Add(sh, f);
-                finishShell(sh, true, "direct");
+                finishShell(sh, usedRefit ? false : true, "direct");
                 return;
             }
             // Repair: sew cracks, then fix face orientation.
@@ -642,12 +753,31 @@ Result Converter::run() {
         }
 
         std::vector<TopoDS_Shape> parts;
+        std::vector<const std::vector<TopoDS_Face>*> partKeep;
         long long skipped = 0;
+        bool anyRefitUsed = false;
         for (auto& o : outs) {
-            for (auto& p : o.parts) parts.push_back(p);
+            for (auto& p : o.parts) {
+                parts.push_back(p);
+                partKeep.push_back(o.keepShapes.empty() ? nullptr : &o.keepShapes);
+            }
             solidsOut += o.solids;
             openShellsOut += o.openShells;
             skipped += o.skipped;
+            if (!o.usedRefit) continue;
+            anyRefitUsed = true;
+            const refit::RefitStats& st = o.refitSt;
+            refitTotals.planes += st.planes;
+            refitTotals.cylinders += st.cylinders;
+            refitTotals.fillets += st.fillets;
+            refitTotals.rejected += st.rejected;
+            refitTotals.facetIslands += st.facetIslands;
+            refitTotals.facetTriangles += st.facetTriangles;
+            refitTotals.distinctRadii += st.distinctRadii;
+            refitTotals.maxVertexDev = std::max(refitTotals.maxVertexDev, st.maxVertexDev);
+            refitTotals.maxEdgeTol = std::max(refitTotals.maxEdgeTol, st.maxEdgeTol);
+            dVolPredSigned += st.dVolPredicted;
+            dVolPredAbs += o.refitDVolAbs;
         }
         {
             long long idxDegen = (long long)nTri - (long long)tris.size();
@@ -677,12 +807,14 @@ Result Converter::run() {
         facesBefore = countShapes(shape, TopAbs_FACE);
         facesAfter = facesBefore;
         if (unify) {
-            auto unifyOne = [&](TopoDS_Shape& s) {
+            auto unifyOne = [&](TopoDS_Shape& s, const std::vector<TopoDS_Face>* keep) {
                 ShapeUpgrade_UnifySameDomain usd(s, Standard_True, Standard_True, Standard_False);
                 if (unifyAngleDeg > 0) {
                     usd.SetAngularTolerance(unifyAngleDeg * kPi / 180.0);
                     usd.SetLinearTolerance(Precision::Confusion());
                 }
+                if (keep)
+                    for (const auto& f : *keep) usd.KeepShape(f);
                 usd.Build();
                 s = usd.Shape();
             };
@@ -698,7 +830,7 @@ Result Converter::run() {
                             for (;;) {
                                 size_t i = nextPart.fetch_add(1);
                                 if (i >= parts.size()) break;
-                                try { unifyOne(parts[i]); }
+                                try { unifyOne(parts[i], partKeep[i]); }
                                 catch (...) { anyFail = true; }   // that body keeps its facets
                             }
                         });
@@ -715,7 +847,7 @@ Result Converter::run() {
                          fmtInt(facesBefore).c_str(), fmtInt(facesAfter).c_str(),
                          uThreads, timer.lap());
                 } else {
-                    unifyOne(shape);
+                    unifyOne(shape, partKeep.empty() ? nullptr : partKeep[0]);
                     facesAfter = countShapes(shape, TopAbs_FACE);
                     note("  unify     %s -> %s faces  [%.2fs]\n",
                          fmtInt(facesBefore).c_str(), fmtInt(facesAfter).c_str(), timer.lap());
@@ -729,6 +861,11 @@ Result Converter::run() {
 
         // ---- 7. tolerance fit, then validity + volume OVERLAPPED with write ----
         fitPlanarTolerances(shape);
+        const int refitFaces = refitTotals.planes + refitTotals.cylinders + refitTotals.fillets;
+        if (smooth && anyRefitUsed && refitTotals.cylinders > 0)
+            refit::fitAnalyticTolerances(shape);
+        if (smooth && anyRefitUsed && refitFaces > 0)
+            BRepLib::EncodeRegularity(shape, Precision::Angular());
         note("  fit       tolerances fitted to true planar deviation  [%.2fs]\n", timer.lap());
 
         bool doCheck = facesAfter <= 50000;
@@ -791,7 +928,9 @@ Result Converter::run() {
         else if (!doCheck)
             note("  check     skipped (%s faces)\n", fmtInt(facesAfter).c_str());
 
-        if (doCheck && ana.checkRan && !ana.valid) {
+        if (doCheck && ana.checkRan && !ana.valid && smooth && anyRefitUsed)
+            warn("smooth: B-Rep invalid after build -- no ShapeFix rewrite on smooth runs");
+        if (doCheck && ana.checkRan && !ana.valid && !(smooth && anyRefitUsed)) {
             // Rare path: repair, then rewrite so the file on disk is the fixed shape.
             try {
                 Timer ft;
@@ -817,9 +956,15 @@ Result Converter::run() {
         if (doVol && ana.volRan) {
             brepVolume = ana.vol;
             double refVol = watertight ? meshVolume : brepVolume;
-            if (watertight && refVol > 0 &&
-                std::fabs(brepVolume - meshVolume) / refVol > 1e-4)
-                warn("B-Rep volume differs from mesh volume by more than 0.01% -- inspect the result");
+            if (watertight && refVol > 0) {
+                if (smooth && dVolPredAbs > 0) {
+                    double budget = std::max(1e-4 * refVol, 3.0 * dVolPredAbs);
+                    if (std::fabs(brepVolume - meshVolume) > budget)
+                        warn("B-Rep volume differs from mesh volume beyond refit budget -- inspect the result");
+                } else if (std::fabs(brepVolume - meshVolume) / refVol > 1e-4) {
+                    warn("B-Rep volume differs from mesh volume by more than 0.01% -- inspect the result");
+                }
+            }
             note("  volume    B-Rep %.3f mm^3, mesh %.3f mm^3%s  [%.2fs]\n", brepVolume, meshVolume,
                  watertight ? "" : " (mesh not watertight; mesh figure approximate)", ana.volS);
         }
@@ -872,6 +1017,19 @@ Result Converter::run() {
         r.volumeDeltaPct = volDeltaPct;
         r.watertight = watertight;
         r.warnings = warnings;
+        if (smooth) {
+            r.smoothPlanes = refitTotals.planes;
+            r.smoothCylinders = refitTotals.cylinders;
+            r.smoothFillets = refitTotals.fillets;
+            r.smoothDistinctRadii = refitTotals.distinctRadii;
+            r.smoothRejected = refitTotals.rejected;
+            r.smoothFacetFaces = refitTotals.facetTriangles;
+            r.facesAfterSmooth = facesAfter;
+            r.smoothSkippedComponents = smoothSkippedComponents;
+            r.smoothMaxDevMM = refitTotals.maxVertexDev;
+            r.smoothMaxEdgeTolMM = refitTotals.maxEdgeTol;
+            r.smoothVolPredictedMM3 = dVolPredSigned;
+        }
         r.ok = true;
         r.exitCode = warnings.empty() ? 0 : 2;
         return r;
@@ -907,6 +1065,9 @@ bool parseSchema(const std::string& text, Schema& out) {
     return false;
 }
 
+// toJson() splices smooth* keys iff convert() filled them (Options::smooth).
+// Frozen header has no Result::smoothEnabled — splice is member-keyed, not
+// thread_local. Hand-filled Results must set facesAfterSmooth to emit keys.
 std::string Result::toJson() const {
     if (!ok)
         return std::string("{\"ok\":false,\"error\":\"") + jsonEscape(error) + "\"}";
@@ -922,16 +1083,52 @@ std::string Result::toJson() const {
         "\"facesBeforeUnify\":%d,\"facesAfterUnify\":%d,\"meshVolumeMM3\":%.6f,"
         "\"stepVolumeMM3\":%.6f,\"volumeDeltaPct\":%.6f,\"watertight\":%s,"
         "\"seconds\":%.2f,\"warnings\":[%s]}";
+    const char* fmtSmooth =
+        "{\"ok\":true,\"input\":\"%s\",\"output\":\"%s\",\"triangles\":%d,"
+        "\"vertices\":%d,\"components\":%d,\"solids\":%d,\"openShells\":%d,"
+        "\"facesBeforeUnify\":%d,\"facesAfterUnify\":%d,\"meshVolumeMM3\":%.6f,"
+        "\"stepVolumeMM3\":%.6f,\"volumeDeltaPct\":%.6f,\"watertight\":%s,"
+        "\"seconds\":%.2f,\"warnings\":[%s],"
+        "\"smoothPlanes\":%d,\"smoothCylinders\":%d,\"smoothFillets\":%d,"
+        "\"smoothDistinctRadii\":%d,\"smoothRejected\":%d,\"smoothFacetFaces\":%d,"
+        "\"facesAfterSmooth\":%d,\"smoothSkippedComponents\":%d,"
+        "\"smoothMaxDevMM\":%.6f,\"smoothMaxEdgeTolMM\":%.6f,"
+        "\"smoothVolPredictedMM3\":%.6f}";
     std::string ei = jsonEscape(input), eo = jsonEscape(output);
-    int n = std::snprintf(nullptr, 0, fmt, ei.c_str(), eo.c_str(), triangles, vertices,
+    const bool emitSmooth = facesAfterSmooth != 0 || smoothSkippedComponents != 0
+        || smoothPlanes != 0 || smoothCylinders != 0 || smoothFillets != 0;
+    int n;
+    if (emitSmooth) {
+        n = std::snprintf(nullptr, 0, fmtSmooth, ei.c_str(), eo.c_str(), triangles, vertices,
+                          components, solids, openShells, facesBeforeUnify, facesAfterUnify,
+                          meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
+                          watertight ? "true" : "false", seconds, wjson.c_str(),
+                          smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
+                          smoothRejected, smoothFacetFaces, facesAfterSmooth,
+                          smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
+                          smoothVolPredictedMM3);
+    } else {
+        n = std::snprintf(nullptr, 0, fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                           components, solids, openShells, facesBeforeUnify, facesAfterUnify,
                           meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
                           watertight ? "true" : "false", seconds, wjson.c_str());
+    }
     std::string s((size_t)n + 1, '\0');
-    std::snprintf(&s[0], s.size(), fmt, ei.c_str(), eo.c_str(), triangles, vertices,
-                  components, solids, openShells, facesBeforeUnify, facesAfterUnify,
-                  meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
-                  watertight ? "true" : "false", seconds, wjson.c_str());
+    if (emitSmooth) {
+        std::snprintf(&s[0], s.size(), fmtSmooth, ei.c_str(), eo.c_str(), triangles, vertices,
+                      components, solids, openShells, facesBeforeUnify, facesAfterUnify,
+                      meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
+                      watertight ? "true" : "false", seconds, wjson.c_str(),
+                      smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
+                      smoothRejected, smoothFacetFaces, facesAfterSmooth,
+                      smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
+                      smoothVolPredictedMM3);
+    } else {
+        std::snprintf(&s[0], s.size(), fmt, ei.c_str(), eo.c_str(), triangles, vertices,
+                      components, solids, openShells, facesBeforeUnify, facesAfterUnify,
+                      meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
+                      watertight ? "true" : "false", seconds, wjson.c_str());
+    }
     s.resize((size_t)n);
     return s;
 }
