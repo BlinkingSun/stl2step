@@ -19,9 +19,9 @@ if(TARGET stl2step_p2buildtest AND TARGET stl2step_regiondump)
                 --p2 ${CMAKE_BINARY_DIR}/stl2step_p2buildtest
                 --corpus ${_stl2step_root}/tests/corpus
                 --cube ${_stl2step_root}/tests/cube.stl
-                --dumps-dir ${_stl2step_root}/_team/p1-dumps
-                --sidecars ${_stl2step_root}/../p0-gen-rw1/tests/corpus
-                --compose-dump ${_stl2step_root}/../p1-compose-fix-rw1/build/stl2step_regiondump)
+                --dumps-dir ${CMAKE_BINARY_DIR}/p1-dumps
+                --sidecars ${_stl2step_root}/tests/corpus
+                --compose-dump ${CMAKE_BINARY_DIR}/stl2step_regiondump)
     set_tests_properties(p2real_live PROPERTIES
         LABELS "gates;p2real"
         TIMEOUT 600)
