@@ -378,7 +378,7 @@ static void usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s <file.stl> [--scale S] [--weld-tol T] [--sew-tol T]\n"
                  "                    [--component N] [--smooth-tol MM] [--smooth-angle DEG]\n"
-                 "                    [--no-fillets] [--out FILE]\n",
+                 "                    [--no-fillets] [--threads N] [--bare] [--out FILE]\n",
                  argv0);
 }
 
@@ -393,7 +393,9 @@ int main(int argc, char** argv) {
     double scale = 1.0, weldTol = 0.0, sewTol = 0.0;
     double smoothTolMM = 0.0, smoothAngleDeg = 2.0;
     bool doFillets = true;
+    bool bare = false;
     int componentFilter = -1;  // -1 = all
+    int threads = 0;           // accepted for gate parity; P1 segment is single-threaded
 
     for (int i = 1; i < argc; i++) {
         auto needArg = [&](const char* flag) -> const char* {
@@ -418,6 +420,11 @@ int main(int argc, char** argv) {
             smoothAngleDeg = std::atof(needArg("--smooth-angle"));
         } else if (std::strcmp(argv[i], "--no-fillets") == 0) {
             doFillets = false;
+        } else if (std::strcmp(argv[i], "--bare") == 0) {
+            bare = true;
+        } else if (std::strcmp(argv[i], "--threads") == 0) {
+            threads = std::atoi(needArg("--threads"));
+            (void)threads;
         } else if (std::strcmp(argv[i], "--out") == 0) {
             outPath = needArg("--out");
         } else if (argv[i][0] == '-') {
@@ -432,6 +439,11 @@ int main(int argc, char** argv) {
     }
     if (path.empty()) {
         usage(argv[0]);
+        return 1;
+    }
+    if (bare && componentFilter < 0) {
+        std::fprintf(stderr,
+                     "stl2step_regiondump: --bare requires --component N\n");
         return 1;
     }
 
@@ -489,6 +501,21 @@ int main(int argc, char** argv) {
                          outPath.c_str());
             return 1;
         }
+    }
+
+    if (bare) {
+        if (dumped.size() != 1) {
+            std::fprintf(stderr,
+                         "stl2step_regiondump: --bare requires one clean component "
+                         "(got %zu dumps, %d dirty skipped)\n",
+                         dumped.size(), dirtySkipped);
+            if (out != stdout) std::fclose(out);
+            return 1;
+        }
+        writeRegionSet(out, dumped[0].rs, 0);
+        std::fputc('\n', out);
+        if (out != stdout) std::fclose(out);
+        return 0;
     }
 
     Obj top(out, 0);

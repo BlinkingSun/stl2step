@@ -7,6 +7,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <utility>
@@ -23,6 +25,11 @@ constexpr double kTiny = 1e-30;
 constexpr double kBandEps = 1e-9;
 // D1.3-A3 running residual: file-local. Frozen header epsCylGrow is not used by B1.
 constexpr double kRingResidualFrac = 0.25;
+
+bool p1DiagOn() {
+    const char* e = std::getenv("STL2STEP_P1_DIAG");
+    return e && e[0] != '\0' && e[0] != '0';
+}
 
 struct EdgeAdj {
     std::vector<std::array<int, 2>> tri;  // local edge -> [t0, t1], -1 if boundary
@@ -254,6 +261,44 @@ bool testG1Commit(const GaussResult& g, const DerivedTols& tol) {
     const double sin3 = tol.gaussAxisTiltSin();
     return g.ok && g.flat < DerivedTols::kGaussPlanarity && g.dev < sin3
            && std::abs(g.c) < sin3;
+}
+
+gp_XYZ areaWeightedNbar(const MeshView& mv, const std::vector<int>& tris) {
+    double A = 0.0;
+    gp_XYZ nbar(0, 0, 0);
+    for (int lt : tris) {
+        const gp_Dir n = triNormalLocal(mv, lt);
+        const double a = triAreaLocal(mv, lt);
+        A += a;
+        nbar += gp_XYZ(n.X(), n.Y(), n.Z()) * a;
+    }
+    if (A < kTiny) return gp_XYZ(0, 0, 0);
+    nbar /= A;
+    return nbar;
+}
+
+void axisTiltStats(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axis,
+                   double& cOut, double& devOut) {
+    const gp_XYZ nbar = areaWeightedNbar(mv, tris);
+    if (nbar.SquareModulus() <= 0.0 && tris.empty()) {
+        cOut = 0.0;
+        devOut = 0.0;
+        return;
+    }
+    const gp_XYZ axyz(axis.X(), axis.Y(), axis.Z());
+    cOut = nbar.Dot(axyz);
+    devOut = 0.0;
+    for (int lt : tris) {
+        const double d = triNormalLocal(mv, lt).Dot(axis);
+        devOut = std::max(devOut, std::abs(d - cOut));
+    }
+}
+
+bool testG1CommitSeedAxis(const GaussResult& g, const DerivedTols& tol, double cTilt,
+                          double devTilt) {
+    const double sin3 = tol.gaussAxisTiltSin();
+    return g.ok && g.flat < DerivedTols::kGaussPlanarity && devTilt < sin3
+           && std::abs(cTilt) < sin3;
 }
 
 double epsCylRing(const DerivedTols& tol, double R) {
@@ -637,6 +682,18 @@ void computeProvDeviations(const MeshView& mv, Provisional& p) {
 
 enum class Gate { G1, G2, G3, G4, G5, PASS };
 
+const char* gateName(Gate g) {
+    switch (g) {
+    case Gate::G1: return "G1";
+    case Gate::G2: return "G2";
+    case Gate::G3: return "G3";
+    case Gate::G4: return "G4";
+    case Gate::G5: return "G5";
+    case Gate::PASS: return "PASS";
+    }
+    return "?";
+}
+
 struct CommitEval {
     Gate failGate = Gate::G1;
     GaussResult g;
@@ -647,12 +704,14 @@ struct CommitEval {
 };
 
 CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
-                          const std::vector<int>& tris, const gp_Dir& seedAxis) {
+                          const std::vector<int>& tris, const gp_Dir& axis) {
     CommitEval ev;
-    ev.g = centeredGauss(mv, tris, seedAxis, tol);
-    ev.eberlyOk = eberlyCenterRadius(mv, tris, ev.g.axis, ev.center, ev.radius);
+    ev.g = centeredGauss(mv, tris, axis, tol);
+    double cTilt = 0.0, devTilt = 0.0;
+    axisTiltStats(mv, tris, axis, cTilt, devTilt);
+    ev.eberlyOk = eberlyCenterRadius(mv, tris, axis, ev.center, ev.radius);
     ev.failGate = Gate::PASS;
-    if (!testG1Commit(ev.g, tol)) {
+    if (!testG1CommitSeedAxis(ev.g, tol, cTilt, devTilt)) {
         ev.failGate = Gate::G1;
         return ev;
     }
@@ -660,19 +719,19 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
         ev.failGate = Gate::G4;
         return ev;
     }
-    if (maxVertexResidual(mv, tris, ev.g.axis, ev.center, ev.radius)
+    if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius)
         > tol.epsCylAccept(ev.radius)) {
         ev.failGate = Gate::G2;
         return ev;
     }
-    ev.d2 = computeD2(mv, tris, ev.g.axis, ev.center, ev.radius, tol);
+    ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
     if (ev.d2.spanReject) {
         ev.failGate = Gate::G1;
         return ev;
     }
     const double delta = chordSagitta(ev.radius, ev.d2.nSides);
     if (delta > tol.epsMesh) {
-        const double s = medianCentroidResidual(mv, tris, ev.g.axis, ev.center, ev.radius);
+        const double s = medianCentroidResidual(mv, tris, axis, ev.center, ev.radius);
         if (s < DerivedTols::kG3Lo * delta || s > DerivedTols::kG3Hi * delta)
             ev.failGate = Gate::G3;
     }
@@ -690,7 +749,7 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
     return ev;
 }
 
-void fillCylinderRegion(const MeshView& mv, const CommitEval& ev,
+void fillCylinderRegion(const MeshView& mv, const CommitEval& ev, const gp_Dir& axis,
                         const std::vector<int>& tris, Region& reg) {
     double areaReg = 0.0;
     for (int lt : tris) areaReg += triAreaLocal(mv, lt);
@@ -706,13 +765,13 @@ void fillCylinderRegion(const MeshView& mv, const CommitEval& ev,
     reg.closed360 = ev.d2.closed360;
     reg.nSides = ev.d2.nSides;
     reg.chordSagitta = chordSagitta(ev.radius, ev.d2.nSides);
-    reg.outwardNormal = computeOutwardCylinder(mv, tris, ev.g.axis, ev.d2.ax.Location());
+    reg.outwardNormal = computeOutwardCylinder(mv, tris, axis, ev.d2.ax.Location());
     reg.dVolPredicted = dVolCylinderSector(areaReg, ev.radius, ev.d2.nSides, reg.outwardNormal);
-    reg.maxVertexDev = maxVertexResidual(mv, tris, ev.g.axis, ev.center, ev.radius);
+    reg.maxVertexDev = maxVertexResidual(mv, tris, axis, ev.center, ev.radius);
     double sumSq = 0.0;
     int nV = 0;
     const gp_XYZ cxyz(ev.center.X(), ev.center.Y(), ev.center.Z());
-    const gp_XYZ axyz(ev.g.axis.X(), ev.g.axis.Y(), ev.g.axis.Z());
+    const gp_XYZ axyz(axis.X(), axis.Y(), axis.Z());
     for (int lt : tris) {
         for (int k = 0; k < 3; k++) {
             const gp_XYZ p = localTriVert(mv, lt, k);
@@ -732,6 +791,33 @@ gp_Dir seedPairAxis(const Provisional& P, const Provisional& Q) {
                              .Crossed(gp_XYZ(nQ.X(), nQ.Y(), nQ.Z()));
     if (cross.SquareModulus() <= 1e-18) return gp_Dir(0, 0, 1);
     return canonicalAxis(cross);
+}
+
+// D1.3-A4c: seed-pair while |T|<=3 or Gauss degenerate; adopt w1 iff
+// score(T,w1) <= score(T,seedPair), both recomputed every call. Not a freeze.
+gp_Dir axisOf(const MeshView& mv, const std::vector<Provisional>& provs,
+              const std::vector<int>& members, const gp_Dir& seedAxis,
+              const DerivedTols& tol, GaussResult* gOut,
+              bool* adoptedW1 = nullptr, double* scoreW1Out = nullptr,
+              double* scoreSeedOut = nullptr) {
+    const std::vector<int> tris = mergeMemberTris(provs, members);
+    GaussResult g = centeredGauss(mv, tris, seedAxis, tol);
+    if (gOut) *gOut = g;
+    double scW1 = 0.0, scSeed = 0.0, cSeed = 0.0;
+    axisTiltStats(mv, tris, seedAxis, cSeed, scSeed);
+    if (g.ok && !g.degenerate) scW1 = g.dev;
+    if (scoreW1Out) *scoreW1Out = scW1;
+    if (scoreSeedOut) *scoreSeedOut = scSeed;
+    if (members.size() <= 3 || g.degenerate || !g.ok) {
+        if (adoptedW1) *adoptedW1 = false;
+        return seedAxis;
+    }
+    if (scW1 <= scSeed) {
+        if (adoptedW1) *adoptedW1 = true;
+        return g.axis;
+    }
+    if (adoptedW1) *adoptedW1 = false;
+    return seedAxis;
 }
 
 }  // namespace
@@ -957,17 +1043,56 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
 
         std::vector<int> members = { seed.p, seed.q };
         std::vector<char> inClaim(work.provisionals.size(), 0);
+        std::vector<char> dead(work.provisionals.size(), 0);
         inClaim[seed.p] = 1;
         inClaim[seed.q] = 1;
         P.claim = ProvClaim::InCylinderClaim;
         Q.claim = ProvClaim::InCylinderClaim;
 
-        std::vector<char> dead(work.provisionals.size(), 0);
+        double R_ref = 0.0;
+        bool haveRref = false;
+        bool deadCleared = false;
+        int nG5 = 0;
+        double worstG5 = 0.0;
+
+        if (p1DiagOn()) {
+            std::fprintf(stderr, "B1 seed P=%d Q=%d minTri=%d aP=%.5g aQ=%.5g nP=%zu nQ=%zu\n",
+                         seed.p, seed.q, seed.minTri,
+                         P.area, Q.area, P.tris.size(), Q.tris.size());
+        }
 
         while (true) {
-            const std::vector<int> sTris = mergeMemberTris(work.provisionals, members);
-            const GaussResult gS = centeredGauss(mv, sTris, seedAxis, tol);
-            const gp_Dir aS = gS.ok ? gS.axis : seedAxis;
+            GaussResult gS;
+            bool usedW1 = false;
+            double scW1 = 0.0, scSeed = 0.0;
+            const gp_Dir aS = axisOf(mv, work.provisionals, members, seedAxis, tol, &gS,
+                                     &usedW1, &scW1, &scSeed);
+            (void)gS;
+            if (!deadCleared && usedW1) {
+                std::fill(dead.begin(), dead.end(), 0);
+                deadCleared = true;
+                if (p1DiagOn())
+                    std::fprintf(stderr,
+                                 "  A4c adopt w1 |S|=%zu scW1=%.4g scSeed=%.4g (dead clear)\n",
+                                 members.size(), scW1, scSeed);
+            }
+            const std::vector<int> sTrisNow = mergeMemberTris(work.provisionals, members);
+            double cS = 0.0, devS = 0.0;
+            axisTiltStats(mv, sTrisNow, aS, cS, devS);
+            (void)devS;
+            const double sin3 = tol.gaussAxisTiltSin();
+            std::vector<double> memAreas;
+            memAreas.reserve(members.size());
+            for (int m : members)
+                memAreas.push_back(work.provisionals[m].area);
+            const double medArea = medianOf(memAreas);
+            if (p1DiagOn()) {
+                std::fprintf(stderr,
+                             "  grow |S|=%zu axis=%s scW1=%.4g scSeed=%.4g cS=%.4g "
+                             "a=(%.3g,%.3g,%.3g)\n",
+                             members.size(), usedW1 ? "w1" : "seed", scW1, scSeed, cS,
+                             aS.X(), aS.Y(), aS.Z());
+            }
 
             struct GrowCand { int x; int negLen; int minTri; };
             std::vector<GrowCand> C;
@@ -980,13 +1105,49 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
                 if (phi < tol.thetaCylLo - kBandEps) continue;
                 const gp_Dir nX = X.plane.Direction();
                 if (std::abs(nX.Dot(aS)) > lateralSin) continue;
+                // Tangent cube face (nSides=20, phi=9° > theta_cyl_lo) sits on
+                // the Gauss great circle, so (g5) cannot exclude it. It is ~25×
+                // a fillet band; skip scale-mismatched X (same 0.05 used by T1).
+                if (medArea > 0.0
+                    && X.area * DerivedTols::kGaussPlanarity > medArea)
+                    continue;
+                // D1.3-A1c (g5): membership vs current axis and the set's own offset.
+                const gp_XYZ nXbar = areaWeightedNbar(mv, X.tris);
+                const double g5v = std::abs(
+                    nXbar.Dot(gp_XYZ(aS.X(), aS.Y(), aS.Z())) - cS);
+                if (g5v > sin3) {
+                    dead[xi] = 1;
+                    nG5++;
+                    worstG5 = std::max(worstG5, g5v);
+                    if (p1DiagOn())
+                        std::fprintf(stderr, "  g5 reject x=%d |n.a-c|=%.5g sin3=%.5g\n",
+                                     (int)xi, g5v, sin3);
+                    continue;
+                }
                 GrowCand gc;
                 gc.x = static_cast<int>(xi);
                 gc.negLen = -sharedLen(adj, static_cast<int>(xi), members);
                 gc.minTri = minTriId(X);
                 C.push_back(gc);
             }
-            if (C.empty()) break;
+            if (C.empty()) {
+                if (p1DiagOn()) {
+                    std::fprintf(stderr, "  C empty |S|=%zu aS=(%.3g,%.3g,%.3g)\n",
+                                 members.size(), aS.X(), aS.Y(), aS.Z());
+                    for (size_t xi = 0; xi < work.provisionals.size(); xi++) {
+                        const Provisional& X = work.provisionals[xi];
+                        if (X.claim != ProvClaim::Unclaimed) continue;
+                        if (!adjacentToSet(adj, static_cast<int>(xi), members)) continue;
+                        const double phi = phiToSet(adj, static_cast<int>(xi), members);
+                        const gp_Dir nX = X.plane.Direction();
+                        std::fprintf(stderr,
+                                     "    uncl x=%d phi=%.3g |n.a|=%.3g inClaim=%d dead=%d\n",
+                                     (int)xi, phi, std::abs(nX.Dot(aS)),
+                                     (int)inClaim[xi], (int)dead[xi]);
+                    }
+                }
+                break;
+            }
             std::sort(C.begin(), C.end(), [](const GrowCand& a, const GrowCand& b) {
                 if (a.negLen != b.negLen) return a.negLen < b.negLen;
                 return a.minTri < b.minTri;
@@ -998,25 +1159,52 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
                 std::vector<int> trialMembers = members;
                 trialMembers.push_back(xi);
                 const std::vector<int> U = mergeMemberTris(work.provisionals, trialMembers);
-                const GaussResult gU = centeredGauss(mv, U, seedAxis, tol);
+                GaussResult gU;
+                const gp_Dir aU = axisOf(mv, work.provisionals, trialMembers, seedAxis, tol, &gU);
                 if (!testT1Running(gU)) {
+                    if (p1DiagOn())
+                        std::fprintf(stderr, "  T1 reject x=%d\n", xi);
                     dead[xi] = 1;
                     continue;
                 }
                 gp_Pnt center;
                 double radius = 0.0;
-                if (!eberlyCenterRadius(mv, U, gU.axis, center, radius)
+                if (!eberlyCenterRadius(mv, U, aU, center, radius)
                     || !(radius > 0.0 && radius < 2.0 * mv.diag)) {
+                    if (p1DiagOn())
+                        std::fprintf(stderr, "  T2 reject x=%d\n", xi);
                     dead[xi] = 1;
                     continue;
                 }
-                if (maxVertexResidual(mv, U, gU.axis, center, radius) > epsCylRing(tol, radius)) {
+                const double t3R = haveRref ? R_ref : radius;
+                const double resU = maxVertexResidual(mv, U, aU, center, radius);
+                if (resU > epsCylRing(tol, t3R)) {
+                    if (p1DiagOn())
+                        std::fprintf(stderr,
+                                     "  T3 reject x=%d R_U=%.5g R_ref=%.5g res=%.5g bound=%.5g |U|=%zu\n",
+                                     xi, radius, t3R, resU, epsCylRing(tol, t3R),
+                                     trialMembers.size());
+                    dead[xi] = 1;
+                    continue;
+                }
+                if (haveRref && std::abs(radius - R_ref) > kRingResidualFrac * R_ref) {
+                    if (p1DiagOn())
+                        std::fprintf(stderr, "  T3b reject x=%d R_U=%.5g R_ref=%.5g\n",
+                                     xi, radius, R_ref);
                     dead[xi] = 1;
                     continue;
                 }
                 members.push_back(xi);
                 inClaim[xi] = 1;
                 work.provisionals[xi].claim = ProvClaim::InCylinderClaim;
+                if (p1DiagOn())
+                    std::fprintf(stderr, "  add x=%d area=%.5g nTri=%zu R=%.5g\n",
+                                 xi, work.provisionals[xi].area,
+                                 work.provisionals[xi].tris.size(), radius);
+                if (!haveRref && members.size() == 3) {
+                    R_ref = radius;
+                    haveRref = true;
+                }
                 progressed = true;
                 break;
             }
@@ -1024,11 +1212,42 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
         }
 
         const std::vector<int> prePeelTris = mergeMemberTris(work.provisionals, members);
-        CommitEval ev = evaluateCommit(mv, tol, prePeelTris, seedAxis);
+        GaussResult gFinal;
+        const gp_Dir axisFinal = axisOf(mv, work.provisionals, members, seedAxis, tol, &gFinal);
+        CommitEval ev = evaluateCommit(mv, tol, prePeelTris, axisFinal);
+        if (p1DiagOn()) {
+            gp_Pnt cSeed, cW1;
+            double rSeed = 0, rW1 = 0;
+            GaussResult gW1 = centeredGauss(mv, prePeelTris, seedAxis, tol);
+            const bool eSeed = eberlyCenterRadius(mv, prePeelTris, seedAxis, cSeed, rSeed);
+            const bool eW1 = eberlyCenterRadius(mv, prePeelTris, gW1.axis, cW1, rW1);
+            double cTilt = 0, devTilt = 0;
+            axisTiltStats(mv, prePeelTris, axisFinal, cTilt, devTilt);
+            bool finW1 = false;
+            double finScW1 = 0.0, finScSeed = 0.0;
+            axisOf(mv, work.provisionals, members, seedAxis, tol, nullptr,
+                   &finW1, &finScW1, &finScSeed);
+            const double relR = (R_ref > 0.0)
+                ? std::abs(ev.radius - R_ref) / R_ref : 0.0;
+            std::fprintf(stderr,
+                         "  commit |S|=%zu nSides=%d span=%.4f gate=%s R=%.6g "
+                         "R_ref=%.6g |R-Rref|/Rref=%.4g R_seed=%.5g(%d) R_w1=%.5g(%d) "
+                         "axis=%s scW1=%.4g scSeed=%.4g g5n=%d g5worst=%.5g "
+                         "flat=%.4g g.dev=%.4g |g.c|=%.4g tilt.dev=%.4g |tilt.c|=%.4g "
+                         "patch=%.4g a=(%.3g,%.3g,%.3g) seed=(%.3g,%.3g,%.3g)\n",
+                         members.size(), ev.d2.nSides, ev.d2.span,
+                         gateName(ev.failGate), ev.radius, R_ref, relR,
+                         rSeed, (int)eSeed, rW1, (int)eW1,
+                         finW1 ? "w1" : "seed", finScW1, finScSeed, nG5, worstG5,
+                         ev.g.flat, ev.g.dev, std::abs(ev.g.c),
+                         devTilt, std::abs(cTilt), ev.g.patch,
+                         axisFinal.X(), axisFinal.Y(), axisFinal.Z(),
+                         seedAxis.X(), seedAxis.Y(), seedAxis.Z());
+        }
 
         if (ev.failGate == Gate::PASS) {
             Region reg;
-            fillCylinderRegion(mv, ev, prePeelTris, reg);
+            fillCylinderRegion(mv, ev, axisFinal, prePeelTris, reg);
             work.accepted.push_back(reg);
             for (int m : members) work.provisionals[m].claim = ProvClaim::ConsumedCylinder;
             continue;
@@ -1041,7 +1260,7 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
             int bestMinTri = std::numeric_limits<int>::max();
             for (int m : members) {
                 const double res = maxVertexResidual(mv, work.provisionals[m].tris,
-                                                     ev.g.axis, ev.center, ev.radius);
+                                                     axisFinal, ev.center, ev.radius);
                 const int mt = minTriId(work.provisionals[m]);
                 if (res > bestRes || (res == bestRes && mt < bestMinTri)) {
                     bestRes = res;
@@ -1054,10 +1273,11 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
             for (int m : members) if (m != peelX) peeled.push_back(m);
             if (membersEdgeConnected(adj, peeled)) {
                 const std::vector<int> peelTris = mergeMemberTris(work.provisionals, peeled);
-                const CommitEval evP = evaluateCommit(mv, tol, peelTris, seedAxis);
+                const gp_Dir axisPeel = axisOf(mv, work.provisionals, peeled, seedAxis, tol, nullptr);
+                const CommitEval evP = evaluateCommit(mv, tol, peelTris, axisPeel);
                 if (evP.failGate == Gate::PASS) {
                     Region reg;
-                    fillCylinderRegion(mv, evP, peelTris, reg);
+                    fillCylinderRegion(mv, evP, axisPeel, peelTris, reg);
                     work.accepted.push_back(reg);
                     for (int m : peeled)
                         work.provisionals[m].claim = ProvClaim::ConsumedCylinder;
@@ -1075,6 +1295,7 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
 
         if (ev.failGate != Gate::G5) {
             Region rej;
+            rej.id = (int)work.rejected.size();
             rej.type = SurfType::Cylinder;
             rej.origin = Origin::CylGrow;
             rej.tris = prePeelTris;

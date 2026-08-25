@@ -9,14 +9,18 @@ rules keyed on closed360.
 Stdlib only. Usage:
 
   python3 check_dump.py [dump.json|-] [--schema PATH] [--examples-dir DIR]
-  ./stl2step_regiondump tests/cube.stl | python3 check_dump.py
+  python3 check_dump.py --invoke-ichecker ICHECKER [--sidecar PATH] dump.json
+  ./stl2step_regiondump tests/corpus/S06.stl --component 0 --bare --threads 1 \\
+    | python3 tests/gates/check_regionset.py - --sidecar tests/corpus/S06.expected.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -227,7 +231,7 @@ def check_loop(v: Any, path: str, viol: Violations) -> None:
         viol.add(f"{path}.outer", "there is no outer boolean")
 
 
-def check_region(v: Any, path: str, viol: Violations) -> None:
+def check_region(v: Any, path: str, viol: Violations, *, apply_i7: bool = True) -> None:
     obj = expect_obj(v, path, viol)
     if obj is None:
         return
@@ -265,8 +269,9 @@ def check_region(v: Any, path: str, viol: Violations) -> None:
         if nk in obj and not is_int(obj[nk]):
             viol.add(f"{path}.{nk}", f"expected integer, got {obj[nk]!r}")
 
-    # I7 / I7b — two if/then rules keyed on closed360.
-    if arr is not None and "closed360" in obj:
+    # I7 / I7b — accepted regions only. FINDINGS-0 G3: ichecker does not
+    # apply these if/then rules to rejected[] (empty loops after stage D).
+    if apply_i7 and arr is not None and "closed360" in obj:
         roles = [lp.get("role") if isinstance(lp, dict) else None for lp in arr]
         n_outer = roles.count("outer")
         n_low = roles.count("capLow")
@@ -334,7 +339,9 @@ def check_regionset(v: Any, path: str, viol: Violations) -> None:
         if arr is None:
             continue
         for i, r in enumerate(arr):
-            check_region(r, f"{path}.{name}[{i}]", viol)
+            check_region(
+                r, f"{path}.{name}[{i}]", viol, apply_i7=(name == "regions")
+            )
     if "chains" in obj:
         arr = expect_arr(obj["chains"], f"{path}.chains", viol)
         if arr is not None:
@@ -464,6 +471,17 @@ def main() -> int:
                     help="frozen regionset.schema.json")
     ap.add_argument("--examples-dir", default=str(DEFAULT_EXAMPLES))
     ap.add_argument("--allow-empty", action="store_true")
+    ap.add_argument(
+        "--invoke-ichecker",
+        metavar="PATH",
+        help="after schema check, run check_regionset.py on each bare RegionSet "
+        "(unwrap comps[].regionSet or pass through bare dump)",
+    )
+    ap.add_argument(
+        "--sidecar",
+        metavar="fixture.expected.json",
+        help="forwarded to check_regionset.py when --invoke-ichecker is set",
+    )
     args = ap.parse_args()
 
     schema_path = Path(args.schema)
@@ -539,6 +557,34 @@ def main() -> int:
     print("KEY-SET ACCOUNTING")
     for line in keyset_account([rs for _, rs in sets], examples, wrapper):
         print(line)
+
+    if args.invoke_ichecker:
+        ichecker = Path(args.invoke_ichecker)
+        if not ichecker.is_file():
+            print(f"FAIL: ichecker not found: {ichecker}", file=sys.stderr)
+            return 2
+        for i, (path, rs) in enumerate(sets):
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=f"_{i}.json",
+                prefix="check_dump_regionset_",
+                delete=False,
+                encoding="utf-8",
+            ) as fh:
+                fh.write(json.dumps(rs, separators=(",", ":")) + "\n")
+                tmp = Path(fh.name)
+            cmd = [sys.executable, str(ichecker), str(tmp)]
+            # Sidecar is fixture-specific; only forward when the dump is one set.
+            if args.sidecar and len(sets) == 1:
+                cmd += ["--sidecar", args.sidecar]
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            tmp.unlink(missing_ok=True)
+            print(proc.stdout, end="")
+            if proc.stderr:
+                print(proc.stderr, file=sys.stderr, end="")
+            if proc.returncode != 0:
+                return proc.returncode
+        print(f"OK: ichecker passed on {len(sets)} RegionSet(s)")
     return 0
 
 

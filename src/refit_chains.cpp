@@ -334,13 +334,37 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         return a.inIdx < b.inIdx;
     });
     out.regions.resize(acc.size());
+    std::vector<int> accRemap(work.accepted.size(), -1);
     for (int i = 0; i < (int)acc.size(); ++i) {
         acc[i].r.id = i;
+        if (acc[i].inIdx >= 0 && acc[i].inIdx < (int)accRemap.size())
+            accRemap[acc[i].inIdx] = i;
         out.regions[i] = std::move(acc[i].r);
         for (int t : out.regions[i].tris) {
             if (out.triRegion[t] >= 0) return false;            // overlap
             out.triRegion[t] = i;
         }
+    }
+    std::vector<int> provToDense((int)work.provisionals.size(), -1);
+    for (int i = 0; i < (int)work.provisionals.size(); ++i) {
+        for (int t : work.provisionals[i].tris) {
+            if (t >= 0 && t < nTri && out.triRegion[t] >= 0) {
+                provToDense[i] = out.triRegion[t];
+                break;
+            }
+        }
+    }
+    auto remapFilletNbr = [&](int nb) -> int {
+        if (nb < 0) return -1;
+        if (nb < (int)provToDense.size() && provToDense[nb] >= 0)
+            return provToDense[nb];
+        if (nb < (int)accRemap.size() && accRemap[nb] >= 0)
+            return accRemap[nb];
+        return -1;
+    };
+    for (Region& r : out.regions) {
+        r.filletNbrA = remapFilletNbr(r.filletNbrA);
+        r.filletNbrB = remapFilletNbr(r.filletNbrB);
     }
 
     // --- islands: maximal connected unclaimed, sort (-area, minLocalTriId)
@@ -889,12 +913,33 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         }
     }
 
-    // --- rejected[]: diagnostics, never own triangles ---------------------
+    // FINDING 2: after the area-sort dense ids and chain walk, filletNbrA/B
+    // are the two tangent-adjacent regions, not the C1 provisional indices.
+    for (Region& r : out.regions) {
+        if (r.origin != Origin::FilletStrip) continue;
+        std::vector<int> tn;
+        for (const BoundaryChain& ch : out.chains) {
+            if (!ch.tangent) continue;
+            if (ch.regA == r.id && ch.regB >= 0) tn.push_back(ch.regB);
+            if (ch.regB == r.id && ch.regA >= 0) tn.push_back(ch.regA);
+        }
+        std::sort(tn.begin(), tn.end());
+        tn.erase(std::unique(tn.begin(), tn.end()), tn.end());
+        if (tn.size() >= 2) {
+            r.filletNbrA = tn[0];
+            r.filletNbrB = tn[1];
+        }
+    }
+
+    // --- rejected[]: D1.3-A6b / D5.6-A1 ----------------------------------
+    // tris = full pre-peel claim set, ascending, non-empty (clearing FORBIDDEN).
+    // loops empty by contract. id = rejectOrdinal assigned at record time,
+    // unique dense over {0..n-1}, NOT reassigned after the sort.
+    // Sort key: (-area, minLocalTriId, id).
     struct Rej {
         Region r;
         double area = 0;
         int minTri = 0;
-        int inIdx = 0;
     };
     std::vector<Rej> rej;
     rej.reserve(work.rejected.size());
@@ -902,21 +947,24 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         Rej x;
         x.r = work.rejected[i];
         std::sort(x.r.tris.begin(), x.r.tris.end());
+        x.r.tris.erase(std::unique(x.r.tris.begin(), x.r.tris.end()), x.r.tris.end());
         x.r.loops.clear();
         x.area = regionArea(mv, x.r.tris);
         x.minTri = minTriId(x.r.tris);
-        x.inIdx = i;
+        if (x.r.id < 0) x.r.id = i;
         rej.push_back(std::move(x));
     }
     std::sort(rej.begin(), rej.end(), [](const Rej& a, const Rej& b) {
         if (a.area != b.area) return a.area > b.area;
         if (a.minTri != b.minTri) return a.minTri < b.minTri;
-        return a.inIdx < b.inIdx;
+        return a.r.id < b.r.id;
     });
     out.rejected.resize(rej.size());
     for (int i = 0; i < (int)rej.size(); ++i) {
-        rej[i].r.id = i;
-        out.rejected[i] = std::move(rej[i].r);
+        Region& rr = rej[i].r;
+        rr.filletNbrA = remapFilletNbr(rr.filletNbrA);
+        rr.filletNbrB = remapFilletNbr(rr.filletNbrB);
+        out.rejected[i] = std::move(rr);
     }
 
     // --- RefitStats -------------------------------------------------------

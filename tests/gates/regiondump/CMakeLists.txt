@@ -33,25 +33,41 @@ if(NOT TARGET stl2step::harness)
                      "${CMAKE_CURRENT_BINARY_DIR}/_harness")
 endif()
 
-# Reconfigure when the real P1 TU appears or disappears so the EXISTS
-# switch below is not stale across a no-edit drop-in.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${_stl2step_root}/src/refit_segment.cpp")
-file(GLOB _refit_src_watch "${_stl2step_root}/src/refit_*.cpp")
-if(_refit_src_watch)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_refit_src_watch})
-endif()
-unset(_refit_src_watch)
+# Reconfigure when any P1 TU appears or disappears so the EXISTS switch below
+# is not stale across a no-edit drop-in.
+set(_p1_tus
+    refit_math.cpp
+    refit_grow.cpp
+    refit_fillet.cpp
+    refit_chains.cpp
+    refit_segment.cpp)
+foreach(_tu IN LISTS _p1_tus)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${_stl2step_root}/src/${_tu}")
+endforeach()
 
 set(_regiondump_sources dump_regionset.cpp)
-set(_refit_segment "${_stl2step_root}/src/refit_segment.cpp")
-if(EXISTS "${_refit_segment}")
-    list(APPEND _regiondump_sources "${_refit_segment}")
-    message(STATUS "stl2step_regiondump: using ${_refit_segment} (stub not compiled)")
+# One predicate over the five-name list: compile every P1 TU iff all five
+# exist. A 1–4 half-link (FINDINGS-0 D1) is the defect this lane repairs.
+set(_p1_all_present TRUE)
+set(_p1_sources "")
+foreach(_tu IN LISTS _p1_tus)
+    set(_path "${_stl2step_root}/src/${_tu}")
+    if(EXISTS "${_path}")
+        list(APPEND _p1_sources "${_path}")
+    else()
+        set(_p1_all_present FALSE)
+    endif()
+endforeach()
+
+if(_p1_all_present)
+    list(APPEND _regiondump_sources ${_p1_sources})
+    message(STATUS
+        "stl2step_regiondump: using 5/5 P1 TUs (stub not compiled)")
 else()
     list(APPEND _regiondump_sources stub_segment.cpp)
     message(WARNING
-        "stl2step_regiondump: src/refit_segment.cpp absent; compiling stub_segment.cpp (vanishes with no file edit when the real TU lands)")
+        "stl2step_regiondump: not all five P1 TUs present; compiling stub_segment.cpp")
 endif()
 
 add_executable(stl2step_regiondump ${_regiondump_sources})
@@ -64,10 +80,24 @@ target_link_libraries(stl2step_regiondump PRIVATE stl2step::harness)
 target_include_directories(stl2step_regiondump PRIVATE
     "${_stl2step_root}/src")
 
-if(NOT EXISTS "${_refit_segment}")
+if(NOT _p1_all_present)
     target_compile_definitions(stl2step_regiondump PRIVATE STL2STEP_REGIONDUMP_STUB=1)
 endif()
 
+if(MSVC)
+    target_compile_definitions(stl2step_regiondump PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+
+# CTest hook lives here (this file is owned). Do not edit tests/CMakeLists.txt.
+if(EXISTS "${_stl2step_root}/tests/p1_compose/CMakeLists.txt")
+    add_subdirectory("${_stl2step_root}/tests/p1_compose"
+                     "${CMAKE_CURRENT_BINARY_DIR}/_p1_compose")
+endif()
+
 unset(_regiondump_sources)
-unset(_refit_segment)
+unset(_p1_tus)
+unset(_p1_sources)
+unset(_p1_all_present)
+unset(_tu)
+unset(_path)
 unset(_stl2step_root)
