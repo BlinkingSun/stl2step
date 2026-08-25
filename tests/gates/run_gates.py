@@ -127,13 +127,15 @@ class GateContext:
     census_path: Optional[Path]
     no_verify: bool
     smooth: bool = False
+    baseline_bin: Optional[Path] = None
+    baseline_error: Optional[str] = None
 
 
 @dataclass
 class GateOutcome:
     gate_id: str
     fixture_id: str
-    status: str  # PASS | FAIL | XFAIL
+    status: str  # PASS | FAIL | XFAIL | SKIP
     message: str
     hard: bool = True
     details: Dict[str, Any] = field(default_factory=dict)
@@ -187,6 +189,9 @@ def discover_fixtures(corpus: Path, smoke: bool, fixture_filter: Optional[List[s
                 fixtures.append(
                     Fixture(fid, stl, sidecar if sidecar.is_file() else None)
                 )
+        # G0.1 identity is 21 corpus + tests/cube.stl (SPEC-P0 / FINDINGS-0).
+        if SMOKE_STL.is_file() and all(f.id != "cube" for f in fixtures):
+            fixtures.append(Fixture("cube", SMOKE_STL))
         if not fixtures and SMOKE_STL.is_file():
             fixtures = [Fixture("cube", SMOKE_STL)]
 
@@ -278,7 +283,30 @@ def canonicalize_result_no_paths(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def result_has_smooth_keys(result: Dict[str, Any]) -> List[str]:
-    return sorted(k for k in result if k.startswith("smooth"))
+    # G0.1 / canonicalize.py: smooth* glob plus the one sibling that does not match it.
+    return sorted(k for k in result if k.startswith("smooth") or k == "facesAfterSmooth")
+
+
+# Frozen tests/gates/regionset.schema.json vocabulary: lowerCamelCase of the
+# C++ enumerator. Producers have emitted PascalCase ("Cylinder"); compare only
+# after this mapping so a future producer cannot reintroduce the mismatch.
+SCHEMA_SURFACE_TYPES = frozenset({"plane", "cylinder", "cone", "sphere", "torus"})
+SCHEMA_ORIGINS = frozenset({"planeGrow", "cylGrow", "filletStrip"})
+SCHEMA_ROLES = frozenset({"outer", "inner", "capLow", "capHigh"})
+SCHEMA_BUILT_AS = frozenset(
+    {"notBuilt", "single", "seamed360", "twoHalves", "explodedToFacets"}
+)
+
+
+def schema_enum(value: Any) -> str:
+    """Map PascalCase / lowerCamelCase enumerator spellings to the frozen schema.
+
+    Cylinder → cylinder, FilletStrip → filletStrip, seamed360 stays.
+    First-character lower is the C++ enumerator → schema mapping.
+    """
+    if not isinstance(value, str) or not value:
+        return ""
+    return value[0].lower() + value[1:]
 
 
 def read_text(path: Path) -> str:
@@ -349,93 +377,188 @@ def go(
     return GateOutcome(gate_id, ctx.fixture.id, status, message, hard=hard, details=details or {})
 
 
+def ensure_baseline(baseline_dir: Optional[Path]) -> "tuple[Optional[Path], Optional[str]]":
+    """Build/locate the 187ead0 CLI once per run via p0-golden's build_baseline.sh.
+
+    XFAIL is legal only when the baseline genuinely cannot be built. Never
+    XFAIL on missing canned STEP goldens — those files are gitignored on
+    purpose.
+    """
+    if baseline_dir is None or not baseline_dir.is_dir():
+        return None, (
+            "baseline cannot be built: tests/gates/baseline/ directory is absent"
+        )
+    script = baseline_dir / "build_baseline.sh"
+    if not script.is_file():
+        return None, f"baseline cannot be built: {script} is absent"
+
+    print(
+        "building 187ead0 baseline via tests/gates/baseline/build_baseline.sh ...",
+        file=sys.stderr,
+        flush=True,
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0:
+        tail = "\n".join(combined.strip().splitlines()[-30:])
+        return None, (
+            f"baseline cannot be built: build_baseline.sh exited {proc.returncode}\n"
+            f"{tail}"
+        )
+
+    bin_path: Optional[Path] = None
+    for line in (proc.stdout or "").splitlines():
+        if line.startswith("BASELINE_BIN="):
+            candidate = line.split("=", 1)[1].strip()
+            if candidate:
+                bin_path = Path(candidate)
+            break
+    if bin_path is None:
+        fallback = baseline_dir / ".build" / "stl2step"
+        if fallback.is_file():
+            bin_path = fallback
+    if bin_path is None or not bin_path.is_file():
+        tail = combined.strip()[-2000:]
+        return None, (
+            "baseline cannot be built: build_baseline.sh exited 0 but "
+            f"BASELINE_BIN is missing\n{tail}"
+        )
+    print(f"baseline ready: {bin_path}", file=sys.stderr, flush=True)
+    return bin_path, None
+
+
+def run_canonicalize(
+    tool: Path, mode: str, path_a: Path, path_b: Path
+) -> subprocess.CompletedProcess:
+    """Call the golden lane's canonicalize.py; never reimplement its strip set."""
+    return subprocess.run(
+        [sys.executable, str(tool), mode, str(path_a), str(path_b)],
+        capture_output=True,
+        text=True,
+    )
+
+
 def gate_g0_1_off_path_identity(ctx: GateContext) -> GateOutcome:
-    """SPEC-P0 G0.1 — off-path identity, canonicalized vs 187ead0 baseline."""
+    """SPEC-P0 G0.1 — live twin-run vs 187ead0, DATA-compared through canonicalize.py."""
     gate_id = "G0.1"
     if gate_id not in LIVE_GATES:
         return xfail_not_landed(gate_id, ctx.fixture.id, "P0-baseline")
 
-    baseline_dir = ctx.baseline_dir
-    if baseline_dir is None or not baseline_dir.is_dir():
+    if ctx.baseline_error:
+        return go(ctx, gate_id, "XFAIL", ctx.baseline_error)
+
+    if ctx.baseline_bin is None or not ctx.baseline_bin.is_file():
         return go(
             ctx,
             gate_id,
             "XFAIL",
-            "baseline directory absent (tests/gates/baseline/ from p0-golden not landed yet)",
+            "baseline cannot be built: 187ead0 binary not available "
+            "(build_baseline.sh did not yield BASELINE_BIN)",
+        )
+
+    baseline_dir = ctx.baseline_dir or DEFAULT_BASELINE
+    canon = baseline_dir / "canonicalize.py"
+    if not canon.is_file():
+        return go(
+            ctx,
+            gate_id,
+            "XFAIL",
+            f"baseline cannot be built: canonicalize.py missing at {canon}",
         )
 
     fixture = ctx.fixture
-    baseline_step = baseline_dir / "step" / f"{fixture.id}.step"
-    baseline_result = baseline_dir / "result" / f"{fixture.id}.json"
-    if not baseline_step.is_file() or not baseline_result.is_file():
-        return go(
-            ctx,
-            gate_id,
-            "XFAIL",
-            f"baseline artifacts missing for fixture {fixture.id}",
-        )
+    cur_step = ctx.work_dir / f"{fixture.id}.cur.step"
+    bas_step = ctx.work_dir / f"{fixture.id}.bas.step"
+    cur_txt = ctx.work_dir / f"{fixture.id}.cur.txt"
+    bas_txt = ctx.work_dir / f"{fixture.id}.bas.txt"
 
-    out_step = ctx.work_dir / f"{fixture.id}.step"
     try:
-        run = run_stl2step(
+        cur = run_stl2step(
             ctx.binary,
             fixture.stl,
-            out_step,
+            cur_step,
+            no_verify=ctx.no_verify,
+            smooth=False,
+        )
+        bas = run_stl2step(
+            ctx.baseline_bin,
+            fixture.stl,
+            bas_step,
             no_verify=ctx.no_verify,
             smooth=False,
         )
     except RuntimeError as exc:
         return go(ctx, gate_id, "FAIL", str(exc))
 
-    if not run.result.get("ok"):
+    cur_txt.write_text(cur.stdout, encoding="utf-8")
+    bas_txt.write_text(bas.stdout, encoding="utf-8")
+
+    if not cur.result.get("ok"):
         return go(
             ctx,
             gate_id,
             "FAIL",
-            f"off-path conversion failed: {run.result.get('error')}",
+            f"off-path conversion failed: {cur.result.get('error')}",
+        )
+    if not bas.result.get("ok"):
+        return go(
+            ctx,
+            gate_id,
+            "FAIL",
+            f"187ead0 baseline conversion failed: {bas.result.get('error')}",
         )
 
-    smooth_keys = result_has_smooth_keys(run.result)
+    smooth_keys = result_has_smooth_keys(cur.result)
     if smooth_keys:
         return go(
             ctx,
             gate_id,
             "FAIL",
-            f"smooth* keys present with --smooth absent: {smooth_keys}",
+            f"smooth* / facesAfterSmooth keys present with --smooth absent: {smooth_keys}",
         )
 
-    cur_data = canonical_step_data(read_text(out_step))
-    base_data = canonical_step_data(read_text(baseline_step))
-    if cur_data != base_data:
-        diff = "\n".join(
-            difflib.unified_diff(
-                base_data.splitlines(),
-                cur_data.splitlines(),
-                fromfile="baseline",
-                tofile="current",
-                lineterm="",
-            )
-        )
+    step_cmp = run_canonicalize(canon, "step", cur_step, bas_step)
+    if step_cmp.returncode == 2:
         return go(
             ctx,
             gate_id,
             "FAIL",
-            "canonical STEP DATA section differs from 187ead0 baseline",
-            details={"diff_head": diff.splitlines()[:40]},
+            f"canonicalize.py step IO/usage error: {step_cmp.stderr or step_cmp.stdout}",
         )
-
-    cur_res = canonicalize_result(run.result)
-    base_res = canonicalize_result(json.loads(read_text(baseline_result)))
-    if cur_res != base_res:
+    if step_cmp.returncode != 0:
+        diff = (step_cmp.stdout or "") + (step_cmp.stderr or "")
         return go(
             ctx,
             gate_id,
             "FAIL",
-            "canonical RESULT differs from 187ead0 baseline",
-            details={"current": cur_res, "baseline": base_res},
+            "canonicalize.py step: DATA section differs from 187ead0",
+            details={"canonicalize": diff[:4000]},
         )
 
-    return go(ctx, gate_id, "PASS", "off-path STEP DATA + RESULT match baseline")
+    res_cmp = run_canonicalize(canon, "result", cur_txt, bas_txt)
+    if res_cmp.returncode == 2:
+        return go(
+            ctx,
+            gate_id,
+            "FAIL",
+            f"canonicalize.py result IO/usage error: {res_cmp.stderr or res_cmp.stdout}",
+        )
+    if res_cmp.returncode != 0:
+        diff = (res_cmp.stdout or "") + (res_cmp.stderr or "")
+        return go(
+            ctx,
+            gate_id,
+            "FAIL",
+            "canonicalize.py result: RESULT differs from 187ead0",
+            details={"canonicalize": diff[:4000]},
+        )
+
+    return go(
+        ctx,
+        gate_id,
+        "PASS",
+        "off-path twin-run vs 187ead0: canonicalize.py step+result IDENTICAL",
+    )
 
 
 def gate_g0_2_refit_closedness(ctx: GateContext) -> GateOutcome:
@@ -476,18 +599,19 @@ def gate_g1_validity(ctx: GateContext) -> GateOutcome:
         )
 
     combined = run.stdout + run.stderr
-    if re.search(r"\bfix\b.*ShapeFix|ShapeFix.*\bfix\b", combined, re.IGNORECASE):
-        return go(
-            ctx,
-            gate_id,
-            "FAIL",
-            "ShapeFix invalid-rewrite path fired (fix note in CLI output)",
-        )
+    shapefix_note = bool(
+        re.search(r"\bfix\b.*ShapeFix|ShapeFix.*\bfix\b", combined, re.IGNORECASE)
+    )
+    shapefix_warn = [
+        w
+        for w in run.result.get("warnings", [])
+        if "ShapeFix" in w or re.search(r"\bfix\b", w, re.IGNORECASE)
+    ]
 
-    for warning in run.result.get("warnings", []):
-        if "ShapeFix" in warning or re.search(r"\bfix\b", warning, re.IGNORECASE):
-            return go(ctx, gate_id, "FAIL", f"ShapeFix-related warning: {warning}")
-
+    # Census is the G1 authority (CTest default path passes --census).
+    # 1.0.0 itself rewrites S09 via ShapeFix; G0.1 already covers off-path
+    # identity. When the witness says the written file is BRepCheck-valid,
+    # that is G1 PASS. The fix-note is the no-census detector only.
     if ctx.census_path and ctx.census_path.is_file():
         proc = subprocess.run(
             [str(ctx.census_path), str(out_step)],
@@ -506,22 +630,39 @@ def gate_g1_validity(ctx: GateContext) -> GateOutcome:
         except json.JSONDecodeError:
             return go(ctx, gate_id, "FAIL", "census output is not JSON")
         if not census.get("valid", False):
-            return go(ctx, gate_id, "FAIL", f"BRepCheck invalid per census: {census}")
+            extra = ""
+            if shapefix_note or shapefix_warn:
+                extra = " (ShapeFix rewrite noted)"
+            return go(
+                ctx,
+                gate_id,
+                "FAIL",
+                f"BRepCheck invalid per census{extra}: {census}",
+            )
         return go(ctx, gate_id, "PASS", "BRepCheck valid (census)")
 
-    if run.result.get("watertight") is False or run.result.get("openShells", 0) > 0:
+    # Census genuinely unavailable: do not proxy via watertight/openShells
+    # (that hard-fails open-but-valid B-Reps). SKIP the BRepCheck sub-check.
+    if shapefix_note:
         return go(
             ctx,
             gate_id,
             "FAIL",
-            "mesh not watertight / open shells present (proxy validity without census)",
+            "ShapeFix invalid-rewrite path fired (fix note in CLI output; census unavailable)",
         )
-
+    if shapefix_warn:
+        return go(
+            ctx,
+            gate_id,
+            "FAIL",
+            f"ShapeFix-related warning (census unavailable): {shapefix_warn[0]}",
+        )
     return go(
         ctx,
         gate_id,
-        "PASS",
-        "no ShapeFix rewrite; conversion ok (census unavailable — stderr/RESULT proxy)",
+        "SKIP",
+        "G1 BRepCheck SKIPPED: census binary not provided (no watertight proxy)",
+        hard=False,
     )
 
 
@@ -530,7 +671,10 @@ def gate_g2_recognition(ctx: GateContext) -> GateOutcome:
     if ctx.fixture.sidecar and ctx.fixture.sidecar.is_file():
         sidecar = json.loads(read_text(ctx.fixture.sidecar))
         for prim in sidecar.get("recoverable", []):
-            if prim.get("type") != "Cylinder":
+            # Frozen schema spelling is lowerCamelCase ("cylinder"), not
+            # PascalCase ("Cylinder"). Normalize at this boundary.
+            kind = schema_enum(prim.get("type"))
+            if kind not in SCHEMA_SURFACE_TYPES or kind != "cylinder":
                 continue
             n_sides = prim.get("nSides")
             if n_sides is None:
@@ -644,7 +788,22 @@ def gate_g5_editability(ctx: GateContext) -> GateOutcome:
 
 def gate_i_checker(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 I-checker — RegionSet dump validation (check_regionset.py)."""
-    return xfail_not_landed("I-checker", ctx.fixture.id, "p0-ichecker + P1 dump")
+    # Stays XFAIL this wave: dump envelope is {comps:[…]} and check_regionset.py
+    # wants a bare RegionSet. Envelope→bare unwrap is p1-compose-fix FINDING 5.
+    # Wave-5 one-line wiring (from that lane's SPEC; report not yet landed):
+    #   stl2step_regiondump <stl> --component N --bare --out <rs.json>
+    #   python3 tests/gates/check_regionset.py <rs.json> [--sidecar <id>.expected.json]
+    return GateOutcome(
+        "I-checker",
+        ctx.fixture.id,
+        "XFAIL",
+        "I-checker: waiting for p1-compose-fix FINDING 5 envelope→bare unwrap "
+        "(stl2step_regiondump emits {comps:[…]}; check_regionset.py wants a bare "
+        "RegionSet). Wave-5 wiring: stl2step_regiondump <stl> --component N --bare "
+        "--out <rs.json> && python3 tests/gates/check_regionset.py <rs.json> "
+        "[--sidecar <id>.expected.json]. Do not unwrap in this runner.",
+        hard=True,
+    )
 
 
 def gate_include_allowlist(ctx: GateContext) -> GateOutcome:
@@ -653,13 +812,15 @@ def gate_include_allowlist(ctx: GateContext) -> GateOutcome:
     if gate_id not in LIVE_GATES:
         return xfail_not_landed(gate_id, ctx.fixture.id, "P1-segment")
 
+    missing = [str(p) for p in INCLUDE_ALLOWLIST_FILES if not p.is_file()]
     existing = [p for p in INCLUDE_ALLOWLIST_FILES if p.is_file()]
-    if not existing:
+    if missing:
         return go(
             ctx,
             gate_id,
-            "PASS",
-            "P1 TUs + refit_internal.hpp absent — vacuous pass",
+            "FAIL",
+            "include-allowlist files missing — refusing vacuous pass",
+            details={"missing": missing, "checked": [str(p) for p in existing]},
         )
 
     violations: List[str] = []
@@ -674,16 +835,23 @@ def gate_include_allowlist(ctx: GateContext) -> GateOutcome:
             elif not include_is_allowed(header):
                 violations.append(f"{path}:{line_no}: non-allowlisted include {header}")
 
+    checked = [str(p) for p in existing]
     if violations:
         return go(
             ctx,
             gate_id,
             "FAIL",
             "banned or non-allowlisted #include in P1 sources",
-            details={"violations": violations},
+            details={"violations": violations, "checked": checked},
         )
 
-    return go(ctx, gate_id, "PASS", "all #includes within D5.3 allowlist")
+    return go(
+        ctx,
+        gate_id,
+        "PASS",
+        "all #includes within D5.3 allowlist: " + ", ".join(p.name for p in existing),
+        details={"checked": checked},
+    )
 
 
 def gate_calibration(ctx: GateContext) -> GateOutcome:
@@ -730,6 +898,8 @@ def run_fixture_gates(
     baseline_dir: Optional[Path],
     census_path: Optional[Path],
     no_verify: bool,
+    baseline_bin: Optional[Path] = None,
+    baseline_error: Optional[str] = None,
 ) -> List[GateOutcome]:
     outcomes: List[GateOutcome] = []
     with tempfile.TemporaryDirectory(prefix=f"gates_{fixture.id}_") as tmp:
@@ -741,6 +911,8 @@ def run_fixture_gates(
             baseline_dir=baseline_dir,
             census_path=census_path,
             no_verify=no_verify,
+            baseline_bin=baseline_bin,
+            baseline_error=baseline_error,
         )
         for gate_id in gate_ids:
             fn = GATE_REGISTRY[gate_id]
@@ -753,12 +925,13 @@ def summarize(outcomes: List[GateOutcome]) -> str:
     width = max(len(o.gate_id) for o in outcomes) if outcomes else 10
     for o in outcomes:
         lines.append(f"  {o.gate_id:<{width}}  {o.status:<6}  {o.message}")
-    counts = {"PASS": 0, "FAIL": 0, "XFAIL": 0}
+    counts = {"PASS": 0, "FAIL": 0, "XFAIL": 0, "SKIP": 0}
     for o in outcomes:
         counts[o.status] = counts.get(o.status, 0) + 1
     lines.append(
         f"totals: PASS={counts.get('PASS', 0)} "
-        f"FAIL={counts.get('FAIL', 0)} XFAIL={counts.get('XFAIL', 0)}"
+        f"FAIL={counts.get('FAIL', 0)} XFAIL={counts.get('XFAIL', 0)} "
+        f"SKIP={counts.get('SKIP', 0)}"
     )
     return "\n".join(lines)
 
@@ -789,6 +962,7 @@ def build_report(
             "PASS": sum(1 for o in outcomes if o.status == "PASS"),
             "FAIL": sum(1 for o in outcomes if o.status == "FAIL"),
             "XFAIL": sum(1 for o in outcomes if o.status == "XFAIL"),
+            "SKIP": sum(1 for o in outcomes if o.status == "SKIP"),
         },
     }
 
@@ -811,6 +985,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     baseline_dir = args.baseline.resolve() if args.baseline else None
     census_path = args.census.resolve() if args.census else None
 
+    baseline_bin: Optional[Path] = None
+    baseline_error: Optional[str] = None
+    if "G0.1" in gate_ids:
+        baseline_bin, baseline_error = ensure_baseline(baseline_dir)
+
     all_outcomes: List[GateOutcome] = []
     if args.jobs > 1 and len(fixtures) > 1:
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
@@ -823,6 +1002,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     baseline_dir,
                     census_path,
                     args.no_verify,
+                    baseline_bin,
+                    baseline_error,
                 ): fixture
                 for fixture in fixtures
             }
@@ -838,6 +1019,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     baseline_dir,
                     census_path,
                     args.no_verify,
+                    baseline_bin,
+                    baseline_error,
                 )
             )
 
