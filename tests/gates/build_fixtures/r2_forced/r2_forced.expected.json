@@ -1,0 +1,42 @@
+{
+  "faceCount": 22,
+  "surfaceCensus": {
+    "planar_facets": 20,
+    "plane": 2
+  },
+  "rung": 3,
+  "rounds": 1,
+  "abandonComponent": false,
+  "sagittaOverR": 0.4999999999999999,
+  "nSides": 3,
+  "note": "Three stacked nSides=3 closed360 cylinders (sagitta/R=0.5) + 2 annuli. Distinct from full_360_hole (nSides=4, sagitta/R\u22480.293, Seamed360). F3 residual fails every cylinder; 2-round R1 cap cannot fixpoint \u2192 ChainUnstable/J6.",
+  "fixture": "r2_forced",
+  "meshTriangles": 32,
+  "closed": true,
+  "volumeMM3": 160.7559689283371,
+  "dVolPredicted": -228.0161253042504,
+  "dVolPredAbs": 228.0161253042504,
+  "volumeBudgetMM3": 684.0483759127512,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "explodedToFacets"
+    },
+    {
+      "id": 1,
+      "builtAs": "explodedToFacets"
+    },
+    {
+      "id": 2,
+      "builtAs": "explodedToFacets"
+    },
+    {
+      "id": 3,
+      "builtAs": "single"
+    },
+    {
+      "id": 4,
+      "builtAs": "single"
+    }
+  ]
+}

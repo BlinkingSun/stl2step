@@ -1,0 +1,32 @@
+{
+  "faceCount": 11,
+  "surfaceCensus": {
+    "cylinder": 1,
+    "plane": 2,
+    "planar_facets": 8
+  },
+  "rung": 1,
+  "rounds": 0,
+  "note": "Closed washer; inner closed360 cylinder CapLow\u2260CapHigh, no Outer, no seam.",
+  "fixture": "full_360_hole",
+  "meshTriangles": 32,
+  "closed": true,
+  "volumeMM3": -384.0,
+  "dVolPredicted": -73.06192982974676,
+  "dVolPredAbs": 73.06192982974676,
+  "volumeBudgetMM3": 219.18578948924028,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "single"
+    },
+    {
+      "id": 1,
+      "builtAs": "single"
+    },
+    {
+      "id": 2,
+      "builtAs": "seamed360"
+    }
+  ]
+}

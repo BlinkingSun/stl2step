@@ -1,0 +1,33 @@
+{
+  "faceCount": 4,
+  "surfaceCensus": {
+    "plane": 2,
+    "cylinder": 1,
+    "planar_facets": 1
+  },
+  "rung": 1,
+  "rounds": 0,
+  "note": "D7 ground-truth R=2.0; all fillet verts on the cylinder. Withdrawn median rule \u2192 R/2.",
+  "fixture": "quarter_round_1tri",
+  "meshTriangles": 6,
+  "closed": false,
+  "volumeMM3": 4.0,
+  "dVolPredicted": -6.849555921538759,
+  "dVolPredAbs": 6.849555921538759,
+  "volumeBudgetMM3": 20.548667764616276,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "single"
+    },
+    {
+      "id": 1,
+      "builtAs": "single"
+    },
+    {
+      "id": 2,
+      "builtAs": "single",
+      "filletRadiusMM": 2.0
+    }
+  ]
+}

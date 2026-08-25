@@ -1,0 +1,412 @@
+{
+  "compRoot": 0,
+  "regions": [
+    {
+      "id": 0,
+      "type": "cylinder",
+      "origin": "cylGrow",
+      "ax": {
+        "loc": [
+          0.0,
+          0.0,
+          2.0
+        ],
+        "dir": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "xdir": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "radius": 6.0,
+      "uMin": 0.0,
+      "uMax": 6.283185307179586,
+      "vMin": -2.0,
+      "vMax": 2.0,
+      "closed360": true,
+      "outwardNormal": false,
+      "tris": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11
+      ],
+      "loops": [
+        {
+          "chainIdx": [
+            0
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "capLow"
+        },
+        {
+          "chainIdx": [
+            1
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "capHigh"
+        }
+      ],
+      "maxVertexDev": 1.840053140966802e-07,
+      "rmsVertexDev": 1.502397098324717e-07,
+      "chordSagitta": 0.8038475772933678,
+      "nSides": 6,
+      "dVolPredicted": -78.2663676820527,
+      "maxVertexSnap": 0.0,
+      "reject": "none",
+      "builtAs": "notBuilt",
+      "filletNbrA": -1,
+      "filletNbrB": -1
+    },
+    {
+      "id": 1,
+      "type": "cylinder",
+      "origin": "cylGrow",
+      "ax": {
+        "loc": [
+          0.0,
+          0.0,
+          7.0
+        ],
+        "dir": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "xdir": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "radius": 3.0,
+      "uMin": 0.0,
+      "uMax": 6.283185307179586,
+      "vMin": -3.0,
+      "vMax": 3.0,
+      "closed360": true,
+      "outwardNormal": false,
+      "tris": [
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23
+      ],
+      "loops": [
+        {
+          "chainIdx": [
+            2
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "capLow"
+        },
+        {
+          "chainIdx": [
+            3
+          ],
+          "reversed": [
+            0
+          ],
+          "role": "capHigh"
+        }
+      ],
+      "maxVertexDev": 9.20026570483401e-08,
+      "rmsVertexDev": 7.511985491623584e-08,
+      "chordSagitta": 0.4019237886466839,
+      "nSides": 6,
+      "dVolPredicted": -29.349887880769764,
+      "maxVertexSnap": 0.0,
+      "reject": "none",
+      "builtAs": "notBuilt",
+      "filletNbrA": -1,
+      "filletNbrB": -1
+    },
+    {
+      "id": 2,
+      "type": "plane",
+      "origin": "planeGrow",
+      "ax": {
+        "loc": [
+          6.0,
+          0.0,
+          4.0
+        ],
+        "dir": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "xdir": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "radius": 0.0,
+      "uMin": 0.0,
+      "uMax": 0.0,
+      "vMin": 0.0,
+      "vMax": 0.0,
+      "closed360": false,
+      "outwardNormal": true,
+      "tris": [
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35
+      ],
+      "loops": [
+        {
+          "chainIdx": [
+            1
+          ],
+          "reversed": [
+            1
+          ],
+          "role": "outer"
+        },
+        {
+          "chainIdx": [
+            2
+          ],
+          "reversed": [
+            1
+          ],
+          "role": "inner"
+        }
+      ],
+      "maxVertexDev": 0.0,
+      "rmsVertexDev": 0.0,
+      "chordSagitta": 0.0,
+      "nSides": 0,
+      "dVolPredicted": 0.0,
+      "maxVertexSnap": 0.0,
+      "reject": "none",
+      "builtAs": "notBuilt",
+      "filletNbrA": -1,
+      "filletNbrB": -1
+    }
+  ],
+  "rejected": [],
+  "chains": [
+    {
+      "regA": 0,
+      "regB": -1,
+      "islandA": -1,
+      "islandB": -1,
+      "tangent": false,
+      "closedLoop": true,
+      "meshEdges": [
+        0,
+        5,
+        9,
+        13,
+        17,
+        21
+      ],
+      "meshVerts": [
+        0,
+        1,
+        4,
+        6,
+        8,
+        10
+      ]
+    },
+    {
+      "regA": 0,
+      "regB": 2,
+      "islandA": -1,
+      "islandB": -1,
+      "tangent": false,
+      "closedLoop": true,
+      "meshEdges": [
+        3,
+        23,
+        20,
+        16,
+        12,
+        8
+      ],
+      "meshVerts": [
+        2,
+        3,
+        11,
+        9,
+        7,
+        5
+      ]
+    },
+    {
+      "regA": 1,
+      "regB": 2,
+      "islandA": -1,
+      "islandB": -1,
+      "tangent": false,
+      "closedLoop": true,
+      "meshEdges": [
+        24,
+        29,
+        33,
+        37,
+        41,
+        45
+      ],
+      "meshVerts": [
+        12,
+        13,
+        16,
+        18,
+        20,
+        22
+      ]
+    },
+    {
+      "regA": 1,
+      "regB": -1,
+      "islandA": -1,
+      "islandB": -1,
+      "tangent": false,
+      "closedLoop": true,
+      "meshEdges": [
+        27,
+        47,
+        44,
+        40,
+        36,
+        32
+      ],
+      "meshVerts": [
+        14,
+        15,
+        23,
+        21,
+        19,
+        17
+      ]
+    }
+  ],
+  "triRegion": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2,
+    2
+  ],
+  "triIsland": [
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1,
+    -1
+  ],
+  "nIslands": 0,
+  "stats": {
+    "planes": 1,
+    "cylinders": 2,
+    "fillets": 0,
+    "rejected": 0,
+    "facetIslands": 0,
+    "facetTriangles": 0,
+    "distinctRadii": 2,
+    "maxVertexDev": 1.840053140966802e-07,
+    "maxEdgeTol": 0.0,
+    "dVolPredicted": -107.61625556282246
+  }
+}

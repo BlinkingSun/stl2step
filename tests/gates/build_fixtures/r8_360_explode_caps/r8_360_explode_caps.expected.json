@@ -1,0 +1,47 @@
+{
+  "faceCount": 19,
+  "surfaceCensus": {
+    "planar_facets": 18,
+    "plane": 1
+  },
+  "rung": 3,
+  "rounds": 1,
+  "note": "P1 cap rings are one closedLoop chain of nSides mesh chords (the gp_Circ collapse). Explode un-collapses each ring to those N chords and rebuilds the planar inner from CapHigh.",
+  "fixture": "r8_360_explode_caps",
+  "meshTriangles": 24,
+  "closed": true,
+  "volumeMM3": -303.9748978614807,
+  "dVolPredicted": -276.3831821869702,
+  "dVolPredAbs": 276.3831821869702,
+  "volumeBudgetMM3": 829.1495465609106,
+  "regions": [
+    {
+      "id": 0,
+      "builtAs": "explodedToFacets",
+      "capRingsUncollapsed": true
+    },
+    {
+      "id": 1,
+      "builtAs": "single",
+      "innerWireRebuiltFromChords": true
+    }
+  ],
+  "r8": {
+    "nSides": 3,
+    "capLowChainIdx": [
+      0
+    ],
+    "capHighChainIdx": [
+      1
+    ],
+    "capLowClosedLoop": true,
+    "capHighClosedLoop": true,
+    "capLowChordCount": 3,
+    "capHighChordCount": 3,
+    "planeInnerChainIdx": [
+      1
+    ],
+    "planeInnerUsesCapHigh": true,
+    "explodeUncollapsesGpCircToNChords": 3
+  }
+}
