@@ -18,19 +18,38 @@ expect_fail() {
     n=$((n + 1))
     json=$(python3 "$CHECKER" "$dump" --json "$@" 2>/dev/null) || true
     got=$(printf '%s\n' "$json" | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-rule=sys.argv[1]
-rec=r.get('rules',{}).get(rule,{})
-print('ok' if (not r.get('ok') and rec.get('pass') is False) else 'bad')
-print(rule, 'pass=' + str(rec.get('pass')), 'offenders=' + ','.join(rec.get('offenders') or []))
+import json, sys
+r = json.load(sys.stdin)
+target = sys.argv[1]
+rules = r.get('rules', {})
+if not rules.get('SCHEMA', {}).get('pass'):
+    print('bad')
+    print('SCHEMA pass=%s' % rules.get('SCHEMA', {}).get('pass'))
+    sys.exit(0)
+if r.get('ok'):
+    print('bad')
+    print('ok=true (expected false)')
+    sys.exit(0)
+if rules.get(target, {}).get('pass') is not False:
+    print('bad')
+    print(target, 'pass=' + str(rules.get(target, {}).get('pass')))
+    sys.exit(0)
+failing = sorted(rid for rid, rec in rules.items()
+                 if rid != 'SCHEMA' and not rec.get('pass'))
+want = sorted([target])
+if failing != want:
+    print('bad')
+    print('failing=' + ','.join(failing) + ' want=' + target)
+else:
+    print('ok')
+print(target, 'isolated offenders=' + ','.join(rules[target].get('offenders') or []))
 " "$rule")
     status=$(printf '%s\n' "$got" | head -n1)
     detail=$(printf '%s\n' "$got" | tail -n1)
     if [ "$status" = "ok" ]; then
-        printf 'PASS  %s  failed %s (%s)\n' "$(basename "$dump")" "$rule" "$detail"
+        printf 'PASS  %s  failed %s only (%s)\n' "$(basename "$dump")" "$rule" "$detail"
     else
-        printf 'FAIL  %s  expected rule %s to fail; %s\n' "$(basename "$dump")" "$rule" "$detail"
+        printf 'FAIL  %s  expected only %s to fail; %s\n' "$(basename "$dump")" "$rule" "$detail"
         fail=$((fail + 1))
     fi
 }

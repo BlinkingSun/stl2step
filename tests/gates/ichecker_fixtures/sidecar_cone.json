@@ -68,7 +68,7 @@
   ],
   "rejected": [
     {
-      "id": 40,
+      "id": 0,
       "type": "cone",
       "origin": "cylGrow",
       "ax": {
@@ -95,7 +95,11 @@
       "vMax": 0.0,
       "closed360": false,
       "outwardNormal": true,
-      "tris": [],
+      "tris": [
+        10,
+        11,
+        12
+      ],
       "loops": [
         {
           "chainIdx": [

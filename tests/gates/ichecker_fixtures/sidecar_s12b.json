@@ -68,7 +68,7 @@
   ],
   "rejected": [
     {
-      "id": 41,
+      "id": 0,
       "type": "plane",
       "origin": "planeGrow",
       "ax": {
@@ -95,7 +95,20 @@
       "vMax": 0.0,
       "closed360": false,
       "outwardNormal": true,
-      "tris": [],
+      "tris": [
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21
+      ],
       "loops": [
         {
           "chainIdx": [

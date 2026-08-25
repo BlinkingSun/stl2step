@@ -68,7 +68,7 @@
   ],
   "rejected": [
     {
-      "id": 42,
+      "id": 0,
       "type": "plane",
       "origin": "planeGrow",
       "ax": {
@@ -95,18 +95,12 @@
       "vMax": 0.0,
       "closed360": false,
       "outwardNormal": true,
-      "tris": [],
-      "loops": [
-        {
-          "chainIdx": [
-            0
-          ],
-          "reversed": [
-            0
-          ],
-          "role": "outer"
-        }
+      "tris": [
+        10,
+        11,
+        12
       ],
+      "loops": [],
       "maxVertexDev": 0.0,
       "rmsVertexDev": 0.0,
       "chordSagitta": 0.0,

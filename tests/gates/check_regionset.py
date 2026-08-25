@@ -627,10 +627,11 @@ def check_I5(dump, ctx):
       - Region::tris strictly ascending local tri id (a duplicate is a tie)
       - accepted regions[i].id == i (dense ids assigned after the sort)
       - island ids used are exactly {0 .. nIslands-1}
-      - unique minLocalTriId across regions / across rejected (a tie is a violation)
+      - unique minLocalTriId across regions; unique dense id across rejected
+        (D5.6-A1 / I5-A1); every rejected entry non-empty
 
     NOT checkable from JSON (frozen schema has no `area` field):
-      - regions[] / rejected[] / islands ordered by (-area, minLocalTriId).
+      - regions[] / rejected[] / islands ordered by (-area, minLocalTriId, id).
         If a region object carries an extra `area` property we honour the full
         key; otherwise we do not invent triangle-count as area.
     """
@@ -688,9 +689,8 @@ def check_I5(dump, ctx):
     if have_area and area_keys:
         strict_sorted([k for k, _ in area_keys], "regions[] (-area, minLocalTriId)", "regions")
 
-    # rejected[] — same keys; ids need only be unique (not necessarily 0..n-1
-    # in the accepted space)
-    r_mins = {}
+    # rejected[] — D1.3-A6b / D5.6-A1 / I5-A1: non-empty tris, dense unique id,
+    # minLocalTriId ties are legal; optional (-area, minLocalTriId, id) order
     r_area_keys = []
     r_have_area = True
     r_ids = []
@@ -698,17 +698,14 @@ def check_I5(dump, ctx):
         rid = _as_int(r.get("id"))
         r_ids.append(rid)
         tris = [_as_int(t) for t in _as_list(r.get("tris"))]
+        if not tris:
+            f.add("rejected%d" % i,
+                  "rejected[] entry carries no triangles — D1.3-A6b requires "
+                  "the claim's full pre-peel tri set")
         strict_sorted(tris, "rejected%d.tris" % i, "rejected%d.tris" % i)
         mn = _min_or_none(tris)
-        if mn is not None:
-            if mn in r_mins:
-                f.add("rejected",
-                      "minLocalTriId %d ties rejected[%d] and rejected[%d]"
-                      % (mn, r_mins[mn], i))
-            else:
-                r_mins[mn] = i
         if "area" in r and isinstance(r["area"], (int, float)):
-            r_area_keys.append(((-float(r["area"]), mn), i))
+            r_area_keys.append(((-float(r["area"]), mn, rid), i))
         else:
             r_have_area = False
         loop_keys = []
@@ -723,9 +720,34 @@ def check_I5(dump, ctx):
             loop_keys.append((ri, mc if mc is not None else -1))
         strict_sorted(loop_keys, "rejected[%d].loops" % i, "rejected%d.loops" % i)
     if r_have_area and r_area_keys:
-        strict_sorted([k for k, _ in r_area_keys], "rejected[] (-area, minLocalTriId)", "rejected")
-    if len(r_ids) != len(set(r_ids)):
-        f.add("rejected", "duplicate rejected[].id values %s" % r_ids)
+        strict_sorted([k for k, _ in r_area_keys],
+                      "rejected[] (-area, minLocalTriId, id)", "rejected")
+    if sorted(r_ids) != list(range(len(r_ids))):
+        f.add("rejected",
+              "rejected[].id must be dense 0..n-1 (have %s)" % r_ids)
+
+    # S12-b: vertexResidual must cover all hex-side provisionals (growx §5.7)
+    sidecar = ctx.get("sidecar") or {}
+    sid = _sidecar_id(sidecar, ctx.get("sidecar_path") or "").lower().replace("_", "-")
+    if "s12-b" in sid or "s12b" in sid:
+        side_tri_count = None
+        for key in ("sideTriCount", "sideTri", "hexSideTriCount", "hexSideTris"):
+            v = sidecar.get(key)
+            if isinstance(v, int) and not isinstance(v, bool):
+                side_tri_count = v
+                break
+        if side_tri_count is not None:
+            vr = [r for r in rejected_of(dump) if r.get("reject") == "vertexResidual"]
+            if len(vr) != 1:
+                f.add("rejected",
+                      "S12-b tri-coverage needs exactly one vertexResidual (have %d)"
+                      % len(vr))
+            else:
+                n_tris = len(_as_list(vr[0].get("tris")))
+                if n_tris != side_tri_count:
+                    f.add("rejected",
+                          "S12-b vertexResidual tris len %d != sidecar side-tri count %d"
+                          % (n_tris, side_tri_count))
 
     # chains[] by minLocalMeshEdgeId
     chain_keys = []

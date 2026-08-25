@@ -68,7 +68,7 @@
   ],
   "rejected": [
     {
-      "id": 50,
+      "id": 0,
       "type": "cylinder",
       "origin": "cylGrow",
       "ax": {
@@ -98,17 +98,7 @@
       "tris": [
         9
       ],
-      "loops": [
-        {
-          "chainIdx": [
-            0
-          ],
-          "reversed": [
-            0
-          ],
-          "role": "outer"
-        }
-      ],
+      "loops": [],
       "maxVertexDev": 0.0,
       "rmsVertexDev": 0.0,
       "chordSagitta": 0.1,
