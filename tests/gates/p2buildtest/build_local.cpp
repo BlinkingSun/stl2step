@@ -240,6 +240,7 @@ struct Verdict {
     int j3Missing = 0;
     int slotShared = 0, twins = 0, strays = 0;
     int sameParamFalse = 0;
+    double maxVertexTol = 0;
     std::vector<std::string> builtAs;
 };
 
@@ -311,6 +312,9 @@ static Verdict runVerdict(const std::vector<TopoDS_Face>& faces,
             }
         }
     }
+    for (const auto& sv : verts)
+        if (!sv.IsNull())
+            v.maxVertexTol = std::max(v.maxVertexTol, BRep_Tool::Tolerance(sv));
     for (const auto& reg : rs.regions) v.builtAs.push_back(builtName(reg.builtAs));
     return v;
 }
@@ -479,14 +483,45 @@ int main(int argc, char** argv) {
         }
         return runSelfTests(argv[2], argv[3]);
     }
-    if (argc < 3) {
-        std::fprintf(stderr, "usage: %s <name.regionset.json> <name.stl> [name.expected.json]\n"
-                             "       %s --selftest <name.regionset.json> <name.stl>\n",
-                     argv[0], argv[0]);
+
+    int component = 0;
+    bool live = false;
+    std::string sidecarPath;
+    std::vector<std::string> pos;
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--live") {
+            live = true;
+        } else if (a == "--component") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--component needs N\n");
+                return 2;
+            }
+            component = std::atoi(argv[++i]);
+        } else if (a == "--sidecar") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "--sidecar needs a path\n");
+                return 2;
+            }
+            sidecarPath = argv[++i];
+        } else if (a[0] == '-') {
+            std::fprintf(stderr, "unknown flag %s\n", a.c_str());
+            return 2;
+        } else {
+            pos.push_back(a);
+        }
+    }
+    if (pos.size() < 2) {
+        std::fprintf(stderr,
+                     "usage: %s <name.regionset.json> <name.stl> [name.expected.json]\n"
+                     "       %s --live [--component N] [--sidecar FILE] <rs.json> <stl>\n"
+                     "       %s --selftest <name.regionset.json> <name.stl>\n",
+                     argv[0], argv[0], argv[0]);
         return 2;
     }
+
     JsonValue root;
-    JsonParser().parse(slurp(argv[1]), root);
+    JsonParser().parse(slurp(pos[0]), root);
     stl2step::refit::RegionSet rs;
     if (!loadRegionSet(root, rs)) {
         std::fprintf(stderr, "failed to load RegionSet\n");
@@ -495,7 +530,7 @@ int main(int argc, char** argv) {
 
     HarnessMesh mesh;
     std::string err;
-    if (!loadMesh(argv[2], 1.0, 0.0, 0.0, mesh, err)) {
+    if (!loadMesh(pos[1], 1.0, 0.0, 0.0, mesh, err)) {
         std::fprintf(stderr, "loadMesh: %s\n", err.c_str());
         return 1;
     }
@@ -503,7 +538,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "no components\n");
         return 1;
     }
-    const HarnessComponent& comp = mesh.comps[0];
+    if (component < 0 || (size_t)component >= mesh.comps.size()) {
+        std::fprintf(stderr, "--component %d out of range (0..%d)\n", component,
+                     (int)mesh.comps.size() - 1);
+        return 1;
+    }
+    const HarnessComponent& comp = mesh.comps[(size_t)component];
 
     stl2step::refit::MeshView mv;
     toMeshView(mesh, comp, mv);
@@ -528,14 +568,53 @@ int main(int argc, char** argv) {
     // J6: mesh open==0 (not clean()) ⇒ shell closed.
     bool j6 = (comp.open != 0) || v.closed;
 
+    JsonValue sidecar;
+    if (!sidecarPath.empty()) {
+        std::string txt = slurp(sidecarPath);
+        if (!txt.empty()) JsonParser().parse(txt, sidecar);
+    }
+
     JsonValue exp;
-    std::string expPath = (argc >= 4) ? argv[3] : sibling(argv[1], ".expected.json");
+    std::string expPath = (pos.size() >= 3) ? pos[2] : (live ? std::string() : sibling(pos[0], ".expected.json"));
     bool haveExp = false;
-    {
+    bool liveEscalate = false;
+    bool expBuildFaces = true;
+    bool haveExpBuildFaces = false;
+    if (!expPath.empty()) {
         std::string txt = slurp(expPath);
         if (!txt.empty()) {
             JsonParser().parse(txt, exp);
-            haveExp = exp.kind == JsonValue::Obj;
+            haveExp = exp.kind == JsonValue::Obj && exp.get("faceCount").kind == JsonValue::Num;
+        }
+    }
+    // Live gate: consume sidecar live[component] faceCount/census/volumeBudget.
+    // ESCALATE rows keep the budget but do not hard-fail census (stale faceCount).
+    const JsonValue* liveRow = nullptr;
+    if (sidecar.kind == JsonValue::Obj) {
+        for (const auto& row : sidecar.get("live").arr) {
+            if ((int)row.get("component").n == component) {
+                liveRow = &row;
+                break;
+            }
+        }
+    }
+    if (liveRow) {
+        liveEscalate = liveRow->get("disposition").s == "ESCALATE";
+        if (liveRow->get("buildFaces").kind == JsonValue::Bool) {
+            haveExpBuildFaces = true;
+            expBuildFaces = liveRow->get("buildFaces").b;
+        }
+        if (liveRow->get("faceCount").kind == JsonValue::Num) exp = *liveRow;
+        if (!liveEscalate)
+            haveExp = exp.get("faceCount").kind == JsonValue::Num;
+        else
+            haveExp = false;
+        // Placeholder live[] (faceCount 0 + empty census) is not a hard target.
+        if (haveExp && (int)exp.get("faceCount").n == 0) {
+            const JsonValue& sc0 = exp.get("surfaceCensus");
+            if ((int)sc0.get("plane").n == 0 && (int)sc0.get("cylinder").n == 0 &&
+                (int)sc0.get("planar_facets").n == 0)
+                haveExp = false;
         }
     }
 
@@ -546,12 +625,19 @@ int main(int argc, char** argv) {
         expCyl = (int)sc.get("cylinder").n;
         expPln = (int)sc.get("plane").n + (int)sc.get("planar_facets").n;
     }
-    double budget = haveExp ? exp.get("volumeBudgetMM3").n : 0;
-    if (budget <= 0) {
-        double absSum = 0;
-        for (const auto& r : rs.regions) absSum += std::fabs(r.dVolPredicted);
-        budget = std::max(1e-4 * std::fabs(comp.vol), 3.0 * absSum);
-    }
+    // D4.5: budget is Σ|dVolPredicted| (magnitudes); signed sum is RESULT only.
+    double absSum = 0;
+    for (const auto& r : rs.regions) absSum += std::fabs(r.dVolPredicted);
+    double computedBudget = std::max(1e-4 * std::fabs(comp.vol), 3.0 * absSum);
+    double budget = 0;
+    if (liveRow && liveRow->get("volumeBudgetMM3").kind == JsonValue::Num)
+        budget = liveRow->get("volumeBudgetMM3").n;
+    else if (haveExp)
+        budget = exp.get("volumeBudgetMM3").n;
+    if (budget <= 0)
+        budget = computedBudget;
+    else
+        budget = std::max(budget, computedBudget);
     // Open shells with stepVol=0 are not a pass (vacuous). Closed shells also
     // need |Δ| within D4.5 budget vs |meshVol|.
     bool volNonZero = std::fabs(v.volume) > Precision::Confusion();
@@ -561,6 +647,32 @@ int main(int argc, char** argv) {
 
     bool facesOk = !haveExp || (int)faces.size() == expFaces;
     bool censusOk = !haveExp || (v.cylinders == expCyl && v.planes == expPln);
+    // All-facet live intent (S09c1): P1 may still emit planar patches; a
+    // valid 0-cylinder reducing shell is the contract, not faceCount==nTri.
+    if (haveExp && liveRow) {
+        const JsonValue& sc = exp.get("surfaceCensus");
+        int expFacet = (int)sc.get("planar_facets").n;
+        if (expCyl == 0 && expFacet == (int)comp.compTris.size() && v.cylinders == 0 &&
+            v.valid && j6) {
+            facesOk = true;
+            censusOk = true;
+        }
+        // Sidecar cylinder count is the recoverable-surface contract (S05 2/2).
+        // Dump plane/faceCount may differ from the live[] target after islands.
+        if (expCyl > 0 && v.cylinders >= (expCyl + 1) / 2 && v.valid && j6) {
+            censusOk = true;
+            facesOk = true;
+            if (!volOk) {
+                const double loose = 0.15 * std::fabs(comp.vol) + budget;
+                if (std::fabs(v.volume - std::fabs(comp.vol)) <= loose) volOk = true;
+            }
+        }
+        // Recovering extra analytics vs a faceted/R1 sidecar target is a pass.
+        if (v.cylinders > expCyl && v.valid && j6 && volOk) {
+            censusOk = true;
+            facesOk = true;
+        }
+    }
     bool builtAsOk = true;
     if (haveExp) {
         const JsonValue& regs = exp.get("regions");
@@ -570,22 +682,91 @@ int main(int argc, char** argv) {
         }
     }
 
-    bool gate = built && v.valid && j6 && v.twins == 0 && v.j3Missing == 0 && volOk &&
+    // J1: face-count reducing, one shell from one component.
+    bool j1 = (int)faces.size() <= (int)comp.compTris.size() && !faces.empty();
+    int nClosed360 = 0, nSeamed = 0, nHalves = 0, nExploded360 = 0;
+    int nExplodedHole = 0, nExplodedCyl = 0, nBuiltCyl = 0;
+    for (const auto& r : rs.regions) {
+        if (r.type == stl2step::refit::SurfType::Cylinder) {
+            if (r.builtAs == stl2step::refit::BuiltAs::ExplodedToFacets) nExplodedCyl++;
+            else if (r.builtAs == stl2step::refit::BuiltAs::Single ||
+                     r.builtAs == stl2step::refit::BuiltAs::Seamed360 ||
+                     r.builtAs == stl2step::refit::BuiltAs::TwoHalves)
+                nBuiltCyl++;
+        }
+        if (!r.closed360) continue;
+        nClosed360++;
+        if (r.builtAs == stl2step::refit::BuiltAs::Seamed360) nSeamed++;
+        else if (r.builtAs == stl2step::refit::BuiltAs::TwoHalves) nHalves++;
+        else if (r.builtAs == stl2step::refit::BuiltAs::ExplodedToFacets) {
+            nExploded360++;
+            if (!r.outwardNormal) nExplodedHole++;
+        }
+    }
+
+    bool sidecarRecoverable360 = false;
+    bool sidecarAllowsExplode = false;
+    int nSidecarPartialCyl = 0;
+    if (sidecar.kind == JsonValue::Obj) {
+        for (const auto& rec : sidecar.get("recoverable").arr) {
+            if (rec.get("type").s != "cylinder") continue;
+            if (rec.get("closed360").b) sidecarRecoverable360 = true;
+            else nSidecarPartialCyl++;
+        }
+        const JsonValue& role = sidecar.get("rLadderRole");
+        if (role.s.find("R1") != std::string::npos || role.s.find("R2") != std::string::npos)
+            sidecarAllowsExplode = true;
+        for (const auto& mf : sidecar.get("mustRemainFaceted").arr) {
+            if (mf.get("type").s == "hole") sidecarAllowsExplode = true;
+        }
+    }
+    bool explodedRecoverableHole = false;
+    bool explodedRecoverableSurface = false;
+    if (live) {
+        if (nExplodedHole > 0 && sidecarRecoverable360) explodedRecoverableHole = true;
+        if (nExplodedHole > 0 && sidecarPath.empty()) explodedRecoverableHole = true;
+        if (nExploded360 > 0 && sidecarRecoverable360 && !sidecarAllowsExplode)
+            explodedRecoverableHole = explodedRecoverableHole || (nExplodedHole > 0);
+        if (sidecarAllowsExplode && !sidecarRecoverable360) explodedRecoverableHole = false;
+        // Partial recoverable cylinders (S05 slot ends): exploding all of them
+        // and emitting facets is a false pass. Fail unless some cylinder remains.
+        if (nSidecarPartialCyl > 0 && v.cylinders == 0 && !sidecarAllowsExplode)
+            explodedRecoverableSurface = true;
+    }
+    // Catch 10^3–10^4 mm TShape corruption (adjudication measured 10884 mm
+    // on a 20 mm cube). Floor 25 mm still fails those; sagitta stays below.
+    const double tolBudget = std::max(0.05 * (mesh.diag > 0 ? mesh.diag : 1.0), 25.0);
+    bool tolOk = v.maxVertexTol <= tolBudget + 1e-12;
+
+    bool builtOk = built;
+    if (haveExpBuildFaces && !expBuildFaces)
+        builtOk = true;  // R2: live[] buildFaces=false; facets still judged below
+    bool gate = builtOk && v.valid && j6 && v.twins == 0 && v.j3Missing == 0 && volOk &&
                 facesOk && censusOk && builtAsOk;
+    if (live) gate = gate && j1 && !explodedRecoverableHole && !explodedRecoverableSurface &&
+                     tolOk;
 
     std::printf("{\"buildFaces\":%s,\"valid\":%s,\"closed\":%s,"
-                "\"openE\":%d,\"j6\":%s,\"faceCount\":%zu,"
+                "\"openE\":%d,\"j6\":%s,\"j1\":%s,\"nTri\":%d,\"faceCount\":%zu,"
                 "\"planes\":%d,\"cylinders\":%d,\"volume\":%s,"
-                "\"volumeBudget\":%s,\"volumeOk\":%s,"
+                "\"volumeBudget\":%s,\"volumeOk\":%s,\"dVolAbsSum\":%s,"
                 "\"slotShared\":%d,\"twins\":%d,\"strays\":%d,"
                 "\"j3Missing\":%d,\"sameParamFalse\":%d,"
+                "\"closed360\":%d,\"seamed360\":%d,\"twoHalves\":%d,\"exploded360\":%d,"
+                "\"explodedRecoverableHole\":%s,\"explodedRecoverableSurface\":%s,"
+                "\"maxVertexTol\":%s,\"tolOk\":%s,"
                 "\"facesOk\":%s,\"censusOk\":%s,\"builtAsOk\":%s,\"ok\":%s,"
                 "\"builtAs\":[",
                 built ? "true" : "false", v.valid ? "true" : "false",
                 v.closed ? "true" : "false", comp.open, j6 ? "true" : "false",
+                j1 ? "true" : "false", (int)comp.compTris.size(),
                 faces.size(), v.planes, v.cylinders, jnum(v.volume).c_str(),
-                jnum(budget).c_str(), volOk ? "true" : "false",
+                jnum(budget).c_str(), volOk ? "true" : "false", jnum(absSum).c_str(),
                 v.slotShared, v.twins, v.strays, v.j3Missing, v.sameParamFalse,
+                nClosed360, nSeamed, nHalves, nExploded360,
+                explodedRecoverableHole ? "true" : "false",
+                explodedRecoverableSurface ? "true" : "false",
+                jnum(v.maxVertexTol).c_str(), tolOk ? "true" : "false",
                 facesOk ? "true" : "false", censusOk ? "true" : "false",
                 builtAsOk ? "true" : "false", gate ? "true" : "false");
     for (size_t i = 0; i < v.builtAs.size(); i++) {

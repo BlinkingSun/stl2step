@@ -40,3 +40,9 @@ if(MSVC)
     target_compile_definitions(stl2step_p2buildtest PRIVATE _USE_MATH_DEFINES NOMINMAX)
     target_compile_options(stl2step_p2buildtest PRIVATE /EHsc)
 endif()
+
+# Live re-gate (lane p2-real). CTest entry lives under tests/gates/p2real/.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../p2real/CMakeLists.txt")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../p2real"
+                     "${CMAKE_CURRENT_BINARY_DIR}/_p2real")
+endif()
