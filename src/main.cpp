@@ -28,6 +28,12 @@ static void usage() {
         "  --force-sew          route every component through the sewing repair path\n"
         "  --no-verify          skip re-reading the written STEP (use when the caller\n"
         "                       imports the file right away -- that import IS the check)\n"
+        "  --smooth             recognise radii and flat regions; emit analytic surfaces\n"
+        "  --refit              alias for --smooth\n"
+        "  --no-smooth          keep faceted mesh surfaces (default)\n"
+        "  --smooth-tol <mm>    surface-fit tolerance in mm (default: auto)\n"
+        "  --smooth-angle <deg> near-flat normal gate for segmentation (default 2.0)\n"
+        "  --no-smooth-fillets  skip recovery of fillet strips as cylinders\n"
         "  --threads <n>        worker threads for parallel stages (default: auto)\n"
         "  --quiet              suppress progress output (RESULT line + errors only)\n"
         "  -v, --version        print version and exit\n"
@@ -48,6 +54,26 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) { fprintf(stderr, "error: %s needs a value\n", flag); exit(1); }
             return argv[++i];
         };
+        auto posDouble = [&](const char* flag) -> double {
+            std::string s = val(flag);
+            char* end = nullptr;
+            double v = strtod(s.c_str(), &end);
+            if (end == s.c_str() || *end != '\0' || v < 0.0) {
+                fprintf(stderr, "error: %s must be a non-negative number\n", flag);
+                exit(1);
+            }
+            return v;
+        };
+        auto angleDeg = [&](const char* flag) -> double {
+            std::string s = val(flag);
+            char* end = nullptr;
+            double v = strtod(s.c_str(), &end);
+            if (end == s.c_str() || *end != '\0' || v <= 0.0 || v > 90.0) {
+                fprintf(stderr, "error: %s must be between 0 and 90\n", flag);
+                exit(1);
+            }
+            return v;
+        };
         if (a == "-h" || a == "--help") { usage(); return 0; }
         else if (a == "-v" || a == "--version") { printf("stl2step %s\n", version()); return 0; }
         else if (a == "-o")              opt.output = val("-o");
@@ -65,6 +91,11 @@ int main(int argc, char** argv) {
         else if (a == "--no-solid")      opt.makeSolids = false;
         else if (a == "--force-sew")     opt.forceSew = true;
         else if (a == "--no-verify")     opt.verify = false;
+        else if (a == "--smooth" || a == "--refit") opt.smooth = true;
+        else if (a == "--no-smooth")     opt.smooth = false;
+        else if (a == "--smooth-tol")    opt.smoothTolMM = posDouble("--smooth-tol");
+        else if (a == "--smooth-angle")  opt.smoothAngleDeg = angleDeg("--smooth-angle");
+        else if (a == "--no-smooth-fillets") opt.smoothFillets = false;
         else if (a == "--threads")       opt.threads = atoi(val("--threads").c_str());
         else if (a == "--quiet")         quiet = true;
         else if (a.size() && a[0] == '-') { fprintf(stderr, "error: unknown option %s\n", a.c_str()); return 1; }
