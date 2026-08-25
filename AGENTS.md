@@ -11,12 +11,20 @@ it.
 
 stl2step converts a **triangle mesh** (`.stl`, binary or ASCII) into a
 **parametric B-Rep solid** (`.step`). It welds vertices, splits the mesh into
-manifold bodies, builds each body as an exact B-Rep in parallel, repairs dirty
-meshes (open edges / flipped facets / non-manifold junctions), merges coplanar
-triangles into single planar faces, fits tolerances, writes a STEP file, and
-optionally re-reads it to self-verify. It is built on OpenCASCADE (OCCT). Output
-is always in **millimetres**. Curved surfaces remain **faceted** at the mesh
-resolution — the engine does not refit analytic surfaces.
+manifold bodies, optionally runs **stage 3.5 (smooth-segment)** when
+`Options::smooth` is true (`refit::segment()` on each clean component; dirty or
+`--force-sew` components are skipped), then builds each body as an exact B-Rep
+in parallel: a component with a refit plan takes the `refit::buildFaces()`
+branch (analytic `Geom_Plane` / `Geom_CylindricalSurface` faces); otherwise the
+per-triangle path runs verbatim. It repairs dirty meshes (open edges / flipped
+facets / non-manifold junctions) via sewing — those components are never refit
+— merges coplanar triangles into single planar faces, fits tolerances, writes a
+STEP file, and optionally re-reads it to self-verify. It is built on
+OpenCASCADE (OCCT). Output is always in **millimetres**. Without `--smooth`
+(the 1.x default) curved surfaces remain **faceted** at the mesh resolution,
+byte-identical to 1.0.0. With `--smooth`, v1 recovers planes, right circular
+cylinders (holes/bosses, N ≥ 6), and plane–plane fillet strips (1–3 rows);
+cones, spheres, and tori stay faceted.
 
 Use it when your software consumes STEP/B-Rep but a user hands you an STL.
 
@@ -57,13 +65,54 @@ kernel).
 | `forceSew` / `--force-sew` | false | Diagnostics only; slower. |
 | `threads` / `--threads` | auto | 0 = all cores. |
 | `productName` | output stem | STEP product name. |
+| `smooth` / `--smooth` (`--refit` alias; `--no-smooth`) | false | Opt-in analytic recovery. **Default OFF for the whole 1.x line.** Off-path STEP + RESULT are byte-identical to 1.0.0 (gate G0.1, 22/22). |
+| `smoothTolMM` / `--smooth-tol <mm>` | 0 (auto) | Surface-fit tolerance in mm. 0 = auto-derived from bbox / weld / sew. Only meaningful when `smooth` is true. |
+| `smoothAngleDeg` / `--smooth-angle <deg>` | 2.0 | Near-flat normal gate for segmentation (degrees). Unrelated to `unifyAngleDeg`. |
+| `smoothFillets` / `--no-smooth-fillets` | true | Recover plane–plane fillet strips as cylinders. `--no-smooth-fillets` sets this false. Ignored when `smooth` is false. |
 
 ### Result (outputs)
 
-Success flag is `ok`. Numeric/meta fields: `input`, `output`, `triangles`,
-`vertices`, `components`, `solids`, `openShells`, `facesBeforeUnify`,
-`facesAfterUnify`, `meshVolumeMM3`, `stepVolumeMM3`, `volumeDeltaPct`,
-`watertight`, `seconds`, `warnings[]`. On failure: `ok=false` + `error`.
+Success flag is `ok`. On failure: `ok=false` + `error`.
+
+| Field | Default | Notes |
+|---|---|---|
+| `ok` | false | True when a STEP file was written (possibly with warnings). |
+| `exitCode` | 1 | 0 clean, 2 written-with-warnings, 1 failed. CLI-equivalent. |
+| `input`, `output` | "" | Resolved paths. |
+| `error` | "" | Human-readable reason when `ok == false`. |
+| `triangles` | 0 | Triangles read from the STL. |
+| `vertices` | 0 | Vertices after welding. |
+| `components` | 0 | Manifold bodies the mesh split into. |
+| `solids` | 0 | Solids written. |
+| `openShells` | 0 | Components that could not close (written as open shells). |
+| `facesBeforeUnify` | 0 | Face count before coplanar merge. |
+| `facesAfterUnify` | 0 | Face count after coplanar merge. |
+| `meshVolumeMM3` | 0 | Source mesh volume (mm³). |
+| `stepVolumeMM3` | 0 | Volume re-read from the STEP (mm³; 0 if verify off). |
+| `volumeDeltaPct` | -1 | \|step − brep\| / brep × 100 (−1 if not measured). |
+| `watertight` | true | Every component closed with consistent winding. |
+| `seconds` | 0 | Wall-clock time of the whole conversion. |
+| `warnings` | [] | Every Warning emitted, in order. |
+
+`smooth*` keys — **C++ `Result` members are always present and default to
+zero.** The RESULT JSON emits these keys **only when `Options::smooth` was
+true**, appended after `warnings`. They are omitted (never emitted as zeros)
+when the feature is off, so an off-path RESULT string stays
+character-identical to 1.0.0.
+
+| Field | Default | Units / notes |
+|---|---|---|
+| `smoothPlanes` | 0 | Planar regions recovered as `Geom_Plane`. |
+| `smoothCylinders` | 0 | Cylindrical regions recovered. |
+| `smoothFillets` | 0 | Fillet strips recovered as cylinders. |
+| `smoothDistinctRadii` | 0 | Distinct cylinder radii accepted. |
+| `smoothRejected` | 0 | Candidate regions rejected by gates. |
+| `smoothFacetFaces` | 0 | Faceted faces left after the smooth pass. |
+| `facesAfterSmooth` | 0 | Total face count after the smooth pass. |
+| `smoothSkippedComponents` | 0 | Dirty components not refit. |
+| `smoothMaxDevMM` | 0 | Max vertex deviation from fit (mm). |
+| `smoothMaxEdgeTolMM` | 0 | Max edge tolerance written (mm). |
+| `smoothVolPredictedMM3` | 0 | Predicted volume from analytic fits (mm³). |
 
 ### Exit codes (CLI) / `Result::exitCode`
 
@@ -88,6 +137,7 @@ stl2step::Options opt;
 opt.input  = inputStlPath;
 opt.output = outputStepPath;   // or leave empty -> "<input>.step"
 opt.verify = false;            // set false when you import the STEP yourself next
+opt.smooth = true;             // opt-in analytic recovery; default false for 1.x
 
 // Optional progress sink (safe to omit / pass nullptr).
 auto log = [](stl2step::Severity sev, const std::string& msg) {
@@ -150,16 +200,19 @@ go to stderr; the RESULT line and exit code are the contract.
 - **Set `--no-verify`** when you will load the STEP immediately after — your load
   is the verification and it is meaningfully faster on large meshes.
 - **Set units.** STL is unitless. If unsure, mm is assumed.
+- **`--smooth` is opt-in** (default off). `smooth*` keys appear on the RESULT
+  object only when you pass it; use `result.get("smoothPlanes")` / `'smoothPlanes' in r`.
 
 ### Python
 
 ```python
 import json, subprocess
 
-def stl_to_step(stl_path, step_path, *, inches=False, verify=False):
+def stl_to_step(stl_path, step_path, *, inches=False, verify=False, smooth=False):
     cmd = ["stl2step", stl_path, "-o", step_path, "--quiet"]
     if inches:      cmd += ["--units", "in"]
     if not verify:  cmd += ["--no-verify"]
+    if smooth:      cmd += ["--smooth"]
     p = subprocess.run(cmd, capture_output=True, text=True)
     line = p.stdout.strip().splitlines()[-1]          # the RESULT line
     result = json.loads(line[len("RESULT "):])
@@ -175,10 +228,11 @@ def stl_to_step(stl_path, step_path, *, inches=False, verify=False):
 
 ```js
 const { execFile } = require("node:child_process");
-function stlToStep(stl, step, { inches = false, verify = false } = {}) {
+function stlToStep(stl, step, { inches = false, verify = false, smooth = false } = {}) {
   const args = [stl, "-o", step, "--quiet"];
   if (inches) args.push("--units", "in");
   if (!verify) args.push("--no-verify");
+  if (smooth) args.push("--smooth");
   return new Promise((resolve, reject) => {
     execFile("stl2step", args, (err, stdout) => {
       const line = stdout.trim().split("\n").at(-1);
@@ -209,11 +263,18 @@ Because each invocation is independent, batch with `xargs -P` /
 
 1. **Units.** Output is always mm. STL has none — pass `--units in` / `inchInput`
    or a `scale`, or your solid will be the wrong size. This is the #1 mistake.
-2. **Curved surfaces stay faceted.** A tessellated cylinder becomes many tiny
-   planar faces, not one analytic cylinder. This is correct and lossless w.r.t.
-   the mesh; it is fine for slice/heightmap CAM, measurement, and import. Do not
-   expect feature recognition or surface refit. Flat faces *are* recovered
-   exactly.
+2. **Analytic recovery is opt-in (`--smooth` / `Options::smooth`, default
+   false for the whole 1.x line).** Without it, curved surfaces stay faceted at
+   the mesh resolution — STEP + RESULT are byte-identical to 1.0.0. With
+   `--smooth` on, v1 recovers **planes**, **right circular cylinders**
+   (holes/bosses, N ≥ 6), and **plane–plane fillet strips** (1–3 rows) as
+   `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. Cones,
+   spheres, and tori are reported and left faceted; there is no freeform/NURBS
+   reconstruction. Refit is skipped on any component that needs the sewing
+   repair path. A regular N≥6 prism (e.g. a hex socket) **is** recovered as a
+   cylinder, and a symmetric 45° chamfer **is** recovered as a fillet — both
+   intended, not bugs. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected. Flat
+   faces *are* recovered exactly whether or not `--smooth` is on.
 3. **Non-watertight input still produces a file.** Open/dirty meshes yield exit
    `2` with `watertight=false` and/or `openShells>0`, and warnings. Decide per
    your use case whether an open shell is acceptable; the file is written either
@@ -235,7 +296,9 @@ Because each invocation is independent, batch with `xargs -P` /
 ## 7. Recommended presets by host scenario
 
 - **CAM / CAD importer that loads the STEP next:** `unify=true` (default),
-  `verify=false`, units set. Fastest path; your import validates.
+  `verify=false`, `smooth=false` (default), units set. Fastest path; your
+  import validates. The preset keeps `smooth=false` because it optimises for
+  round-trip speed into a CAM kernel that is about to re-tessellate anyway.
 - **Batch/library conversion where files are archived, not immediately loaded:**
   keep `verify=true` so `volumeDeltaPct` is populated as a quality signal; run
   files concurrently.
@@ -251,7 +314,13 @@ Because each invocation is independent, batch with `xargs -P` /
   Common causes: unreadable/empty STL, no usable geometry, write path not
   writable.
 - Exit `2` → file written; iterate `warnings` and decide if acceptable
-  (open shell? volume mismatch?).
+  (open shell? volume mismatch?). `warn()` appends to `Result::warnings` and
+  maps to exit 2. Example from the `--smooth` path: `smooth: analytic rebuild
+  reverted on one component -- kept faceted` (R2 revert). Dirty-skip
+  (`N component(s) skipped (dirty mesh, repaired path)`) and NYI rejects
+  (cones, spheres, tori left faceted) are `note()`, **not** warnings — a dirty
+  input converted with `--smooth` keeps its exit code versus the same input
+  without it.
 - Timeout guard (subprocess): conversion time scales with triangle count; set a
   generous timeout for very large meshes rather than a tight one.
 
@@ -260,6 +329,12 @@ Because each invocation is independent, batch with `xargs -P` /
 ## 9. Versioning
 
 `stl2step::version()` / `stl2step --version` returns the semantic version
-(`1.0.0`). The `Options` field set, the `Result`/`RESULT` field set, and the exit
-codes are the compatibility surface — additive changes only within a major
+(`1.1.0-pre`). The `Options` field set, the `Result`/`RESULT` field set, and the
+exit codes are the compatibility surface — additive changes only within a major
 version. Pin a tag (`GIT_TAG v1.0.0`) when embedding.
+
+RESULT addendum: when `Options::smooth` is true, `toJson()` / the CLI `RESULT`
+line appends the `smooth*` keys after `warnings`. Those keys are present
+**only when `smooth == true`**; they are omitted (never zero-valued) on the
+off path so the RESULT string stays character-identical to 1.0.0. The C++
+`Result` members are always present and default to zero (the dual contract).
