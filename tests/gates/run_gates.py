@@ -48,7 +48,7 @@ ALL_GATE_IDS = (
 )
 
 # Gates whose implementation phase has landed in wave 2.
-LIVE_GATES: Set[str] = {"G0.1", "G1", "G4", "include-allowlist"}
+LIVE_GATES: Set[str] = {"G0.1", "G1", "G4", "I-checker", "include-allowlist"}
 
 HARD_GATES: Set[str] = {
     "G0.1",
@@ -125,6 +125,8 @@ class GateContext:
     work_dir: Path
     baseline_dir: Optional[Path]
     census_path: Optional[Path]
+    dump_path: Optional[Path]
+    ichecker_path: Optional[Path]
     no_verify: bool
     smooth: bool = False
     baseline_bin: Optional[Path] = None
@@ -159,6 +161,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS, help="Corpus directory")
     p.add_argument("--binary", type=Path, required=True, help="Path to stl2step CLI")
     p.add_argument("--census", type=Path, help="Path to stl2step_census binary")
+    p.add_argument("--dump", type=Path,
+                   help="Path to stl2step_regiondump binary (I-checker gate)")
+    p.add_argument("--ichecker", type=Path,
+                   help="Path to tests/gates/check_regionset.py (I-checker gate)")
     p.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE, help="G0.1 baseline dir")
     p.add_argument("--no-verify", action="store_true", help="Pass --no-verify to stl2step")
     p.add_argument("--jobs", type=int, default=1, help="Parallel fixture workers")
@@ -787,23 +793,72 @@ def gate_g5_editability(ctx: GateContext) -> GateOutcome:
 
 
 def gate_i_checker(ctx: GateContext) -> GateOutcome:
-    """SPEC-P0 I-checker — RegionSet dump validation (check_regionset.py)."""
-    # Stays XFAIL this wave: dump envelope is {comps:[…]} and check_regionset.py
-    # wants a bare RegionSet. Envelope→bare unwrap is p1-compose-fix FINDING 5.
-    # Wave-5 one-line wiring (from that lane's SPEC; report not yet landed):
-    #   stl2step_regiondump <stl> --component N --bare --out <rs.json>
-    #   python3 tests/gates/check_regionset.py <rs.json> [--sidecar <id>.expected.json]
-    return GateOutcome(
-        "I-checker",
-        ctx.fixture.id,
-        "XFAIL",
-        "I-checker: waiting for p1-compose-fix FINDING 5 envelope→bare unwrap "
-        "(stl2step_regiondump emits {comps:[…]}; check_regionset.py wants a bare "
-        "RegionSet). Wave-5 wiring: stl2step_regiondump <stl> --component N --bare "
-        "--out <rs.json> && python3 tests/gates/check_regionset.py <rs.json> "
-        "[--sidecar <id>.expected.json]. Do not unwrap in this runner.",
-        hard=True,
-    )
+    """SPEC-P0 I-checker — RegionSet dump validation (check_regionset.py).
+
+    LIVE since the wave-4 staging assembly: p1-compose-fix landed the
+    envelope->bare unwrap (`stl2step_regiondump --component N --bare --out`),
+    so the runner drives the dump per CLEAN component and validates each bare
+    RegionSet with check_regionset.py, including the fixture sidecar where one
+    exists. A fixture with no clean components (S15, S16-R1-round-2) is SKIP,
+    not PASS — I6 says P1 is never called on a dirty component.
+    """
+    gate_id = "I-checker"
+    if gate_id not in LIVE_GATES:
+        return xfail_not_landed(gate_id, ctx.fixture.id, "p0-ichecker + P1 dump")
+    if not (ctx.dump_path and ctx.dump_path.is_file()):
+        return go(ctx, gate_id, "XFAIL",
+                  "I-checker: --dump <stl2step_regiondump> not supplied or missing; "
+                  "build the target and pass --dump", hard=True)
+    if not (ctx.ichecker_path and ctx.ichecker_path.is_file()):
+        return go(ctx, gate_id, "XFAIL",
+                  "I-checker: --ichecker <check_regionset.py> not supplied or missing",
+                  hard=True)
+
+    stl = ctx.fixture.stl
+    envelope = subprocess.run([str(ctx.dump_path), str(stl)],
+                              check=False, capture_output=True, text=True)
+    if envelope.returncode != 0:
+        return go(ctx, gate_id, "FAIL",
+                  f"regiondump failed on {stl.name}: {envelope.stderr.strip()[:400]}")
+    try:
+        doc = json.loads(envelope.stdout)
+    except json.JSONDecodeError as exc:
+        return go(ctx, gate_id, "FAIL", f"regiondump emitted invalid JSON on {stl.name}: {exc}")
+
+    comps = [int(c["index"]) for c in doc.get("comps", []) if c.get("clean")]
+    if not comps:
+        return go(ctx, gate_id, "SKIP",
+                  f"{stl.name}: no clean components (I6 — P1 is never called on a dirty component)",
+                  hard=True)
+
+    sidecar = ctx.fixture.sidecar if getattr(ctx.fixture, "sidecar", None) else None
+    failures: List[str] = []
+    for comp in comps:
+        bare = ctx.work_dir / f"{ctx.fixture.id}-comp{comp}.regionset.json"
+        made = subprocess.run(
+            [str(ctx.dump_path), str(stl), "--component", str(comp), "--bare",
+             "--out", str(bare)],
+            check=False, capture_output=True, text=True)
+        if made.returncode != 0 or not bare.is_file():
+            failures.append(f"comp{comp}: --bare dump failed: {made.stderr.strip()[:200]}")
+            continue
+        cmd = [sys.executable, str(ctx.ichecker_path), str(bare)]
+        if sidecar and Path(sidecar).is_file():
+            cmd += ["--sidecar", str(sidecar)]
+        chk = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if chk.returncode != 0:
+            detail = (chk.stdout.strip() or chk.stderr.strip())[:400]
+            failures.append(f"comp{comp}: {detail}")
+
+    if failures:
+        return go(ctx, gate_id, "FAIL",
+                  f"I-checker: {len(failures)}/{len(comps)} component(s) failed — "
+                  + " | ".join(failures),
+                  details={"components": comps, "failures": failures})
+    return go(ctx, gate_id, "PASS",
+              f"I-checker: I1-I9 (I7/I7b separately) hold on {len(comps)} clean "
+              f"component(s) of {stl.name}",
+              details={"components": comps})
 
 
 def gate_include_allowlist(ctx: GateContext) -> GateOutcome:
@@ -897,6 +952,8 @@ def run_fixture_gates(
     binary: Path,
     baseline_dir: Optional[Path],
     census_path: Optional[Path],
+    dump_path: Optional[Path],
+    ichecker_path: Optional[Path],
     no_verify: bool,
     baseline_bin: Optional[Path] = None,
     baseline_error: Optional[str] = None,
@@ -910,6 +967,8 @@ def run_fixture_gates(
             work_dir=work_dir,
             baseline_dir=baseline_dir,
             census_path=census_path,
+            dump_path=dump_path,
+            ichecker_path=ichecker_path,
             no_verify=no_verify,
             baseline_bin=baseline_bin,
             baseline_error=baseline_error,
@@ -984,6 +1043,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     baseline_dir = args.baseline.resolve() if args.baseline else None
     census_path = args.census.resolve() if args.census else None
+    dump_path = args.dump.resolve() if args.dump else None
+    ichecker_path = (args.ichecker.resolve() if args.ichecker
+                     else (REPO_ROOT / "tests/gates/check_regionset.py"))
 
     baseline_bin: Optional[Path] = None
     baseline_error: Optional[str] = None
@@ -1001,6 +1063,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     binary,
                     baseline_dir,
                     census_path,
+                    dump_path,
+                    ichecker_path,
                     args.no_verify,
                     baseline_bin,
                     baseline_error,
@@ -1018,6 +1082,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     binary,
                     baseline_dir,
                     census_path,
+                    dump_path,
+                    ichecker_path,
                     args.no_verify,
                     baseline_bin,
                     baseline_error,
