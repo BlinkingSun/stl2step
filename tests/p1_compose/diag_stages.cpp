@@ -3,6 +3,7 @@
 #include "mesh_harness_refit.hpp"
 #include "refit_internal.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
