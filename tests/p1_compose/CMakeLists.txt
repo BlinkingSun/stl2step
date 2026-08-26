@@ -28,7 +28,7 @@ add_test(NAME p1_compose_gate
     COMMAND ${Python3_EXECUTABLE} ${_compose_script}
             --repo ${_root}
             --build-dir ${CMAKE_BINARY_DIR}
-            --dump ${CMAKE_BINARY_DIR}/stl2step_regiondump
+            --dump $<TARGET_FILE:stl2step_regiondump>
             --ichecker ${_root}/tests/gates/check_regionset.py
             --corpus ${_root}/tests/corpus
             --cube ${_root}/tests/cube.stl)

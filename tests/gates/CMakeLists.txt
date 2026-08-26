@@ -65,7 +65,9 @@ if(TARGET stl2step AND EXISTS "${_stl2step_gates_runner}")
     endif()
     set_tests_properties(gates_full PROPERTIES
         LABELS "gates"
-        TIMEOUT 600
+        # G0.1 twin-builds the pinned baseline inside this test; an MSVC
+        # cold build alone can exceed 600s, so the budget covers build+gates.
+        TIMEOUT 3600
         REQUIRED_FILES "${_gates_full_required}")
     if(_gates_full_depends)
         set_tests_properties(gates_full PROPERTIES DEPENDS "${_gates_full_depends}")

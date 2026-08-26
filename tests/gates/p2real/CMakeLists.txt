@@ -15,13 +15,13 @@ if(TARGET stl2step_p2buildtest AND TARGET stl2step_regiondump)
         COMMAND ${Python3_EXECUTABLE} ${_p2real_script}
                 --repo ${_stl2step_root}
                 --build-dir ${CMAKE_BINARY_DIR}
-                --dump ${CMAKE_BINARY_DIR}/stl2step_regiondump
-                --p2 ${CMAKE_BINARY_DIR}/stl2step_p2buildtest
+                --dump $<TARGET_FILE:stl2step_regiondump>
+                --p2 $<TARGET_FILE:stl2step_p2buildtest>
                 --corpus ${_stl2step_root}/tests/corpus
                 --cube ${_stl2step_root}/tests/cube.stl
                 --dumps-dir ${CMAKE_BINARY_DIR}/p1-dumps
                 --sidecars ${_stl2step_root}/tests/corpus
-                --compose-dump ${CMAKE_BINARY_DIR}/stl2step_regiondump)
+                --compose-dump $<TARGET_FILE:stl2step_regiondump>)
     set_tests_properties(p2real_live PROPERTIES
         LABELS "gates;p2real"
         TIMEOUT 600)

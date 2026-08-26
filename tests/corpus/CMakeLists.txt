@@ -102,8 +102,17 @@ add_test(NAME corpus_determinism
         -P "${CMAKE_CURRENT_SOURCE_DIR}/check_corpus_determinism.cmake")
 
     if(TARGET stl2step)
+    # A bare .sh has no shebang execution on Windows (ctest "Not Run");
+    # invoke through bash when one exists (Git Bash on GitHub runners).
+    find_program(STL2STEP_BASH bash)
+    if(STL2STEP_BASH)
+        set(_engine_check_cmd "${STL2STEP_BASH}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/run_engine_check.sh")
+    else()
+        set(_engine_check_cmd "${CMAKE_CURRENT_SOURCE_DIR}/run_engine_check.sh")
+    endif()
     add_test(NAME corpus_engine_convert
-        COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run_engine_check.sh"
+        COMMAND ${_engine_check_cmd}
                 $<TARGET_FILE:stl2step>)
     set_tests_properties(corpus_engine_convert PROPERTIES
         ENVIRONMENT "CORPUS=${_corpus_out_dir};CENSUS=$<TARGET_FILE:stl2step_census>"

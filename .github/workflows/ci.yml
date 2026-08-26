@@ -77,8 +77,24 @@ jobs:
           # pinned ancestor commit; a shallow clone makes build_baseline.sh
           # fail (git exit 128) and G0.1/G0.3 lose their twin comparison.
           fetch-depth: 0
+      # OCCT via vcpkg is a ~3.5h source build cold. Cache vcpkg's binary
+      # archives keyed on the runner image so only image updates pay it.
+      # Explicit restore/save (not actions/cache) so a later test failure
+      # still saves the archives — the save step runs right after install.
+      - name: Restore vcpkg binary archives
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-occt-${{ runner.os }}-${{ env.ImageVersion }}
       - name: Install OpenCASCADE (vcpkg)
         run: vcpkg install opencascade
+      - name: Save vcpkg binary archives
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-occt-${{ runner.os }}-${{ env.ImageVersion }}
       - name: Configure
         run: cmake -S . -B build
                    -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
