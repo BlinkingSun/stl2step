@@ -1,6 +1,6 @@
 {
   "id": "Body11",
-  "description": "Real CAD export — phase-2 benchmark (2 components, 419 recognised cylinders, 0 built today)",
+  "description": "Real CAD export — phase-2 benchmark (2 components, 583 recognised cylinders, 0 built today)",
   "realExport": true,
   "provenance": {
     "sourcePath": "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body11.stl",
@@ -17,8 +17,8 @@
   "expectedOpenShells": 0,
   "smoothExpectedExit": 2,
   "smoothWarningCountMax": 7806,
-  "smoothVolumeDeltaPctMax": 0.0,
-  "smoothRecognisedCylinders": 419,
+  "smoothVolumeDeltaPctMax": 0.023832,
+  "smoothRecognisedCylinders": 583,
   "recoverable": [],
   "mustRemainFaceted": [],
   "expectedRejects": [],

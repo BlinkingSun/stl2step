@@ -41,3 +41,17 @@ for mixed analytic plates.
 
 A0 diagnostic: `STL2STEP_DIAG_PLATES=1` dumps `BRepCheck_Status` after a failing
 `makeFaceKeep` (stderr only; zero default-path effect).
+
+## I-checker I7 on large real-part RegionSet dumps (Body28 comp0)
+
+Live `stl2step_regiondump --bare` on Body28 exposes **I7 loop incompleteness** on
+two open regions — not a checker false positive:
+
+| Region | Loop | Chain | Symptom |
+|--------|------|-------|---------|
+| 547 | loop0 | 1124 | single open chain; loops not complete/closed |
+| 783 | loop0 | 1031 | single open chain; loops not complete/closed |
+
+Body11 comp0/comp1 pass I-checker today; Body28 comp0 fails. Both real-CAD fixtures
+are **I-checker PARKED** in `gates_full` (honest red via `--unpark I-checker`);
+all synthetic corpus fixtures remain LIVE.

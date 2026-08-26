@@ -42,6 +42,15 @@ PARKED_GATES: Dict[str, str] = {
     "R-ladder": "S16 R1/R2 ladder blocked on F2 — edge-failure R1 enrollment",
 }
 
+# Per-(gate, fixture) parking — synthetic fixtures stay LIVE; real-CAD only.
+ICHECKER_REAL_CAD_PARK_REASON = (
+    "I7 loop completeness on large real-part dumps (regions 547/783) — recognition v-next"
+)
+PARKED_GATE_FIXTURES: Dict[Tuple[str, str], str] = {
+    ("I-checker", "Body11"): ICHECKER_REAL_CAD_PARK_REASON,
+    ("I-checker", "Body28"): ICHECKER_REAL_CAD_PARK_REASON,
+}
+
 
 @dataclass
 class RunArtifacts:
@@ -915,6 +924,13 @@ SMOOTH_ON_CHECKS: Dict[str, Callable[[GateContext], GateOutcome]] = {
 }
 
 
+def parked_reason(gate_id: str, fixture_id: str) -> Optional[str]:
+    """Gate-wide or per-fixture park reason, if any."""
+    if (gate_id, fixture_id) in PARKED_GATE_FIXTURES:
+        return PARKED_GATE_FIXTURES[(gate_id, fixture_id)]
+    return PARKED_GATES.get(gate_id)
+
+
 def apply_parking(
     outcomes: List[GateOutcome],
     unparked: Optional[Set[str]] = None,
@@ -923,12 +939,8 @@ def apply_parking(
     unparked = unparked or set()
     out: List[GateOutcome] = []
     for o in outcomes:
-        if (
-            o.gate_id in PARKED_GATES
-            and o.gate_id not in unparked
-            and o.status == "FAIL"
-        ):
-            reason = PARKED_GATES[o.gate_id]
+        reason = parked_reason(o.gate_id, o.fixture_id)
+        if reason and o.gate_id not in unparked and o.status == "FAIL":
             out.append(
                 GateOutcome(
                     o.gate_id,
@@ -966,8 +978,11 @@ def format_gate_table(outcomes: Sequence[GateOutcome]) -> str:
         lines.append(row.rstrip())
 
     parked = [g for g in gates if g in PARKED_GATES]
-    if parked:
+    parked_gf = sorted(PARKED_GATE_FIXTURES.items())
+    if parked or parked_gf:
         lines.append("parked gates (default suite ignores their FAILs):")
         for g in parked:
             lines.append(f"  {g}: {PARKED_GATES[g]}")
+        for (g, f), reason in parked_gf:
+            lines.append(f"  {g}@{f}: {reason}")
     return "\n".join(lines)

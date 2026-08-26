@@ -1080,6 +1080,9 @@ def build_report(
             "SKIP": sum(1 for o in outcomes if o.status == "SKIP"),
         },
         "parkedGates": dict(PARKED_GATES),
+        "parkedGateFixtures": {
+            f"{g}@{f}": reason for (g, f), reason in so.PARKED_GATE_FIXTURES.items()
+        },
     }
 
 
