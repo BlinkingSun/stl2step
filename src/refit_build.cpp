@@ -583,6 +583,33 @@ AnalyticCurve pickIntAna(const IntAna_QuadQuadGeo& iq, const MeshView& mv, const
     return best;
 }
 
+bool diagP2Enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_P2_DIAG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+bool planeCylSideContact(const Region& plnR, const Region& cylR, double epsPlane) {
+    const double adn = std::fabs(cylR.ax.Direction().Dot(plnR.ax.Direction()));
+    if (adn > std::sin(3.0 * kPi / 180.0) + 1e-15) return false;
+    const double d = std::fabs(plnR.ax.Direction().XYZ().Dot(
+        cylR.ax.Location().XYZ() - plnR.ax.Location().XYZ()));
+    const double tol =
+        std::max(epsPlane, std::max(plnR.maxVertexDev, cylR.maxVertexDev));
+    return std::fabs(d - cylR.radius) <= tol;
+}
+
+AnalyticCurve constructedPlaneCylCap(const Region& plnR, const Region& cylR) {
+    AnalyticCurve out;
+    if (!planePerpCylinder(plnR, cylR)) return out;
+    out.kind = AnalyticCurve::Circ;
+    out.circ = cylinderIsoCircle(cylR, planeVOnCylinder(plnR, cylR));
+    return out;
+}
+
 AnalyticCurve constructedGenerator(const Region& cylR, const Region& plnR) {
     AnalyticCurve out;
     gp_Cylinder cyl = asCyl(cylR);
@@ -642,11 +669,28 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             double H = std::fabs(B.vMax - B.vMin);
             IntAna_QuadQuadGeo iq(asPlane(A), asCyl(B), tolAng, tol, H);
             AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol);
-            // G4: constructed generator ONLY for the tangent/G1 case (§2.5).
-            if (c.kind == AnalyticCurve::None && ch.tangent && planePerpCylinder(A, B))
+            const double epsPl = derivedEpsPlane(mv);
+            // G4: side-grazing plane|cyl => generator line (§2.5). Re-evaluate
+            // geometry here — ch.tangent can miss when |dist-R| is within fit
+            // residual but above the epsPlane floor.
+            if (c.kind == AnalyticCurve::None && planeCylSideContact(A, B, epsPl))
                 c = constructedGenerator(B, A);
-            if (c.kind == AnalyticCurve::None)
+            // Cap circle from the fitted cylinder when IntAna misses or picks
+            // the wrong branch (coarse meshes: pickIntAna residual gate).
+            if (c.kind == AnalyticCurve::None && planePerpCylinder(A, B))
+                c = constructedPlaneCylCap(A, B);
+            if (c.kind == AnalyticCurve::None) {
+                if (diagP2Enabled()) {
+                    IntAna_ResultType ty = iq.IsDone() ? iq.TypeInter() : IntAna_Empty;
+                    std::fprintf(stderr,
+                                 "DIAG_P2 plane|cyl regA=%d regB=%d R=%.4f ty=%d "
+                                 "tangent=%d side=%d perp=%d nV=%zu\n",
+                                 ch.regA, ch.regB, B.radius, (int)ty, (int)ch.tangent,
+                                 (int)planeCylSideContact(A, B, epsPl),
+                                 (int)planePerpCylinder(A, B), ch.meshVerts.size());
+                }
                 emit(warn, "smooth: IntAna plane|cyl empty/same — keeping mesh polyline");
+            }
             return c;
         }
         if (A.type == SurfType::Cylinder && B.type == SurfType::Plane) {

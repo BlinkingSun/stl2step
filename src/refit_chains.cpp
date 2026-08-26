@@ -163,7 +163,11 @@ bool g1Tangent(const Region& A, const Region& B, double epsPlane) {
         const Region& cy = aCyl ? A : B;
         const double adn = std::fabs(cy.ax.Direction().Dot(pl.ax.Direction()));
         if (adn > std::sin(kDeg3) + 1e-15) return false;
-        return std::fabs(distLinePlane(pl.ax, cy.ax) - cy.radius) <= epsPlane;
+        // Mesh fit residual can exceed the epsPlane floor on coarse exports
+        // (handle-lock reg55|17: |dist-R|=0.022 mm vs epsPlane=0.02).
+        const double tol =
+            std::max(epsPlane, std::max(pl.maxVertexDev, cy.maxVertexDev));
+        return std::fabs(distLinePlane(pl.ax, cy.ax) - cy.radius) <= tol;
     }
     if (aCyl && bCyl) {
         if (!axesParallel3(A.ax.Direction(), B.ax.Direction())) return false;
