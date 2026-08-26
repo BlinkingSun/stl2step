@@ -75,3 +75,11 @@ add_test(NAME harness_determinism
 unset(_harness_deg)
 unset(_harness_two)
 unset(_harness_cube)
+
+# ad-hoc signing (see root helper)
+if(TARGET stl2step_meshharness)
+  stl2step_adhoc_sign(stl2step_meshharness)
+endif()
+if(TARGET stl2step_harness_test)
+  stl2step_adhoc_sign(stl2step_harness_test)
+endif()

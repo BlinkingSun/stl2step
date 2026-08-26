@@ -18,12 +18,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
-# CALIBRATED AT P0 CLOSE
-G3_CHORD_SAGITTA_WINDOW_MM = 0.0  # placeholder — freeze at P0 close
-G3_VOLUME_K = 0.0  # placeholder — freeze at P0 close
-G5_EDGE_K = 0.1  # start 0.1 × min recovered radius (SOFT)
+import smooth_on as so
 
-LEGACY_VOLUME_GATE_PCT = 0.01  # applies with smooth off only
+# Re-export frozen thresholds (single source: smooth_on.py).
+G3_RATIO_LO = so.G3_RATIO_LO
+G3_RATIO_HI = so.G3_RATIO_HI
+G3_CHORD_SAGITTA_WINDOW_MM = so.G3_CHORD_SAGITTA_WINDOW_MM
+G3_VOLUME_K = so.G3_VOLUME_K
+G5_EDGE_K = so.G5_EDGE_K
+G4_4_MIN_G1_S02 = so.G4_4_MIN_G1_S02
+LEGACY_VOLUME_GATE_PCT = so.LEGACY_VOLUME_GATE_PCT
+PARKED_GATES = so.PARKED_GATES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = REPO_ROOT / "tests" / "corpus"
@@ -47,8 +52,23 @@ ALL_GATE_IDS = (
     "R-ladder",
 )
 
-# Gates whose implementation phase has landed in wave 2.
-LIVE_GATES: Set[str] = {"G0.1", "G1", "G4", "I-checker", "include-allowlist"}
+# Gates whose implementation has landed (off-path + smooth-on).
+LIVE_GATES: Set[str] = {
+    "G0.1",
+    "G0.2",
+    "G0.3",
+    "G1",
+    "G2",
+    "G2.5",
+    "G3",
+    "G4",
+    "G4.4",
+    "G5",
+    "I-checker",
+    "include-allowlist",
+    "R-ladder",
+    "calibration",
+}
 
 HARD_GATES: Set[str] = {
     "G0.1",
@@ -64,7 +84,7 @@ HARD_GATES: Set[str] = {
     "R-ladder",
 }
 
-SOFT_GATES: Set[str] = {"G3", "G5"}
+SOFT_GATES: Set[str] = {"G5"}
 
 INCLUDE_ALLOWLIST_FILES = (
     REPO_ROOT / "src" / "refit_segment.cpp",
@@ -152,6 +172,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
             Shard examples:
               run_gates.py --smoke --binary ./build/stl2step
               run_gates.py --fixture S01,S06,S09 --gate G0.1,G4 --binary ./build/stl2step
+              run_gates.py --unpark G3,G4.4 --binary ./build/stl2step  # surface parked reds
             """
         ),
     )
@@ -174,6 +195,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=Path("gates-report.json"),
         help="Machine-readable report path",
     )
+    p.add_argument(
+        "--unpark",
+        help="Comma-separated parked gate ids to surface honest FAILs (e.g. G3,G4.4)",
+    )
     return p.parse_args(argv)
 
 
@@ -184,27 +209,8 @@ def split_csv(value: Optional[str]) -> Optional[List[str]]:
 
 
 def discover_fixtures(corpus: Path, smoke: bool, fixture_filter: Optional[List[str]]) -> List[Fixture]:
-    if smoke:
-        fixtures = [Fixture("cube", SMOKE_STL)]
-    else:
-        fixtures = []
-        if corpus.is_dir():
-            for stl in sorted(corpus.glob("S*.stl")):
-                fid = stl.stem
-                sidecar = corpus / f"{fid}.expected.json"
-                fixtures.append(
-                    Fixture(fid, stl, sidecar if sidecar.is_file() else None)
-                )
-        # G0.1 identity is 21 corpus + tests/cube.stl (SPEC-P0 / FINDINGS-0).
-        if SMOKE_STL.is_file() and all(f.id != "cube" for f in fixtures):
-            fixtures.append(Fixture("cube", SMOKE_STL))
-        if not fixtures and SMOKE_STL.is_file():
-            fixtures = [Fixture("cube", SMOKE_STL)]
-
-    if fixture_filter:
-        wanted = set(fixture_filter)
-        fixtures = [f for f in fixtures if f.id in wanted or f.stl.stem in wanted]
-    return fixtures
+    raw = so.discover_fixtures(corpus, SMOKE_STL, smoke, fixture_filter)
+    return [Fixture(f.id, f.stl, f.sidecar) for f in raw]
 
 
 def parse_result_line(stdout: str) -> Dict[str, Any]:
@@ -567,14 +573,41 @@ def gate_g0_1_off_path_identity(ctx: GateContext) -> GateOutcome:
     )
 
 
+def smooth_ctx(ctx: GateContext) -> so.GateContext:
+    return so.GateContext(
+        binary=ctx.binary,
+        fixture=so.Fixture(ctx.fixture.id, ctx.fixture.stl, ctx.fixture.sidecar),
+        work_dir=ctx.work_dir,
+        census_path=ctx.census_path,
+        dump_path=ctx.dump_path,
+        no_verify=ctx.no_verify,
+        baseline_bin=ctx.baseline_bin,
+    )
+
+
+def outcome_from_so(o: so.GateOutcome) -> GateOutcome:
+    return GateOutcome(
+        o.gate_id,
+        o.fixture_id,
+        o.status,
+        o.message,
+        hard=o.hard,
+        details=o.details or {},
+    )
+
+
 def gate_g0_2_refit_closedness(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G0.2 — refit never reduces closedness (solids/openShells)."""
-    return xfail_not_landed("G0.2", ctx.fixture.id, "P3-engine/smooth")
+    if "G0.2" not in LIVE_GATES:
+        return xfail_not_landed("G0.2", ctx.fixture.id, "P3-engine/smooth")
+    return outcome_from_so(so.check_g0_2(smooth_ctx(ctx)))
 
 
 def gate_g0_3_dirty_skip(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G0.3 — dirty skip on S15; force-sew global disable."""
-    return xfail_not_landed("G0.3", ctx.fixture.id, "P3-engine/smooth")
+    if "G0.3" not in LIVE_GATES:
+        return xfail_not_landed("G0.3", ctx.fixture.id, "P3-engine/smooth")
+    return outcome_from_so(so.check_g0_3(smooth_ctx(ctx)))
 
 
 def gate_g1_validity(ctx: GateContext) -> GateOutcome:
@@ -674,31 +707,23 @@ def gate_g1_validity(ctx: GateContext) -> GateOutcome:
 
 def gate_g2_recognition(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G2 — recoverable primitive recognition vs sidecar."""
-    if ctx.fixture.sidecar and ctx.fixture.sidecar.is_file():
-        sidecar = json.loads(read_text(ctx.fixture.sidecar))
-        for prim in sidecar.get("recoverable", []):
-            # Frozen schema spelling is lowerCamelCase ("cylinder"), not
-            # PascalCase ("Cylinder"). Normalize at this boundary.
-            kind = schema_enum(prim.get("type"))
-            if kind not in SCHEMA_SURFACE_TYPES or kind != "cylinder":
-                continue
-            n_sides = prim.get("nSides")
-            if n_sides is None:
-                continue
-            g2_radius_threshold(float(prim.get("radius", 0.0)), int(n_sides), 0.0)
-    return xfail_not_landed("G2", ctx.fixture.id, "P2-build + p0-census")
+    if "G2" not in LIVE_GATES:
+        return xfail_not_landed("G2", ctx.fixture.id, "P2-build + p0-census")
+    return outcome_from_so(so.check_g2(smooth_ctx(ctx)))
 
 
 def gate_g2_5_built_as(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G2.5 — closed360 holes built as one cylindrical face."""
-    return xfail_not_landed("G2.5", ctx.fixture.id, "P2-build + p0-census")
+    if "G2.5" not in LIVE_GATES:
+        return xfail_not_landed("G2.5", ctx.fixture.id, "P2-build + p0-census")
+    return outcome_from_so(so.check_g2_5(smooth_ctx(ctx)))
 
 
 def gate_g3_sagitta_volume(ctx: GateContext) -> GateOutcome:
-    """SPEC-P0 G3 — sagitta sanity + volume budget (SOFT until P3)."""
-    # Off-path mesh-volume gate uses LEGACY_VOLUME_GATE_PCT; retired on smooth runs.
-    _off_path_volume_pct = LEGACY_VOLUME_GATE_PCT
-    return xfail_not_landed("G3", ctx.fixture.id, "P3-engine/smooth")
+    """SPEC-P0 G3 — chord-aware D4.5 volume budget (HARD)."""
+    if "G3" not in LIVE_GATES:
+        return xfail_not_landed("G3", ctx.fixture.id, "P3-engine/smooth")
+    return outcome_from_so(so.check_g3(smooth_ctx(ctx)))
 
 
 def gate_g4_determinism(ctx: GateContext) -> GateOutcome:
@@ -784,12 +809,16 @@ def gate_g4_determinism(ctx: GateContext) -> GateOutcome:
 
 def gate_g4_4_encode_regularity(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G4.4 — EncodeRegularity G1 continuity on S02 fillet edges."""
-    return xfail_not_landed("G4.4", ctx.fixture.id, "P3-engine/release")
+    if "G4.4" not in LIVE_GATES:
+        return xfail_not_landed("G4.4", ctx.fixture.id, "P3-engine/release")
+    return outcome_from_so(so.check_g4_4(smooth_ctx(ctx)))
 
 
 def gate_g5_editability(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G5 — editability censuses; smoothMaxEdgeTolMM threshold (SOFT)."""
-    return xfail_not_landed("G5", ctx.fixture.id, "P3-engine/smooth")
+    if "G5" not in LIVE_GATES:
+        return xfail_not_landed("G5", ctx.fixture.id, "P3-engine/smooth")
+    return outcome_from_so(so.check_g5(smooth_ctx(ctx)))
 
 
 def gate_i_checker(ctx: GateContext) -> GateOutcome:
@@ -911,12 +940,16 @@ def gate_include_allowlist(ctx: GateContext) -> GateOutcome:
 
 def gate_calibration(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 calibration — freeze G3 window and volume k at P0 close."""
-    return xfail_not_landed("calibration", ctx.fixture.id, "P0-corpus-close")
+    if "calibration" not in LIVE_GATES:
+        return xfail_not_landed("calibration", ctx.fixture.id, "P0-corpus-close")
+    return outcome_from_so(so.check_calibration(smooth_ctx(ctx)))
 
 
 def gate_r_ladder(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 R-ladder — S16 R1-explode, R1-round-2, R2 revert fixtures."""
-    return xfail_not_landed("R-ladder", ctx.fixture.id, "P0-corpus S16 + P2-build")
+    if "R-ladder" not in LIVE_GATES:
+        return xfail_not_landed("R-ladder", ctx.fixture.id, "P0-corpus S16 + P2-build")
+    return outcome_from_so(so.check_r_ladder(smooth_ctx(ctx)))
 
 
 GATE_REGISTRY: Dict[str, Callable[[GateContext], GateOutcome]] = {
@@ -979,18 +1012,34 @@ def run_fixture_gates(
     return outcomes
 
 
+def is_hard_failure(o: GateOutcome) -> bool:
+    """True when an outcome should fail the process (excludes SOFT gates and PARKED)."""
+    if o.status != "FAIL":
+        return False
+    if o.gate_id in SOFT_GATES or not o.hard:
+        return False
+    return True
+
+
 def summarize(outcomes: List[GateOutcome]) -> str:
     lines = ["gates summary:"]
     width = max(len(o.gate_id) for o in outcomes) if outcomes else 10
     for o in outcomes:
-        lines.append(f"  {o.gate_id:<{width}}  {o.status:<6}  {o.message}")
-    counts = {"PASS": 0, "FAIL": 0, "XFAIL": 0, "SKIP": 0}
+        lines.append(f"  {o.gate_id:<{width}}  {o.status:<7}  {o.message}")
+    counts: Dict[str, int] = {}
     for o in outcomes:
         counts[o.status] = counts.get(o.status, 0) + 1
+    soft_fail = sum(
+        1
+        for o in outcomes
+        if o.status == "FAIL" and (o.gate_id in SOFT_GATES or not o.hard)
+    )
+    hard_fail = sum(1 for o in outcomes if is_hard_failure(o))
     lines.append(
         f"totals: PASS={counts.get('PASS', 0)} "
-        f"FAIL={counts.get('FAIL', 0)} XFAIL={counts.get('XFAIL', 0)} "
-        f"SKIP={counts.get('SKIP', 0)}"
+        f"FAIL(hard)={hard_fail} FAIL(soft)={soft_fail} "
+        f"PARKED={counts.get('PARKED', 0)} "
+        f"XFAIL={counts.get('XFAIL', 0)} SKIP={counts.get('SKIP', 0)}"
     )
     return "\n".join(lines)
 
@@ -1020,9 +1069,17 @@ def build_report(
         "summary": {
             "PASS": sum(1 for o in outcomes if o.status == "PASS"),
             "FAIL": sum(1 for o in outcomes if o.status == "FAIL"),
+            "FAIL_hard": sum(1 for o in outcomes if is_hard_failure(o)),
+            "FAIL_soft": sum(
+                1
+                for o in outcomes
+                if o.status == "FAIL" and (o.gate_id in SOFT_GATES or not o.hard)
+            ),
+            "PARKED": sum(1 for o in outcomes if o.status == "PARKED"),
             "XFAIL": sum(1 for o in outcomes if o.status == "XFAIL"),
             "SKIP": sum(1 for o in outcomes if o.status == "SKIP"),
         },
+        "parkedGates": dict(PARKED_GATES),
     }
 
 
@@ -1035,6 +1092,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     fixture_filter = split_csv(args.fixture)
     gate_filter = split_csv(args.gate)
+    unpark = set(split_csv(args.unpark) or [])
     gate_ids = selected_gates(gate_filter)
     fixtures = discover_fixtures(args.corpus, args.smoke, fixture_filter)
     if not fixtures:
@@ -1090,17 +1148,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             )
 
+    all_outcomes = so.apply_parking(all_outcomes, unpark)
+
     report = build_report(fixtures, gate_ids, all_outcomes, args)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     print(summarize(all_outcomes))
+    print(so.format_gate_table(all_outcomes))
     print(f"report: {args.report}")
 
-    hard_failures = [
-        o
-        for o in all_outcomes
-        if o.status == "FAIL" and o.hard and o.gate_id not in SOFT_GATES
-    ]
+    hard_failures = [o for o in all_outcomes if is_hard_failure(o)]
     return 1 if hard_failures else 0
 
 

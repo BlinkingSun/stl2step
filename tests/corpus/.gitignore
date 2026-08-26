@@ -1,3 +1,9 @@
 *.stl
 *.expected.json
 corpus.stamp
+
+# Committed real CAD exports (not generator output) — targeted un-ignore.
+!Body11.stl
+!Body11.expected.json
+!Body28.stl
+!Body28.expected.json

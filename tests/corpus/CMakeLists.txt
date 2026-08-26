@@ -99,11 +99,11 @@ add_test(NAME corpus_determinism
         -DDIR_B=${CMAKE_CURRENT_BINARY_DIR}/_det_b
         -P "${CMAKE_CURRENT_SOURCE_DIR}/check_corpus_determinism.cmake")
 
-if(TARGET stl2step)
+    if(TARGET stl2step)
     add_test(NAME corpus_engine_convert
         COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/run_engine_check.sh"
                 $<TARGET_FILE:stl2step>)
     set_tests_properties(corpus_engine_convert PROPERTIES
-        ENVIRONMENT "CORPUS=${_corpus_out_dir}"
+        ENVIRONMENT "CORPUS=${_corpus_out_dir};CENSUS=$<TARGET_FILE:stl2step_census>"
         DEPENDS corpus_generate)
 endif()

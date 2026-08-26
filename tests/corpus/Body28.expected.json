@@ -1,0 +1,41 @@
+{
+  "id": "Body28",
+  "description": "Real CAD export — contrast fixture (1 component, plate-scale part, 344 recognised cylinders, 0 built today)",
+  "realExport": true,
+  "provenance": {
+    "sourcePath": "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body28.stl",
+    "statement": "Real CAD export from the user's own work; not authored for this project and not derived from any corpus fixture."
+  },
+  "deflection": 0,
+  "triangleCount": 14126,
+  "meshVolume": 56440.048811179484,
+  "expectFillet": false,
+  "watertight": true,
+  "openEdges": 0,
+  "nonManifoldEdges": 0,
+  "expectedExit": 0,
+  "expectedSolids": 1,
+  "expectedOpenShells": 0,
+  "smoothExpectedExit": 2,
+  "smoothWarningCountMax": 1469,
+  "smoothVolumeDeltaPctMax": 0.0,
+  "smoothRecognisedCylinders": 344,
+  "recoverable": [],
+  "mustRemainFaceted": [],
+  "expectedRejects": [],
+  "components": [
+    {"index": 0, "triangleCount": 14126, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 56440.048811179484, "clean": true}
+  ],
+  "live": [
+    {
+      "component": 0,
+      "disposition": "PARTIAL",
+      "partialReason": "P1 recognises 344 cylinders; P2 built 0 (whole-component R2). Contrast with Body11: single body, lower warning count, larger bbox — same zero-build outcome.",
+      "builtCylindersFloor": 0,
+      "builtPlanesFloor": 0,
+      "faceCount": 8468,
+      "surfaceCensus": {"plane": 8468, "cylinder": 0, "planar_facets": 0},
+      "volumeBudgetMM3": 5.644004881117948
+    }
+  ]
+}

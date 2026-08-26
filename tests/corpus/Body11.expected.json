@@ -1,0 +1,51 @@
+{
+  "id": "Body11",
+  "description": "Real CAD export — phase-2 benchmark (2 components, 419 recognised cylinders, 0 built today)",
+  "realExport": true,
+  "provenance": {
+    "sourcePath": "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body11.stl",
+    "statement": "Real CAD export from the user's own work; not authored for this project and not derived from any corpus fixture."
+  },
+  "deflection": 0,
+  "triangleCount": 15300,
+  "meshVolume": 21943.8573949154,
+  "expectFillet": false,
+  "openEdges": 0,
+  "nonManifoldEdges": 69,
+  "expectedExit": 0,
+  "expectedSolids": 2,
+  "expectedOpenShells": 0,
+  "smoothExpectedExit": 2,
+  "smoothWarningCountMax": 7806,
+  "smoothVolumeDeltaPctMax": 0.0,
+  "smoothRecognisedCylinders": 419,
+  "recoverable": [],
+  "mustRemainFaceted": [],
+  "expectedRejects": [],
+  "components": [
+    {"index": 0, "triangleCount": 12060, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 20952.431550312685, "clean": true},
+    {"index": 1, "triangleCount": 3240, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 991.4258446026722, "clean": true}
+  ],
+  "live": [
+    {
+      "component": 0,
+      "disposition": "PARTIAL",
+      "partialReason": "P1 recognises cylinders; P2 built 0 at file census (whole-component R2 after J6). Never-get-worse: 2 solids, valid, closed, volume exact.",
+      "builtCylindersFloor": 0,
+      "builtPlanesFloor": 0,
+      "faceCount": 8518,
+      "surfaceCensus": {"plane": 8518, "cylinder": 0, "planar_facets": 0},
+      "volumeBudgetMM3": 2.0952431550312685
+    },
+    {
+      "component": 1,
+      "disposition": "PARTIAL",
+      "partialReason": "P1 recognises cylinders; P2 built 0 at file census (whole-component R2 after J6). Never-get-worse: 2 solids, valid, closed, volume exact.",
+      "builtCylindersFloor": 0,
+      "builtPlanesFloor": 0,
+      "faceCount": 2280,
+      "surfaceCensus": {"plane": 2280, "cylinder": 0, "planar_facets": 0},
+      "volumeBudgetMM3": 0.09914258446026722
+    }
+  ]
+}

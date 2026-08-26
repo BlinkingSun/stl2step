@@ -101,3 +101,8 @@ unset(_p1_all_present)
 unset(_tu)
 unset(_path)
 unset(_stl2step_root)
+
+# ad-hoc signing (see root helper)
+if(TARGET stl2step_regiondump)
+  stl2step_adhoc_sign(stl2step_regiondump)
+endif()

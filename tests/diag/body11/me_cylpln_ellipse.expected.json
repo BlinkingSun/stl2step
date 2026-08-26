@@ -1,0 +1,5 @@
+{
+  "class": "ME_CYLPLN_ELLIPSE_PROJ / ME_CYLPLN_DIFF_PTS_CLOSED",
+  "today": "closed prism, --smooth emits 'smooth: analytic MakeEdge failed — keeping mesh polyline' on cap / generator edges",
+  "should": "plane|cyl caps become gp_Circ (or gp_Elips if oblique) via IntAna; MakeEdge(v,v) on a fitted iso-circle succeeds; polyline only if IntAna Empty/Same"
+}
