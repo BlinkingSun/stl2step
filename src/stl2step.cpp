@@ -494,6 +494,33 @@ Result Converter::run() {
         auto isClean = [&](const CompStat& cs) {
             return !forceSew && cs.open == 0 && cs.conflict == 0 && cs.nonManifold == 0;
         };
+        auto segmentSummaryStderr = [](int root, const refit::RegionSet& rs) {
+            std::fprintf(stderr,
+                         "engine segment root=%d regions=%zu rejected=%zu planes=%d "
+                         "cylinders=%d fillets=%d facetIslands=%d\n",
+                         root, rs.regions.size(), rs.rejected.size(), rs.stats.planes,
+                         rs.stats.cylinders, rs.stats.fillets, rs.stats.facetIslands);
+            for (const refit::Region& r : rs.regions) {
+                const char* ty = "plane";
+                if (r.type == refit::SurfType::Cylinder) ty = "cylinder";
+                else if (r.type == refit::SurfType::Cone) ty = "cone";
+                else if (r.type == refit::SurfType::Sphere) ty = "sphere";
+                else if (r.type == refit::SurfType::Torus) ty = "torus";
+                std::fprintf(stderr, "  id=%d type=%s tris=%zu radius=%.6g closed360=%d\n",
+                             r.id, ty, r.tris.size(), r.radius, r.closed360 ? 1 : 0);
+            }
+            std::fputs("  cylinder radii:", stderr);
+            bool first = true;
+            for (const refit::Region& r : rs.regions) {
+                if (r.type != refit::SurfType::Cylinder) continue;
+                if (!first) std::fputc(',', stderr);
+                first = false;
+                char buf[64];
+                std::snprintf(buf, sizeof buf, "%.17g", r.radius);
+                std::fputs(buf, stderr);
+            }
+            std::fputc('\n', stderr);
+        };
         auto fillMeshView = [&](const CompStat& cs, refit::MeshView& mv) {
             mv.pts = pts.data();
             mv.tris = reinterpret_cast<const int(*)[3]>(tris.data());
@@ -534,6 +561,9 @@ Result Converter::run() {
                 rs.compRoot = root;
                 refit::segment(mv, segp, rs, nullptr);
                 std::lock_guard<std::mutex> lk(planMu);
+                if (const char* e = std::getenv("STL2STEP_SEGMENT_SUMMARY");
+                    e && e[0] && e[0] != '0')
+                    segmentSummaryStderr(root, rs);
                 refitPlans.emplace(root, std::move(rs));
             });
             if (smoothSkippedComponents > 0)
