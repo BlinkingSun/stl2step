@@ -26,7 +26,25 @@ plane|cyl IntAna edge rebuild degenerate (49 free edges) on a mesh this
 coarse — likely near-tangent plane/cylinder pairs at 8–16-segment
 resolution where facet normals straddle the cyl gates.
 
+## Verbatim unify-angle sweep (macOS arm64, main @ hl/D worktree)
+
+Coarse Fusion STL (908 tris); `facesAfterUnify` from RESULT (`--no-verify`):
+
+| `--unify-angle` | `facesAfterUnify` |
+|-----------------|-------------------|
+| 0.001 (default) | 434 |
+| 0.01            | 263 |
+
+Default gate leaves one planar facet per mesh triangle pair that passes the
+0.001° coplanar test; float32 STL normal jitter blocks most merges. Raising
+to 0.01° collapses many coplanar facet pairs (263 faces) but is **not** a
+Verbatim default change (G0.1).
+
+STEP text census of Verbatim output (`tests/tools/step_census.py`):
+434 `ADVANCED_FACE`, 434 `PLANE`, 0 cylinders, 888 `LINE` edges.
+
 ## Status
 
-Not wired into ctest (no ground-truth sidecar yet). Verbatim output is
-correct and shippable for this part; TrueForm work item is open.
+`ground-truth.json` sidecar added (28 faces = 13 planes + 15 cylinders per
+original CAD). Not wired into ctest yet. Verbatim output is correct and
+shippable for this part; TrueForm work item is open.
