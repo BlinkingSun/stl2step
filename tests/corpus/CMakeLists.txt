@@ -37,10 +37,12 @@ endif()
 # because that find_package ran inside add_subdirectory(_engine).
 # Graft: re-run find_package HERE so OpenCASCADE_LIBRARY_DIR is populated in
 # this directory's scope (standalone) before the find_library fallback.
-if(NOT TARGET TKFillet OR NOT TARGET TKOffset OR NOT TARGET TKBool)
+if(NOT TARGET TKFillet OR NOT TARGET TKOffset OR NOT TARGET TKBool OR NOT TARGET TKMesh)
     find_package(OpenCASCADE REQUIRED)
 endif()
-foreach(_tk IN ITEMS TKFillet TKOffset TKBool)
+# TKMesh: BRepMesh_IncrementalMesh in tessellate(). Homebrew's OCCT config
+# links it transitively; Ubuntu's libocct 7.6 does not — name it explicitly.
+foreach(_tk IN ITEMS TKFillet TKOffset TKBool TKMesh)
     if(TARGET ${_tk})
         target_link_libraries(stl2step_corpus_gen PRIVATE ${_tk})
     else()

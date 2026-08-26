@@ -14,6 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history: the gate suite builds the canonical baseline from a
+          # pinned ancestor commit; a shallow clone makes build_baseline.sh
+          # fail (git exit 128) and G0.1/G0.3 lose their twin comparison.
+          fetch-depth: 0
       - name: Install OpenCASCADE + toolchain
         # libtbb-dev: Ubuntu's OCCT CMake config links TBB by absolute .so path
         # but the libocct-*-dev packages don't pull in the TBB dev package.
@@ -35,6 +40,11 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history: the gate suite builds the canonical baseline from a
+          # pinned ancestor commit; a shallow clone makes build_baseline.sh
+          # fail (git exit 128) and G0.1/G0.3 lose their twin comparison.
+          fetch-depth: 0
       - name: Install OpenCASCADE
         run: brew install opencascade
       - name: Configure
@@ -49,6 +59,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history: the gate suite builds the canonical baseline from a
+          # pinned ancestor commit; a shallow clone makes build_baseline.sh
+          # fail (git exit 128) and G0.1/G0.3 lose their twin comparison.
+          fetch-depth: 0
       - name: Install OpenCASCADE (vcpkg)
         run: vcpkg install opencascade
       - name: Configure

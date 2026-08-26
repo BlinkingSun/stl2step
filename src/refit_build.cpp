@@ -27,7 +27,9 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
-#include <BRepCheck_ListIteratorOfListOfStatus.hxx>
+// BRepCheck_ListIteratorOfListOfStatus.hxx is a typedef header removed from
+// newer OCCT distributions (vcpkg); the list type's own Iterator is portable.
+#include <BRepCheck_ListOfStatus.hxx>
 #include <BRepCheck_Result.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
@@ -996,7 +998,7 @@ void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f) {
         if (!an.IsValid() && !f.IsNull()) {
             Handle(BRepCheck_Result) res = an.Result(f);
             if (!res.IsNull()) {
-                for (BRepCheck_ListIteratorOfListOfStatus it(res->Status()); it.More();
+                for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More();
                      it.Next())
                     std::fprintf(stderr, " st=%d", (int)it.Value());
             }
