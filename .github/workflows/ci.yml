@@ -19,15 +19,28 @@ jobs:
           # pinned ancestor commit; a shallow clone makes build_baseline.sh
           # fail (git exit 128) and G0.1/G0.3 lose their twin comparison.
           fetch-depth: 0
-      - name: Install OpenCASCADE + toolchain
-        # libtbb-dev: Ubuntu's OCCT CMake config links TBB by absolute .so path
-        # but the libocct-*-dev packages don't pull in the TBB dev package.
+      - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake g++ libtbb-dev \
-            libocct-foundation-dev libocct-modeling-data-dev \
-            libocct-modeling-algorithms-dev libocct-data-exchange-dev
+          sudo apt-get install -y --no-install-recommends cmake g++
+      # Ubuntu 24.04's system OCCT is 7.6.3; the TrueForm engine and its gate
+      # expectations are calibrated against OCCT 7.9 (what Homebrew and vcpkg
+      # ship). On 7.6 the recognizer's numbers legitimately differ (S09 comp1
+      # finds 0 cylinders), so CI pins the calibrated version instead.
+      - name: Install OpenCASCADE 7.9 (conda-forge)
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: occt
+          create-args: >-
+            -c conda-forge
+            occt=7.9
+      - name: Point CMake and the loader at the pinned OCCT
+        # Exported via GITHUB_ENV so the gate suite's nested baseline
+        # configure (build_baseline.sh) picks the same OCCT up from the
+        # environment, not just the top-level configure.
+        run: |
+          echo "CMAKE_PREFIX_PATH=$MAMBA_ROOT_PREFIX/envs/occt" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$MAMBA_ROOT_PREFIX/envs/occt/lib" >> "$GITHUB_ENV"
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
                    -DSTL2STEP_BUILD_EXAMPLES=ON -DSTL2STEP_BUILD_TESTS=ON
