@@ -70,6 +70,9 @@ jobs:
 
   windows:
     runs-on: windows-latest
+    env:
+      # cp1252 console encoding crashes the gate runner (it prints U+2264)
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v5
         with:
