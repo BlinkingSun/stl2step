@@ -848,6 +848,7 @@ Result Converter::run() {
                          uThreads, timer.lap());
                 } else {
                     unifyOne(shape, partKeep.empty() ? nullptr : partKeep[0]);
+                    parts[0] = shape;
                     facesAfter = countShapes(shape, TopAbs_FACE);
                     note("  unify     %s -> %s faces  [%.2fs]\n",
                          fmtInt(facesBefore).c_str(), fmtInt(facesAfter).c_str(), timer.lap());
@@ -856,6 +857,31 @@ Result Converter::run() {
                 warn(std::string("coplanar merge failed (") +
                      (f.GetMessageString() ? f.GetMessageString() : "?") +
                      ") -- keeping per-triangle faces");
+            }
+        }
+
+        int builtPl = 0, builtCy = 0, builtFi = 0, builtCo = 0, revCo = 0;
+        if (smooth) {
+            size_t pi = 0;
+            for (size_t ci = 0; ci < order.size(); ++ci) {
+                const CompOut& o = outs[ci];
+                int cyls = 0;
+                for (size_t k = 0; k < o.parts.size(); ++k) {
+                    for (TopExp_Explorer ex(parts[pi], TopAbs_FACE); ex.More(); ex.Next())
+                        if (BRepAdaptor_Surface(TopoDS::Face(ex.Current()), Standard_False)
+                                .GetType() == GeomAbs_Cylinder)
+                            cyls++;
+                    ++pi;
+                }
+                if (!refitPlans.count(order[ci])) continue;
+                const refit::RefitStats& st = o.refitSt;
+                if (o.usedRefit && (cyls > 0 || (st.cylinders == 0 && st.planes > 0))) {
+                    builtCo++;
+                    builtPl += st.planes;
+                    builtCy += cyls;
+                    builtFi += st.fillets;
+                } else
+                    revCo++;
             }
         }
 
@@ -1029,6 +1055,11 @@ Result Converter::run() {
             r.smoothMaxDevMM = refitTotals.maxVertexDev;
             r.smoothMaxEdgeTolMM = refitTotals.maxEdgeTol;
             r.smoothVolPredictedMM3 = dVolPredSigned;
+            r.smoothBuiltPlanes = builtPl;
+            r.smoothBuiltCylinders = builtCy;
+            r.smoothBuiltFillets = builtFi;
+            r.smoothBuiltComponents = builtCo;
+            r.smoothRevertedComponents = revCo;
         }
         r.ok = true;
         r.exitCode = warnings.empty() ? 0 : 2;
@@ -1093,7 +1124,9 @@ std::string Result::toJson() const {
         "\"smoothDistinctRadii\":%d,\"smoothRejected\":%d,\"smoothFacetFaces\":%d,"
         "\"facesAfterSmooth\":%d,\"smoothSkippedComponents\":%d,"
         "\"smoothMaxDevMM\":%.6f,\"smoothMaxEdgeTolMM\":%.6f,"
-        "\"smoothVolPredictedMM3\":%.6f}";
+        "\"smoothVolPredictedMM3\":%.6f,"
+        "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltFillets\":%d,"
+        "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d}";
     std::string ei = jsonEscape(input), eo = jsonEscape(output);
     const bool emitSmooth = facesAfterSmooth != 0 || smoothSkippedComponents != 0
         || smoothPlanes != 0 || smoothCylinders != 0 || smoothFillets != 0;
@@ -1106,7 +1139,8 @@ std::string Result::toJson() const {
                           smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
                           smoothRejected, smoothFacetFaces, facesAfterSmooth,
                           smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
-                          smoothVolPredictedMM3);
+                          smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
+                          smoothBuiltFillets, smoothBuiltComponents, smoothRevertedComponents);
     } else {
         n = std::snprintf(nullptr, 0, fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                           components, solids, openShells, facesBeforeUnify, facesAfterUnify,
@@ -1122,7 +1156,8 @@ std::string Result::toJson() const {
                       smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
                       smoothRejected, smoothFacetFaces, facesAfterSmooth,
                       smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
-                      smoothVolPredictedMM3);
+                      smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
+                      smoothBuiltFillets, smoothBuiltComponents, smoothRevertedComponents);
     } else {
         std::snprintf(&s[0], s.size(), fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                       components, solids, openShells, facesBeforeUnify, facesAfterUnify,

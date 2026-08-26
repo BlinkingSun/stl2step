@@ -90,17 +90,28 @@ struct SurfaceCensus {
 
 struct LiveExpectation {
     int component = 0;
-    std::string disposition = "PASS";
+    std::string disposition = "PASS";  // PASS | PARTIAL | ESCALATE
     std::string escalateReason;
+    std::string partialReason;
+    int recognisedCylinders = -1;   // P1 recognition count (-1 = omit)
+    int builtCylindersFloor = -1;   // ratchet: built >= floor (-1 = omit)
+    int builtPlanesFloor = -1;
     int faceCount = 0;
     SurfaceCensus surfaceCensus;
     double volumeBudgetMM3 = 0;
     bool buildFaces = true;
 };
 
+struct Provenance {
+    std::string sourcePath;
+    std::string statement;
+};
+
 struct Sidecar {
     std::string id;
     std::string description;
+    bool realExport = false;
+    Provenance provenance;
     double deflection = 0;
     int triangleCount = 0;
     double meshVolume = 0;
@@ -118,6 +129,11 @@ struct Sidecar {
     int expectedExit = 0;
     int expectedSolids = 1;
     int expectedOpenShells = 0;
+    // Smooth-on contract (real exports and any fixture that opts in).
+    int smoothExpectedExit = -1;       // -1 = do not check smooth path
+    int smoothWarningCountMax = -1;    // upper bound on warn() count
+    double smoothVolumeDeltaPctMax = -1;  // with verify on (-1 = skip)
+    int smoothRecognisedCylinders = -1;   // file-level P1 count (-1 = omit)
     std::vector<MeshComponentInfo> components;
     std::vector<LiveExpectation> live;
 };
@@ -400,6 +416,13 @@ inline std::string writeSidecarJson(const Sidecar& s) {
     os << "{\n";
     os << "  \"id\": \"" << s.id << "\",\n";
     os << "  \"description\": \"" << s.description << "\",\n";
+    if (s.realExport) {
+        os << "  \"realExport\": true,\n";
+        os << "  \"provenance\": {\n";
+        os << "    \"sourcePath\": \"" << s.provenance.sourcePath << "\",\n";
+        os << "    \"statement\": \"" << s.provenance.statement << "\"\n";
+        os << "  },\n";
+    }
     os << "  \"deflection\": " << s.deflection << ",\n";
     os << "  \"triangleCount\": " << s.triangleCount << ",\n";
     os << "  \"meshVolume\": " << s.meshVolume << ",\n";
@@ -412,6 +435,15 @@ inline std::string writeSidecarJson(const Sidecar& s) {
     os << "  \"expectedExit\": " << s.expectedExit << ",\n";
     os << "  \"expectedSolids\": " << s.expectedSolids << ",\n";
     os << "  \"expectedOpenShells\": " << s.expectedOpenShells << ",\n";
+    if (s.smoothExpectedExit >= 0)
+        os << "  \"smoothExpectedExit\": " << s.smoothExpectedExit << ",\n";
+    if (s.smoothWarningCountMax >= 0)
+        os << "  \"smoothWarningCountMax\": " << s.smoothWarningCountMax << ",\n";
+    if (s.smoothVolumeDeltaPctMax >= 0)
+        os << "  \"smoothVolumeDeltaPctMax\": " << s.smoothVolumeDeltaPctMax << ",\n";
+    if (s.smoothRecognisedCylinders >= 0)
+        os << "  \"smoothRecognisedCylinders\": " << s.smoothRecognisedCylinders
+           << ",\n";
     os << "  \"recoverable\": [\n";
     for (size_t i = 0; i < s.recoverable.size(); ++i) {
         const auto& r = s.recoverable[i];
@@ -470,6 +502,14 @@ inline std::string writeSidecarJson(const Sidecar& s) {
         os << "      \"disposition\": \"" << l.disposition << "\",\n";
         if (!l.escalateReason.empty())
             os << "      \"escalateReason\": \"" << l.escalateReason << "\",\n";
+        if (!l.partialReason.empty())
+            os << "      \"partialReason\": \"" << l.partialReason << "\",\n";
+        if (l.recognisedCylinders >= 0)
+            os << "      \"recognisedCylinders\": " << l.recognisedCylinders << ",\n";
+        if (l.builtCylindersFloor >= 0)
+            os << "      \"builtCylindersFloor\": " << l.builtCylindersFloor << ",\n";
+        if (l.builtPlanesFloor >= 0)
+            os << "      \"builtPlanesFloor\": " << l.builtPlanesFloor << ",\n";
         if (!l.buildFaces) os << "      \"buildFaces\": false,\n";
         os << "      \"faceCount\": " << l.faceCount << ",\n";
         os << "      \"surfaceCensus\": {\"plane\": " << l.surfaceCensus.plane

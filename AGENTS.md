@@ -11,18 +11,18 @@ it.
 
 stl2step converts a **triangle mesh** (`.stl`, binary or ASCII) into a
 **parametric B-Rep solid** (`.step`). It welds vertices, splits the mesh into
-manifold bodies, optionally runs **stage 3.5 (smooth-segment)** when
+manifold bodies, optionally runs **stage 3.5 (TrueForm segment)** when
 `Options::smooth` is true (`refit::segment()` on each clean component; dirty or
 `--force-sew` components are skipped), then builds each body as an exact B-Rep
 in parallel: a component with a refit plan takes the `refit::buildFaces()`
 branch (analytic `Geom_Plane` / `Geom_CylindricalSurface` faces); otherwise the
-per-triangle path runs verbatim. It repairs dirty meshes (open edges / flipped
+per-triangle **Verbatim** path runs. It repairs dirty meshes (open edges / flipped
 facets / non-manifold junctions) via sewing — those components are never refit
 — merges coplanar triangles into single planar faces, fits tolerances, writes a
 STEP file, and optionally re-reads it to self-verify. It is built on
 OpenCASCADE (OCCT). Output is always in **millimetres**. Without `--smooth`
 (the 1.x default) curved surfaces remain **faceted** at the mesh resolution,
-byte-identical to 1.0.0. With `--smooth`, v1 recovers planes, right circular
+byte-identical to 1.0.0. With **TrueForm** (`--engine trueform` / `--smooth`), v1 recovers planes, right circular
 cylinders (holes/bosses, N ≥ 6), and plane–plane fillet strips (1–3 rows);
 cones, spheres, and tori stay faceted.
 
@@ -65,7 +65,7 @@ kernel).
 | `forceSew` / `--force-sew` | false | Diagnostics only; slower. |
 | `threads` / `--threads` | auto | 0 = all cores. |
 | `productName` | output stem | STEP product name. |
-| `smooth` / `--smooth` (`--refit` alias; `--no-smooth`) | false | Opt-in analytic recovery. **Default OFF for the whole 1.x line.** Off-path STEP + RESULT are byte-identical to 1.0.0 (gate G0.1, 22/22). |
+| `smooth` / `--engine trueform` / `--smooth` / `--refit` (`--engine verbatim` / `--no-smooth`) | false | **TrueForm** analytic recovery (premium). Default **Verbatim** for the whole 1.x line. Off-path STEP + RESULT are byte-identical to 1.0.0 (gate G0.1, 22/22). |
 | `smoothTolMM` / `--smooth-tol <mm>` | 0 (auto) | Surface-fit tolerance in mm. 0 = auto-derived from bbox / weld / sew. Only meaningful when `smooth` is true. |
 | `smoothAngleDeg` / `--smooth-angle <deg>` | 2.0 | Near-flat normal gate for segmentation (degrees). Unrelated to `unifyAngleDeg`. |
 | `smoothFillets` / `--no-smooth-fillets` | true | Recover plane–plane fillet strips as cylinders. `--no-smooth-fillets` sets this false. Ignored when `smooth` is false. |
@@ -263,15 +263,17 @@ Because each invocation is independent, batch with `xargs -P` /
 
 1. **Units.** Output is always mm. STL has none — pass `--units in` / `inchInput`
    or a `scale`, or your solid will be the wrong size. This is the #1 mistake.
-2. **Analytic recovery is opt-in (`--smooth` / `Options::smooth`, default
-   false for the whole 1.x line).** Without it, curved surfaces stay faceted at
-   the mesh resolution — STEP + RESULT are byte-identical to 1.0.0. With
-   `--smooth` on, v1 recovers **planes**, **right circular cylinders**
-   (holes/bosses, N ≥ 6), and **plane–plane fillet strips** (1–3 rows) as
-   `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. Cones,
-   spheres, and tori are reported and left faceted; there is no freeform/NURBS
-   reconstruction. Refit is skipped on any component that needs the sewing
-   repair path. A regular N≥6 prism (e.g. a hex socket) **is** recovered as a
+2. **Two named modes — Verbatim (default) and TrueForm (`Options::smooth`).**
+   **Verbatim** keeps curved surfaces faceted at the mesh resolution — STEP +
+   RESULT are byte-identical to 1.0.0. **TrueForm** recovers **planes**, **right
+   circular cylinders** (holes/bosses, N ≥ 6), and **plane–plane fillet strips**
+   (1–3 rows) as `Geom_Plane` / `Geom_CylindricalSurface` faces with editable
+   radii. Components that cannot close analytically fall back to Verbatim per
+   component (never corrupt the file). On a real CAD export, TrueForm may build a
+   fraction of recognised cylinders (e.g. 127/583 on Body11); see
+   `tests/diag/body11/KNOWN-GAP.md`. Cones, spheres, and tori are reported and
+   left faceted; there is no freeform/NURBS reconstruction. Refit is skipped on
+   any component that needs the sewing repair path. A regular N≥6 prism (e.g. a hex socket) **is** recovered as a
    cylinder, and a symmetric 45° chamfer **is** recovered as a fillet — both
    intended, not bugs. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected. Flat
    faces *are* recovered exactly whether or not `--smooth` is on.
@@ -296,9 +298,9 @@ Because each invocation is independent, batch with `xargs -P` /
 ## 7. Recommended presets by host scenario
 
 - **CAM / CAD importer that loads the STEP next:** `unify=true` (default),
-  `verify=false`, `smooth=false` (default), units set. Fastest path; your
-  import validates. The preset keeps `smooth=false` because it optimises for
-  round-trip speed into a CAM kernel that is about to re-tessellate anyway.
+ `verify=false`, **Verbatim** mode (`smooth=false`), units set. Fastest path; your
+ import validates. Verbatim is the default because it optimises for round-trip
+ speed into a CAM kernel that is about to re-tessellate anyway.
 - **Batch/library conversion where files are archived, not immediately loaded:**
   keep `verify=true` so `volumeDeltaPct` is populated as a quality signal; run
   files concurrently.

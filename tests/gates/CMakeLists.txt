@@ -53,6 +53,10 @@ if(TARGET stl2step AND EXISTS "${_stl2step_gates_runner}")
         list(APPEND _gates_full_cmd --census "$<TARGET_FILE:stl2step_census>")
         set(_gates_full_required "${_gates_full_required};$<TARGET_FILE:stl2step_census>")
     endif()
+    if(TARGET stl2step_regiondump)
+        list(APPEND _gates_full_cmd --dump "$<TARGET_FILE:stl2step_regiondump>")
+        set(_gates_full_required "${_gates_full_required};$<TARGET_FILE:stl2step_regiondump>")
+    endif()
     add_test(NAME gates_full COMMAND ${_gates_full_cmd})
     # corpus_generate lives in the sibling tests/corpus/ dir; if(TEST) is not
     # visible here, but CTest resolves DEPENDS by name at run time.

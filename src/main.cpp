@@ -28,9 +28,12 @@ static void usage() {
         "  --force-sew          route every component through the sewing repair path\n"
         "  --no-verify          skip re-reading the written STEP (use when the caller\n"
         "                       imports the file right away -- that import IS the check)\n"
-        "  --smooth             recognise radii and flat regions; emit analytic surfaces\n"
-        "  --refit              alias for --smooth\n"
-        "  --no-smooth          keep faceted mesh surfaces (default)\n"
+        "  --engine <mode>      conversion mode: verbatim (default) | trueform\n"
+        "                       verbatim = byte-faithful tessellation (same as --no-smooth)\n"
+        "                       trueform = premium analytic reconstruction (--smooth)\n"
+        "  --smooth             alias for --engine trueform\n"
+        "  --refit              alias for --engine trueform\n"
+        "  --no-smooth          alias for --engine verbatim\n"
         "  --smooth-tol <mm>    surface-fit tolerance in mm (default: auto)\n"
         "  --smooth-angle <deg> near-flat normal gate for segmentation (default 2.0)\n"
         "  --no-smooth-fillets  skip recovery of fillet strips as cylinders\n"
@@ -38,8 +41,9 @@ static void usage() {
         "  --quiet              suppress progress output (RESULT line + errors only)\n"
         "  -v, --version        print version and exit\n"
         "  -h, --help           print this help and exit\n\n"
-        "STEP files are written in millimetres. Curved surfaces remain faceted at the\n"
-        "STL's resolution; coplanar facets (flat faces) are merged into single faces.\n"
+        "STEP files are written in millimetres. Default mode is Verbatim (faceted\n"
+        "surfaces at STL resolution). TrueForm (--engine trueform) recovers analytic\n"
+        "planes, cylinders, and fillets where the refit ladder succeeds.\n"
         "Exit codes: 0 ok, 2 ok-with-warnings, 1 failed. Last stdout line: RESULT {json}\n",
         version());
 }
@@ -91,6 +95,15 @@ int main(int argc, char** argv) {
         else if (a == "--no-solid")      opt.makeSolids = false;
         else if (a == "--force-sew")     opt.forceSew = true;
         else if (a == "--no-verify")     opt.verify = false;
+        else if (a == "--engine") {
+            std::string mode = val("--engine");
+            if (mode == "verbatim" || mode == "faceted") opt.smooth = false;
+            else if (mode == "trueform" || mode == "smooth") opt.smooth = true;
+            else {
+                fprintf(stderr, "error: --engine must be verbatim or trueform\n");
+                return 1;
+            }
+        }
         else if (a == "--smooth" || a == "--refit") opt.smooth = true;
         else if (a == "--no-smooth")     opt.smooth = false;
         else if (a == "--smooth-tol")    opt.smoothTolMM = posDouble("--smooth-tol");

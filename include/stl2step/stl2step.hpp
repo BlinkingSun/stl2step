@@ -192,6 +192,12 @@ struct Result {
     double smoothMaxEdgeTolMM = 0.0;   // max edge tolerance written (mm)
     double smoothVolPredictedMM3 = 0.0; // predicted volume from analytic fits (mm^3)
 
+    int smoothBuiltPlanes = 0;
+    int smoothBuiltCylinders = 0;
+    int smoothBuiltFillets = 0;
+    int smoothBuiltComponents = 0;
+    int smoothRevertedComponents = 0;
+
     // The machine-readable payload the CLI prints after "RESULT ". Stable field
     // set and ordering; safe to parse. Does not include the "RESULT " prefix.
     std::string toJson() const;

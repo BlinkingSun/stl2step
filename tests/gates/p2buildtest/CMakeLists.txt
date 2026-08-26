@@ -46,3 +46,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../p2real/CMakeLists.txt")
     add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../p2real"
                      "${CMAKE_CURRENT_BINARY_DIR}/_p2real")
 endif()
+
+# ad-hoc signing (see root helper)
+if(TARGET stl2step_p2buildtest)
+  stl2step_adhoc_sign(stl2step_p2buildtest)
+endif()

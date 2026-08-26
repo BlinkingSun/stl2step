@@ -1,0 +1,5 @@
+{
+  "class": "IA_CYLCYL_NOGEOM",
+  "today": "emits 'smooth: IntAna cyl|cyl empty/same — keeping mesh polyline' (TypeInter=NoGeometricSolution). May also seamed360-invalid, J6, R2.",
+  "should": "keep mesh polyline (§2.5). Do NOT constructed-generator (P1 tangent=false; axes not ∥ within 3°). Do NOT BRepAlgoAPI_Section."
+}

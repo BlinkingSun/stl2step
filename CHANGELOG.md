@@ -14,18 +14,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [1.1.0-unreleased]
 
-Optional analytic-surface recovery behind `--smooth`. No tag, no release.
+Optional analytic-surface recovery behind **TrueForm** mode (`--engine trueform`,
+`--smooth`). No tag, no release.
 
 ### Added
-- `--smooth` opt-in recovery of **planes**, **right circular cylinders**
+- **Verbatim / TrueForm** branding: two named conversion modes. **Verbatim**
+  (default) is byte-faithful tessellation, identical to 1.0.0. **TrueForm** is
+  premium analytic reconstruction (today's `--smooth` path).
+- CLI `--engine verbatim|trueform` with `--smooth` / `--refit` / `--no-smooth`
+  aliases mapping to TrueForm / Verbatim respectively.
+- **TrueForm** opt-in recovery of **planes**, **right circular cylinders**
   (holes/bosses, N ≥ 6), and **plane–plane fillet strips** (1–3 rows) as
   `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. Library
-  field: `Options::smooth`. Default **OFF** for the whole 1.x line.
-- Six CLI flags: `--smooth`, `--refit` (alias), `--no-smooth`,
-  `--smooth-tol <mm>`, `--smooth-angle <deg>`, `--no-smooth-fillets`.
-  Matching `Options` fields: `smooth`, `smoothTolMM` (0 = auto, mm),
-  `smoothAngleDeg` (default 2.0 deg), `smoothFillets` (default true;
-  `--no-smooth-fillets` clears it).
+  field: `Options::smooth`. Default **Verbatim** for the whole 1.x line.
+- Six CLI flags: `--engine`, `--smooth`, `--refit` (TrueForm aliases),
+  `--no-smooth` (Verbatim alias), `--smooth-tol <mm>`, `--smooth-angle <deg>`,
+  `--no-smooth-fillets`. Matching `Options` fields: `smooth`, `smoothTolMM`
+  (0 = auto, mm), `smoothAngleDeg` (default 2.0 deg), `smoothFillets` (default
+  true; `--no-smooth-fillets` clears it).
 - Eleven `Result` fields: `smoothPlanes`, `smoothCylinders`, `smoothFillets`,
   `smoothDistinctRadii`, `smoothRejected`, `smoothFacetFaces`,
   `facesAfterSmooth`, `smoothSkippedComponents`, `smoothMaxDevMM`,
@@ -33,6 +39,12 @@ Optional analytic-surface recovery behind `--smooth`. No tag, no release.
   present and default to zero; RESULT `smooth*` keys are spliced only when
   `smooth == true`, appended after `warnings` (omitted, never zero-valued,
   on the off path).
+- Five `smoothBuilt*` fields (`smoothBuiltPlanes`, `smoothBuiltCylinders`,
+  `smoothBuiltFillets`, `smoothBuiltComponents`, `smoothRevertedComponents`)
+  counting post-unify file-truth census on components that delivered cylinders.
+- Smooth-on acceptance gates in `tests/gates/run_gates.py` + `smooth_on.py`
+  (G0.2, G0.3, G2, G2.5, G3, G4.4, G5, R-ladder, calibration) with a **parked**
+  mechanism for documented reds (`--unpark` to surface honest fails).
 - Documented D6.4 limitations: a regular N≥6 prism (e.g. a hex socket) **is**
   recovered as a cylinder; a symmetric 45° chamfer **is** recovered as a
   fillet; an asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
@@ -41,8 +53,11 @@ Optional analytic-surface recovery behind `--smooth`. No tag, no release.
 - Engine version string is `1.1.0-pre` (`STL2STEP_VERSION_*` macros). CMake
   `project(... VERSION …)` is owned separately and is not part of this
   changelog entry.
-- **`--smooth` off is byte-identical to 1.0.0** (STEP + RESULT), measured by
+- **Verbatim mode is byte-identical to 1.0.0** (STEP + RESULT), measured by
   gate G0.1 at 22/22 on every corpus fixture.
+- README and AGENTS.md present Verbatim/TrueForm by name, including honest
+  real-world numbers (127/583 cylinders built on Body11) and a KNOWN-GAP pointer
+  to `tests/diag/body11/KNOWN-GAP.md`.
 
 ## [1.0.0]
 

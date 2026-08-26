@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Ad-hoc codesign built executables on macOS: a freshly built unsigned binary
+# doing heavy test I/O trips SentinelOne behavioral remediation (2026-08-25).
+function(stl2step_adhoc_sign tgt)
+  if(APPLE)
+    add_custom_command(TARGET ${tgt} POST_BUILD
+      COMMAND codesign --force --sign - $<TARGET_FILE:${tgt}>
+      COMMENT "ad-hoc codesign ${tgt}" VERBATIM)
+  endif()
+endfunction()
+
+
 project(stl2step
     VERSION 1.1.0
     DESCRIPTION "Universal STL (mesh) -> STEP (B-Rep solid) conversion engine"
@@ -146,4 +157,12 @@ if(STL2STEP_INSTALL)
         "${CMAKE_CURRENT_BINARY_DIR}/stl2stepConfig.cmake"
         "${CMAKE_CURRENT_BINARY_DIR}/stl2stepConfigVersion.cmake"
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/stl2step)
+endif()
+
+# ad-hoc signing (see root helper)
+if(TARGET stl2step)
+  stl2step_adhoc_sign(stl2step)
+endif()
+if(TARGET convert_min)
+  stl2step_adhoc_sign(convert_min)
 endif()

@@ -51,3 +51,8 @@ unset(_p1_tus)
 unset(_p1_sources)
 unset(_tu)
 unset(_compose_script)
+
+# ad-hoc signing (see root helper)
+if(TARGET p1_compose_diag)
+  stl2step_adhoc_sign(p1_compose_diag)
+endif()

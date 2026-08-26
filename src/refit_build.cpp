@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <string>
 #include <utility>
@@ -315,6 +316,25 @@ double meshTolCap(const MeshView& mv, const Region* r) {
             c = std::max(c, r->radius * (1.0 - std::cos(kPi / 4.0)));
     }
     return c * 1.001 + Precision::Confusion();
+}
+
+// Same derivation as refit_segment.cpp DerivedTols::epsPlane (frozen TU).
+double derivedEpsPlane(const MeshView& mv) {
+    const double diag = mv.diag > 0.0 ? mv.diag : 1.0;
+    const double epsMesh = std::max(std::max(mv.weldTol, 1e-4 * diag), 1e-3);
+    return std::max(std::max(epsMesh, mv.sewTol), 0.02);
+}
+
+// Snap budget for an accepted IntAna / constructed curve. Floor is SPEC-F2
+// max(sewTol, region.maxVertexDev, epsPlane). Ceiling is pickIntAna's
+// wrong-branch gate (max(sewTol*50, 1 mm)): a curve we kept is allowed
+// that residual. Does not move shared verts; only bumps tolerance.
+double analyticSnapCap(const MeshView& mv, const Region* A, const Region* B) {
+    double c = std::max(meshTolCap(mv, A), meshTolCap(mv, B));
+    if (A) c = std::max(c, A->maxVertexDev);
+    if (B) c = std::max(c, B->maxVertexDev);
+    c = std::max(c, derivedEpsPlane(mv));
+    return c;
 }
 
 // F4: absorb sagitta in edge/vertex tolerance, but NEVER inflate a shared
@@ -643,12 +663,35 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
     return {};
 }
 
+TopoDS_Edge makeFullCircle(const gp_Circ& circ, const TopoDS_Vertex& V);
+TopoDS_Edge makeFullEllipse(const gp_Elips& el, const TopoDS_Vertex& V);
+
+// SPEC-F2: MakeEdge from projected parameters on the IntAna curve (chain is
+// selector). Bypasses BRepBuilderAPI_MakeEdge's PointProjectionFailed when
+// the vertex sits outside its current tolerance but on an accepted curve.
+TopoDS_Edge bindEdgeByParam(const Handle(Geom_Curve)& gc, const TopoDS_Vertex& v1,
+                            const TopoDS_Vertex& v2, double p1, double p2) {
+    if (gc.IsNull() || v1.IsNull() || v2.IsNull()) return {};
+    try {
+        BRepBuilderAPI_MakeEdge me(gc, v1, v2, p1, p2);
+        if (me.IsDone()) return me.Edge();
+    } catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
 TopoDS_Edge makeEdgeFromCurve(const AnalyticCurve& c, const TopoDS_Vertex& v1,
                               const TopoDS_Vertex& v2, bool closedFull) {
     try {
         if (c.kind == AnalyticCurve::Lin) {
             BRepBuilderAPI_MakeEdge me(c.lin, v1, v2);
             if (me.IsDone()) return me.Edge();
+            const double p1 = ElCLib::Parameter(c.lin, BRep_Tool::Pnt(v1));
+            const double p2 = ElCLib::Parameter(c.lin, BRep_Tool::Pnt(v2));
+            if (std::fabs(p1 - p2) <= Precision::Confusion()) return {};
+            Handle(Geom_Line) gl = new Geom_Line(c.lin);
+            TopoDS_Edge pe = bindEdgeByParam(gl, v1, v2, p1, p2);
+            if (!pe.IsNull()) return pe;
         } else if (c.kind == AnalyticCurve::Circ) {
             if (closedFull || v1.IsSame(v2)) {
                 BRepBuilderAPI_MakeEdge me(c.circ, v1, v1);
@@ -656,7 +699,6 @@ TopoDS_Edge makeEdgeFromCurve(const AnalyticCurve& c, const TopoDS_Vertex& v1,
                 BRepBuilderAPI_MakeEdge me2(c.circ);
                 if (me2.IsDone()) return me2.Edge();
             } else {
-                // Mesh chain is the selector: pick the arc whose midpoint matches the chain.
                 BRepBuilderAPI_MakeEdge me(c.circ, v1, v2);
                 if (me.IsDone()) return me.Edge();
             }
@@ -725,6 +767,55 @@ TopoDS_Edge makeArc(const gp_Circ& circ, const TopoDS_Vertex& vA, const TopoDS_V
             BRepBuilderAPI_MakeEdge me(mk.Value(), vA, vB);
             if (me.IsDone()) return me.Edge();
         }
+    } catch (const Standard_Failure&) {
+    }
+    return TopoDS_Edge();
+}
+
+// ME_CYLPLN_ELLIPSE_PROJ: same mid-vertex selector as makeArc, on the IntAna
+// ellipse. Open arcs keep the chain as the selector.
+TopoDS_Edge makeEllipseArc(const gp_Elips& el, const TopoDS_Vertex& vA, const TopoDS_Vertex& vB,
+                           const gp_Pnt& midHint) {
+    const double twopi = 2.0 * kPi;
+    auto wrap = [&](double t) {
+        while (t < 0.0) t += twopi;
+        while (t >= twopi) t -= twopi;
+        return t;
+    };
+    try {
+        double p1 = wrap(ElCLib::Parameter(el, BRep_Tool::Pnt(vA)));
+        double p2 = wrap(ElCLib::Parameter(el, BRep_Tool::Pnt(vB)));
+        double pm = wrap(ElCLib::Parameter(el, midHint));
+        double df = p2 - p1;
+        while (df <= 0.0) df += twopi;
+        double dm = pm - p1;
+        while (dm < 0.0) dm += twopi;
+        Handle(Geom_Ellipse) ge = new Geom_Ellipse(el);
+        BRep_Builder B;
+        TopoDS_Edge e;
+        B.MakeEdge(e, ge, Precision::Confusion());
+        if (dm <= df + 1e-9) {
+            B.Add(e, vA.Oriented(TopAbs_FORWARD));
+            B.Add(e, vB.Oriented(TopAbs_REVERSED));
+            B.Range(e, p1, p1 + df);
+            B.UpdateVertex(vA, p1, e, std::max(BRep_Tool::Tolerance(vA), Precision::Confusion()));
+            B.UpdateVertex(vB, p1 + df, e, std::max(BRep_Tool::Tolerance(vB), Precision::Confusion()));
+        } else {
+            const double db = twopi - df;
+            const double t0 = wrap(p1 - db);
+            B.Add(e, vB.Oriented(TopAbs_FORWARD));
+            B.Add(e, vA.Oriented(TopAbs_REVERSED));
+            B.Range(e, t0, t0 + db);
+            B.UpdateVertex(vB, t0, e, std::max(BRep_Tool::Tolerance(vB), Precision::Confusion()));
+            B.UpdateVertex(vA, t0 + db, e, std::max(BRep_Tool::Tolerance(vA), Precision::Confusion()));
+            e.Reverse();
+        }
+        return e;
+    } catch (const Standard_Failure&) {
+    }
+    try {
+        BRepBuilderAPI_MakeEdge me(el, vA, vB);
+        if (me.IsDone()) return me.Edge();
     } catch (const Standard_Failure&) {
     }
     return TopoDS_Edge();
@@ -887,6 +978,33 @@ bool rotateEdgesToVertex(std::vector<TopoDS_Edge>& edges, const TopoDS_Vertex& V
 }
 
 void setFaceOutward(TopoDS_Face& f, bool outwardNormal);
+
+bool diagPlatesEnabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_DIAG_PLATES");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f) {
+    if (!diagPlatesEnabled()) return;
+    try {
+        BRepCheck_Analyzer an(f, Standard_True);
+        std::fprintf(stderr, "DIAG_PLATE rid=%d valid=%d", rid, an.IsValid() ? 1 : 0);
+        if (!an.IsValid() && !f.IsNull()) {
+            Handle(BRepCheck_Result) res = an.Result(f);
+            if (!res.IsNull()) {
+                for (BRepCheck_ListIteratorOfListOfStatus it(res->Status()); it.More();
+                     it.Next())
+                    std::fprintf(stderr, " st=%d", (int)it.Value());
+            }
+        }
+        std::fprintf(stderr, "\n");
+    } catch (const Standard_Failure&) {
+    }
+}
 
 // BRep_Builder::MakeFace + Add keeps the input wire's TShapes (J2).
 // BRepBuilderAPI_MakeFace(plane/surf, wire) may project/copy edges and is the
@@ -1141,9 +1259,12 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             }
             innerW.push_back(iw);
         }
-        if (innersOk && makeFaceKeep(gpl, ow, innerW, r.outwardNormal, outF) &&
-            (faceIsValid(outF) || ensureFaceValid(outF, meshTolCap(mv, &r)))) {
-            return !outF.IsNull();
+        if (innersOk && makeFaceKeep(gpl, ow, innerW, r.outwardNormal, outF)) {
+            if (faceIsValid(outF) || ensureFaceValid(outF, meshTolCap(mv, &r)))
+                return !outF.IsNull();
+            diagPlateMakeFaceFail(r.id, outF);
+        } else if (innersOk) {
+            diagPlateMakeFaceFail(r.id, outF);
         }
         BRepBuilderAPI_MakeFace mf(asPlane(r), ow, Standard_True);
         if (!mf.IsDone()) return false;
@@ -1402,10 +1523,55 @@ TopoDS_Edge makeFullCircle(const gp_Circ& circ, const TopoDS_Vertex& V) {
     } catch (const Standard_Failure&) {
     }
     try {
+        BRepBuilderAPI_MakeEdge me2(circ);
+        if (me2.IsDone()) {
+            TopoDS_Edge e = me2.Edge();
+            e.Closed(Standard_True);
+            return e;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    try {
         Handle(Geom_Circle) gc = new Geom_Circle(circ);
         BRep_Builder B;
         TopoDS_Edge e;
         B.MakeEdge(e, gc, Precision::Confusion());
+        B.Add(e, V.Oriented(TopAbs_FORWARD));
+        B.Add(e, V.Oriented(TopAbs_REVERSED));
+        B.Range(e, 0.0, 2.0 * kPi);
+        e.Closed(Standard_True);
+        return e;
+    } catch (const Standard_Failure&) {
+    }
+    return TopoDS_Edge();
+}
+
+// ME_CYLPLN_DIFF_PTS_CLOSED on an ellipse: MakeEdge(elips, V, V) after
+// snapping one vertex, not two distinct projections.
+TopoDS_Edge makeFullEllipse(const gp_Elips& el, const TopoDS_Vertex& V) {
+    try {
+        BRepBuilderAPI_MakeEdge me(el, V, V);
+        if (me.IsDone()) {
+            TopoDS_Edge e = me.Edge();
+            e.Closed(Standard_True);
+            return e;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    try {
+        BRepBuilderAPI_MakeEdge me2(el);
+        if (me2.IsDone()) {
+            TopoDS_Edge e = me2.Edge();
+            e.Closed(Standard_True);
+            return e;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    try {
+        Handle(Geom_Ellipse) ge = new Geom_Ellipse(el);
+        BRep_Builder B;
+        TopoDS_Edge e;
+        B.MakeEdge(e, ge, Precision::Confusion());
         B.Add(e, V.Oriented(TopAbs_FORWARD));
         B.Add(e, V.Oriented(TopAbs_REVERSED));
         B.Range(e, 0.0, 2.0 * kPi);
@@ -1989,8 +2155,16 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         std::vector<char> collapsed(rs.chains.size(), 0);
         std::vector<ChainGeom> geom(rs.chains.size());
+        // Per-chain edge-failure ledger (DECISION §5). Producer: chain build.
+        // Consumer: J6 recoverPass 0 only — first-pass R1 enrollment on these
+        // ids cascades to zero cylinders on Body11. IA_CYLCYL_NOGEOM (cyl|cyl
+        // IntAna none) is legal polyline and is never enrolled.
+        std::vector<char> chainEdgeFail(rs.chains.size(), 0);
+        int recoverPass = 0;
+        int rounds = 0;
 
         auto rebuildCollapsed = [&]() {
+            chainEdgeFail.assign(rs.chains.size(), 0);
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 collapsed[ci] = 0;
                 geom[ci] = ChainGeom{};
@@ -2015,6 +2189,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 // analytic | analytic
                 AnalyticCurve curve;
+                WarnFn chainWarn = (recoverPass == 0 && rounds == 0) ? warn : nullptr;
                 if (ch.tangent) {
                     if (A->type == SurfType::Cylinder && B->type == SurfType::Plane)
                         curve = constructedGenerator(*A, *B);
@@ -2023,11 +2198,19 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     else if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder)
                         curve = constructedCylCylGenerator(*A, *B);
                     else
-                        curve = intersectSurfaces(*A, *B, mv, ch, sewTol, warn);
+                        curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
                 } else {
-                    curve = intersectSurfaces(*A, *B, mv, ch, sewTol, warn);
+                    curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
                 }
-                if (curve.kind == AnalyticCurve::None) continue;
+                // IntAna none: cyl|cyl is legal polyline (IA_CYLCYL_NOGEOM).
+                // plane|plane and plane|cyl misses are post-fit edge failures.
+                if (curve.kind == AnalyticCurve::None) {
+                    if ((A->type == SurfType::Plane && B->type == SurfType::Plane) ||
+                        (A->type == SurfType::Plane && B->type == SurfType::Cylinder) ||
+                        (A->type == SurfType::Cylinder && B->type == SurfType::Plane))
+                        chainEdgeFail[ci] = 1;
+                    continue;
+                }
 
                 // Terminals: open chain = first/last meshVert; closed = seam vertex (or first).
                 int ia, ib;
@@ -2045,18 +2228,18 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 if (ia < 0 || ib < 0 || (size_t)ia >= verts.size() || (size_t)ib >= verts.size())
                     continue;
+                const Region* cylR = (A->type == SurfType::Cylinder) ? A
+                                   : (B->type == SurfType::Cylinder) ? B
+                                                                     : nullptr;
+                const Region* plnR = (A->type == SurfType::Plane) ? A
+                                   : (B->type == SurfType::Plane) ? B
+                                                                 : nullptr;
                 // F1: closed360 cap circles must be V-isos of the fitted cylinder
                 // (axis + R + XDirection). IntAna's own radius/location is ~1e-7
                 // off the fitted R on live N>=12 prisms; that desyncs the 3d
                 // circle from the cylindrical surface and BRepCheck-fails the
                 // seamed face. Project onto the axis and use Region::radius.
                 if (curve.kind == AnalyticCurve::Circ) {
-                    const Region* cylR = (A->type == SurfType::Cylinder) ? A
-                                       : (B->type == SurfType::Cylinder) ? B
-                                                                         : nullptr;
-                    const Region* plnR = (A->type == SurfType::Plane) ? A
-                                       : (B->type == SurfType::Plane) ? B
-                                                                     : nullptr;
                     if (cylR) {
                         double v = gp_Vec(cylR->ax.Location(), curve.circ.Location())
                                        .Dot(cylR->ax.Direction());
@@ -2065,7 +2248,22 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         curve.circ = cylinderIsoCircle(*cylR, v);
                     }
                 }
-                const double snapCap = std::max(meshTolCap(mv, A), meshTolCap(mv, B));
+                double snapCap = analyticSnapCap(mv, A, B);
+                // ME_PLNPLN_*_PROJ: terminal-to-line residual (median 0.08 mm,
+                // p90 0.45) exceeds sewTol. Bump to residual up to the
+                // pickIntAna acceptance (1 mm) on plane|plane only — cyl
+                // snaps stay on the I4 floor so extra MakeFace fails do not
+                // eat the 127-cylinder small component.
+                if (A->type == SurfType::Plane && B->type == SurfType::Plane) {
+                    const double dA = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ia]));
+                    const double dB = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ib]));
+                    const double sew = (mv.sewTol > 0.0) ? mv.sewTol : Precision::Confusion();
+                    const double acceptCap = std::max(sew * 50.0, 1.0);
+                    snapCap = std::max(snapCap,
+                                       std::min(std::max(std::isfinite(dA) ? dA : 0.0,
+                                                         std::isfinite(dB) ? dB : 0.0),
+                                                acceptCap));
+                }
                 snapVertexToCurve(verts[(size_t)ia], curve, snapCap);
                 snapVertexToCurve(verts[(size_t)ib], curve, snapCap);
                 TopoDS_Edge e;
@@ -2089,11 +2287,21 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         }
                     }
                     e = makeArc(curve.circ, verts[(size_t)ia], verts[(size_t)ib], mid);
+                    if (e.IsNull())
+                        e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
                 } else {
                     e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
                 }
                 if (e.IsNull()) {
-                    emit(warn, "smooth: analytic MakeEdge failed — keeping mesh polyline");
+                    const bool identicLine =
+                        curve.kind == AnalyticCurve::Lin &&
+                        (ia == ib || BRep_Tool::Pnt(verts[(size_t)ia])
+                                         .Distance(BRep_Tool::Pnt(verts[(size_t)ib])) <=
+                                         Precision::Confusion());
+                    // IDENTIC_POINTS: keep polyline, do not invent an edge, do
+                    // not enroll edge-failure R1 (the chain's legal fallback).
+                    if (!identicLine) chainEdgeFail[ci] = 1;
+                    emit(chainWarn, "smooth: analytic MakeEdge failed — keeping mesh polyline");
                     continue;
                 }
                 if (full && curve.kind == AnalyticCurve::Circ && ch.meshVerts.size() >= 2) {
@@ -2195,19 +2403,20 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             return any;
         };
 
-        int recoverPass = 0;
-        int rounds = 0;
         bool unstable = false;
         std::vector<TopoDS_Face> built;
+        std::vector<int> builtRid;
         TopoDS_Shell sh;
     try_rebuild:
         rounds = 0;
         unstable = false;
         built.clear();
+        builtRid.clear();
         const int kMaxRounds = 2;
         while (true) {
             rebuildCollapsed();
             built.clear();
+            builtRid.clear();
             bool anyFail = false;
             std::vector<int> failedIds;
             std::vector<size_t> buildOrder(rs.regions.size());
@@ -2229,17 +2438,51 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     r.reject = Reject::FaceBuildFailed;
                     r.builtAs = BuiltAs::NotBuilt;
                 } else {
-                    for (auto& f : acc) built.push_back(f);
+                    for (auto& f : acc) {
+                        built.push_back(f);
+                        builtRid.push_back(r.id);
+                    }
                 }
             }
+            // Edge-failure R1 (DECISION §5). A region whose analytic reconstruction
+            // failed — MakeFace not done, or the face is BRepCheck-invalid after
+            // the projected-param / snap-cap MakeEdge path — is a post-fit
+            // failure. Explode it, uncollapse its chains, rebuild neighbours.
+            // MakeEdge-fail that still yields a BRepCheck-valid mixed face is
+            // the legal polyline fallback (IA_* empty/same, IDENTIC_POINTS)
+            // and is not exploded. Cap 2 rounds, then R2.
             if (!anyFail) break;
-            if (rounds >= kMaxRounds) {
-                unstable = true;
-                break;
-            }
-            // R1: explode failed regions, un-collapse their chains, rebuild neighbours.
+            std::sort(failedIds.begin(), failedIds.end());
+            failedIds.erase(std::unique(failedIds.begin(), failedIds.end()), failedIds.end());
             for (int id : failedIds) explodeRegion(id);
             rounds++;
+            if (rounds > kMaxRounds) {
+                // 2-round cap: leftover post-fit fails were just exploded.
+                // Rebuild once more. Remaining fails ⇒ ChainUnstable / R2.
+                rebuildCollapsed();
+                built.clear();
+                builtRid.clear();
+                anyFail = false;
+                failedIds.clear();
+                for (size_t oi : buildOrder) {
+                    Region& r = rs.regions[oi];
+                    if (regionExploded(exploded, r.id)) continue;
+                    std::vector<TopoDS_Face> acc;
+                    if (!buildOneRegion(r, acc)) {
+                        anyFail = true;
+                        failedIds.push_back(r.id);
+                        r.reject = Reject::FaceBuildFailed;
+                        r.builtAs = BuiltAs::NotBuilt;
+                    } else {
+                        for (auto& f : acc) {
+                            built.push_back(f);
+                            builtRid.push_back(r.id);
+                        }
+                    }
+                }
+                if (anyFail) unstable = true;
+                break;
+            }
         }
 
         if (unstable) {
@@ -2249,9 +2492,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             restoreShared();
             explodeAll();
             built.clear();
+            builtRid.clear();
             for (size_t k = 0; k < mv.nTri; k++) {
                 TopoDS_Face f = makeFacet(mv, verts, meshE, edgeOk, k);
-                if (!f.IsNull()) built.push_back(f);
+                if (!f.IsNull()) {
+                    built.push_back(f);
+                    builtRid.push_back(-1);
+                }
             }
             if (built.empty()) {
                 out.clear();
@@ -2272,6 +2519,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (!f.IsNull()) {
                     ensureFaceValid(f, meshTolCap(mv, nullptr));
                     built.push_back(f);
+                    builtRid.push_back(exp ? rid : -1);
                 }
             }
         }
@@ -2404,19 +2652,43 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             if (recoverPass < 1) {
                 bool did = false;
-                if (!keepCyl)
-                    did = explodeAll();
-                else {
-                    // Keep Seamed360 holes; drop junk partials (S03 cone
-                    // fragments) that left the shell open.
-                    bool any = false;
-                    for (const Region& rg : rs.regions) {
-                        if (regionExploded(exploded, rg.id)) continue;
-                        if (rg.type != SurfType::Cylinder || rg.closed360) continue;
-                        explodeRegion(rg.id);
-                        any = true;
+                // J6 deferred edge-failure R1: explode regions whose analytic
+                // chains failed (ledger from rebuildCollapsed). Not enrolled on
+                // the MakeFace R1 pass — that blanket cascade zeroed cylinders.
+                {
+                    std::vector<int> edgeFailIds;
+                    auto addId = [&](int id) {
+                        if (id < 0 || regionExploded(exploded, id)) return;
+                        if (std::find(edgeFailIds.begin(), edgeFailIds.end(), id) ==
+                            edgeFailIds.end())
+                            edgeFailIds.push_back(id);
+                    };
+                    for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+                        if (!chainEdgeFail[ci]) continue;
+                        addId(rs.chains[ci].regA);
+                        addId(rs.chains[ci].regB);
                     }
-                    did = any;
+                    std::sort(edgeFailIds.begin(), edgeFailIds.end());
+                    for (int id : edgeFailIds) {
+                        explodeRegion(id);
+                        did = true;
+                    }
+                }
+                if (!did) {
+                    if (!keepCyl)
+                        did = explodeAll();
+                    else {
+                        // Keep Seamed360 holes; drop junk partials (S03 cone
+                        // fragments) that left the shell open.
+                        bool any = false;
+                        for (const Region& rg : rs.regions) {
+                            if (regionExploded(exploded, rg.id)) continue;
+                            if (rg.type != SurfType::Cylinder || rg.closed360) continue;
+                            explodeRegion(rg.id);
+                            any = true;
+                        }
+                        did = any;
+                    }
                 }
                 if (did) {
                     recoverPass++;
@@ -2431,7 +2703,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             return false;
         }
 
-        if (recoverPass < 1 && !shellIsValid(sh)) {
+        if (recoverPass < 2 && !shellIsValid(sh)) {
             bool hasSeamed = false;
             for (const Region& rg : rs.regions) {
                 if (regionExploded(exploded, rg.id)) continue;
@@ -2440,11 +2712,26 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     hasSeamed = true;
             }
             bool any = false;
-            if (hasSeamed) {
+            if (hasSeamed && recoverPass < 1) {
                 for (const Region& rg : rs.regions) {
                     if (regionExploded(exploded, rg.id)) continue;
                     if (rg.type != SurfType::Cylinder || rg.closed360) continue;
                     explodeRegion(rg.id);
+                    any = true;
+                }
+            } else {
+                // Closed but BRepCheck-invalid: explode the invalid analytic
+                // faces (post-fit failure), uncollapse, rebuild neighbours.
+                std::vector<char> seen((size_t)std::max(0, maxId) + 1, 0);
+                for (size_t i = 0; i < built.size(); i++) {
+                    int id = (i < builtRid.size()) ? builtRid[i] : -1;
+                    if (id < 0 || (size_t)id >= seen.size() || seen[(size_t)id]) continue;
+                    if (regionExploded(exploded, id)) continue;
+                    if (faceIsValid(built[i])) continue;
+                    const Region* rr = regionById(rs, id);
+                    if (rr && rr->type == SurfType::Cylinder) continue;
+                    explodeRegion(id);
+                    seen[(size_t)id] = 1;
                     any = true;
                 }
             }

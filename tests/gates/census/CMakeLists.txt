@@ -93,3 +93,11 @@ add_test(NAME census_error
     COMMAND "${CMAKE_COMMAND}"
         -DCENSUS=$<TARGET_FILE:stl2step_census>
         -P "${CMAKE_CURRENT_SOURCE_DIR}/check_error.cmake")
+
+# ad-hoc signing (see root helper)
+if(TARGET stl2step_census)
+  stl2step_adhoc_sign(stl2step_census)
+endif()
+if(TARGET stl2step_census_test)
+  stl2step_adhoc_sign(stl2step_census_test)
+endif()

@@ -35,26 +35,24 @@ part.stl  ──►  weld ─► split into solids ─► build B-Rep (parallel)
 
 ## What it is and isn't
 
-A mesh carries no analytic geometry of its own. By default stl2step is faithful
-to the tessellation; analytic recovery is an **opt-in** flag.
+stl2step exposes two named conversion modes:
 
-- **Flat faces** are recovered exactly — coplanar triangles merge into one planar
-  face with proper edges. This is the big win for downstream CAM.
-- **`--smooth` is OFF by default for the whole 1.x line.** Curved surfaces stay
-  *faceted* at the STL's resolution. With the flag off, STEP + RESULT are
-  **byte-identical to 1.0.0** — measured by gate G0.1 at 22/22 on every corpus
-  fixture.
-- **`--smooth` on** recovers, in v1: **planes**, **right circular cylinders**
-  (holes/bosses, N ≥ 6), and **plane–plane fillet strips** (1–3 rows), emitted as
-  true `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. It does
-  **not** recover cones, spheres, or tori (reported, left faceted), does not
-  reconstruct freeform/NURBS, and **skips refit on any component that needs the
-  sewing repair path**.
-- **Documented limitations, not bugs.** A regular N≥6 prism (e.g. a hex socket)
-  **is** recovered as a cylinder. A symmetric 45° chamfer **is** recovered as a
-  fillet. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
-- Output is always written in **millimetres**. STL is unitless, so tell the
-  engine the input units (see `--units` / `Options::inchInput` / `Options::scale`).
+| Mode | CLI | What you get |
+|---|---|---|
+| **Verbatim** (default) | `--engine verbatim` / `--no-smooth` | Byte-faithful tessellation. Curved surfaces stay faceted at the STL resolution. STEP + RESULT are **byte-identical to 1.0.0** (gate G0.1, 22/22). |
+| **TrueForm** (premium) | `--engine trueform` / `--smooth` / `--refit` | Analytic recovery: **planes**, **right circular cylinders** (N ≥ 6), and **plane–plane fillet strips** (1–3 rows) as `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. |
+
+**Verbatim is always safe.** TrueForm runs per component; any component that cannot close analytically falls back to Verbatim for that body only — the file is still written, never corrupted.
+
+On a real CAD export (Body11 benchmark: 15,300 triangles, 583 cylinders recognised by segmentation, 419 in the legacy recognition counter), TrueForm today builds **127** of those as analytic cylinders in the written STEP while keeping 2 closed solids and exact volume. The remaining recognition gap and twelve residual free-edge classes are documented in [`tests/diag/body11/KNOWN-GAP.md`](tests/diag/body11/KNOWN-GAP.md) — not silent regressions.
+
+Flat faces are recovered exactly in both modes — coplanar triangles merge into single planar faces. This is the main win for downstream CAM even without TrueForm.
+
+TrueForm does **not** recover cones, spheres, or tori (reported, left faceted), does not reconstruct freeform/NURBS, and **skips refit on any component that needs the sewing repair path**.
+
+**Documented limitations, not bugs.** A regular N≥6 prism (e.g. a hex socket) **is** recovered as a cylinder. A symmetric 45° chamfer **is** recovered as a fillet. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
+
+Output is always written in **millimetres**. STL is unitless, so tell the engine the input units (see `--units` / `Options::inchInput` / `Options::scale`).
 
 ---
 
@@ -118,11 +116,12 @@ The CLI lands at `build/stl2step` (`build/Release/stl2step.exe` on Windows).
 ## Command-line usage
 
 ```sh
-stl2step part.stl                         # writes part.step next to the input
+stl2step part.stl                         # writes part.step next to the input (Verbatim)
 stl2step part.stl -o out/part.step        # explicit output
+stl2step part.stl --engine trueform       # TrueForm analytic recovery
 stl2step part.stl --units in              # STL modelled in inches -> scaled to mm
 stl2step part.stl --no-verify             # fastest: skip the re-read self-check
-stl2step part.stl --smooth                # recover planes, cylinders, fillets
+stl2step part.stl --smooth                # alias for --engine trueform
 stl2step part.stl --schema AP242 --threads 4
 ```
 
@@ -155,9 +154,10 @@ Run `stl2step --help` for the full option list.
 | `--no-solid` | Emit shells only |
 | `--force-sew` | Route every body through the repair path |
 | `--no-verify` | Skip re-reading the output (see below) |
-| `--smooth` | Recognise radii and flat regions; emit analytic surfaces (default OFF for 1.x) |
-| `--refit` | Alias for `--smooth` |
-| `--no-smooth` | Keep faceted mesh surfaces (default) |
+| `--engine verbatim\|trueform` | Conversion mode (default `verbatim`). `trueform` = analytic recovery |
+| `--smooth` | Alias for `--engine trueform` |
+| `--refit` | Alias for `--engine trueform` |
+| `--no-smooth` | Alias for `--engine verbatim` |
 | `--smooth-tol <mm>` | Surface-fit tolerance in mm (default: auto) |
 | `--smooth-angle <deg>` | Near-flat normal gate for segmentation (default 2.0) |
 | `--no-smooth-fillets` | Skip recovery of fillet strips as cylinders |

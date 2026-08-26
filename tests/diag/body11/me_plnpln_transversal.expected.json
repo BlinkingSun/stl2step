@@ -1,0 +1,5 @@
+{
+  "class": "ME_PLNPLN_TRANSVERSAL_PROJ",
+  "today": "closed mesh, --smooth emits many 'smooth: analytic MakeEdge failed — keeping mesh polyline' (plane|plane PointProjectionFailed; snapCap = sewTol)",
+  "should": "plane|plane chains collapse to IntAna gp_Lin; terminals project within max(epsPlane, maxVertexDev); no whole-component R2 from this class alone"
+}

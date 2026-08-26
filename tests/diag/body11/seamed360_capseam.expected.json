@@ -1,0 +1,5 @@
+{
+  "class": "SEAMED360_BREPCHECK_INVALID",
+  "today": "nSides=44 hole walls + caps: 'seamed360: BRepCheck invalid on seamed face'. Body11 also has 1× 'cap wire does not pass seam vertex' on c0 rid 0.",
+  "should": "§2.4 ladder Seamed360 → TwoHalves → R1 explode that region only. A full 360 hole that passes BRepCheck stays one seamed face (editability)."
+}
