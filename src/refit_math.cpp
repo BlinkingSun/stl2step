@@ -516,6 +516,269 @@ bool gaussMapAxis(const MeshView& mv, const std::vector<int>& tris, gp_Dir& axis
     return true;
 }
 
+double radiusFromChordLength(double chordLen, int nSides) {
+    if (nSides < 3 || !(chordLen > 0.0) || !std::isfinite(chordLen)) return 0.0;
+    const double s = std::sin(kPi / static_cast<double>(nSides));
+    if (s <= 1e-15) return 0.0;
+    const double r = chordLen / (2.0 * s);
+    return (std::isfinite(r) && r > 0.0) ? r : 0.0;
+}
+
+double circumradiusFromInscribed(double rInscribed, int nSides) {
+    if (nSides < 3 || !(rInscribed > 0.0) || !std::isfinite(rInscribed)) return 0.0;
+    const double c = std::cos(kPi / static_cast<double>(nSides));
+    if (c <= 1e-15) return 0.0;
+    const double r = rInscribed / c;
+    return (std::isfinite(r) && r > 0.0) ? r : 0.0;
+}
+
+double radiusFromChordSagitta(double halfChord, double sagitta) {
+    if (!(sagitta > 1e-15) || !(halfChord >= 0.0) || !std::isfinite(halfChord)
+        || !std::isfinite(sagitta))
+        return 0.0;
+    const double r = (halfChord * halfChord + sagitta * sagitta) / (2.0 * sagitta);
+    return (std::isfinite(r) && r > 0.0) ? r : 0.0;
+}
+
+double medianOfSorted(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    if (n % 2 == 1) return v[n / 2];
+    return 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+gp_XYZ triNormalUnnorm(const MeshView& mv, int localTri) {
+    gp_XYZ a, b, c;
+    if (!triCorners(mv, localTri, a, b, c)) return gp_XYZ(0, 0, 0);
+    return (b - a).Crossed(c - a);
+}
+
+int estimateFullCircleSides(const MeshView& mv, const std::vector<int>& tris) {
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.empty()) return 0;
+
+    std::vector<double> phis;
+    for (int t : ids) {
+        for (int u : ids) {
+            if (u <= t) continue;
+            const int g = mv.compTris[t];
+            const int gu = mv.compTris[u];
+            const int* T = mv.tris[g];
+            const int* U = mv.tris[gu];
+            bool share = false;
+            for (int k = 0; k < 3 && !share; k++) {
+                const int gv0 = T[k];
+                const int gv1 = T[(k + 1) % 3];
+                for (int j = 0; j < 3; j++) {
+                    const int a = U[j];
+                    const int b = U[(j + 1) % 3];
+                    if ((a == gv0 && b == gv1) || (a == gv1 && b == gv0)) {
+                        share = true;
+                        break;
+                    }
+                }
+            }
+            if (!share) continue;
+            const gp_XYZ n0 = triNormalUnnorm(mv, t);
+            const gp_XYZ n1 = triNormalUnnorm(mv, u);
+            const double m0 = n0.Modulus();
+            const double m1 = n1.Modulus();
+            if (m0 < 1e-15 || m1 < 1e-15) continue;
+            const double dot = (n0 / m0).Dot(n1 / m1);
+            const double phi = std::acos(std::clamp(dot, -1.0, 1.0));
+            if (phi > 0.05 && phi < kPi - 0.05) phis.push_back(phi);
+        }
+    }
+    if (phis.empty()) return 0;
+    const double med = medianOfSorted(phis);
+    if (med < 1e-6) return 0;
+    return std::max(3, static_cast<int>(std::llround(kTwoPi / med)));
+}
+
+bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
+                          const gp_Dir& axis, gp_Pnt& center, double& radius,
+                          int nSides, double spanRad) {
+    if (!(radius > 0.0) || !std::isfinite(radius) || nSides < 3) return false;
+    // Coarse Fusion band only — corpus fixtures stay on the Pratt vertex fit.
+    if (mv.nTri < 500 || mv.nTri > 1200) return false;
+
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 2) return false;
+
+    gp_XYZ aw(axis.XYZ());
+    const double am = aw.Modulus();
+    if (am < 1e-15) return false;
+    aw.Divide(am);
+    gp_XYZ u, v;
+    if (!axisFrame(aw, u, v)) return false;
+
+    const gp_XYZ c0(center.X(), center.Y(), center.Z());
+
+    struct Vtx {
+        gp_XYZ p;
+        double ang;
+        double rad;
+    };
+    std::vector<Vtx> ring;
+    {
+        std::vector<int> gids;
+        for (int t : ids) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            const int g = mv.compTris[t];
+            for (int k = 0; k < 3; k++) gids.push_back(mv.tris[g][k]);
+        }
+        std::sort(gids.begin(), gids.end());
+        gids.erase(std::unique(gids.begin(), gids.end()), gids.end());
+        ring.reserve(gids.size());
+        for (int gi : gids) {
+            const gp_XYZ p = mv.pts[gi];
+            const gp_XYZ d = p - c0;
+            const gp_XYZ radial = d - aw * d.Dot(aw);
+            const double rr = radial.Modulus();
+            if (!(rr > 0.0)) continue;
+            const double ang = std::atan2(radial.Dot(v), radial.Dot(u));
+            ring.push_back({p, ang, rr});
+        }
+    }
+    if (ring.size() < 3) return false;
+    std::sort(ring.begin(), ring.end(),
+              [](const Vtx& a, const Vtx& b) { return a.ang < b.ang; });
+
+    const int nDihedral = estimateFullCircleSides(mv, ids);
+    int nEff = nDihedral > 0 ? nDihedral : nSides;
+    nEff = std::clamp(nEff, 4, 48);
+    const double segAng = kTwoPi / static_cast<double>(nEff);
+    const double chordNom = 2.0 * radius * std::sin(kPi / static_cast<double>(nEff));
+
+    std::vector<double> chordRadii;
+    const size_t nV = ring.size();
+    size_t skipEdge = nV;
+    if (nV >= 3) {
+        double maxGap = -1.0;
+        for (size_t i = 0; i < nV; i++) {
+            const size_t j = (i + 1) % nV;
+            double gap = ring[j].ang - ring[i].ang;
+            if (j == 0) gap = (ring[0].ang + kTwoPi) - ring[nV - 1].ang;
+            if (gap > maxGap) {
+                maxGap = gap;
+                skipEdge = i;
+            }
+        }
+    }
+
+    // Mesh-adjacent ring chords only (angular sort skips facets on partial arcs).
+    std::vector<char> inTri(static_cast<size_t>(mv.nTri), 0);
+    for (int t : ids)
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inTri[static_cast<size_t>(t)] = 1;
+    for (int t : ids) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        const int g = mv.compTris[t];
+        const int* T = mv.tris[g];
+        for (int k = 0; k < 3; k++) {
+            const int gv0 = T[k];
+            const int gv1 = T[(k + 1) % 3];
+            for (int uTri : ids) {
+                if (uTri == t) continue;
+                if (!inTri[static_cast<size_t>(uTri)]) continue;
+                const int gu = mv.compTris[uTri];
+                const int* U = mv.tris[gu];
+                bool share = false;
+                for (int j = 0; j < 3; j++) {
+                    const int a = U[j];
+                    const int b = U[(j + 1) % 3];
+                    if ((a == gv0 && b == gv1) || (a == gv1 && b == gv0)) {
+                        share = true;
+                        break;
+                    }
+                }
+                if (!share) continue;
+                const gp_XYZ p0 = mv.pts[gv0];
+                const gp_XYZ p1 = mv.pts[gv1];
+                const double chord = (p1 - p0).Modulus();
+                if (!(chord > 0.0)) continue;
+                const gp_XYZ d0 = p0 - c0;
+                const gp_XYZ d1 = p1 - c0;
+                const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                const double rad0 = r0.Modulus();
+                const double rad1 = r1.Modulus();
+                if (!(rad0 > 0.0) || !(rad1 > 0.0)) continue;
+                const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                double dAng = std::abs(ang1 - ang0);
+                if (dAng > kPi) dAng = kTwoPi - dAng;
+                // Skip axial seams (Δθ ≈ 0) and near-diameter spans.
+                if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                if (std::abs(rad0 - rad1) > 0.05 * std::max(rad0, rad1)) continue;
+                const double s = std::sin(0.5 * dAng);
+                if (s <= 1e-9) continue;
+                const double rChord = chord / (2.0 * s);
+                if (rChord > radius * 0.90 && rChord < radius * 1.42) chordRadii.push_back(rChord);
+            }
+        }
+    }
+
+    // Fallback: angularly consecutive vertices when no internal mesh chords found.
+    if (chordRadii.empty()) {
+        for (size_t i = 0; i < nV; i++) {
+            if (i == skipEdge) continue;
+            const size_t j = (i + 1) % nV;
+            double dAng = ring[j].ang - ring[i].ang;
+            if (j == 0) dAng = (ring[0].ang + kTwoPi) - ring[nV - 1].ang;
+            if (dAng < 1e-6 || dAng >= kPi) continue;
+            const double chord = (ring[j].p - ring[i].p).Modulus();
+            if (!(chord > 0.0)) continue;
+            const double halfAng = 0.5 * dAng;
+            const double s = std::sin(halfAng);
+            if (s <= 1e-9) continue;
+            const double rChord = chord / (2.0 * s);
+            if (rChord > radius * 0.90 && rChord < radius * 1.42) chordRadii.push_back(rChord);
+        }
+    }
+
+    const double rInscribed = circumradiusFromInscribed(radius, nEff);
+    double rPick = radius;
+
+    if (chordRadii.size() >= 1) {
+        const double rChordMed = medianOfSorted(chordRadii);
+        if (rChordMed > radius) rPick = rChordMed;
+    }
+    if (rInscribed > rPick * 1.003 && rInscribed <= radius * 1.20 && nEff <= 12)
+        rPick = std::max(rPick, rInscribed);
+
+    if (rPick <= radius * 1.01) {
+        (void)spanRad;
+        (void)segAng;
+        (void)chordNom;
+        return true;
+    }
+
+    double cap = radius * 1.25;
+    if (!chordRadii.empty()) cap = std::max(cap, rPick * 1.02);
+    if (rPick > cap) rPick = cap;
+    radius = rPick;
+
+    std::vector<double> xs(ring.size()), ys(ring.size());
+    for (size_t i = 0; i < ring.size(); i++) {
+        const gp_XYZ d = ring[i].p - c0;
+        xs[i] = d.Dot(u);
+        ys[i] = d.Dot(v);
+    }
+    double cx = 0.0, cy = 0.0, r2 = 0.0;
+    if (prattFit2(xs.data(), ys.data(), ring.size(), cx, cy, r2)) {
+        const gp_XYZ cNew = c0 + cx * u + cy * v;
+        if (finite3(cNew.X(), cNew.Y(), cNew.Z()) && r2 > 0.0) {
+            center = gp_Pnt(cNew.X(), cNew.Y(), cNew.Z());
+            if (r2 > radius * 0.97 && r2 < radius * 1.06) radius = 0.5 * (radius + r2);
+        }
+    }
+    (void)spanRad;
+    return std::isfinite(radius) && radius > 0.0;
+}
+
 double chordSagitta(double radius, int nSides) {
     if (nSides < 1 || !std::isfinite(radius)) return 0.0;
     return radius * (1.0 - std::cos(kPi / static_cast<double>(nSides)));

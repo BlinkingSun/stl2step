@@ -741,17 +741,25 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
         return ev;
     }
     ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+    const double rBeforeRefine = ev.radius;
+    if (coarseFusionBand(mv) && ev.d2.nSides >= 3 && !ev.d2.spanReject) {
+        refineCylinderRadius(mv, tris, axis, ev.center, ev.radius, ev.d2.nSides, ev.d2.span);
+        ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+    }
     if (ev.d2.spanReject) {
         ev.failGate = Gate::G1;
         return ev;
     }
     const bool coarse = coarseFusionBand(mv);
+    const double lift = std::max(0.0, ev.radius - rBeforeRefine);
     if (coarse) {
         // G2: vertices sit on a chordal ring; coarse N≥6 meshes need at least
         // chord-sagitta slack, not just 1%R (handle-lock R≈16–20 fails at |S|=2).
         double g2Tol = tol.epsCylAccept(ev.radius);
         const int nEstSides = std::max(ev.d2.nSides, std::max(6, (int)tris.size()));
         g2Tol = std::max(g2Tol, chordSagitta(ev.radius, nEstSides));
+        if (lift > 0.0)
+            g2Tol = std::max(g2Tol, lift * 1.15 + chordSagitta(ev.radius, nEstSides));
         if (tris.size() <= 8)
             g2Tol = std::max(g2Tol, epsCylRing(tol, ev.radius));
         if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol) {
@@ -765,7 +773,8 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
     }
     const double delta = chordSagitta(ev.radius, ev.d2.nSides);
     // G3: nSides from a tiny arc span is unstable — skip until span ≥ ~20°.
-    if (delta > tol.epsMesh && (!coarse || ev.d2.span >= 0.35)) {
+    // Chord-corrected radii shift centroid residuals; skip G3 on coarse lift.
+    if (delta > tol.epsMesh && (!coarse || (ev.d2.span >= 0.35 && lift <= 0.0))) {
         const double s = medianCentroidResidual(mv, tris, axis, ev.center, ev.radius);
         if (s < DerivedTols::kG3Lo * delta || s > DerivedTols::kG3Hi * delta)
             ev.failGate = Gate::G3;
@@ -824,6 +833,84 @@ void fillCylinderRegion(const MeshView& mv, const CommitEval& ev, const gp_Dir& 
         }
     }
     reg.rmsVertexDev = nV > 0 ? std::sqrt(sumSq / nV) : 0.0;
+}
+
+double axisLineSeparation(const gp_Ax3& a, const gp_Ax3& b) {
+    const gp_Vec d(a.Location(), b.Location());
+    const gp_Vec ax(a.Direction());
+    return ax.Crossed(d).Magnitude();
+}
+
+bool regionsShareMeshEdge(const MeshView& mv, const Region& a, const Region& b) {
+    for (int t : a.tris) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        const int g = mv.compTris[t];
+        const int* T = mv.tris[g];
+        for (int k = 0; k < 3; k++) {
+            const int gv0 = T[k];
+            const int gv1 = T[(k + 1) % 3];
+            for (int u : b.tris) {
+                if (u < 0 || static_cast<size_t>(u) >= mv.nTri) continue;
+                const int gu = mv.compTris[u];
+                const int* U = mv.tris[gu];
+                for (int j = 0; j < 3; j++) {
+                    const int a0 = U[j];
+                    const int a1 = U[(j + 1) % 3];
+                    if ((a0 == gv0 && a1 == gv1) || (a0 == gv1 && a1 == gv0)) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool coaxialCylinderMergeable(const Region& a, const Region& b, const DerivedTols& tol,
+                                bool adjacent) {
+    if (a.type != SurfType::Cylinder || b.type != SurfType::Cylinder) return false;
+    if (!(a.radius > 0.0) || !(b.radius > 0.0)) return false;
+    const gp_Dir da = a.ax.Direction();
+    const gp_Dir db = b.ax.Direction();
+    if (std::abs(da.Dot(db)) < 0.995) return false;
+    const double sep = axisLineSeparation(a.ax, b.ax);
+    const double rTol = std::max(tol.epsPlane, 0.08 * std::min(a.radius, b.radius));
+    if (sep > rTol) return false;
+    const double rAvg = 0.5 * (a.radius + b.radius);
+    const double rRel = std::abs(a.radius - b.radius) / std::max(rAvg, 1e-6);
+    if (rRel < 0.12) return true;
+    // Phantom partial fits on the same bore: adjacent, coaxial, complementary radii.
+    return adjacent && rRel < 0.28;
+}
+
+void mergeCoaxialCylinders(const MeshView& mv, const DerivedTols& tol, SegmentWork& work) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 0; i < work.accepted.size(); ++i) {
+            Region& A = work.accepted[i];
+            if (A.type != SurfType::Cylinder) continue;
+            for (size_t j = i + 1; j < work.accepted.size(); ++j) {
+                const Region& B = work.accepted[j];
+                const bool adjacent = regionsShareMeshEdge(mv, A, B);
+                if (!coaxialCylinderMergeable(A, B, tol, adjacent)) continue;
+                if (!adjacent && axisLineSeparation(A.ax, B.ax) > tol.epsPlane) continue;
+                std::vector<int> mergedTris = A.tris;
+                mergedTris.insert(mergedTris.end(), B.tris.begin(), B.tris.end());
+                std::sort(mergedTris.begin(), mergedTris.end());
+                mergedTris.erase(std::unique(mergedTris.begin(), mergedTris.end()),
+                                 mergedTris.end());
+                const gp_Dir axis = A.radius >= B.radius ? A.ax.Direction() : B.ax.Direction();
+                CommitEval ev = evaluateCommit(mv, tol, mergedTris, axis);
+                if (ev.failGate != Gate::PASS) continue;
+                Region reg;
+                fillCylinderRegion(mv, ev, axis, mergedTris, reg);
+                A = reg;
+                work.accepted.erase(work.accepted.begin() + static_cast<long>(j));
+                changed = true;
+                break;
+            }
+            if (changed) break;
+        }
+    }
 }
 
 gp_Dir seedPairAxis(const Provisional& P, const Provisional& Q) {
@@ -1354,6 +1441,8 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
             work.rejected.push_back(rej);
         }
     }
+
+    if (coarseFusionBand(mv)) mergeCoaxialCylinders(mv, tol, work);
 
     sortRegions(work.accepted);
     sortRegions(work.rejected);
