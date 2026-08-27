@@ -259,12 +259,10 @@ def main() -> int:
             else:
                 bare_name = f"{Path(name).stem}_c{comp}.json"
             rs = dumps_dir / bare_name
-            if not rs.is_file():
-                if compose_dump is None or not compose_dump.is_file():
-                    failures.append(f"{tag}: missing dump {rs}")
-                    rows.append(f"FAIL {tag}: missing dump")
-                    n_fail += 1
-                    continue
+            if compose_dump is not None and compose_dump.is_file():
+                # Live re-gate: always refresh P1 dumps from the in-tree regiondump
+                # so corpus/STL changes (e.g. pinned S09) cannot leave stale JSON in
+                # ${CMAKE_BINARY_DIR}/p1-dumps from an earlier configure.
                 try:
                     dump_bare(compose_dump, stl, comp, rs)
                 except RuntimeError as e:
@@ -272,6 +270,11 @@ def main() -> int:
                     rows.append(f"FAIL {tag}: regen dump")
                     n_fail += 1
                     continue
+            elif not rs.is_file():
+                failures.append(f"{tag}: missing dump {rs}")
+                rows.append(f"FAIL {tag}: missing dump")
+                n_fail += 1
+                continue
 
             b1 = p2_live(args.p2, rs, stl, comp, sidecar)
             b8 = b1  # frozen dump is the identity snapshot
