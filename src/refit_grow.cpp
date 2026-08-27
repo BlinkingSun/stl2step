@@ -22,7 +22,14 @@ namespace stl2step { namespace refit {
 namespace {
 
 constexpr double kTiny = 1e-30;
-constexpr double kBandEps = 1e-9;
+// Angular band for seedInBand / grow phi gates: scale with the gate magnitude so
+// libm ULP noise at theta_cyl_lo (~3 deg) cannot flip membership across targets.
+inline double angleBandEps(double thetaRad) {
+    constexpr double kAbs = 1e-12;
+    const double ulp = std::numeric_limits<double>::epsilon()
+                       * std::max(1.0, std::abs(thetaRad));
+    return std::max(kAbs, 8.0 * ulp);
+}
 // D1.3-A3 running residual: file-local. Frozen header epsCylGrow is not used by B1.
 constexpr double kRingResidualFrac = 0.25;
 
@@ -635,7 +642,9 @@ bool adjacentToSet(const ProvAdjList& adj, int x, const std::vector<int>& member
 }
 
 bool seedInBand(double phi, const DerivedTols& tol) {
-    return phi >= tol.thetaCylLo - kBandEps && phi <= tol.thetaCylHi + kBandEps;
+    const double loEps = angleBandEps(tol.thetaCylLo);
+    const double hiEps = angleBandEps(tol.thetaCylHi);
+    return phi >= tol.thetaCylLo - loEps && phi <= tol.thetaCylHi + hiEps;
 }
 
 bool membersEdgeConnected(const ProvAdjList& adj, const std::vector<int>& members) {
@@ -1102,7 +1111,7 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
                 if (X.claim != ProvClaim::Unclaimed) continue;
                 if (!adjacentToSet(adj, static_cast<int>(xi), members)) continue;
                 const double phi = phiToSet(adj, static_cast<int>(xi), members);
-                if (phi < tol.thetaCylLo - kBandEps) continue;
+                if (phi < tol.thetaCylLo - angleBandEps(tol.thetaCylLo)) continue;
                 const gp_Dir nX = X.plane.Direction();
                 if (std::abs(nX.Dot(aS)) > lateralSin) continue;
                 // Tangent cube face (nSides=20, phi=9° > theta_cyl_lo) sits on
@@ -1113,15 +1122,16 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
                     continue;
                 // D1.3-A1c (g5): membership vs current axis and the set's own offset.
                 const gp_XYZ nXbar = areaWeightedNbar(mv, X.tris);
+                const double g5Bound = sin3 + angleBandEps(sin3);
                 const double g5v = std::abs(
                     nXbar.Dot(gp_XYZ(aS.X(), aS.Y(), aS.Z())) - cS);
-                if (g5v > sin3) {
+                if (g5v > g5Bound) {
                     dead[xi] = 1;
                     nG5++;
                     worstG5 = std::max(worstG5, g5v);
                     if (p1DiagOn())
-                        std::fprintf(stderr, "  g5 reject x=%d |n.a-c|=%.5g sin3=%.5g\n",
-                                     (int)xi, g5v, sin3);
+                        std::fprintf(stderr, "  g5 reject x=%d |n.a-c|=%.17g bound=%.17g sin3=%.17g\n",
+                                     (int)xi, g5v, g5Bound, sin3);
                     continue;
                 }
                 GrowCand gc;
