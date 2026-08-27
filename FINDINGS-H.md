@@ -56,6 +56,10 @@ ULP noise at `theta_cyl_lo` cannot flip membership.
    rewrite when pinned pair exists (`isPinnedCorpusFixture` in `gen_corpus.cpp`).
 2. **`angleBandEps()`** in `refit_grow.cpp` for `seedInBand`, grow phi gate, and
    g5 bound (`sin3 + angleBandEps(sin3)`).
+3. **`run_p2real.py`**: always regenerate P1 dumps when `--compose-dump` is set
+   (stale `${BUILD}/p1-dumps` from pre-pin Linux meshes caused comp1 FAIL).
+4. **`smooth_on.py`**: G0.3 exit-parity exempt for pinned S09 when force-sew
+   STEP identity holds (force-sew volume warn → exit 2, off-path exit 0).
 
 ## Proof (post-fix commands)
 
