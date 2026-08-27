@@ -542,6 +542,18 @@ double intAnaAcceptResidual(const MeshView& mv, const BoundaryChain& ch, double 
             acceptR = std::max(acceptR, fit * 3.0 + derivedEpsPlane(mv));
         else if (ch.meshVerts.size() <= 20)
             acceptR = std::max(acceptR, fit * 2.0 + derivedEpsPlane(mv));
+        // Skew/near-tangent cyl|cyl: IntAna conics land off the mesh band on
+        // coarse exports — widen acceptance vs the fitted residual.
+        if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder) {
+            acceptR = std::max(acceptR, fit * 4.0 + derivedEpsPlane(mv));
+            if (ch.meshVerts.size() <= 3)
+                acceptR = std::max(acceptR, fit * 5.0 + derivedEpsPlane(mv) * 2.0);
+        }
+        if ((A->type == SurfType::Plane && B->type == SurfType::Cylinder) ||
+            (A->type == SurfType::Cylinder && B->type == SurfType::Plane)) {
+            if (ch.meshVerts.size() <= 3)
+                acceptR = std::max(acceptR, fit * 5.0 + derivedEpsPlane(mv) * 2.0);
+        }
     }
     return acceptR;
 }
@@ -682,6 +694,35 @@ void diagJ6FreeEdges(const MeshView& mv, const TopoDS_Shell& sh,
     }
 }
 
+double distAxesCyl(const gp_Ax3& a, const gp_Ax3& b) {
+    const gp_XYZ u = a.Direction().XYZ();
+    const gp_XYZ v = b.Direction().XYZ();
+    const gp_XYZ w = b.Location().XYZ() - a.Location().XYZ();
+    const gp_XYZ cr = u.Crossed(v);
+    const double crn = cr.Modulus();
+    if (crn <= std::sin(8.0 * kPi / 180.0) + 1e-15) return w.Crossed(u).Modulus();
+    return std::fabs(w.Dot(cr)) / crn;
+}
+
+bool axesNearParallel8(const gp_Dir& a, const gp_Dir& b) {
+    return a.XYZ().Crossed(b.XYZ()).Modulus() <= std::sin(8.0 * kPi / 180.0) + 1e-15;
+}
+
+bool cylCylTangentContact(const Region& a, const Region& b, double epsPlane) {
+    if (!axesNearParallel8(a.ax.Direction(), b.ax.Direction())) return false;
+    const double tol = std::max(epsPlane, std::max(a.maxVertexDev, b.maxVertexDev));
+    const double d = distAxesCyl(a.ax, b.ax);
+    const double ext = a.radius + b.radius;
+    const double inn = std::fabs(a.radius - b.radius);
+    return std::fabs(d - ext) <= tol || std::fabs(d - inn) <= tol;
+}
+
+bool cylCylParallelOffset(const Region& a, const Region& b, double epsPlane) {
+    if (!axesNearParallel8(a.ax.Direction(), b.ax.Direction())) return false;
+    const double tol = std::max(epsPlane, std::max(a.maxVertexDev, b.maxVertexDev));
+    return distAxesCyl(a.ax, b.ax) > tol;
+}
+
 bool planeCylSideContact(const Region& plnR, const Region& cylR, double epsPlane) {
     const double adn = std::fabs(cylR.ax.Direction().Dot(plnR.ax.Direction()));
     if (adn > std::sin(3.0 * kPi / 180.0) + 1e-15) return false;
@@ -743,6 +784,43 @@ AnalyticCurve constructedCylCylGenerator(const Region& a, const Region& b) {
     return out;
 }
 
+AnalyticCurve meshAnchoredCylGenerator(const Region& cyl, const MeshView& mv,
+                                       const BoundaryChain& ch) {
+    AnalyticCurve out;
+    if (ch.meshVerts.empty()) return out;
+    gp_Dir axis = cyl.ax.Direction();
+    gp_Pnt meshP = pntOf(mv, ch.meshVerts[ch.meshVerts.size() / 2]);
+    gp_Vec toP(cyl.ax.Location(), meshP);
+    toP -= gp_Vec(axis) * toP.Dot(axis);
+    if (toP.Magnitude() < Precision::Confusion()) return out;
+    gp_Dir rad(toP);
+    gp_Pnt origin = cyl.ax.Location().Translated(gp_Vec(rad) * cyl.radius);
+    out.kind = AnalyticCurve::Lin;
+    out.lin = gp_Lin(origin, axis);
+    return out;
+}
+
+AnalyticCurve bestCylCylConstructed(const Region& a, const Region& b, const MeshView& mv,
+                                    const BoundaryChain& ch, double acceptR) {
+    AnalyticCurve best;
+    double bestR = 1e300;
+    auto consider = [&](const AnalyticCurve& c) {
+        if (c.kind == AnalyticCurve::None) return;
+        const double r = chainResidual(c, mv, ch);
+        if (r <= acceptR && r < bestR) {
+            bestR = r;
+            best = c;
+        }
+    };
+    consider(constructedCylCylGenerator(a, b));
+    consider(constructedCylCylGenerator(b, a));
+    if (axesNearParallel8(a.ax.Direction(), b.ax.Direction())) {
+        consider(meshAnchoredCylGenerator(a, mv, ch));
+        consider(meshAnchoredCylGenerator(b, mv, ch));
+    }
+    return best;
+}
+
 AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView& mv,
                                 const BoundaryChain& ch, double sewTol, WarnFn warn) {
     const double tolAng = Precision::Angular();
@@ -761,6 +839,14 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             IntAna_QuadQuadGeo iq(asPlane(A), cylForIntersect(B), tolAng, tol, H);
             const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
             AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol, acceptR);
+            // Oblique plane|cyl: IntAna ellipse on 2-vertex coarse chains often
+            // exceeds the first-pass residual gate but still matches the mesh band.
+            if (c.kind == AnalyticCurve::None && iq.IsDone() &&
+                iq.TypeInter() == IntAna_Ellipse && ch.meshVerts.size() <= 3) {
+                const double fit = std::max(A.maxVertexDev, B.maxVertexDev);
+                const double loose = std::max(acceptR, fit * 8.0 + derivedEpsPlane(mv) * 3.0);
+                c = pickIntAna(iq, mv, ch, sewTol, loose);
+            }
             const double epsPl = derivedEpsPlane(mv);
             // G4: side-grazing plane|cyl => generator line (§2.5). Re-evaluate
             // geometry here — ch.tangent can miss when |dist-R| is within fit
@@ -798,8 +884,25 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             IntAna_QuadQuadGeo iq(cylForIntersect(A), cylForIntersect(B), tol);
             const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
             AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol, acceptR);
-            if (c.kind == AnalyticCurve::None)
+            const double epsPl = derivedEpsPlane(mv);
+            // Near-tangent fillet|bore and arch|arch: IntAna empty on coarse
+            // meshes — construct the shared generator from fitted geometry.
+            if (c.kind == AnalyticCurve::None && cylCylTangentContact(A, B, epsPl))
+                c = constructedCylCylGenerator(A, B);
+            if (c.kind == AnalyticCurve::None && cylCylParallelOffset(A, B, epsPl))
+                c = bestCylCylConstructed(A, B, mv, ch, acceptR);
+            if (c.kind == AnalyticCurve::None) {
+                if (diagP2Enabled()) {
+                    IntAna_ResultType ty = iq.IsDone() ? iq.TypeInter() : IntAna_Empty;
+                    std::fprintf(stderr,
+                                 "DIAG_P2 cyl|cyl regA=%d regB=%d R=%.4f/%.4f ty=%d "
+                                 "tangent=%d tanContact=%d parOff=%d nV=%zu\n",
+                                 ch.regA, ch.regB, A.radius, B.radius, (int)ty, (int)ch.tangent,
+                                 (int)cylCylTangentContact(A, B, epsPl),
+                                 (int)cylCylParallelOffset(A, B, epsPl), ch.meshVerts.size());
+                }
                 emit(warn, "smooth: IntAna cyl|cyl empty/same — keeping mesh polyline");
+            }
             return c;
         }
     } catch (const Standard_Failure&) {
@@ -2420,7 +2523,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     else if (B->type == SurfType::Cylinder && A->type == SurfType::Plane)
                         curve = constructedGenerator(*B, *A);
                     else if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder)
-                        curve = constructedCylCylGenerator(*A, *B);
+                        curve = bestCylCylConstructed(
+                            *A, *B, mv, ch, intAnaAcceptResidual(mv, ch, sewTol, A, B));
                     else
                         curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
                 } else {
@@ -2484,6 +2588,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     const double dB = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ib]));
                     const double sew = (mv.sewTol > 0.0) ? mv.sewTol : Precision::Confusion();
                     const double acceptCap = std::max(sew * 50.0, 1.0);
+                    snapCap = std::max(snapCap,
+                                       std::min(std::max(std::isfinite(dA) ? dA : 0.0,
+                                                         std::isfinite(dB) ? dB : 0.0),
+                                                acceptCap));
+                }
+                if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder &&
+                    curve.kind == AnalyticCurve::Lin) {
+                    const double dA = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ia]));
+                    const double dB = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ib]));
+                    const double sew = (mv.sewTol > 0.0) ? mv.sewTol : Precision::Confusion();
+                    const double acceptCap = intAnaAcceptResidual(mv, ch, sewTol, A, B);
                     snapCap = std::max(snapCap,
                                        std::min(std::max(std::isfinite(dA) ? dA : 0.0,
                                                          std::isfinite(dB) ? dB : 0.0),
