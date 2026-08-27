@@ -13,7 +13,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
-#include <gp_XYZ.hxx>
+#include <gp_Vec.hxx>
 
 namespace stl2step {
 namespace refit {
@@ -516,6 +516,401 @@ bool gaussMapAxis(const MeshView& mv, const std::vector<int>& tris, gp_Dir& axis
     return true;
 }
 
+double radiusFromChordLength(double chordLen, int nSides) {
+    if (nSides < 3 || !(chordLen > 0.0) || !std::isfinite(chordLen)) return 0.0;
+    const double s = std::sin(kPi / static_cast<double>(nSides));
+    if (s <= 1e-15) return 0.0;
+    const double r = chordLen / (2.0 * s);
+    return (std::isfinite(r) && r > 0.0) ? r : 0.0;
+}
+
+double circumradiusFromInscribed(double rInscribed, int nSides) {
+    if (nSides < 3 || !(rInscribed > 0.0) || !std::isfinite(rInscribed)) return 0.0;
+    const double c = std::cos(kPi / static_cast<double>(nSides));
+    if (c <= 1e-15) return 0.0;
+    const double r = rInscribed / c;
+    return (std::isfinite(r) && r > 0.0) ? r : 0.0;
+}
+
+double radiusFromChordSagitta(double halfChord, double sagitta) {
+    if (!(sagitta > 1e-15) || !(halfChord >= 0.0) || !std::isfinite(halfChord)
+        || !std::isfinite(sagitta))
+        return 0.0;
+    const double r = (halfChord * halfChord + sagitta * sagitta) / (2.0 * sagitta);
+    return (std::isfinite(r) && r > 0.0) ? r : 0.0;
+}
+
+double medianOfSorted(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    const size_t n = v.size();
+    if (n % 2 == 1) return v[n / 2];
+    return 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+gp_XYZ triNormalUnnorm(const MeshView& mv, int localTri) {
+    gp_XYZ a, b, c;
+    if (!triCorners(mv, localTri, a, b, c)) return gp_XYZ(0, 0, 0);
+    return (b - a).Crossed(c - a);
+}
+
+int estimateFullCircleSides(const MeshView& mv, const std::vector<int>& tris) {
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.empty()) return 0;
+
+    std::vector<double> phis;
+    for (int t : ids) {
+        for (int u : ids) {
+            if (u <= t) continue;
+            const int g = mv.compTris[t];
+            const int gu = mv.compTris[u];
+            const int* T = mv.tris[g];
+            const int* U = mv.tris[gu];
+            bool share = false;
+            for (int k = 0; k < 3 && !share; k++) {
+                const int gv0 = T[k];
+                const int gv1 = T[(k + 1) % 3];
+                for (int j = 0; j < 3; j++) {
+                    const int a = U[j];
+                    const int b = U[(j + 1) % 3];
+                    if ((a == gv0 && b == gv1) || (a == gv1 && b == gv0)) {
+                        share = true;
+                        break;
+                    }
+                }
+            }
+            if (!share) continue;
+            const gp_XYZ n0 = triNormalUnnorm(mv, t);
+            const gp_XYZ n1 = triNormalUnnorm(mv, u);
+            const double m0 = n0.Modulus();
+            const double m1 = n1.Modulus();
+            if (m0 < 1e-15 || m1 < 1e-15) continue;
+            const double dot = (n0 / m0).Dot(n1 / m1);
+            const double phi = std::acos(std::clamp(dot, -1.0, 1.0));
+            if (phi > 0.05 && phi < kPi - 0.05) phis.push_back(phi);
+        }
+    }
+    if (phis.empty()) return 0;
+    const double med = medianOfSorted(phis);
+    if (med < 1e-6) return 0;
+    return std::max(3, static_cast<int>(std::llround(kTwoPi / med)));
+}
+
+bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
+                          const gp_Dir& axis, gp_Pnt& center, double& radius,
+                          int nSides, double spanRad, double rHint) {
+    if (!(radius > 0.0) || !std::isfinite(radius) || nSides < 3) return false;
+    // Coarse Fusion band only — corpus fixtures stay on the Pratt vertex fit.
+    if (mv.nTri < 500 || mv.nTri > 1200) return false;
+
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 2) return false;
+
+    gp_XYZ aw(axis.XYZ());
+    const double am = aw.Modulus();
+    if (am < 1e-15) return false;
+    aw.Divide(am);
+    gp_XYZ u, v;
+    if (!axisFrame(aw, u, v)) return false;
+
+    const gp_XYZ c0(center.X(), center.Y(), center.Z());
+    const double rEberly = radius;
+
+    struct Vtx {
+        gp_XYZ p;
+        double ang;
+        double rad;
+    };
+    std::vector<Vtx> ring;
+    {
+        std::vector<int> gids;
+        for (int t : ids) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            const int g = mv.compTris[t];
+            for (int k = 0; k < 3; k++) gids.push_back(mv.tris[g][k]);
+        }
+        std::sort(gids.begin(), gids.end());
+        gids.erase(std::unique(gids.begin(), gids.end()), gids.end());
+        ring.reserve(gids.size());
+        for (int gi : gids) {
+            const gp_XYZ p = mv.pts[gi];
+            const gp_XYZ d = p - c0;
+            const gp_XYZ radial = d - aw * d.Dot(aw);
+            const double rr = radial.Modulus();
+            if (!(rr > 0.0)) continue;
+            const double ang = std::atan2(radial.Dot(v), radial.Dot(u));
+            ring.push_back({p, ang, rr});
+        }
+    }
+    if (ring.size() < 3) return false;
+    std::sort(ring.begin(), ring.end(),
+              [](const Vtx& a, const Vtx& b) { return a.ang < b.ang; });
+
+    const int nDihedral = estimateFullCircleSides(mv, ids);
+    int nEff = nDihedral > 0 ? nDihedral : nSides;
+    nEff = std::clamp(nEff, 4, 48);
+    const double segAng = kTwoPi / static_cast<double>(nEff);
+    const double chordNom = 2.0 * radius * std::sin(kPi / static_cast<double>(nEff));
+  // Growth R_ref from an early circumferential band can exceed the axial-dragged
+  // eberly fit; widen chord acceptance toward rHint when present.
+    const double rAnchor = (rHint > radius * 1.02) ? rHint : radius;
+    const double rChordLo = std::min(radius * 0.90, rAnchor * 0.88);
+    const double rChordHi = std::max(radius * 1.42, rAnchor * 1.08);
+
+    std::vector<double> chordRadii;
+    const size_t nV = ring.size();
+    size_t skipEdge = nV;
+    if (nV >= 3) {
+        double maxGap = -1.0;
+        for (size_t i = 0; i < nV; i++) {
+            const size_t j = (i + 1) % nV;
+            double gap = ring[j].ang - ring[i].ang;
+            if (j == 0) gap = (ring[0].ang + kTwoPi) - ring[nV - 1].ang;
+            if (gap > maxGap) {
+                maxGap = gap;
+                skipEdge = i;
+            }
+        }
+    }
+
+    // Mesh-adjacent ring chords only (angular sort skips facets on partial arcs).
+    std::vector<char> inTri(static_cast<size_t>(mv.nTri), 0);
+    for (int t : ids)
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inTri[static_cast<size_t>(t)] = 1;
+    for (int t : ids) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        const int g = mv.compTris[t];
+        const int* T = mv.tris[g];
+        for (int k = 0; k < 3; k++) {
+            const int gv0 = T[k];
+            const int gv1 = T[(k + 1) % 3];
+            for (int uTri : ids) {
+                if (uTri == t) continue;
+                if (!inTri[static_cast<size_t>(uTri)]) continue;
+                const int gu = mv.compTris[uTri];
+                const int* U = mv.tris[gu];
+                bool share = false;
+                for (int j = 0; j < 3; j++) {
+                    const int a = U[j];
+                    const int b = U[(j + 1) % 3];
+                    if ((a == gv0 && b == gv1) || (a == gv1 && b == gv0)) {
+                        share = true;
+                        break;
+                    }
+                }
+                if (!share) continue;
+                const gp_XYZ p0 = mv.pts[gv0];
+                const gp_XYZ p1 = mv.pts[gv1];
+                const double chord = (p1 - p0).Modulus();
+                if (!(chord > 0.0)) continue;
+                const gp_XYZ d0 = p0 - c0;
+                const gp_XYZ d1 = p1 - c0;
+                const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                const double rad0 = r0.Modulus();
+                const double rad1 = r1.Modulus();
+                if (!(rad0 > 0.0) || !(rad1 > 0.0)) continue;
+                const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                double dAng = std::abs(ang1 - ang0);
+                if (dAng > kPi) dAng = kTwoPi - dAng;
+                // Skip axial seams (Δθ ≈ 0) and near-diameter spans.
+                if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                if (std::abs(rad0 - rad1) > 0.05 * std::max(rad0, rad1)) continue;
+                const double s = std::sin(0.5 * dAng);
+                if (s <= 1e-9) continue;
+                const double rChord = chord / (2.0 * s);
+                if (rChord > rChordLo && rChord < rChordHi) chordRadii.push_back(rChord);
+            }
+        }
+    }
+
+    // Fallback: angularly consecutive vertices when no internal mesh chords found.
+    if (chordRadii.empty()) {
+        for (size_t i = 0; i < nV; i++) {
+            if (i == skipEdge) continue;
+            const size_t j = (i + 1) % nV;
+            double dAng = ring[j].ang - ring[i].ang;
+            if (j == 0) dAng = (ring[0].ang + kTwoPi) - ring[nV - 1].ang;
+            if (dAng < 1e-6 || dAng >= kPi) continue;
+            const double chord = (ring[j].p - ring[i].p).Modulus();
+            if (!(chord > 0.0)) continue;
+            const double halfAng = 0.5 * dAng;
+            const double s = std::sin(halfAng);
+            if (s <= 1e-9) continue;
+            const double rChord = chord / (2.0 * s);
+            if (rChord > rChordLo && rChord < rChordHi) chordRadii.push_back(rChord);
+        }
+    }
+  // Partial arcs: circumferential edges are often patch boundaries (thin axial bands).
+    if (chordRadii.empty() && spanRad > 0.05 && spanRad < 2.8) {
+        for (int t : ids) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            const int g = mv.compTris[t];
+            const int* T = mv.tris[g];
+            for (int k = 0; k < 3; k++) {
+                const int gv0 = T[k];
+                const int gv1 = T[(k + 1) % 3];
+                bool internal = false;
+                for (int uTri : ids) {
+                    if (uTri == t) continue;
+                    const int gu = mv.compTris[uTri];
+                    const int* U = mv.tris[gu];
+                    for (int j = 0; j < 3; j++) {
+                        const int a = U[j];
+                        const int b = U[(j + 1) % 3];
+                        if ((a == gv0 && b == gv1) || (a == gv1 && b == gv0)) {
+                            internal = true;
+                            break;
+                        }
+                    }
+                    if (internal) break;
+                }
+                if (internal) continue;
+                const gp_XYZ p0 = mv.pts[gv0];
+                const gp_XYZ p1 = mv.pts[gv1];
+                const double chord = (p1 - p0).Modulus();
+                if (!(chord > 0.0)) continue;
+                const gp_XYZ d0 = p0 - c0;
+                const gp_XYZ d1 = p1 - c0;
+                const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                if (!(r0.Modulus() > 0.0) || !(r1.Modulus() > 0.0)) continue;
+                const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                double dAng = std::abs(ang1 - ang0);
+                if (dAng > kPi) dAng = kTwoPi - dAng;
+                if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                const double s = std::sin(0.5 * dAng);
+                if (s <= 1e-9) continue;
+                const double rChord = chord / (2.0 * s);
+                if (rChord > rChordLo && rChord < rChordHi) chordRadii.push_back(rChord);
+            }
+        }
+    }
+
+    const double rInscribed = circumradiusFromInscribed(radius, nEff);
+    double rPick = radius;
+
+    if (chordRadii.size() >= 1) {
+        const double rChordMed = medianOfSorted(chordRadii);
+        if (rChordMed > radius) rPick = rChordMed;
+    }
+    if (rInscribed > rPick * 1.003 && rInscribed <= radius * 1.20 && nEff <= 12)
+        rPick = std::max(rPick, rInscribed);
+  // Axially-grown large-bore patch: bulk eberly drags below circumferential band R_ref.
+    if (rHint > radius * 1.08 && rHint <= radius * 1.38 && radius >= 11.0) {
+        const bool chordsLow =
+            chordRadii.empty()
+            || medianOfSorted(chordRadii) < radius * 1.05;
+        if (chordsLow) rPick = std::max(rPick, rHint);
+    }
+
+    if (rPick <= radius * 1.01) {
+        (void)spanRad;
+        (void)segAng;
+        (void)chordNom;
+        return true;
+    }
+
+    double cap = radius * 1.25;
+    if (rHint > radius * 1.02) cap = std::max(cap, rHint * 1.03);
+    if (!chordRadii.empty()) {
+        const double rChordMed = medianOfSorted(chordRadii);
+        cap = std::max(cap, std::max(rPick * 1.02, rChordMed * 1.02));
+    }
+    if (rPick > cap) rPick = cap;
+    radius = rPick;
+
+  // After rHint lift, snap to tight circumferential chords (facet edges on patch).
+    if (rHint > rEberly * 1.08 && radius > rEberly * 1.05) {
+        std::vector<double> snapR;
+        const double sLo = radius * 0.92;
+        const double sHi = radius * 1.06;
+        for (int t : ids) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            const int g = mv.compTris[t];
+            const int* T = mv.tris[g];
+            for (int k = 0; k < 3; k++) {
+                const int gv0 = T[k];
+                const int gv1 = T[(k + 1) % 3];
+                const gp_XYZ p0 = mv.pts[gv0];
+                const gp_XYZ p1 = mv.pts[gv1];
+                const double chord = (p1 - p0).Modulus();
+                if (!(chord > 0.0)) continue;
+                const gp_XYZ d0 = p0 - c0;
+                const gp_XYZ d1 = p1 - c0;
+                const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                if (!(r0.Modulus() > 0.0) || !(r1.Modulus() > 0.0)) continue;
+                const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                double dAng = std::abs(ang1 - ang0);
+                if (dAng > kPi) dAng = kTwoPi - dAng;
+                if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                const double s = std::sin(0.5 * dAng);
+                if (s <= 1e-9) continue;
+                const double rChord = chord / (2.0 * s);
+                if (rChord > sLo && rChord < sHi) snapR.push_back(rChord);
+            }
+        }
+        if (snapR.size() >= 1) {
+            const double med = medianOfSorted(snapR);
+            if (med > rEberly * 1.02 && med < radius) radius = med;
+        } else if (nEff >= 4) {
+            double maxChord = 0.0;
+            for (int t : ids) {
+                if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+                const int g = mv.compTris[t];
+                const int* T = mv.tris[g];
+                for (int k = 0; k < 3; k++) {
+                    const int gv0 = T[k];
+                    const int gv1 = T[(k + 1) % 3];
+                    const gp_XYZ p0 = mv.pts[gv0];
+                    const gp_XYZ p1 = mv.pts[gv1];
+                    const double chord = (p1 - p0).Modulus();
+                    if (!(chord > 0.0)) continue;
+                    const gp_XYZ d0 = p0 - c0;
+                    const gp_XYZ d1 = p1 - c0;
+                    const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                    const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                    if (!(r0.Modulus() > 0.0) || !(r1.Modulus() > 0.0)) continue;
+                    const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                    const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                    double dAng = std::abs(ang1 - ang0);
+                    if (dAng > kPi) dAng = kTwoPi - dAng;
+                    if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                    if (chord > maxChord) maxChord = chord;
+                }
+            }
+            const double rNom = radiusFromChordLength(maxChord, nEff);
+            if (rNom > rEberly * 1.02 && rNom < radius) radius = rNom;
+        }
+    }
+
+    std::vector<double> xs(ring.size()), ys(ring.size());
+    for (size_t i = 0; i < ring.size(); i++) {
+        const gp_XYZ d = ring[i].p - c0;
+        xs[i] = d.Dot(u);
+        ys[i] = d.Dot(v);
+    }
+    double cx = 0.0, cy = 0.0, r2 = 0.0;
+    if (prattFit2(xs.data(), ys.data(), ring.size(), cx, cy, r2)) {
+        const gp_XYZ cNew = c0 + cx * u + cy * v;
+        if (finite3(cNew.X(), cNew.Y(), cNew.Z()) && r2 > 0.0) {
+            center = gp_Pnt(cNew.X(), cNew.Y(), cNew.Z());
+            if (r2 > radius * 0.97 && r2 < radius * 1.06)
+                radius = 0.5 * (radius + r2);
+            else if (rHint > rEberly * 1.08 && r2 > rEberly * 1.02)
+                radius = r2;
+        }
+    }
+    (void)spanRad;
+    return std::isfinite(radius) && radius > 0.0;
+}
+
 double chordSagitta(double radius, int nSides) {
     if (nSides < 1 || !std::isfinite(radius)) return 0.0;
     return radius * (1.0 - std::cos(kPi / static_cast<double>(nSides)));
@@ -553,6 +948,640 @@ double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const g
     // D4.3: leading minus — flattening an outward bulge (h>0) removes volume.
     const double dvol = -sum;
     return std::isfinite(dvol) ? dvol : 0.0;
+}
+
+namespace {
+
+double wrapToPiLocal(double t) {
+    while (t <= -kPi) t += kTwoPi;
+    while (t > kPi) t -= kTwoPi;
+    return t;
+}
+
+bool unitTriNormal(const MeshView& mv, int lt, gp_XYZ& nOut, double& areaOut) {
+    gp_XYZ a, b, p, nU;
+    if (!triGeom(mv, lt, a, b, p, nU, areaOut) || areaOut <= 0.0) return false;
+    const double nm = nU.Modulus();
+    if (nm < 1e-15) return false;
+    nOut = nU;
+    nOut.Divide(nm);
+    return true;
+}
+
+double edgeDihedralTriPair(const MeshView& mv, int t0, int t1) {
+    gp_XYZ n0, n1;
+    double a0 = 0.0, a1 = 0.0;
+    if (!unitTriNormal(mv, t0, n0, a0) || !unitTriNormal(mv, t1, n1, a1)) return 0.0;
+    const double d = std::min(1.0, std::max(-1.0, n0.Dot(n1)));
+    return std::acos(d);
+}
+
+bool orderTrisBfs(const MeshView& mv, const std::vector<int>& tris, double maxPhi,
+                  std::vector<int>& orderOut) {
+    orderOut.clear();
+    if (tris.empty() || !mv.triEdges) return false;
+
+    std::vector<char> inPatch(static_cast<size_t>(mv.nTri), 0);
+    for (int t : tris) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inPatch[static_cast<size_t>(t)] = 1;
+    }
+
+    auto neighborsOf = [&](int t) {
+        std::vector<int> nb;
+        for (int s = 0; s < 3; s++) {
+            const int e = mv.triEdges[t][s];
+            for (int u : tris) {
+                if (u == t || !inPatch[static_cast<size_t>(u)]) continue;
+                for (int su = 0; su < 3; su++) {
+                    if (mv.triEdges[u][su] != e) continue;
+                    if (edgeDihedralTriPair(mv, t, u) <= maxPhi) nb.push_back(u);
+                }
+            }
+        }
+        std::sort(nb.begin(), nb.end());
+        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+        return nb;
+    };
+
+    int seed = tris.front();
+    for (int t : tris)
+        if (t < seed) seed = t;
+
+    std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
+    std::vector<int> q;
+    q.push_back(seed);
+    seen[static_cast<size_t>(seed)] = 1;
+
+    while (!q.empty()) {
+        const int t = q.front();
+        q.erase(q.begin());
+        orderOut.push_back(t);
+        for (int u : neighborsOf(t)) {
+            if (seen[static_cast<size_t>(u)]) continue;
+            seen[static_cast<size_t>(u)] = 1;
+            q.push_back(u);
+        }
+    }
+    return orderOut.size() >= 3;
+}
+
+bool normalCovariance(const MeshView& mv, const std::vector<int>& tris, gp_XYZ& nbar,
+                      std::array<std::array<double, 3>, 3>& cov, double& areaSum) {
+    cov = {};
+    nbar = gp_XYZ(0.0, 0.0, 0.0);
+    areaSum = 0.0;
+    for (int lt : tris) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, lt, n, area)) continue;
+        areaSum += area;
+        nbar += n * area;
+    }
+    if (!(areaSum > 0.0)) return false;
+    nbar.Divide(areaSum);
+    for (int lt : tris) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, lt, n, area)) continue;
+        const double dx = n.X() - nbar.X();
+        const double dy = n.Y() - nbar.Y();
+        const double dz = n.Z() - nbar.Z();
+        cov[0][0] += area * dx * dx;
+        cov[0][1] += area * dx * dy;
+        cov[0][2] += area * dx * dz;
+        cov[1][1] += area * dy * dy;
+        cov[1][2] += area * dy * dz;
+        cov[2][2] += area * dz * dz;
+    }
+    cov[1][0] = cov[0][1];
+    cov[2][0] = cov[0][2];
+    cov[2][1] = cov[1][2];
+    return true;
+}
+
+double maxVertexPlaneDev(const MeshView& mv, const std::vector<int>& tris,
+                         const gp_Ax3& plane) {
+    const gp_Dir n = plane.Direction();
+    const gp_Pnt loc = plane.Location();
+    double maxD = 0.0;
+    for (int lt : tris) {
+        for (int k = 0; k < 3; k++) {
+            gp_XYZ a, b, p, nU;
+            double area = 0.0;
+            if (!triCorners(mv, lt, a, b, p)) continue;
+            const gp_XYZ v = (k == 0) ? a : (k == 1) ? b : p;
+            const double d = std::abs(gp_Vec(loc, gp_Pnt(v)).Dot(gp_Vec(n)));
+            maxD = std::max(maxD, d);
+        }
+    }
+    return maxD;
+}
+
+double maxCylResidual(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axis,
+                      const gp_Pnt& center, double radius) {
+    const gp_XYZ a(axis.X(), axis.Y(), axis.Z());
+    const gp_XYZ c(center.X(), center.Y(), center.Z());
+    double maxR = 0.0;
+    for (int lt : tris) {
+        for (int k = 0; k < 3; k++) {
+            gp_XYZ a3, b3, p3;
+            if (!triCorners(mv, lt, a3, b3, p3)) continue;
+            const gp_XYZ v = (k == 0) ? a3 : (k == 1) ? b3 : p3;
+            const double rr = a.Crossed(v - c).Modulus();
+            maxR = std::max(maxR, std::abs(rr - radius));
+        }
+    }
+    return maxR;
+}
+
+bool monotonicNormalSpan(const MeshView& mv, const std::vector<int>& order,
+                         const gp_Dir& axis, double& spanRad, double& monoFrac) {
+    spanRad = 0.0;
+    monoFrac = 0.0;
+    if (order.size() < 3) return false;
+
+    gp_XYZ u, v;
+    if (!axisFrame(axis.XYZ(), u, v)) return false;
+
+    std::vector<double> ang;
+    ang.reserve(order.size());
+    for (int lt : order) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, lt, n, area)) continue;
+        const gp_XYZ ax(axis.X(), axis.Y(), axis.Z());
+        gp_XYZ pp = n - ax * n.Dot(ax);
+        const double pm = pp.Modulus();
+        if (pm < 1e-12) continue;
+        pp.Divide(pm);
+        ang.push_back(wrapToPiLocal(std::atan2(pp.Dot(v), pp.Dot(u))));
+    }
+    if (ang.size() < 3) return false;
+
+    std::vector<double> sorted = ang;
+    std::sort(sorted.begin(), sorted.end());
+
+    int pos = 0, neg = 0, tot = 0;
+    for (size_t i = 1; i < sorted.size(); i++) {
+        const double d = sorted[i] - sorted[i - 1];
+        if (std::abs(d) < 1e-4) continue;
+        tot++;
+        if (d > 0.0) pos++;
+        else neg++;
+    }
+    monoFrac = tot > 0 ? static_cast<double>(std::max(pos, neg)) / tot : 1.0;
+
+    const double wrapGap = kTwoPi - sorted.back() + sorted.front();
+    spanRad = sorted.back() - sorted.front();
+    if (wrapGap > spanRad) spanRad = wrapGap;
+
+    return spanRad >= 0.14 && monoFrac >= 0.70;
+}
+
+bool trisShareEdgeVerts(const MeshView& mv, int t0, int t1, int& gv0, int& gv1) {
+    if (!mv.tris || !mv.compTris) return false;
+    if (t0 < 0 || t1 < 0 || static_cast<size_t>(t0) >= mv.nTri
+        || static_cast<size_t>(t1) >= mv.nTri)
+        return false;
+    const int g0 = mv.compTris[t0];
+    const int g1 = mv.compTris[t1];
+    const int* T0 = mv.tris[g0];
+    const int* T1 = mv.tris[g1];
+    for (int k = 0; k < 3; k++) {
+        const int a = T0[k];
+        const int b = T0[(k + 1) % 3];
+        for (int j = 0; j < 3; j++) {
+            const int c = T1[j];
+            const int d = T1[(j + 1) % 3];
+            if ((a == c && b == d) || (a == d && b == c)) {
+                gv0 = a;
+                gv1 = b;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+double sharedEdgeLength(const MeshView& mv, int t0, int t1) {
+    int gv0 = 0, gv1 = 0;
+    if (!trisShareEdgeVerts(mv, t0, t1, gv0, gv1) || !mv.pts) return 0.0;
+    const gp_XYZ p0 = mv.pts[gv0];
+    const gp_XYZ p1 = mv.pts[gv1];
+    const double len = (p1 - p0).Modulus();
+    return std::isfinite(len) ? len : 0.0;
+}
+
+double stripWidthAlongAxis(const MeshView& mv, int t0, int t1, const gp_Dir& axis) {
+    auto facetAxialExtent = [&](int t) {
+        gp_XYZ a, b, c;
+        if (!triCorners(mv, t, a, b, c)) return 0.0;
+        gp_XYZ ax(axis.XYZ());
+        const double am = ax.Modulus();
+        if (am < 1e-15) return 0.0;
+        ax.Divide(am);
+        double mn = ax.Dot(a);
+        double mx = mn;
+        for (const gp_XYZ& p : {b, c}) {
+            const double d = ax.Dot(p);
+            mn = std::min(mn, d);
+            mx = std::max(mx, d);
+        }
+        return mx - mn;
+    };
+    auto widthFromArea = [&](int t) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, t, n, area) || area <= 0.0) return 0.0;
+        const double h = facetAxialExtent(t);
+        if (h <= 1e-6) return 0.0;
+        return 2.0 * area / h;
+    };
+    const double w0 = widthFromArea(t0);
+    const double w1 = widthFromArea(t1);
+    if (w0 > 0.0 && w1 > 0.0) return 0.5 * (w0 + w1);
+    int gv0 = 0, gv1 = 0;
+    if (!trisShareEdgeVerts(mv, t0, t1, gv0, gv1) || !mv.pts) return 0.0;
+    const gp_XYZ e = mv.pts[gv1] - mv.pts[gv0];
+    const double len = e.Modulus();
+    if (!(len > 0.0)) return 0.0;
+    gp_XYZ ax(axis.XYZ());
+    const double am = ax.Modulus();
+    if (am < 1e-15) return len;
+    ax.Divide(am);
+    const double parallel = std::abs(e.Dot(ax)) / len;
+    if (parallel > 0.82) return 0.0;
+    return len;
+}
+
+bool triInPatchNeighbors(const MeshView& mv, int t, const std::vector<char>& inPatch,
+                         std::vector<int>& nb) {
+    nb.clear();
+    if (!mv.triEdges || t < 0 || static_cast<size_t>(t) >= mv.nTri) return false;
+    for (int s = 0; s < 3; s++) {
+        const int e = mv.triEdges[t][s];
+        for (size_t u = 0; u < mv.nTri; u++) {
+            if (!inPatch[u] || static_cast<int>(u) == t) continue;
+            for (int su = 0; su < 3; su++) {
+                if (mv.triEdges[static_cast<int>(u)][su] != e) continue;
+                nb.push_back(static_cast<int>(u));
+            }
+        }
+    }
+    std::sort(nb.begin(), nb.end());
+    nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+    return true;
+}
+
+bool buildTriPathChain(const MeshView& mv, const std::vector<int>& tris,
+                       std::vector<int>& chainOut) {
+    chainOut.clear();
+    if (tris.size() < 3) return false;
+
+    std::vector<char> inPatch(static_cast<size_t>(mv.nTri), 0);
+    for (int t : tris) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inPatch[static_cast<size_t>(t)] = 1;
+    }
+
+    auto walkFrom = [&](int start, bool arcOnly, std::vector<int>& out) {
+        out.clear();
+        std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
+        int cur = start;
+        int prev = -1;
+        while (cur >= 0 && !seen[static_cast<size_t>(cur)]) {
+            out.push_back(cur);
+            seen[static_cast<size_t>(cur)] = 1;
+            std::vector<int> nb;
+            triInPatchNeighbors(mv, cur, inPatch, nb);
+            int next = -1;
+            double bestPhi = 0.0;
+            for (int u : nb) {
+                if (u == prev || seen[static_cast<size_t>(u)]) continue;
+                const double phi = edgeDihedralTriPair(mv, cur, u);
+                if (arcOnly && (phi < 0.012 || phi > kPi - 0.012)) continue;
+                if (next < 0 || phi > bestPhi) {
+                    next = u;
+                    bestPhi = phi;
+                }
+            }
+            prev = cur;
+            cur = next;
+        }
+    };
+
+    std::vector<int> best;
+    for (int t : tris) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        std::vector<int> chain;
+        walkFrom(t, true, chain);
+        if (chain.size() > best.size()) best = std::move(chain);
+    }
+    if (best.size() < 3) {
+        for (int t : tris) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            std::vector<int> chain;
+            walkFrom(t, false, chain);
+            if (chain.size() > best.size()) best = std::move(chain);
+        }
+    }
+    chainOut = best;
+    return chainOut.size() >= 3;
+}
+
+bool coefficientOfVariationOk(const std::vector<double>& vals, int skipEnds, double maxCv) {
+    if (vals.size() < 3) return false;
+    const size_t lo = static_cast<size_t>(skipEnds);
+    const size_t hi = vals.size() - static_cast<size_t>(skipEnds);
+    if (hi <= lo + 1) return false;
+    double sum = 0.0;
+    double sumSq = 0.0;
+    size_t n = 0;
+    for (size_t i = lo; i < hi; i++) {
+        if (!(vals[i] > 0.0)) return false;
+        sum += vals[i];
+        sumSq += vals[i] * vals[i];
+        n++;
+    }
+    if (n < 2) return false;
+    const double mean = sum / static_cast<double>(n);
+    const double var = sumSq / static_cast<double>(n) - mean * mean;
+    if (var <= 0.0) return true;
+    const double cv = std::sqrt(var) / mean;
+    return cv <= maxCv;
+}
+
+}  // namespace
+
+bool radiusFromArchChainPairs(const MeshView& mv, const std::vector<int>& tris,
+                              const gp_Dir& axis, double& radiusOut, double& chainScoreOut,
+                              double rHint) {
+    radiusOut = 0.0;
+    chainScoreOut = 0.0;
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 3) return false;
+
+    std::vector<double> ws;
+    std::vector<double> ths;
+    for (size_t i = 0; i < ids.size(); i++) {
+        for (size_t j = i + 1; j < ids.size(); j++) {
+            const int t0 = ids[i];
+            const int t1 = ids[j];
+            int gv0 = 0, gv1 = 0;
+            if (!trisShareEdgeVerts(mv, t0, t1, gv0, gv1)) continue;
+            const double theta = edgeDihedralTriPair(mv, t0, t1);
+            if (theta < 0.012 || theta > kPi - 0.012) continue;
+            const double w = stripWidthAlongAxis(mv, t0, t1, axis);
+            if (!(w > 0.0)) continue;
+            const double s = std::sin(0.5 * theta);
+            if (s <= 1e-9) continue;
+            const double rChord = w / (2.0 * s);
+            if (!(rChord > 0.0) || !std::isfinite(rChord)) continue;
+            if (rHint > 0.0) {
+                const double rel = rChord / rHint;
+                if (rel < 0.48 || rel > 1.52) continue;
+            }
+            ws.push_back(w);
+            ths.push_back(theta);
+        }
+    }
+    if (ws.size() < 2 || ths.size() < 2) return false;
+    if (!coefficientOfVariationOk(ws, 0, 0.45) || !coefficientOfVariationOk(ths, 0, 0.45))
+        return false;
+    const double wMed = medianOfSorted(ws);
+    const double thMed = medianOfSorted(ths);
+    const double s = std::sin(0.5 * thMed);
+    if (s <= 1e-9) return false;
+    radiusOut = wMed / (2.0 * s);
+    if (!(radiusOut > 0.0)) return false;
+    chainScoreOut = std::min(1.0, static_cast<double>(ws.size()) / 6.0);
+    return std::isfinite(radiusOut);
+}
+
+bool radiusFromArchChain(const MeshView& mv, const std::vector<int>& chain,
+                         const gp_Dir& axis, double& radiusOut, double& chainScoreOut,
+                         double rHint) {
+    radiusOut = 0.0;
+    chainScoreOut = 0.0;
+    if (chain.size() < 3) return false;
+
+    constexpr double kMinTheta = 0.012;
+    constexpr double kMaxTheta = kPi - 0.04;
+
+    std::vector<double> areas;
+    areas.reserve(chain.size());
+    for (int t : chain) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, t, n, area) || area <= 0.0) return false;
+        areas.push_back(area);
+    }
+
+    std::vector<double> thetas;
+    thetas.reserve(chain.size());
+    for (size_t i = 1; i < chain.size(); i++) {
+        const double th = edgeDihedralTriPair(mv, chain[i - 1], chain[i]);
+        thetas.push_back(th);
+    }
+
+    const int areaSkip = chain.size() >= 10 ? 2 : 1;
+    if (!coefficientOfVariationOk(areas, areaSkip, 0.42)) return false;
+
+    std::vector<double> arcThetas;
+    for (double th : thetas) {
+        if (th >= kMinTheta && th <= kMaxTheta) arcThetas.push_back(th);
+    }
+    if (arcThetas.size() < 2) return false;
+    if (!coefficientOfVariationOk(arcThetas, 0, 0.45)) return false;
+
+    std::vector<double> radii;
+    const size_t nLinks = chain.size() - 1;
+    size_t goodLinks = 0;
+    for (size_t i = 1; i < chain.size(); i++) {
+        const double theta = thetas[i - 1];
+        if (theta < kMinTheta || theta > kMaxTheta) continue;
+        const double w = stripWidthAlongAxis(mv, chain[i - 1], chain[i], axis);
+        if (!(w > 0.0)) continue;
+        const double s = std::sin(0.5 * theta);
+        if (s <= 1e-9) continue;
+        const double rChord = w / (2.0 * s);
+        if (!(rChord > 0.0) || !std::isfinite(rChord)) continue;
+        if (rHint > 0.0) {
+            const double rel = rChord / rHint;
+            if (rel < 0.48 || rel > 1.52) continue;
+        }
+
+        radii.push_back(rChord);
+        goodLinks++;
+    }
+
+    if (radii.size() < 2) return false;
+    const double rMed = medianOfSorted(radii);
+    if (!(rMed > 0.0)) return false;
+
+  // Score: arc-link coverage + chain length.
+    const double linkFrac = nLinks > 0 ? static_cast<double>(goodLinks) / nLinks : 0.0;
+    chainScoreOut = linkFrac * std::min(1.0, static_cast<double>(chain.size()) / 5.0);
+    if (chainScoreOut < 0.28) return false;
+
+    radiusOut = rMed;
+    return std::isfinite(radiusOut) && radiusOut > 0.0;
+}
+
+bool archChainRadiusFromPatch(const MeshView& mv, const std::vector<int>& tris,
+                              const gp_Dir& axis, double& radiusOut,
+                              double& chainScoreOut, double rHint) {
+    radiusOut = 0.0;
+    chainScoreOut = 0.0;
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    std::vector<int> chain;
+    if (!buildTriPathChain(mv, ids, chain)) return false;
+    const bool okChain = radiusFromArchChain(mv, chain, axis, radiusOut, chainScoreOut, rHint);
+    double pairR = 0.0;
+    double pairScore = 0.0;
+    const bool okPairs =
+        ids.size() >= 3
+        && radiusFromArchChainPairs(mv, ids, axis, pairR, pairScore, rHint);
+    if (okPairs && pairScore >= chainScoreOut) {
+        radiusOut = pairR;
+        chainScoreOut = pairScore;
+        return true;
+    }
+    return okChain;
+}
+
+bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
+                         const DerivedTols& tol, ArcStripDetect& out) {
+    out = ArcStripDetect{};
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 3) return false;
+
+    gp_XYZ nbar;
+    std::array<std::array<double, 3>, 3> cov{};
+    double areaSum = 0.0;
+    if (!normalCovariance(mv, ids, nbar, cov, areaSum)) return false;
+
+    std::array<double, 3> eval{};
+    std::array<std::array<double, 3>, 3> evec{};
+    if (!jacobiEigenSymmetric3(cov, eval, evec)) return false;
+
+    const double L = std::max(mv.diag, tol.epsMesh);
+    const double theta = (L > 0.0) ? (tol.epsMesh / L) : 0.0;
+    const double mu2Floor = areaSum * theta * theta;
+    if (eval[1] <= mu2Floor && eval[1] <= 1e-12 * std::max(eval[2], 1e-300)) return false;
+
+    gp_Ax3 pca;
+    const bool havePca = pcaPlane(mv, ids, pca);
+    const double pdev = havePca ? maxVertexPlaneDev(mv, ids, pca) : 0.0;
+
+  // w1 = smallest-eigenvalue axis (normal-rotation axis for cylinder bands).
+    gp_XYZ w1(evec[0][0], evec[0][1], evec[0][2]);
+    const double wm = w1.Modulus();
+    if (wm < 1e-15) return false;
+    w1.Divide(wm);
+    std::array<double, 3> av{w1.X(), w1.Y(), w1.Z()};
+    signNormalize(av);
+    w1 = gp_XYZ(av[0], av[1], av[2]);
+    const gp_Dir axis(w1.X(), w1.Y(), w1.Z());
+
+    std::vector<int> order;
+    if (!orderTrisBfs(mv, ids, tol.thetaPlane, order)) return false;
+
+    double spanRad = 0.0;
+    double monoFrac = 0.0;
+    const bool mono = monotonicNormalSpan(mv, order, axis, spanRad, monoFrac);
+    const bool staticNormals = !mono && pdev > tol.epsPlane * 2.0;
+
+    if (!mono && !staticNormals) return false;
+    if (mono && spanRad < 0.21) return false;  // ~12°
+
+    gp_Pnt center;
+    double radius = 0.0;
+    if (!eberlyCenterRadius(mv, ids, axis, center, radius)) return false;
+    if (!(radius >= 15.0) || radius > 55.0) return false;
+
+    const double res = maxCylResidual(mv, ids, axis, center, radius);
+    double accept = tol.epsCylAccept(radius);
+    const int nEst = std::max(6, static_cast<int>(ids.size()));
+    accept = std::max(accept, chordSagitta(radius, nEst));
+    // Coarse Fusion band: chordal rings on large-R partial arcs (handle-lock
+    // R≈20 needs ~0.5 mm slack vs the 0.39 mm sagitta floor alone).
+    if (mv.nTri >= 500 && mv.nTri <= 1200)
+        accept = std::max(accept, 0.05 * radius);
+    if (res > accept) return false;
+
+    out.ok = true;
+    out.axis = axis;
+    out.center = center;
+    out.radius = radius;
+    out.spanRad = spanRad;
+    out.staticNormals = staticNormals;
+    return true;
+}
+
+bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
+                     const DerivedTols& tol, ArcStripDetect& out) {
+    out = ArcStripDetect{};
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 3) return false;
+
+    gp_XYZ nbar;
+    std::array<std::array<double, 3>, 3> cov{};
+    double areaSum = 0.0;
+    if (!normalCovariance(mv, ids, nbar, cov, areaSum)) return false;
+
+    std::array<double, 3> eval{};
+    std::array<std::array<double, 3>, 3> evec{};
+    if (!jacobiEigenSymmetric3(cov, eval, evec)) return false;
+
+    gp_XYZ w1(evec[0][0], evec[0][1], evec[0][2]);
+    const double wm = w1.Modulus();
+    if (wm < 1e-15) return false;
+    w1.Divide(wm);
+    std::array<double, 3> av{w1.X(), w1.Y(), w1.Z()};
+    signNormalize(av);
+    w1 = gp_XYZ(av[0], av[1], av[2]);
+    const gp_Dir axis(w1.X(), w1.Y(), w1.Z());
+
+    std::vector<int> chain;
+    if (!buildTriPathChain(mv, ids, chain)) return false;
+
+    double chainR = 0.0;
+    double chainScore = 0.0;
+    if (!radiusFromArchChain(mv, chain, axis, chainR, chainScore, 0.0)) return false;
+
+    double spanRad = 0.0;
+    double monoFrac = 0.0;
+    (void)monotonicNormalSpan(mv, chain, axis, spanRad, monoFrac);
+
+    gp_Pnt center;
+    double radius = chainR;
+    if (!eberlyCenterRadius(mv, ids, axis, center, radius)) return false;
+
+    if (chainScore >= 0.45) radius = chainR;
+
+    if (!(radius >= 8.0) || radius > 55.0) return false;
+
+    const double res = maxCylResidual(mv, ids, axis, center, radius);
+    double accept = tol.epsCylAccept(radius);
+    const int nEst = std::max(6, static_cast<int>(ids.size()));
+    accept = std::max(accept, chordSagitta(radius, nEst));
+    if (mv.nTri >= 500 && mv.nTri <= 1200)
+        accept = std::max(accept, 0.05 * radius);
+    if (res > accept) return false;
+
+    out.ok = true;
+    out.axis = axis;
+    out.center = center;
+    out.radius = radius;
+    out.spanRad = spanRad;
+    out.staticNormals = false;
+    out.chainScore = chainScore;
+    out.fromArchChain = true;
+    return true;
 }
 
 }  // namespace refit

@@ -7,3 +7,8 @@ corpus.stamp
 !Body11.expected.json
 !Body28.stl
 !Body28.expected.json
+!handle-lock.stl
+!handle-lock.expected.json
+# S09 loft: OCCT BRepMesh tessellation is not byte-stable across platforms.
+!S09.stl
+!S09.expected.json

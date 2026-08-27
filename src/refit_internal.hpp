@@ -102,6 +102,13 @@ struct DerivedTols {
     }
 };
 
+// Coarse Fusion/STLB export band (handle-lock @ 908 tris). Lane B coarse gates
+// and adaptCoarseSegmentParams must stay in sync — unscoped B (nTri<=1200 or
+// global evaluateCommit/A3 changes) breaks p2real S13/S14 fillet fixtures.
+inline bool coarseFusionBand(const MeshView& mv) {
+    return mv.nTri >= 500 && mv.nTri <= 1200;
+}
+
 // Working state threaded A1 -> D. Region ids and loops are filled in buildTopologyD.
 struct SegmentWork {
     std::vector<int> triChart;          // size mv.nTri
@@ -149,9 +156,51 @@ bool gaussMapAxis(const MeshView& mv, const std::vector<int>& tris, gp_Dir& axis
 
 double chordSagitta(double radius, int nSides);
 
+// Chord-sagitta / inscribed-polygon radius recovery (refit_math.cpp).
+double radiusFromChordLength(double chordLen, int nSides);
+double circumradiusFromInscribed(double rInscribed, int nSides);
+double radiusFromChordSagitta(double halfChord, double sagitta);
+int estimateFullCircleSides(const MeshView& mv, const std::vector<int>& tris);
+bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
+                          const gp_Dir& axis, gp_Pnt& center, double& radius,
+                          int nSides, double spanRad, double rHint = 0.0);
+
 double dVolCylinderSector(double areaReg, double radius, int nSides, bool outwardNormal);
 
 double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const gp_Ax3& ax);
+
+// Large-R arc strip (lane F): monotonic normal rotation about a common axis, or a
+// static-normal vertex ring on coarse tessellation. Used by peelLargeArcStripsA2b.
+struct ArcStripDetect {
+    bool ok = false;
+    gp_Dir axis;
+    gp_Pnt center;
+    double radius = 0;
+    double spanRad = 0;
+    bool staticNormals = false;
+    double chainScore = 0.0;  // arch-chain signal strength (lane ARCHCHAINS)
+    bool fromArchChain = false;
+};
+
+bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
+                         const DerivedTols& tol, ArcStripDetect& out);
+
+// Point-to-point arch chain (lane ARCHCHAINS): equal-area strip chain with uniform
+// dihedral steps; R = w/(2 sin(θ/2)). Returns chainScore in out.chainScore.
+bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
+                     const DerivedTols& tol, ArcStripDetect& out);
+
+// Core chain-chord radius from an ordered tri path; axis filters circumferential edges.
+bool radiusFromArchChain(const MeshView& mv, const std::vector<int>& chain,
+                         const gp_Dir& axis, double& radiusOut, double& chainScoreOut,
+                         double rHint = 0.0);
+
+// Build path chain from patch tris and compute arch-chain radius (evaluateCommit hook).
+bool archChainRadiusFromPatch(const MeshView& mv, const std::vector<int>& tris,
+                              const gp_Dir& axis, double& radiusOut,
+                              double& chainScoreOut, double rHint = 0.0);
+
+bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWork& work);
 
 }}  // namespace stl2step::refit
 

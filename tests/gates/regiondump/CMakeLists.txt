@@ -47,8 +47,6 @@ foreach(_tu IN LISTS _p1_tus)
 endforeach()
 
 set(_regiondump_sources dump_regionset.cpp)
-# One predicate over the five-name list: compile every P1 TU iff all five
-# exist. A 1–4 half-link (FINDINGS-0 D1) is the defect this lane repairs.
 set(_p1_all_present TRUE)
 set(_p1_sources "")
 foreach(_tu IN LISTS _p1_tus)
@@ -60,10 +58,19 @@ foreach(_tu IN LISTS _p1_tus)
     endif()
 endforeach()
 
-if(_p1_all_present)
+# refit::segment lives in stl2step::core; stl2step::harness links it PUBLIC.
+# Recompiling 1–4 P1 TUs into this executable while also linking core is the
+# half-link defect (FINDINGS-0 D1): duplicate segment() symbols, stub winning
+# at link, or silent divergence from the in-engine path.
+set(_regiondump_use_core_refit FALSE)
+if(TARGET stl2step::core AND EXISTS "${_stl2step_root}/src/refit_segment.cpp")
+    set(_regiondump_use_core_refit TRUE)
+    message(STATUS
+        "stl2step_regiondump: refit from stl2step::core (no duplicate P1 compile)")
+elseif(_p1_all_present)
     list(APPEND _regiondump_sources ${_p1_sources})
     message(STATUS
-        "stl2step_regiondump: using 5/5 P1 TUs (stub not compiled)")
+        "stl2step_regiondump: compiling 5/5 P1 TUs (no stl2step::core)")
 else()
     list(APPEND _regiondump_sources stub_segment.cpp)
     message(WARNING
@@ -80,7 +87,7 @@ target_link_libraries(stl2step_regiondump PRIVATE stl2step::harness)
 target_include_directories(stl2step_regiondump PRIVATE
     "${_stl2step_root}/src")
 
-if(NOT _p1_all_present)
+if(NOT _regiondump_use_core_refit AND NOT _p1_all_present)
     target_compile_definitions(stl2step_regiondump PRIVATE STL2STEP_REGIONDUMP_STUB=1)
 endif()
 
@@ -98,6 +105,7 @@ unset(_regiondump_sources)
 unset(_p1_tus)
 unset(_p1_sources)
 unset(_p1_all_present)
+unset(_regiondump_use_core_refit)
 unset(_tu)
 unset(_path)
 unset(_stl2step_root)

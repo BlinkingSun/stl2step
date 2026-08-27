@@ -378,8 +378,31 @@ static void usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s <file.stl> [--scale S] [--weld-tol T] [--sew-tol T]\n"
                  "                    [--component N] [--smooth-tol MM] [--smooth-angle DEG]\n"
-                 "                    [--no-fillets] [--threads N] [--bare] [--out FILE]\n",
+                 "                    [--no-fillets|--no-smooth-fillets] [--include-dirty]\n"
+                 "                    [--threads N] [--bare] [--diag] [--out FILE]\n",
                  argv0);
+}
+
+static void diagRegionSummary(FILE* f, size_t compIndex, int root, const RegionSet& rs) {
+    std::fprintf(f, "segment comp%zu root=%d ok regions=%zu rejected=%zu "
+                 "planes=%d cylinders=%d fillets=%d facetIslands=%d\n",
+                 compIndex, root, rs.regions.size(), rs.rejected.size(),
+                 rs.stats.planes, rs.stats.cylinders, rs.stats.fillets,
+                 rs.stats.facetIslands);
+    for (const Region& r : rs.regions) {
+        std::fprintf(f, "  id=%d type=%s origin=%s tris=%zu radius=%.6g closed360=%d\n",
+                     r.id, surfTypeName(r.type), originName(r.origin), r.tris.size(),
+                     r.radius, r.closed360 ? 1 : 0);
+    }
+    std::fprintf(f, "  cylinder radii:");
+    bool first = true;
+    for (const Region& r : rs.regions) {
+        if (r.type != SurfType::Cylinder) continue;
+        if (!first) std::fputs(",", f);
+        first = false;
+        putFloat(f, r.radius);
+    }
+    std::fputc('\n', f);
 }
 
 int main(int argc, char** argv) {
@@ -394,6 +417,8 @@ int main(int argc, char** argv) {
     double smoothTolMM = 0.0, smoothAngleDeg = 2.0;
     bool doFillets = true;
     bool bare = false;
+    bool includeDirty = false;
+    bool diag = false;
     int componentFilter = -1;  // -1 = all
     int threads = 0;           // accepted for gate parity; P1 segment is single-threaded
 
@@ -418,8 +443,13 @@ int main(int argc, char** argv) {
             smoothTolMM = std::atof(needArg("--smooth-tol"));
         } else if (std::strcmp(argv[i], "--smooth-angle") == 0) {
             smoothAngleDeg = std::atof(needArg("--smooth-angle"));
-        } else if (std::strcmp(argv[i], "--no-fillets") == 0) {
+        } else if (std::strcmp(argv[i], "--no-fillets") == 0 ||
+                   std::strcmp(argv[i], "--no-smooth-fillets") == 0) {
             doFillets = false;
+        } else if (std::strcmp(argv[i], "--include-dirty") == 0) {
+            includeDirty = true;
+        } else if (std::strcmp(argv[i], "--diag") == 0) {
+            diag = true;
         } else if (std::strcmp(argv[i], "--bare") == 0) {
             bare = true;
         } else if (std::strcmp(argv[i], "--threads") == 0) {
@@ -471,6 +501,7 @@ int main(int argc, char** argv) {
         const HarnessComponent* c;
         RegionSet rs;
         bool segmentOk;
+        const char* segmentSkip = nullptr;  // non-null => segment() not run
     };
     std::vector<Dumped> dumped;
     int dirtySkipped = 0;
@@ -478,18 +509,22 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < mesh.comps.size(); i++) {
         if (componentFilter >= 0 && (int)i != componentFilter) continue;
         const HarnessComponent& c = mesh.comps[i];
-        if (!c.clean()) {
-            dirtySkipped++;  // counted, never warned (I6)
-            continue;
-        }
-        MeshView mv{};
-        toMeshView(mesh, c, mv);
         Dumped d;
         d.index = i;
         d.c = &c;
         d.rs.compRoot = c.root;
+        if (!c.clean() && !includeDirty) {
+            dirtySkipped++;
+            d.segmentOk = false;
+            d.segmentSkip = "dirtyComponent";
+            dumped.push_back(std::move(d));
+            continue;
+        }
+        MeshView mv{};
+        toMeshView(mesh, c, mv);
         d.segmentOk = stl2step::refit::segment(mv, params, d.rs, nullptr);
         d.rs.compRoot = c.root;  // harness root is the component key
+        if (diag) diagRegionSummary(stderr, i, c.root, d.rs);
         dumped.push_back(std::move(d));
     }
 
@@ -506,9 +541,17 @@ int main(int argc, char** argv) {
     if (bare) {
         if (dumped.size() != 1) {
             std::fprintf(stderr,
-                         "stl2step_regiondump: --bare requires one clean component "
-                         "(got %zu dumps, %d dirty skipped)\n",
+                         "stl2step_regiondump: --bare requires one component row "
+                         "(got %zu dumps, %d dirty skipped without segment)\n",
                          dumped.size(), dirtySkipped);
+            if (out != stdout) std::fclose(out);
+            return 1;
+        }
+        if (dumped[0].segmentSkip) {
+            std::fprintf(stderr,
+                         "stl2step_regiondump: --bare component skipped (%s); "
+                         "pass --include-dirty to segment\n",
+                         dumped[0].segmentSkip);
             if (out != stdout) std::fclose(out);
             return 1;
         }
@@ -537,6 +580,17 @@ int main(int argc, char** argv) {
     std::fprintf(out, "%d", dirtySkipped);
     top.key("dumped");
     std::fprintf(out, "%zu", dumped.size());
+    int totalRegions = 0, totalRejected = 0;
+    for (const Dumped& d : dumped) {
+        if (!d.segmentSkip) {
+            totalRegions += (int)d.rs.regions.size();
+            totalRejected += (int)d.rs.rejected.size();
+        }
+    }
+    top.key("totalRegions");
+    std::fprintf(out, "%d", totalRegions);
+    top.key("totalRejected");
+    std::fprintf(out, "%d", totalRejected);
     top.key("comps");
     if (dumped.empty()) {
         std::fputs("[]", out);
@@ -560,12 +614,24 @@ int main(int argc, char** argv) {
             std::fprintf(out, "%zu", d.c->compEdges.size());
             co.key("clean");
             std::fputs(d.c->clean() ? "true" : "false", out);
+            if (d.segmentSkip) {
+                co.key("segmentSkip");
+                std::fprintf(out, "\"%s\"", d.segmentSkip);
+            }
             co.key("segmentOk");
             std::fputs(d.segmentOk ? "true" : "false", out);
+            co.key("regionCount");
+            std::fprintf(out, "%zu", d.segmentSkip ? 0 : d.rs.regions.size());
+            co.key("rejectedCount");
+            std::fprintf(out, "%zu", d.segmentSkip ? 0 : d.rs.rejected.size());
             co.key("compVtx");
             putIntArray(out, d.c->compVtx);
             co.key("regionSet");
-            writeRegionSet(out, d.rs, 6);
+            if (d.segmentSkip) {
+                std::fputs("null", out);
+            } else {
+                writeRegionSet(out, d.rs, 6);
+            }
             co.end();
         }
         std::fputc('\n', out);

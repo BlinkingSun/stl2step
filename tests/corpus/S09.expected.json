@@ -1,0 +1,76 @@
+{
+  "id": "S09",
+  "description": "40x40x20 box fused with spline loft (freeform must stay faceted; 2 solids)",
+  "deflection": 0.25,
+  "triangleCount": 54,
+  "meshVolume": 32496.706107302412,
+  "expectFillet": false,
+  "watertight": true,
+  "openEdges": 0,
+  "nonManifoldEdges": 0,
+  "expectedExit": 0,
+  "expectedSolids": 2,
+  "expectedOpenShells": 0,
+  "recoverable": [
+    {
+      "type": "plane",
+      "count": 1,
+      "normal": [0,0,-1],
+      "nSides": 0
+    },
+    {
+      "type": "plane",
+      "count": 1,
+      "normal": [0,0,1],
+      "nSides": 0
+    },
+    {
+      "type": "plane",
+      "count": 1,
+      "normal": [-1,0,0],
+      "nSides": 0
+    },
+    {
+      "type": "plane",
+      "count": 1,
+      "normal": [0,-1,0],
+      "nSides": 0
+    },
+    {
+      "type": "plane",
+      "count": 1,
+      "normal": [1,0,0],
+      "nSides": 0
+    },
+    {
+      "type": "plane",
+      "count": 1,
+      "normal": [0,1,0],
+      "nSides": 0
+    }
+  ],
+  "mustRemainFaceted": [
+    {"type": "freeform", "count": 1, "note": "ThruSections loft patch"}
+  ],
+  "expectedRejects": [],
+  "components": [
+    {"index": 0, "triangleCount": 12, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 31999.999999999996, "clean": true},
+    {"index": 1, "triangleCount": 42, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 496.70610730241833, "clean": true}
+  ],
+  "live": [
+    {
+      "component": 0,
+      "disposition": "PASS",
+      "faceCount": 6,
+      "surfaceCensus": {"plane": 6, "cylinder": 0, "planar_facets": 0},
+      "volumeBudgetMM3": 3.1999999999999997
+    },
+    {
+      "component": 1,
+      "disposition": "PASS",
+      "faceCount": 42,
+      "surfaceCensus": {"plane": 0, "cylinder": 0, "planar_facets": 42},
+      "volumeBudgetMM3": 0.049670610730241836
+    }
+  ]
+}

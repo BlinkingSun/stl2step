@@ -330,9 +330,19 @@ FixtureResult emitShape(const std::string& id, const std::string& desc, TopoDS_S
     return out;
 }
 
+// Fixtures whose STL+sidecar are committed (see tests/corpus/.gitignore).
+// OCCT tessellation of the S09 loft differs across libm/FMA targets; the
+// committed pair is the cross-platform calibration input for P1/P2 gates.
+static bool isPinnedCorpusFixture(const std::string& id) {
+    return id == "S09";
+}
+
 bool writeFixture(const fs::path& dir, const FixtureResult& fx) {
     const fs::path stlPath = dir / (fx.sidecar.id + ".stl");
     const fs::path jsonPath = dir / (fx.sidecar.id + ".expected.json");
+    if (isPinnedCorpusFixture(fx.sidecar.id) && fs::exists(stlPath) && fs::exists(jsonPath)) {
+        return true;
+    }
     const std::string label = ("stl2step corpus " + fx.sidecar.id).substr(0, 79);
     if (!writeBinaryStl(stlPath.string(), fx.mesh, label.c_str())) return false;
     return writeTextFile(jsonPath.string(), writeSidecarJson(fx.sidecar));
@@ -781,7 +791,9 @@ int main(int argc, char** argv) {
     run("S06", [] { return buildNGonCylinder("S06", "N=8 polygonal cylinder D=50 H=100", 8, 0.05); });
     run("S07", [] { return buildNGonCylinder("S07", "N=12 polygonal cylinder D=50 H=100", 12, 0.05); });
     run("S08", [] { return buildNGonCylinder("S08", "N=16 polygonal cylinder D=50 H=100", 16, 0.05); });
-    run("S09", [] { return buildS09(); });
+    if (!isPinnedCorpusFixture("S09")
+        || !fs::exists(outDir / "S09.stl") || !fs::exists(outDir / "S09.expected.json"))
+        run("S09", [] { return buildS09(); });
     run("S10", [] { return buildS10(); });
     run("S11", [] { return buildS11(); });
     run("S11-b", [] { return buildS11b(); });
@@ -796,6 +808,11 @@ int main(int argc, char** argv) {
     run("S16-R2-ChainUnstable", [] { return buildS16R2(); });
 
     for (const auto& fx : fixtures) {
+        if (isPinnedCorpusFixture(fx.sidecar.id)
+            && fs::exists(outDir / (fx.sidecar.id + ".stl"))
+            && fs::exists(outDir / (fx.sidecar.id + ".expected.json"))) {
+            continue;
+        }
         if (!writeFixture(outDir, fx)) {
             std::cerr << "FAIL write " << fx.sidecar.id << "\n";
             ++failures;

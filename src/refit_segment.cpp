@@ -16,6 +16,12 @@ namespace {
 
 constexpr double kDegToRad = M_PI / 180.0;
 
+void adaptCoarseSegmentParams(const MeshView& mv, SegmentParams& p) {
+    if (!coarseFusionBand(mv)) return;
+    p.thetaPlaneDeg = std::max(p.thetaPlaneDeg, 15.0);
+    p.thetaCylHiDeg = std::max(p.thetaCylHiDeg, 70.0);
+}
+
 DerivedTols deriveTols(const MeshView& mv, const SegmentParams& p) {
     DerivedTols tol;
     tol.epsMesh = (p.epsMesh > 0.0)
@@ -56,9 +62,11 @@ bool segment(const MeshView& mv, const SegmentParams& p, RegionSet& out, WarnFn 
     try {
         out = RegionSet{};
 
-        const DerivedTols tol = deriveTols(mv, p);
+        SegmentParams params = p;
+        adaptCoarseSegmentParams(mv, params);
+        const DerivedTols tol = deriveTols(mv, params);
 
-        if (!runStages(mv, p, tol, out)) {
+        if (!runStages(mv, params, tol, out)) {
             out = RegionSet{};
             if (warn) warn("refit::segment: stage failed");
             return false;

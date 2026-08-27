@@ -159,6 +159,13 @@ bool edgeSpansFullCircle(const TopoDS_Edge& e) {
 gp_Pln asPlane(const Region& r) { return gp_Pln(r.ax); }
 gp_Cylinder asCyl(const Region& r) { return gp_Cylinder(r.ax, r.radius); }
 
+Handle(Geom_CylindricalSurface) cylSurfaceForRegion(const Region& r);
+
+gp_Cylinder cylForIntersect(const Region& r) {
+    if (r.type != SurfType::Cylinder) return asCyl(r);
+    return cylSurfaceForRegion(r)->Cylinder();
+}
+
 bool isAnalytic(const Region* r) {
     return r && (r->type == SurfType::Plane || r->type == SurfType::Cylinder);
 }
@@ -325,6 +332,19 @@ double derivedEpsPlane(const MeshView& mv) {
     const double diag = mv.diag > 0.0 ? mv.diag : 1.0;
     const double epsMesh = std::max(std::max(mv.weldTol, 1e-4 * diag), 1e-3);
     return std::max(std::max(epsMesh, mv.sewTol), 0.02);
+}
+
+// Partial-cylinder face validity: prefer measured chord sag over the nSides≥4
+// π/4 floor when nSides was counted (handle-lock rid=5: 2.14 mm vs 4.7 mm).
+double partialFaceTolCap(const MeshView& mv, const Region& r) {
+    double c = std::max(mv.sewTol, Precision::Confusion());
+    c = std::max(c, r.maxVertexDev);
+    c = std::max(c, derivedEpsPlane(mv));
+    if (r.nSides > 0 && r.chordSagitta > 0.0)
+        c = std::max(c, r.chordSagitta);
+    else if (r.radius > 0.0)
+        c = std::max(c, r.radius * (1.0 - std::cos(kPi / 4.0)));
+    return c * 1.001 + Precision::Confusion();
 }
 
 // Snap budget for an accepted IntAna / constructed curve. Floor is SPEC-F2
@@ -526,8 +546,33 @@ bool wireEdgesFromVertex(const TopoDS_Wire& w, const TopoDS_Vertex& V,
     return false;
 }
 
+double intAnaAcceptResidual(const MeshView& mv, const BoundaryChain& ch, double sewTol,
+                            const Region* A, const Region* B) {
+    double acceptR = std::max(sewTol * 50.0, 1.0);
+    if (A && B) {
+        const double fit = std::max(A->maxVertexDev, B->maxVertexDev);
+        if (ch.meshVerts.size() <= 3)
+            acceptR = std::max(acceptR, fit * 3.0 + derivedEpsPlane(mv));
+        else if (ch.meshVerts.size() <= 20)
+            acceptR = std::max(acceptR, fit * 2.0 + derivedEpsPlane(mv));
+        // Skew/near-tangent cyl|cyl: IntAna conics land off the mesh band on
+        // coarse exports — widen acceptance vs the fitted residual.
+        if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder) {
+            acceptR = std::max(acceptR, fit * 4.0 + derivedEpsPlane(mv));
+            if (ch.meshVerts.size() <= 3)
+                acceptR = std::max(acceptR, fit * 5.0 + derivedEpsPlane(mv) * 2.0);
+        }
+        if ((A->type == SurfType::Plane && B->type == SurfType::Cylinder) ||
+            (A->type == SurfType::Cylinder && B->type == SurfType::Plane)) {
+            if (ch.meshVerts.size() <= 3)
+                acceptR = std::max(acceptR, fit * 5.0 + derivedEpsPlane(mv) * 2.0);
+        }
+    }
+    return acceptR;
+}
+
 AnalyticCurve pickIntAna(const IntAna_QuadQuadGeo& iq, const MeshView& mv, const BoundaryChain& ch,
-                         double sewTol) {
+                         double sewTol, double acceptResidual = -1.0) {
     AnalyticCurve best;
     if (!iq.IsDone()) return best;
     IntAna_ResultType ty = iq.TypeInter();
@@ -576,11 +621,137 @@ AnalyticCurve pickIntAna(const IntAna_QuadQuadGeo& iq, const MeshView& mv, const
             }
         }
     }
-    if (best.kind != AnalyticCurve::None && bestR > std::max(sewTol * 50.0, 1.0)) {
-        // Intersection exists but is the wrong branch relative to this chain.
-        best.kind = AnalyticCurve::None;
+    if (best.kind != AnalyticCurve::None) {
+        const double acceptR =
+            acceptResidual > 0.0 ? acceptResidual : std::max(sewTol * 50.0, 1.0);
+        if (bestR > acceptR) best.kind = AnalyticCurve::None;
     }
     return best;
+}
+
+bool diagP2Enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_P2_DIAG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+bool diagJ6Enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_J6_DIAG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+void diagJ6FreeEdges(const MeshView& mv, const TopoDS_Shell& sh,
+                     const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                     const RegionSet& rs, const std::vector<char>& collapsed) {
+    try {
+        TopTools_IndexedDataMapOfShapeListOfShape anc;
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(sh, TopAbs_FACE, faceMap);
+        std::vector<int> faceRid((size_t)faceMap.Extent() + 1, -1);
+        for (size_t i = 0; i < built.size(); i++) {
+            int idx = faceMap.FindIndex(built[i]);
+            if (idx > 0 && i < builtRid.size()) faceRid[(size_t)idx] = builtRid[i];
+        }
+        int nFree = 0;
+        for (int i = 1; i <= anc.Extent(); i++) {
+            if (anc(i).Extent() >= 2) continue;
+            const TopoDS_Edge& e = TopoDS::Edge(anc.FindKey(i));
+            TopoDS_Vertex va, vb;
+            TopExp::Vertices(e, va, vb, Standard_True);
+            gp_Pnt pa = BRep_Tool::Pnt(va), pb = BRep_Tool::Pnt(vb);
+            int frid = -1;
+            if (anc(i).Extent() == 1) {
+                const TopoDS_Face& f = TopoDS::Face(anc(i).First());
+                int fi = faceMap.FindIndex(f);
+                if (fi > 0) frid = faceRid[(size_t)fi];
+            }
+            int ciMatch = -1;
+            for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+                if (ci >= collapsed.size() || !collapsed[ci]) continue;
+                const BoundaryChain& ch = rs.chains[ci];
+                if (ch.meshVerts.size() < 2) continue;
+                gp_Pnt p0 = pntOf(mv, ch.meshVerts.front());
+                gp_Pnt p1 = pntOf(mv, ch.meshVerts.back());
+                if (pa.Distance(p0) < 0.05 && pb.Distance(p1) < 0.05 ||
+                    pa.Distance(p1) < 0.05 && pb.Distance(p0) < 0.05)
+                    ciMatch = (int)ci;
+            }
+            std::fprintf(stderr,
+                         "DIAG_J6 freeE#%d faceRid=%d ci=%d pa=(%.3f,%.3f,%.3f) "
+                         "pb=(%.3f,%.3f,%.3f) len=%.4f\n",
+                         nFree, frid, ciMatch, pa.X(), pa.Y(), pa.Z(), pb.X(), pb.Y(), pb.Z(),
+                         pa.Distance(pb));
+            nFree++;
+        }
+        int analyticPoly = 0, analyticCol = 0;
+        for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+            const BoundaryChain& ch = rs.chains[ci];
+            const Region* A = regionById(rs, ch.regA);
+            const Region* B = regionById(rs, ch.regB);
+            if (!isAnalytic(A) || !isAnalytic(B)) continue;
+            if (ci < collapsed.size() && collapsed[ci]) analyticCol++;
+            else analyticPoly++;
+        }
+        std::fprintf(stderr, "DIAG_J6 summary freeEdges=%d analyticCollapsed=%d "
+                             "analyticPolyline=%d\n",
+                     nFree, analyticCol, analyticPoly);
+    } catch (const Standard_Failure&) {
+    }
+}
+
+double distAxesCyl(const gp_Ax3& a, const gp_Ax3& b) {
+    const gp_XYZ u = a.Direction().XYZ();
+    const gp_XYZ v = b.Direction().XYZ();
+    const gp_XYZ w = b.Location().XYZ() - a.Location().XYZ();
+    const gp_XYZ cr = u.Crossed(v);
+    const double crn = cr.Modulus();
+    if (crn <= std::sin(8.0 * kPi / 180.0) + 1e-15) return w.Crossed(u).Modulus();
+    return std::fabs(w.Dot(cr)) / crn;
+}
+
+bool axesNearParallel8(const gp_Dir& a, const gp_Dir& b) {
+    return a.XYZ().Crossed(b.XYZ()).Modulus() <= std::sin(8.0 * kPi / 180.0) + 1e-15;
+}
+
+bool cylCylTangentContact(const Region& a, const Region& b, double epsPlane) {
+    if (!axesNearParallel8(a.ax.Direction(), b.ax.Direction())) return false;
+    const double tol = std::max(epsPlane, std::max(a.maxVertexDev, b.maxVertexDev));
+    const double d = distAxesCyl(a.ax, b.ax);
+    const double ext = a.radius + b.radius;
+    const double inn = std::fabs(a.radius - b.radius);
+    return std::fabs(d - ext) <= tol || std::fabs(d - inn) <= tol;
+}
+
+bool cylCylParallelOffset(const Region& a, const Region& b, double epsPlane) {
+    if (!axesNearParallel8(a.ax.Direction(), b.ax.Direction())) return false;
+    const double tol = std::max(epsPlane, std::max(a.maxVertexDev, b.maxVertexDev));
+    return distAxesCyl(a.ax, b.ax) > tol;
+}
+
+bool planeCylSideContact(const Region& plnR, const Region& cylR, double epsPlane) {
+    const double adn = std::fabs(cylR.ax.Direction().Dot(plnR.ax.Direction()));
+    if (adn > std::sin(3.0 * kPi / 180.0) + 1e-15) return false;
+    const double d = std::fabs(plnR.ax.Direction().XYZ().Dot(
+        cylR.ax.Location().XYZ() - plnR.ax.Location().XYZ()));
+    const double tol =
+        std::max(epsPlane, std::max(plnR.maxVertexDev, cylR.maxVertexDev));
+    return std::fabs(d - cylR.radius) <= tol;
+}
+
+AnalyticCurve constructedPlaneCylCap(const Region& plnR, const Region& cylR) {
+    AnalyticCurve out;
+    if (!planePerpCylinder(plnR, cylR)) return out;
+    out.kind = AnalyticCurve::Circ;
+    out.circ = cylinderIsoCircle(cylR, planeVOnCylinder(plnR, cylR));
+    return out;
 }
 
 AnalyticCurve constructedGenerator(const Region& cylR, const Region& plnR) {
@@ -626,6 +797,43 @@ AnalyticCurve constructedCylCylGenerator(const Region& a, const Region& b) {
     return out;
 }
 
+AnalyticCurve meshAnchoredCylGenerator(const Region& cyl, const MeshView& mv,
+                                       const BoundaryChain& ch) {
+    AnalyticCurve out;
+    if (ch.meshVerts.empty()) return out;
+    gp_Dir axis = cyl.ax.Direction();
+    gp_Pnt meshP = pntOf(mv, ch.meshVerts[ch.meshVerts.size() / 2]);
+    gp_Vec toP(cyl.ax.Location(), meshP);
+    toP -= gp_Vec(axis) * toP.Dot(axis);
+    if (toP.Magnitude() < Precision::Confusion()) return out;
+    gp_Dir rad(toP);
+    gp_Pnt origin = cyl.ax.Location().Translated(gp_Vec(rad) * cyl.radius);
+    out.kind = AnalyticCurve::Lin;
+    out.lin = gp_Lin(origin, axis);
+    return out;
+}
+
+AnalyticCurve bestCylCylConstructed(const Region& a, const Region& b, const MeshView& mv,
+                                    const BoundaryChain& ch, double acceptR) {
+    AnalyticCurve best;
+    double bestR = 1e300;
+    auto consider = [&](const AnalyticCurve& c) {
+        if (c.kind == AnalyticCurve::None) return;
+        const double r = chainResidual(c, mv, ch);
+        if (r <= acceptR && r < bestR) {
+            bestR = r;
+            best = c;
+        }
+    };
+    consider(constructedCylCylGenerator(a, b));
+    consider(constructedCylCylGenerator(b, a));
+    if (axesNearParallel8(a.ax.Direction(), b.ax.Direction())) {
+        consider(meshAnchoredCylGenerator(a, mv, ch));
+        consider(meshAnchoredCylGenerator(b, mv, ch));
+    }
+    return best;
+}
+
 AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView& mv,
                                 const BoundaryChain& ch, double sewTol, WarnFn warn) {
     const double tolAng = Precision::Angular();
@@ -633,30 +841,81 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
     try {
         if (A.type == SurfType::Plane && B.type == SurfType::Plane) {
             IntAna_QuadQuadGeo iq(asPlane(A), asPlane(B), tolAng, tol);
-            AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol);
+            const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
+            AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol, acceptR);
             if (c.kind == AnalyticCurve::None)
                 emit(warn, "smooth: IntAna plane|plane empty/same — keeping mesh polyline");
             return c;
         }
         if (A.type == SurfType::Plane && B.type == SurfType::Cylinder) {
             double H = std::fabs(B.vMax - B.vMin);
-            IntAna_QuadQuadGeo iq(asPlane(A), asCyl(B), tolAng, tol, H);
-            AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol);
-            // G4: constructed generator ONLY for the tangent/G1 case (§2.5).
-            if (c.kind == AnalyticCurve::None && ch.tangent && planePerpCylinder(A, B))
+            IntAna_QuadQuadGeo iq(asPlane(A), cylForIntersect(B), tolAng, tol, H);
+            const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
+            AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol, acceptR);
+            // Oblique plane|cyl: IntAna ellipse on 2-vertex coarse chains often
+            // exceeds the first-pass residual gate but still matches the mesh band.
+            if (c.kind == AnalyticCurve::None && iq.IsDone() &&
+                iq.TypeInter() == IntAna_Ellipse && ch.meshVerts.size() <= 3) {
+                const double fit = std::max(A.maxVertexDev, B.maxVertexDev);
+                const double loose = std::max(acceptR, fit * 8.0 + derivedEpsPlane(mv) * 3.0);
+                c = pickIntAna(iq, mv, ch, sewTol, loose);
+            }
+            const double epsPl = derivedEpsPlane(mv);
+            // G4: side-grazing plane|cyl => generator line (§2.5). Re-evaluate
+            // geometry here — ch.tangent can miss when |dist-R| is within fit
+            // residual but above the epsPlane floor.
+            if (c.kind == AnalyticCurve::None && planeCylSideContact(A, B, epsPl))
                 c = constructedGenerator(B, A);
-            if (c.kind == AnalyticCurve::None)
+            // Cap circle from the fitted cylinder when IntAna misses or picks
+            // the wrong branch (coarse meshes: pickIntAna residual gate).
+            if (c.kind == AnalyticCurve::None && planePerpCylinder(A, B))
+                c = constructedPlaneCylCap(A, B);
+            // Ellipse branch on a cap plane is often a noisy IntAna circle; prefer
+            // the fitted iso-circle when the plane is perpendicular to the axis.
+            if (c.kind == AnalyticCurve::Elips && planePerpCylinder(A, B) && !B.closed360) {
+                AnalyticCurve cap = constructedPlaneCylCap(A, B);
+                if (cap.kind == AnalyticCurve::Circ) c = cap;
+            }
+            if (c.kind == AnalyticCurve::None) {
+                if (diagP2Enabled()) {
+                    IntAna_ResultType ty = iq.IsDone() ? iq.TypeInter() : IntAna_Empty;
+                    std::fprintf(stderr,
+                                 "DIAG_P2 plane|cyl regA=%d regB=%d R=%.4f ty=%d "
+                                 "tangent=%d side=%d perp=%d nV=%zu\n",
+                                 ch.regA, ch.regB, B.radius, (int)ty, (int)ch.tangent,
+                                 (int)planeCylSideContact(A, B, epsPl),
+                                 (int)planePerpCylinder(A, B), ch.meshVerts.size());
+                }
                 emit(warn, "smooth: IntAna plane|cyl empty/same — keeping mesh polyline");
+            }
             return c;
         }
         if (A.type == SurfType::Cylinder && B.type == SurfType::Plane) {
             return intersectSurfaces(B, A, mv, ch, sewTol, warn);
         }
         if (A.type == SurfType::Cylinder && B.type == SurfType::Cylinder) {
-            IntAna_QuadQuadGeo iq(asCyl(A), asCyl(B), tol);
-            AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol);
-            if (c.kind == AnalyticCurve::None)
+            IntAna_QuadQuadGeo iq(cylForIntersect(A), cylForIntersect(B), tol);
+            const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
+            AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol, acceptR);
+            const double epsPl = derivedEpsPlane(mv);
+            // Near-tangent fillet|bore and arch|arch: IntAna empty on coarse
+            // meshes — construct the shared generator from fitted geometry.
+            if (c.kind == AnalyticCurve::None && cylCylTangentContact(A, B, epsPl))
+                c = constructedCylCylGenerator(A, B);
+            if (c.kind == AnalyticCurve::None && cylCylParallelOffset(A, B, epsPl))
+                c = bestCylCylConstructed(A, B, mv, ch, acceptR);
+            if (c.kind == AnalyticCurve::None) {
+                if (diagP2Enabled()) {
+                    IntAna_ResultType ty = iq.IsDone() ? iq.TypeInter() : IntAna_Empty;
+                    std::fprintf(stderr,
+                                 "DIAG_P2 cyl|cyl regA=%d regB=%d R=%.4f/%.4f ty=%d "
+                                 "tangent=%d tanContact=%d parOff=%d nV=%zu\n",
+                                 ch.regA, ch.regB, A.radius, B.radius, (int)ty, (int)ch.tangent,
+                                 (int)cylCylTangentContact(A, B, epsPl),
+                                 (int)cylCylParallelOffset(A, B, epsPl), ch.meshVerts.size());
+                }
                 emit(warn, "smooth: IntAna cyl|cyl empty/same — keeping mesh polyline");
+            }
             return c;
         }
     } catch (const Standard_Failure&) {
@@ -804,13 +1063,11 @@ TopoDS_Edge makeEllipseArc(const gp_Elips& el, const TopoDS_Vertex& vA, const To
             B.UpdateVertex(vB, p1 + df, e, std::max(BRep_Tool::Tolerance(vB), Precision::Confusion()));
         } else {
             const double db = twopi - df;
-            const double t0 = wrap(p1 - db);
-            B.Add(e, vB.Oriented(TopAbs_FORWARD));
-            B.Add(e, vA.Oriented(TopAbs_REVERSED));
-            B.Range(e, t0, t0 + db);
-            B.UpdateVertex(vB, t0, e, std::max(BRep_Tool::Tolerance(vB), Precision::Confusion()));
-            B.UpdateVertex(vA, t0 + db, e, std::max(BRep_Tool::Tolerance(vA), Precision::Confusion()));
-            e.Reverse();
+            B.Add(e, vA.Oriented(TopAbs_FORWARD));
+            B.Add(e, vB.Oriented(TopAbs_REVERSED));
+            B.Range(e, p1, p1 + db);
+            B.UpdateVertex(vA, p1, e, std::max(BRep_Tool::Tolerance(vA), Precision::Confusion()));
+            B.UpdateVertex(vB, p1 + db, e, std::max(BRep_Tool::Tolerance(vB), Precision::Confusion()));
         }
         return e;
     } catch (const Standard_Failure&) {
@@ -1113,6 +1370,25 @@ bool seamStraddleU(const Region& r) {
     return (u0 < -0.5 * kPi && u1 > 0.0) || (u0 < 2.0 * kPi && u1 > 2.0 * kPi);
 }
 
+// Mid-vertex selector for partial-cylinder cap arcs when the chain has only
+// two terminals (no mesh interior point). Uses the fitted u-span midpoint on
+// the iso-circle at the cap V — not OCCT's shortest arc between endpoints.
+gp_Pnt partialCylCapArcMid(const Region& cyl, const Region* plnR, const gp_Circ& circ) {
+    double v = gp_Vec(cyl.ax.Location(), circ.Location()).Dot(cyl.ax.Direction());
+    if (plnR && planePerpCylinder(*plnR, cyl)) v = planeVOnCylinder(*plnR, cyl);
+    double u0 = cyl.uMin, u1 = cyl.uMax;
+    if (u1 < u0) u1 += 2.0 * kPi;
+    double um = 0.5 * (u0 + u1);
+    double ang = um;
+    if (!seamStraddleU(cyl)) {
+        while (ang > kPi) ang -= 2.0 * kPi;
+        while (ang <= -kPi) ang += 2.0 * kPi;
+    }
+    gp_Vec rad(gp_Vec(cyl.ax.XDirection()) * std::cos(ang) +
+               gp_Vec(cyl.ax.YDirection()) * std::sin(ang));
+    return cyl.ax.Location().Translated(gp_Vec(cyl.ax.Direction()) * v + rad * cyl.radius);
+}
+
 double regionU(const Region& r, const gp_Pnt& p) {
     double chi = wrapToPi(azimuthOf(r, p));
     // RULING-b unwrapped sheet only when the fitted interval straddles the
@@ -1139,27 +1415,72 @@ double vOnAx(const gp_Ax3& ax, const gp_Pnt& p) {
     return gp_Vec(ax.Location(), p).Dot(ax.Direction());
 }
 
+double cylRadialDev(const Region& r, const gp_Pnt& p) {
+    gp_Vec rho(r.ax.Location(), p);
+    gp_Vec ax(r.ax.Direction());
+    gp_Vec rad = rho - ax * rho.Dot(ax);
+    return std::fabs(rad.Magnitude() - r.radius);
+}
+
+gp_Pnt projectPntOnCylinder(const Region& r, const gp_Pnt& p) {
+    gp_Vec rho(r.ax.Location(), p);
+    gp_Vec ax(r.ax.Direction());
+    double v = rho.Dot(ax);
+    gp_Vec rad = rho - ax * v;
+    const double mag = rad.Magnitude();
+    if (mag < Precision::Confusion())
+        rad = gp_Vec(r.ax.XDirection()) * r.radius;
+    else
+        rad.Scale(r.radius / mag);
+    return r.ax.Location().Translated(ax * v + rad);
+}
+
+bool edgeUsesLinearCylPCurve(const TopoDS_Edge& e) {
+    Standard_Real f = 0, l = 0;
+    Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+    if (c.IsNull()) return true;
+    if (c->DynamicType() == STANDARD_TYPE(Geom_Ellipse)) return false;
+    if (c->DynamicType() == STANDARD_TYPE(Geom_TrimmedCurve)) {
+        Handle(Geom_TrimmedCurve) tc = Handle(Geom_TrimmedCurve)::DownCast(c);
+        if (!tc.IsNull() && tc->BasisCurve()->DynamicType() == STANDARD_TYPE(Geom_Ellipse))
+            return false;
+    }
+    return true;
+}
+
+void rebindCirclePCurvesOnWire(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, double sewTol) {
+    for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
+        TopoDS_Edge eW = ex.Current();
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c = BRep_Tool::Curve(eW, f, l);
+        if (!c.IsNull() && c->DynamicType() == STANDARD_TYPE(Geom_Circle))
+            addPcurvesOnSurface(surf, eW, false, sewTol);
+    }
+}
+
 void bindCylPCurves(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, const Region& r,
                     double sewTol) {
     Handle(Geom_CylindricalSurface) cyl = Handle(Geom_CylindricalSurface)::DownCast(surf);
     const bool rotated = !cyl.IsNull() &&
                          cyl->Position().XDirection().Angle(r.ax.XDirection()) > 1e-9;
     BRep_Builder B;
-    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
-        TopoDS_Edge e = TopoDS::Edge(it.Value());
-        Standard_Real f3 = 0, l3 = 0;
-        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
-        gp_Pnt pa, pb;
-        if (!c3.IsNull()) {
-            pa = c3->Value(f3);
-            pb = c3->Value(l3);
-        } else {
-            TopoDS_Vertex va, vb;
-            TopExp::Vertices(e, va, vb, Standard_False);
-            if (va.IsNull() || vb.IsNull()) continue;
-            pa = BRep_Tool::Pnt(va);
-            pb = BRep_Tool::Pnt(vb);
+    for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
+        TopoDS_Edge eW = ex.Current();
+        if (!edgeUsesLinearCylPCurve(eW)) {
+            addPcurvesOnSurface(surf, eW, false, sewTol);
+            continue;
         }
+        TopoDS_Vertex va = ex.CurrentVertex();
+        TopoDS_Vertex vtx1, vtx2;
+        TopExp::Vertices(eW, vtx1, vtx2, Standard_False);
+        TopoDS_Vertex vb = vtx1.IsSame(va) ? vtx2 : vtx1;
+        if (va.IsNull() || vb.IsNull()) continue;
+        gp_Pnt pa = BRep_Tool::Pnt(va);
+        gp_Pnt pb = BRep_Tool::Pnt(vb);
+        // Trim endpoints must lie on the fitted cylinder sheet, not on the
+        // inscribed mesh polygon (partial-face chord sag).
+        pa = projectPntOnCylinder(r, pa);
+        pb = projectPntOnCylinder(r, pb);
         double u1, v1, u2, v2;
         if (rotated) {
             gp_Ax3 ax = cyl->Position();
@@ -1183,8 +1504,8 @@ void bindCylPCurves(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, const Regi
         double mag = duv.Magnitude();
         if (mag < Precision::PConfusion()) continue;
         Handle(Geom2d_Line) ln = new Geom2d_Line(gp_Pnt2d(u1, v1), gp_Dir2d(duv));
-        B.UpdateEdge(e, ln, surf, TopLoc_Location(), sewTol);
-        B.Range(e, surf, TopLoc_Location(), 0.0, mag);
+        B.UpdateEdge(eW, ln, surf, TopLoc_Location(), sewTol);
+        B.Range(eW, surf, TopLoc_Location(), 0.0, mag);
     }
 }
 
@@ -1232,6 +1553,14 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
         for (const Loop* ip : inners) {
             TopoDS_Wire iw;
             if (!buildLoopWire(iw, *ip, rs, mv, geom, collapsed, meshE, edgeOk)) return false;
+            if (ip->chainIdx.size() == 1) {
+                const int ci = ip->chainIdx[0];
+                if (ci >= 0 && (size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
+                    (size_t)ci < geom.size() && geom[(size_t)ci].collapsed &&
+                    geom[(size_t)ci].edges.size() == 1 &&
+                    edgeSpansFullCircle(geom[(size_t)ci].edges[0]))
+                    iw = TopoDS::Wire(iw.Reversed());
+            }
             if (ip->chainIdx.size() > 6) {
                 try {
                     BRepBuilderAPI_MakeWire mw;
@@ -1258,6 +1587,16 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             if (!buildLoopWire(iw, *ip, rs, mv, geom, collapsed, meshE, edgeOk)) {
                 innersOk = false;
                 break;
+            }
+            // Hole loops must bind shared Seamed360 cap circles with reversed
+            // wire orientation (same TShape, flipped in the wire).
+            if (ip->chainIdx.size() == 1) {
+                const int ci = ip->chainIdx[0];
+                if (ci >= 0 && (size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
+                    (size_t)ci < geom.size() && geom[(size_t)ci].collapsed &&
+                    geom[(size_t)ci].edges.size() == 1 &&
+                    edgeSpansFullCircle(geom[(size_t)ci].edges[0]))
+                    iw = TopoDS::Wire(iw.Reversed());
             }
             innerW.push_back(iw);
         }
@@ -1376,6 +1715,10 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
                           const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                           const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
                           double sewTol, TopoDS_Face& outF) {
+    auto diagPartial = [&](const char* why) {
+        if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0')
+            std::fprintf(stderr, "DIAG_PARTIAL rid=%d %s\n", r.id, why);
+    };
     const Loop* outer = nullptr;
     std::vector<TopoDS_Wire> inners;
     for (const Loop& lp : r.loops) {
@@ -1386,27 +1729,46 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             inners.push_back(iw);
         }
     }
-    if (!outer) return false;
-    TopoDS_Wire ow;
-    if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk)) return false;
-    if (seamStraddleU(r) || outer->chainIdx.size() > 6) {
-        try {
-            BRepBuilderAPI_MakeWire mw;
-            for (TopoDS_Iterator it(ow); it.More(); it.Next())
-                mw.Add(TopoDS::Edge(it.Value()));
-            if (mw.IsDone()) {
-                TopoDS_Wire ow2 = mw.Wire();
-                ow2.Closed(Standard_True);
-                ow = ow2;
-            }
-        } catch (const Standard_Failure&) {
-        }
+    if (!outer) {
+        diagPartial("no-outer");
+        return false;
     }
-    const double cap = meshTolCap(mv, &r);
+    TopoDS_Wire ow;
+    auto refreshOuterWire = [&]() -> bool {
+        if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk)) return false;
+        if (seamStraddleU(r) || outer->chainIdx.size() > 6) {
+            try {
+                BRepBuilderAPI_MakeWire mw;
+                for (TopoDS_Iterator it(ow); it.More(); it.Next())
+                    mw.Add(TopoDS::Edge(it.Value()));
+                if (mw.IsDone()) {
+                    TopoDS_Wire ow2 = mw.Wire();
+                    ow2.Closed(Standard_True);
+                    ow = ow2;
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        return true;
+    };
+    if (!refreshOuterWire()) {
+        diagPartial("loop-wire");
+        return false;
+    }
+    const double cap = std::max(partialFaceTolCap(mv, r), analyticSnapCap(mv, &r, nullptr));
     auto finishPartial = [&](TopoDS_Face cand) -> bool {
         if (cand.IsNull()) return false;
-        setFaceOutward(cand, r.outwardNormal);
-        addPcurvesOnFace(cand, sewTol, false);
+        {
+            TopoDS_Face want = cand, other = cand;
+            setFaceOutward(want, r.outwardNormal);
+            setFaceOutward(other, !r.outwardNormal);
+            if (faceIsValid(want)) cand = want;
+            else if (faceIsValid(other)) cand = other;
+            else cand = want;
+        }
+        if (!faceIsValid(cand)) {
+            addPcurvesOnFace(cand, sewTol, false);
+        }
         if (!faceIsValid(cand)) {
             try {
                 ShapeFix_Face sff(cand);
@@ -1426,32 +1788,137 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             setFaceOutward(cand, r.outwardNormal);
             addPcurvesOnFace(cand, sewTol, false);
         }
-        if (!ensureFaceValid(cand, cap)) return false;
-        if (!faceIsValid(cand)) return false;
+        if (!ensureFaceValid(cand, cap)) {
+            if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0') {
+                double maxD = 0.0;
+                for (TopExp_Explorer vx(cand, TopAbs_VERTEX); vx.More(); vx.Next())
+                    maxD = std::max(maxD, cylRadialDev(r, BRep_Tool::Pnt(TopoDS::Vertex(vx.Current()))));
+                std::fprintf(stderr, "DIAG_PARTIAL rid=%d maxCylDev=%.4f cap=%.4f valid=%d", r.id,
+                             maxD, cap, faceIsValid(cand) ? 1 : 0);
+                try {
+                    BRepCheck_Analyzer an(cand, Standard_True);
+                    if (!an.IsValid()) {
+                        Handle(BRepCheck_Result) res = an.Result(cand);
+                        if (!res.IsNull()) {
+                            for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More();
+                                 it.Next())
+                                std::fprintf(stderr, " st=%d", (int)it.Value());
+                        }
+                    }
+                } catch (const Standard_Failure&) {
+                }
+                std::fprintf(stderr, "\n");
+            }
+            diagPartial(faceIsValid(cand) ? "ensure-only" : "ensure-invalid");
+            return false;
+        }
+        if (!faceIsValid(cand)) {
+            diagPartial("face-invalid");
+            return false;
+        }
         outF = cand;
         return true;
     };
-    auto tryPartial = [&](const Handle(Geom_CylindricalSurface)& surf) -> bool {
+    auto makeFaceBound = [&](const Handle(Geom_Surface)& surf, TopoDS_Face& cand) -> bool {
+        if (mv.nTri >= 500 && !refreshOuterWire()) return false;
         bindCylPCurves(ow, surf, r, sewTol);
         for (auto& iw : inners) bindCylPCurves(iw, surf, r, sewTol);
-        TopoDS_Face cand;
-        try {
-            BRepBuilderAPI_MakeFace mf(surf, ow, Standard_True);
-            if (mf.IsDone()) {
+        auto attempt = [&]() -> bool {
+            try {
+                BRepBuilderAPI_MakeFace mf(surf, ow, Standard_True);
+                if (!mf.IsDone()) return false;
                 for (const auto& iw : inners) mf.Add(iw);
-                if (mf.IsDone()) cand = mf.Face();
+                if (!mf.IsDone()) return false;
+                cand = mf.Face();
+                return !cand.IsNull();
+            } catch (const Standard_Failure&) {
+                return false;
             }
-        } catch (const Standard_Failure&) {
+        };
+        if (attempt()) return true;
+        rebindCirclePCurvesOnWire(ow, surf, sewTol);
+        for (auto& iw : inners) rebindCirclePCurvesOnWire(iw, surf, sewTol);
+        return attempt();
+    };
+    auto tryPartial = [&](const Handle(Geom_CylindricalSurface)& surf) -> bool {
+        TopoDS_Face cand;
+        bool got = makeFaceBound(surf, cand);
+        if (!got) {
+            if (mv.nTri >= 500 && !refreshOuterWire()) {
+                diagPartial("makeface-null");
+                return false;
+            }
+            got = makeFaceKeep(surf, ow, inners, r.outwardNormal, cand);
         }
-        if (cand.IsNull() && !makeFaceKeep(surf, ow, inners, r.outwardNormal, cand)) return false;
+        if (!got) {
+            diagPartial("makeface-null");
+            return false;
+        }
         return finishPartial(cand);
+    };
+    auto wantRotTrim = [&]() -> bool {
+        if (mv.nTri < 500) return false;
+        double u0 = r.uMin, u1 = r.uMax;
+        if (u1 < u0) u1 += 2.0 * kPi;
+        const double span = u1 - u0;
+        if (span <= Precision::Confusion()) return false;
+        return seamStraddleU(r) ||
+               (r.uMin < -1e-10 && r.uMax > 1e-10 && span < kPi) ||
+               (!r.outwardNormal && span <= 0.5 * kPi + 0.02) ||
+               (r.radius > 0.0 && r.radius < 2.0 && span <= 0.5 * kPi + 0.02);
+    };
+    auto tryRotTrimmedSheet = [&]() -> bool {
+        if (r.closed360 || !wantRotTrim()) return false;
+        double u0 = r.uMin, u1 = r.uMax;
+        if (u1 < u0) u1 += 2.0 * kPi;
+        const double span = u1 - u0;
+        if (!refreshOuterWire()) return false;
+        try {
+            Handle(Geom_CylindricalSurface) surfR;
+            // Positive-u quarter holes (rid=20) mirror negative-u (rid=19) via uMax
+            // rotation onto the same [0, span] trimmed sheet.
+            if (!r.outwardNormal && r.uMin >= -1e-10 && u1 <= 0.5 * kPi + 0.02) {
+                gp_Ax3 ax = r.ax;
+                ax.Rotate(gp_Ax1(ax.Location(), ax.Direction()), u1);
+                surfR = new Geom_CylindricalSurface(gp_Cylinder(ax, r.radius));
+            } else {
+                surfR = cylSurfaceForRegion(r);
+            }
+            Handle(Geom_RectangularTrimmedSurface) trim =
+                new Geom_RectangularTrimmedSurface(surfR, 0.0, span, r.vMin, r.vMax);
+            TopoDS_Face cand;
+            bool got = makeFaceBound(trim, cand);
+            if (!got && (mv.nTri < 500 || refreshOuterWire()))
+                got = makeFaceKeep(trim, ow, inners, r.outwardNormal, cand);
+            if (!got) return false;
+            return finishPartial(cand);
+        } catch (const Standard_Failure&) {
+            return false;
+        }
     };
     Handle(Geom_CylindricalSurface) surf0 = new Geom_CylindricalSurface(asCyl(r));
     auto tryAllSurfs = [&](TopoDS_Wire& wire) -> bool {
         TopoDS_Wire owSaved = ow;
         ow = wire;
+        if (wantRotTrim() && tryRotTrimmedSheet()) {
+            ow = owSaved;
+            return true;
+        }
         double u0 = r.uMin, u1 = r.uMax;
         if (u1 < u0) u1 += 2.0 * kPi;
+        try {
+            Handle(Geom_RectangularTrimmedSurface) trim =
+                new Geom_RectangularTrimmedSurface(surf0, u0, u1, r.vMin, r.vMax);
+            TopoDS_Face cand;
+            bool got = makeFaceBound(trim, cand);
+            if (!got && (mv.nTri < 500 || refreshOuterWire()))
+                got = makeFaceKeep(trim, ow, inners, r.outwardNormal, cand);
+            if (got && finishPartial(cand)) {
+                ow = owSaved;
+                return true;
+            }
+        } catch (const Standard_Failure&) {
+        }
         if (seamStraddleU(r)) {
             try {
                 BRepBuilderAPI_MakeFace box(asCyl(r), u0, u1, r.vMin, r.vMax);
@@ -1466,27 +1933,6 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
                         ow = owSaved;
                         return true;
                     }
-                }
-            } catch (const Standard_Failure&) {
-            }
-            try {
-                Handle(Geom_RectangularTrimmedSurface) trim =
-                    new Geom_RectangularTrimmedSurface(surf0, u0, u1, r.vMin, r.vMax);
-                bindCylPCurves(ow, trim, r, sewTol);
-                for (auto& iw : inners) bindCylPCurves(iw, trim, r, sewTol);
-                TopoDS_Face cand;
-                try {
-                    BRepBuilderAPI_MakeFace mf(trim, ow, Standard_True);
-                    if (mf.IsDone()) {
-                        for (const auto& iw : inners) mf.Add(iw);
-                        if (mf.IsDone()) cand = mf.Face();
-                    }
-                } catch (const Standard_Failure&) {
-                }
-                if (cand.IsNull()) makeFaceKeep(trim, ow, inners, r.outwardNormal, cand);
-                if (finishPartial(cand)) {
-                    ow = owSaved;
-                    return true;
                 }
             } catch (const Standard_Failure&) {
             }
@@ -1505,12 +1951,24 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         ow = owSaved;
         return false;
     };
-    if (tryAllSurfs(ow)) return true;
-    if (seamStraddleU(r)) {
+    if (mv.nTri < 500) {
+        if (tryAllSurfs(ow)) return true;
+    } else {
+        if (!r.outwardNormal) {
+            if (refreshOuterWire()) {
+                TopoDS_Wire rev = ow;
+                rev.Reverse();
+                if (tryAllSurfs(rev)) return true;
+            }
+        }
+        if (refreshOuterWire() && tryAllSurfs(ow)) return true;
+    }
+    {
         TopoDS_Wire rev = ow;
         rev.Reverse();
         if (tryAllSurfs(rev)) return true;
     }
+    diagPartial("all-failed");
     return false;
 }
 
@@ -2167,6 +2625,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         auto rebuildCollapsed = [&]() {
             chainEdgeFail.assign(rs.chains.size(), 0);
+            int diagCollapse = 0;
+            if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0')
+                diagCollapse = 1;
+            int nMix = 0, nNone = 0, nFail = 0, nOk = 0;
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 collapsed[ci] = 0;
                 geom[ci] = ChainGeom{};
@@ -2176,6 +2638,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (A && regionExploded(exploded, A->id)) A = nullptr;
                 if (B && regionExploded(exploded, B->id)) B = nullptr;
                 if (!isAnalytic(A) || !isAnalytic(B)) {
+                    nMix++;
                     // mixed analytic|faceted, or island|island: polyline verbatim
                     if ((isAnalytic(A) && !isAnalytic(B)) || (!isAnalytic(A) && isAnalytic(B))) {
                         const Region* an = isAnalytic(A) ? A : B;
@@ -2198,7 +2661,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     else if (B->type == SurfType::Cylinder && A->type == SurfType::Plane)
                         curve = constructedGenerator(*B, *A);
                     else if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder)
-                        curve = constructedCylCylGenerator(*A, *B);
+                        curve = bestCylCylConstructed(
+                            *A, *B, mv, ch, intAnaAcceptResidual(mv, ch, sewTol, A, B));
                     else
                         curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
                 } else {
@@ -2207,6 +2671,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // IntAna none: cyl|cyl is legal polyline (IA_CYLCYL_NOGEOM).
                 // plane|plane and plane|cyl misses are post-fit edge failures.
                 if (curve.kind == AnalyticCurve::None) {
+                    nNone++;
                     if ((A->type == SurfType::Plane && B->type == SurfType::Plane) ||
                         (A->type == SurfType::Plane && B->type == SurfType::Cylinder) ||
                         (A->type == SurfType::Cylinder && B->type == SurfType::Plane))
@@ -2266,33 +2731,81 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                                          std::isfinite(dB) ? dB : 0.0),
                                                 acceptCap));
                 }
+                if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder &&
+                    curve.kind == AnalyticCurve::Lin) {
+                    const double dA = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ia]));
+                    const double dB = curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ib]));
+                    const double sew = (mv.sewTol > 0.0) ? mv.sewTol : Precision::Confusion();
+                    const double acceptCap = intAnaAcceptResidual(mv, ch, sewTol, A, B);
+                    snapCap = std::max(snapCap,
+                                       std::min(std::max(std::isfinite(dA) ? dA : 0.0,
+                                                         std::isfinite(dB) ? dB : 0.0),
+                                                acceptCap));
+                }
                 snapVertexToCurve(verts[(size_t)ia], curve, snapCap);
                 snapVertexToCurve(verts[(size_t)ib], curve, snapCap);
                 TopoDS_Edge e;
-                if (!full && curve.kind == AnalyticCurve::Circ && ch.meshVerts.size() >= 3) {
-                    // Open circular chain (partial-cyl cap): 180° MakeEdge(V,V) is
-                    // ambiguous — pick the mesh vertex whose azimuth is closest
-                    // to the region's u-mid (S05 nSides=26 is a true 180°).
-                    gp_Pnt mid = pntOf(mv, ch.meshVerts[ch.meshVerts.size() / 2]);
-                    const Region* cylHint = (A && A->type == SurfType::Cylinder) ? A
-                                           : (B && B->type == SurfType::Cylinder) ? B
-                                                                                 : nullptr;
-                    if (cylHint && !cylHint->closed360) {
-                        const double um = 0.5 * (cylHint->uMin + cylHint->uMax);
-                        double best = 1e300;
-                        for (int lv : ch.meshVerts) {
-                            double du = std::fabs(regionU(*cylHint, pntOf(mv, lv)) - um);
-                            if (du < best) {
-                                best = du;
-                                mid = pntOf(mv, lv);
-                            }
-                        }
-                    }
-                    e = makeArc(curve.circ, verts[(size_t)ia], verts[(size_t)ib], mid);
+                const Region* cylHint = (A && A->type == SurfType::Cylinder) ? A
+                                       : (B && B->type == SurfType::Cylinder) ? B
+                                                                             : nullptr;
+                const Region* plnHint = (A && A->type == SurfType::Plane) ? A
+                                       : (B && B->type == SurfType::Plane) ? B
+                                                                         : nullptr;
+                if (full && curve.kind == AnalyticCurve::Circ) {
+                    // Plane inner wires around Seamed360 holes: MakeEdge(circ,V,V)
+                    // fails on coarse loops — use the F1 iso-circle + makeFullCircle
+                    // ladder (same as cap rings).
+                    e = makeFullCircle(curve.circ, verts[(size_t)ia]);
                     if (e.IsNull())
                         e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
                 } else {
-                    e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
+                    const bool partialCylArc =
+                        cylHint && !cylHint->closed360 && curve.kind == AnalyticCurve::Circ;
+                    if (partialCylArc || (!full && curve.kind == AnalyticCurve::Circ &&
+                                          ch.meshVerts.size() >= 3)) {
+                        gp_Pnt mid;
+                        if (partialCylArc && ch.meshVerts.size() < 3)
+                            mid = partialCylCapArcMid(*cylHint, plnHint, curve.circ);
+                        else {
+                            // Open circular chain (partial-cyl cap): 180° MakeEdge(V,V) is
+                            // ambiguous — pick the mesh vertex whose azimuth is closest
+                            // to the region's u-mid (S05 nSides=26 is a true 180°).
+                            mid = pntOf(mv, ch.meshVerts[ch.meshVerts.size() / 2]);
+                            if (cylHint) {
+                                const double um = 0.5 * (cylHint->uMin + cylHint->uMax);
+                                double best = 1e300;
+                                for (int lv : ch.meshVerts) {
+                                    double du =
+                                        std::fabs(regionU(*cylHint, pntOf(mv, lv)) - um);
+                                    if (du < best) {
+                                        best = du;
+                                        mid = pntOf(mv, lv);
+                                    }
+                                }
+                            }
+                        }
+                        e = makeArc(curve.circ, verts[(size_t)ia], verts[(size_t)ib], mid);
+                        if (e.IsNull())
+                            e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib],
+                                                  full);
+                    } else if (!full && curve.kind == AnalyticCurve::Elips &&
+                               ch.meshVerts.size() >= 2) {
+                        gp_Pnt mid;
+                        if (ch.meshVerts.size() >= 3)
+                            mid = pntOf(mv, ch.meshVerts[ch.meshVerts.size() / 2]);
+                        else {
+                            gp_Pnt pa = BRep_Tool::Pnt(verts[(size_t)ia]);
+                            gp_Pnt pb = BRep_Tool::Pnt(verts[(size_t)ib]);
+                            mid = gp_Pnt(0.5 * (pa.X() + pb.X()), 0.5 * (pa.Y() + pb.Y()),
+                                         0.5 * (pa.Z() + pb.Z()));
+                        }
+                        e = makeEllipseArc(curve.elips, verts[(size_t)ia], verts[(size_t)ib], mid);
+                        if (e.IsNull())
+                            e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib],
+                                                  full);
+                    } else {
+                        e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
+                    }
                 }
                 if (e.IsNull()) {
                     const bool identicLine =
@@ -2303,6 +2816,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // IDENTIC_POINTS: keep polyline, do not invent an edge, do
                     // not enroll edge-failure R1 (the chain's legal fallback).
                     if (!identicLine) chainEdgeFail[ci] = 1;
+                    if (!identicLine) nFail++;
                     emit(chainWarn, "smooth: analytic MakeEdge failed — keeping mesh polyline");
                     continue;
                 }
@@ -2313,10 +2827,23 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     while (dt < 0.0) dt += 2.0 * kPi;
                     if (dt > kPi) e.Reverse();
                 }
+                if (curve.kind == AnalyticCurve::Lin) {
+                    auto partialCyl = [](const Region* R) {
+                        return R && R->type == SurfType::Cylinder && !R->closed360;
+                    };
+                    if (partialCyl(A) || partialCyl(B))
+                        e = orientEdgeFromTo(e, verts[(size_t)ia]);
+                }
                 geom[ci].collapsed = true;
                 geom[ci].edges = {e};
                 collapsed[ci] = 1;
+                nOk++;
             }
+            if (diagCollapse)
+                std::fprintf(stderr,
+                             "DIAG_COLLAPSE mix=%d none=%d fail=%d ok=%d total=%zu recover=%d "
+                             "rounds=%d\n",
+                             nMix, nNone, nFail, nOk, rs.chains.size(), recoverPass, rounds);
         };
 
         auto buildOneRegion = [&](Region& r, std::vector<TopoDS_Face>& acc) -> bool {
@@ -2638,6 +3165,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
             for (int i = 1; i <= anc.Extent(); i++)
                 if (anc(i).Extent() < 2) freeE++;
+            if (diagJ6Enabled())
+                diagJ6FreeEdges(mv, sh, built, builtRid, rs, collapsed);
             emit(warn, "J6: shell not closed freeEdges=" + std::to_string(freeE) +
                            " faces=" + std::to_string(built.size()) +
                            " recover=" + std::to_string(recoverPass));

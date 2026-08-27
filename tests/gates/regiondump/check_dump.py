@@ -127,10 +127,15 @@ WRAPPER_KEYS = {
     "vtx",
     "edges",
     "clean",
+    "segmentSkip",
     "segmentOk",
+    "regionCount",
+    "rejectedCount",
     "compVtx",
     "regionSet",
     "regionSets",
+    "totalRegions",
+    "totalRejected",
 }
 
 
