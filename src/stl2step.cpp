@@ -891,7 +891,10 @@ Result Converter::run() {
                 // TrueForm-only: mesh-jitter-aware flat consolidation on faceted
                 // islands (revert fallback and analytic+facet mixes). Verbatim
                 // defaults stay at unifyAngleDeg (G0.1 byte-identity).
-                if (smooth) {
+                // Coarse Fusion/STLB band only (500–1200 tris; sync with
+                // coarseFusionBand in refit_internal.hpp). Large real-CAD meshes
+                // (e.g. Body11) must not get a second unify — it breaks closure.
+                if (smooth && nTri >= 500 && nTri <= 1200) {
                     double segMaxDev = refitTotals.maxVertexDev;
                     for (const auto& kv : refitPlans)
                         segMaxDev = std::max(segMaxDev, kv.second.stats.maxVertexDev);
