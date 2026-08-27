@@ -837,10 +837,11 @@ Result Converter::run() {
         facesBefore = countShapes(shape, TopAbs_FACE);
         facesAfter = facesBefore;
         if (unify) {
-            auto unifyOne = [&](TopoDS_Shape& s, const std::vector<TopoDS_Face>* keep) {
+            auto unifyOne = [&](TopoDS_Shape& s, const std::vector<TopoDS_Face>* keep,
+                                double angleDeg) {
                 ShapeUpgrade_UnifySameDomain usd(s, Standard_True, Standard_True, Standard_False);
-                if (unifyAngleDeg > 0) {
-                    usd.SetAngularTolerance(unifyAngleDeg * kPi / 180.0);
+                if (angleDeg > 0) {
+                    usd.SetAngularTolerance(angleDeg * kPi / 180.0);
                     usd.SetLinearTolerance(Precision::Confusion());
                 }
                 if (keep)
@@ -848,7 +849,8 @@ Result Converter::run() {
                 usd.Build();
                 s = usd.Shape();
             };
-            try {
+            auto unifyAll = [&](double angleDeg, const char* label) {
+                const int before = countShapes(shape, TopAbs_FACE);
                 if (parts.size() > 1) {
                     unsigned uThreads = (unsigned)std::min<size_t>(
                         { (size_t)hw, parts.size(), (size_t)10 });
@@ -860,7 +862,7 @@ Result Converter::run() {
                             for (;;) {
                                 size_t i = nextPart.fetch_add(1);
                                 if (i >= parts.size()) break;
-                                try { unifyOne(parts[i], partKeep[i]); }
+                                try { unifyOne(parts[i], partKeep[i], angleDeg); }
                                 catch (...) { anyFail = true; }   // that body keeps its facets
                             }
                         });
@@ -873,15 +875,33 @@ Result Converter::run() {
                     if (anyFail)
                         warn("coplanar merge failed on at least one body -- it keeps per-triangle faces");
                     facesAfter = countShapes(shape, TopAbs_FACE);
-                    note("  unify     %s -> %s faces (%u threads)  [%.2fs]\n",
-                         fmtInt(facesBefore).c_str(), fmtInt(facesAfter).c_str(),
+                    note("  %s     %s -> %s faces (%u threads)  [%.2fs]\n",
+                         label, fmtInt(before).c_str(), fmtInt(facesAfter).c_str(),
                          uThreads, timer.lap());
                 } else {
-                    unifyOne(shape, partKeep.empty() ? nullptr : partKeep[0]);
+                    unifyOne(shape, partKeep.empty() ? nullptr : partKeep[0], angleDeg);
                     parts[0] = shape;
                     facesAfter = countShapes(shape, TopAbs_FACE);
-                    note("  unify     %s -> %s faces  [%.2fs]\n",
-                         fmtInt(facesBefore).c_str(), fmtInt(facesAfter).c_str(), timer.lap());
+                    note("  %s     %s -> %s faces  [%.2fs]\n",
+                         label, fmtInt(before).c_str(), fmtInt(facesAfter).c_str(), timer.lap());
+                }
+            };
+            try {
+                unifyAll(unifyAngleDeg, "unify");
+                // TrueForm-only: mesh-jitter-aware flat consolidation on faceted
+                // islands (revert fallback and analytic+facet mixes). Verbatim
+                // defaults stay at unifyAngleDeg (G0.1 byte-identity).
+                if (smooth) {
+                    double segMaxDev = refitTotals.maxVertexDev;
+                    for (const auto& kv : refitPlans)
+                        segMaxDev = std::max(segMaxDev, kv.second.stats.maxVertexDev);
+                    const double epsMesh = std::max({weldTol, 1e-4 * diag, 1e-3});
+                    const double dev = std::max(segMaxDev, epsMesh);
+                    const double L = std::max(diag, dev);
+                    const double smoothFlatDeg =
+                        std::max(0.01, dev / L * (180.0 / kPi));
+                    if (smoothFlatDeg > unifyAngleDeg)
+                        unifyAll(smoothFlatDeg, "smooth-flat");
                 }
             } catch (const Standard_Failure& f) {
                 warn(std::string("coplanar merge failed (") +
