@@ -734,7 +734,8 @@ struct CommitEval {
 };
 
 CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
-                          const std::vector<int>& tris, const gp_Dir& axis) {
+                          const std::vector<int>& tris, const gp_Dir& axis,
+                          double rHint = 0.0) {
     CommitEval ev;
     ev.g = centeredGauss(mv, tris, axis, tol);
     double cTilt = 0.0, devTilt = 0.0;
@@ -753,7 +754,8 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
     const double rBeforeRefine = ev.radius;
     bool archChainApplied = false;
     if (coarseFusionBand(mv) && ev.d2.nSides >= 3 && !ev.d2.spanReject) {
-        refineCylinderRadius(mv, tris, axis, ev.center, ev.radius, ev.d2.nSides, ev.d2.span);
+        refineCylinderRadius(mv, tris, axis, ev.center, ev.radius, ev.d2.nSides, ev.d2.span,
+                             rHint);
         ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
     }
     if (coarseFusionBand(mv) && tris.size() >= 3 && ev.radius >= 15.0) {
@@ -1378,6 +1380,8 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
                 if (!haveRref && members.size() == 3) {
                     R_ref = radius;
                     haveRref = true;
+                } else if (haveRref && radius > R_ref) {
+                    R_ref = radius;
                 }
                 progressed = true;
                 break;
@@ -1388,7 +1392,8 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
         const std::vector<int> prePeelTris = mergeMemberTris(work.provisionals, members);
         GaussResult gFinal;
         const gp_Dir axisFinal = axisOf(mv, work.provisionals, members, seedAxis, tol, &gFinal);
-        CommitEval ev = evaluateCommit(mv, tol, prePeelTris, axisFinal);
+        const double growHint = (haveRref && R_ref > 0.0) ? R_ref : 0.0;
+        CommitEval ev = evaluateCommit(mv, tol, prePeelTris, axisFinal, growHint);
         if (p1DiagOn()) {
             gp_Pnt cSeed, cW1;
             double rSeed = 0, rW1 = 0;

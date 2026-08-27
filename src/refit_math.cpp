@@ -599,7 +599,7 @@ int estimateFullCircleSides(const MeshView& mv, const std::vector<int>& tris) {
 
 bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
                           const gp_Dir& axis, gp_Pnt& center, double& radius,
-                          int nSides, double spanRad) {
+                          int nSides, double spanRad, double rHint) {
     if (!(radius > 0.0) || !std::isfinite(radius) || nSides < 3) return false;
     // Coarse Fusion band only — corpus fixtures stay on the Pratt vertex fit.
     if (mv.nTri < 500 || mv.nTri > 1200) return false;
@@ -616,6 +616,7 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
     if (!axisFrame(aw, u, v)) return false;
 
     const gp_XYZ c0(center.X(), center.Y(), center.Z());
+    const double rEberly = radius;
 
     struct Vtx {
         gp_XYZ p;
@@ -652,6 +653,11 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
     nEff = std::clamp(nEff, 4, 48);
     const double segAng = kTwoPi / static_cast<double>(nEff);
     const double chordNom = 2.0 * radius * std::sin(kPi / static_cast<double>(nEff));
+  // Growth R_ref from an early circumferential band can exceed the axial-dragged
+  // eberly fit; widen chord acceptance toward rHint when present.
+    const double rAnchor = (rHint > radius * 1.02) ? rHint : radius;
+    const double rChordLo = std::min(radius * 0.90, rAnchor * 0.88);
+    const double rChordHi = std::max(radius * 1.42, rAnchor * 1.08);
 
     std::vector<double> chordRadii;
     const size_t nV = ring.size();
@@ -716,7 +722,7 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
                 const double s = std::sin(0.5 * dAng);
                 if (s <= 1e-9) continue;
                 const double rChord = chord / (2.0 * s);
-                if (rChord > radius * 0.90 && rChord < radius * 1.42) chordRadii.push_back(rChord);
+                if (rChord > rChordLo && rChord < rChordHi) chordRadii.push_back(rChord);
             }
         }
     }
@@ -735,7 +741,53 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
             const double s = std::sin(halfAng);
             if (s <= 1e-9) continue;
             const double rChord = chord / (2.0 * s);
-            if (rChord > radius * 0.90 && rChord < radius * 1.42) chordRadii.push_back(rChord);
+            if (rChord > rChordLo && rChord < rChordHi) chordRadii.push_back(rChord);
+        }
+    }
+  // Partial arcs: circumferential edges are often patch boundaries (thin axial bands).
+    if (chordRadii.empty() && spanRad > 0.05 && spanRad < 2.8) {
+        for (int t : ids) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            const int g = mv.compTris[t];
+            const int* T = mv.tris[g];
+            for (int k = 0; k < 3; k++) {
+                const int gv0 = T[k];
+                const int gv1 = T[(k + 1) % 3];
+                bool internal = false;
+                for (int uTri : ids) {
+                    if (uTri == t) continue;
+                    const int gu = mv.compTris[uTri];
+                    const int* U = mv.tris[gu];
+                    for (int j = 0; j < 3; j++) {
+                        const int a = U[j];
+                        const int b = U[(j + 1) % 3];
+                        if ((a == gv0 && b == gv1) || (a == gv1 && b == gv0)) {
+                            internal = true;
+                            break;
+                        }
+                    }
+                    if (internal) break;
+                }
+                if (internal) continue;
+                const gp_XYZ p0 = mv.pts[gv0];
+                const gp_XYZ p1 = mv.pts[gv1];
+                const double chord = (p1 - p0).Modulus();
+                if (!(chord > 0.0)) continue;
+                const gp_XYZ d0 = p0 - c0;
+                const gp_XYZ d1 = p1 - c0;
+                const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                if (!(r0.Modulus() > 0.0) || !(r1.Modulus() > 0.0)) continue;
+                const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                double dAng = std::abs(ang1 - ang0);
+                if (dAng > kPi) dAng = kTwoPi - dAng;
+                if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                const double s = std::sin(0.5 * dAng);
+                if (s <= 1e-9) continue;
+                const double rChord = chord / (2.0 * s);
+                if (rChord > rChordLo && rChord < rChordHi) chordRadii.push_back(rChord);
+            }
         }
     }
 
@@ -748,6 +800,13 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
     }
     if (rInscribed > rPick * 1.003 && rInscribed <= radius * 1.20 && nEff <= 12)
         rPick = std::max(rPick, rInscribed);
+  // Axially-grown large-bore patch: bulk eberly drags below circumferential band R_ref.
+    if (rHint > radius * 1.08 && rHint <= radius * 1.38 && radius >= 11.0) {
+        const bool chordsLow =
+            chordRadii.empty()
+            || medianOfSorted(chordRadii) < radius * 1.05;
+        if (chordsLow) rPick = std::max(rPick, rHint);
+    }
 
     if (rPick <= radius * 1.01) {
         (void)spanRad;
@@ -757,9 +816,79 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
     }
 
     double cap = radius * 1.25;
-    if (!chordRadii.empty()) cap = std::max(cap, rPick * 1.02);
+    if (rHint > radius * 1.02) cap = std::max(cap, rHint * 1.03);
+    if (!chordRadii.empty()) {
+        const double rChordMed = medianOfSorted(chordRadii);
+        cap = std::max(cap, std::max(rPick * 1.02, rChordMed * 1.02));
+    }
     if (rPick > cap) rPick = cap;
     radius = rPick;
+
+  // After rHint lift, snap to tight circumferential chords (facet edges on patch).
+    if (rHint > rEberly * 1.08 && radius > rEberly * 1.05) {
+        std::vector<double> snapR;
+        const double sLo = radius * 0.92;
+        const double sHi = radius * 1.06;
+        for (int t : ids) {
+            if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+            const int g = mv.compTris[t];
+            const int* T = mv.tris[g];
+            for (int k = 0; k < 3; k++) {
+                const int gv0 = T[k];
+                const int gv1 = T[(k + 1) % 3];
+                const gp_XYZ p0 = mv.pts[gv0];
+                const gp_XYZ p1 = mv.pts[gv1];
+                const double chord = (p1 - p0).Modulus();
+                if (!(chord > 0.0)) continue;
+                const gp_XYZ d0 = p0 - c0;
+                const gp_XYZ d1 = p1 - c0;
+                const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                if (!(r0.Modulus() > 0.0) || !(r1.Modulus() > 0.0)) continue;
+                const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                double dAng = std::abs(ang1 - ang0);
+                if (dAng > kPi) dAng = kTwoPi - dAng;
+                if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                const double s = std::sin(0.5 * dAng);
+                if (s <= 1e-9) continue;
+                const double rChord = chord / (2.0 * s);
+                if (rChord > sLo && rChord < sHi) snapR.push_back(rChord);
+            }
+        }
+        if (snapR.size() >= 1) {
+            const double med = medianOfSorted(snapR);
+            if (med > rEberly * 1.02 && med < radius) radius = med;
+        } else if (nEff >= 4) {
+            double maxChord = 0.0;
+            for (int t : ids) {
+                if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+                const int g = mv.compTris[t];
+                const int* T = mv.tris[g];
+                for (int k = 0; k < 3; k++) {
+                    const int gv0 = T[k];
+                    const int gv1 = T[(k + 1) % 3];
+                    const gp_XYZ p0 = mv.pts[gv0];
+                    const gp_XYZ p1 = mv.pts[gv1];
+                    const double chord = (p1 - p0).Modulus();
+                    if (!(chord > 0.0)) continue;
+                    const gp_XYZ d0 = p0 - c0;
+                    const gp_XYZ d1 = p1 - c0;
+                    const gp_XYZ r0 = d0 - aw * d0.Dot(aw);
+                    const gp_XYZ r1 = d1 - aw * d1.Dot(aw);
+                    if (!(r0.Modulus() > 0.0) || !(r1.Modulus() > 0.0)) continue;
+                    const double ang0 = std::atan2(r0.Dot(v), r0.Dot(u));
+                    const double ang1 = std::atan2(r1.Dot(v), r1.Dot(u));
+                    double dAng = std::abs(ang1 - ang0);
+                    if (dAng > kPi) dAng = kTwoPi - dAng;
+                    if (dAng < 0.09 || dAng >= kPi - 0.09) continue;
+                    if (chord > maxChord) maxChord = chord;
+                }
+            }
+            const double rNom = radiusFromChordLength(maxChord, nEff);
+            if (rNom > rEberly * 1.02 && rNom < radius) radius = rNom;
+        }
+    }
 
     std::vector<double> xs(ring.size()), ys(ring.size());
     for (size_t i = 0; i < ring.size(); i++) {
@@ -772,7 +901,10 @@ bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
         const gp_XYZ cNew = c0 + cx * u + cy * v;
         if (finite3(cNew.X(), cNew.Y(), cNew.Z()) && r2 > 0.0) {
             center = gp_Pnt(cNew.X(), cNew.Y(), cNew.Z());
-            if (r2 > radius * 0.97 && r2 < radius * 1.06) radius = 0.5 * (radius + r2);
+            if (r2 > radius * 0.97 && r2 < radius * 1.06)
+                radius = 0.5 * (radius + r2);
+            else if (rHint > rEberly * 1.08 && r2 > rEberly * 1.02)
+                radius = r2;
         }
     }
     (void)spanRad;
