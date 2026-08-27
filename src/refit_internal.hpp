@@ -160,6 +160,22 @@ double dVolCylinderSector(double areaReg, double radius, int nSides, bool outwar
 
 double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const gp_Ax3& ax);
 
+// Large-R arc strip (lane F): monotonic normal rotation about a common axis, or a
+// static-normal vertex ring on coarse tessellation. Used by peelLargeArcStripsA2b.
+struct ArcStripDetect {
+    bool ok = false;
+    gp_Dir axis;
+    gp_Pnt center;
+    double radius = 0;
+    double spanRad = 0;
+    bool staticNormals = false;
+};
+
+bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
+                         const DerivedTols& tol, ArcStripDetect& out);
+
+bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWork& work);
+
 }}  // namespace stl2step::refit
 
 #endif  // STL2STEP_REFIT_INTERNAL_HPP
