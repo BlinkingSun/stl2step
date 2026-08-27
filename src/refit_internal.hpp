@@ -149,6 +149,15 @@ bool gaussMapAxis(const MeshView& mv, const std::vector<int>& tris, gp_Dir& axis
 
 double chordSagitta(double radius, int nSides);
 
+// Chord-sagitta / inscribed-polygon radius recovery (refit_math.cpp).
+double radiusFromChordLength(double chordLen, int nSides);
+double circumradiusFromInscribed(double rInscribed, int nSides);
+double radiusFromChordSagitta(double halfChord, double sagitta);
+int estimateFullCircleSides(const MeshView& mv, const std::vector<int>& tris);
+bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
+                          const gp_Dir& axis, gp_Pnt& center, double& radius,
+                          int nSides, double spanRad);
+
 double dVolCylinderSector(double areaReg, double radius, int nSides, bool outwardNormal);
 
 double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const gp_Ax3& ax);
