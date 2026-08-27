@@ -102,6 +102,13 @@ struct DerivedTols {
     }
 };
 
+// Coarse Fusion/STLB export band (handle-lock @ 908 tris). Lane B coarse gates
+// and adaptCoarseSegmentParams must stay in sync — unscoped B (nTri<=1200 or
+// global evaluateCommit/A3 changes) breaks p2real S13/S14 fillet fixtures.
+inline bool coarseFusionBand(const MeshView& mv) {
+    return mv.nTri >= 500 && mv.nTri <= 1200;
+}
+
 // Working state threaded A1 -> D. Region ids and loops are filled in buildTopologyD.
 struct SegmentWork {
     std::vector<int> triChart;          // size mv.nTri

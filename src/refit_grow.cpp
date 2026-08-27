@@ -350,13 +350,6 @@ int estimateNBandsFromPatch(const MeshView& mv, const std::vector<int>& tris) {
     return std::max(1, static_cast<int>(std::llround(2.0 * M_PI / med)));
 }
 
-// Coarse Fusion/STLB export band (handle-lock @ 908 tris). Matches
-// adaptCoarseSegmentParams in refit_segment.cpp — keep corpus fixtures
-// (S02=412, S13/14≤20) on default gates.
-bool coarseFusionBand(const MeshView& mv) {
-    return mv.nTri >= 500 && mv.nTri <= 1200;
-}
-
 double percentile75(std::vector<double> v) {
     if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());

@@ -17,13 +17,9 @@ namespace {
 constexpr double kDegToRad = M_PI / 180.0;
 
 void adaptCoarseSegmentParams(const MeshView& mv, SegmentParams& p) {
-    // Coarse Fusion/STLB exports (handle-lock band: ~500–1200 tris). Skip
-    // synthetic corpus fixtures (S02=412, S05=132, S13/14≤20) calibrated at
-    // default thetaPlane=2°.
-    if (mv.nTri >= 500 && mv.nTri <= 1200) {
-        p.thetaPlaneDeg = std::max(p.thetaPlaneDeg, 15.0);
-        p.thetaCylHiDeg = std::max(p.thetaCylHiDeg, 70.0);
-    }
+    if (!coarseFusionBand(mv)) return;
+    p.thetaPlaneDeg = std::max(p.thetaPlaneDeg, 15.0);
+    p.thetaCylHiDeg = std::max(p.thetaCylHiDeg, 70.0);
 }
 
 DerivedTols deriveTols(const MeshView& mv, const SegmentParams& p) {

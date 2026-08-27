@@ -88,23 +88,38 @@ Target ground truth: 28 faces (13 planes + 15 cylinders), 30 circles.
 
 ## Proof (c) — regression
 
+Bisect (`rm -rf build && cmake && ctest -R p2real_live` at each commit):
+
+| Commit   | p2real_live |
+|----------|-------------|
+| 92c2905  | PASS |
+| f1c6594  | PASS |
+| 9692bd4  | PASS |
+| 8d3f78a  | PASS |
+| a095f01  | PASS (scoped B) |
+
+**Offending change (reproduced):** unscoped lane B `refit_grow.cpp` — global
+`evaluateCommit` G2/G3/G5 relaxations + unconditional A3 coplanar merge (hl/B @
+33514d6). With scoped segment only, unscoped grow still fails S13/S14:
+
+```
+S13 comp0: faces=12/16 exploded360=1 censusOk=False
+S14 comp0: buildFaces=False
+```
+
+Root cause: B's coarse cylinder/plane gates must not run on corpus fillet fixtures
+(S13=16 tris, S14=20 tris). **Fix:** guard all B segmentation relaxations behind
+shared `coarseFusionBand()` (500 ≤ nTri ≤ 1200); reject B's `nTri≤1200`
+`adaptCoarseSegmentParams` and global gate edits. Centralised in
+`refit_internal.hpp` so segment + grow cannot drift.
+
 ```sh
 ctest --test-dir build
-→ 26/27 passed
-```
+→ 27/27 passed
 
-**Failure (pre-existing on main @ 92c2905, not introduced by B merge):**
-
-```
-p2real_live: S13.stl comp0 censusOk=False (exploded360=1);
-             S14.stl comp0 buildFaces=False
-```
-
-Lane-specific re-gates after B+C integration:
-
-```
+ctest -R p2real_live                              → 1/1 pass
 ctest -R "p2buildtest|gates_smoke|corpus_engine"  → 13/13 pass
-ctest -R "p2buildtest|gates_smoke"                 → 12/12 pass
+ctest -R "p2buildtest|gates_smoke"                → 12/12 pass
 ```
 
 ## Remaining gaps (ranked)
@@ -114,7 +129,5 @@ ctest -R "p2buildtest|gates_smoke"                 → 12/12 pass
    follow-on P2 work. Segmentation now reaches 12+15 regions (was 0 built).
 2. **Large bores missing** — 20 mm / 30 mm radii not segmented (too few facets in
    arc; need wider growth through 90° caps).
-3. **p2real_live S13/S14** — corpus gate failures on main baseline; unrelated to
-   handle-lock lanes but blocks 27/27 on this box.
-4. **IntAna plane|plane / cyl|cyl / remaining plane|cyl misses** — several chains
+3. **IntAna plane|plane / cyl|cyl / remaining plane|cyl misses** — several chains
    still polyline after C fix (reg 18|17 `tangent=false` in regiondump).
