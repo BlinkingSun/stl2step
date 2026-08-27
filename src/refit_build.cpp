@@ -2757,8 +2757,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     while (dt < 0.0) dt += 2.0 * kPi;
                     if (dt > kPi) e.Reverse();
                 }
-                if (curve.kind == AnalyticCurve::Lin)
-                    e = orientEdgeFromTo(e, verts[(size_t)ia]);
+                if (curve.kind == AnalyticCurve::Lin) {
+                    auto partialCyl = [](const Region* R) {
+                        return R && R->type == SurfType::Cylinder && !R->closed360;
+                    };
+                    if (partialCyl(A) || partialCyl(B))
+                        e = orientEdgeFromTo(e, verts[(size_t)ia]);
+                }
                 geom[ci].collapsed = true;
                 geom[ci].edges = {e};
                 collapsed[ci] = 1;
