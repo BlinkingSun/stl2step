@@ -163,7 +163,7 @@ double radiusFromChordSagitta(double halfChord, double sagitta);
 int estimateFullCircleSides(const MeshView& mv, const std::vector<int>& tris);
 bool refineCylinderRadius(const MeshView& mv, const std::vector<int>& tris,
                           const gp_Dir& axis, gp_Pnt& center, double& radius,
-                          int nSides, double spanRad);
+                          int nSides, double spanRad, double rHint = 0.0);
 
 double dVolCylinderSector(double areaReg, double radius, int nSides, bool outwardNormal);
 
