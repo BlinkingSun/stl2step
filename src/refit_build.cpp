@@ -3242,31 +3242,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     (rg.builtAs == BuiltAs::Seamed360 || rg.builtAs == BuiltAs::TwoHalves))
                     hasSeamed = true;
             }
-            bool allPartialBuiltValid = true;
-            int nPartialBuilt = 0;
-            for (const Region& rg : rs.regions) {
-                if (regionExploded(exploded, rg.id)) continue;
-                if (rg.type != SurfType::Cylinder || rg.closed360) continue;
-                if (rg.builtAs == BuiltAs::Single || rg.builtAs == BuiltAs::TwoHalves) {
-                    nPartialBuilt++;
-                } else if (rg.builtAs != BuiltAs::ExplodedToFacets) {
-                    allPartialBuiltValid = false;
-                }
-            }
-            // Closed shell + every partial region built as analytic: keep census even
-            // when BRepCheck_Analyzer rejects the whole shell (multi-cyl handle-lock).
-            const bool keepValidPartials =
-                shClosed && allPartialBuiltValid && nPartialBuilt > 0 &&
-                mv.nTri >= 500 && mv.nTri <= 1200;
             bool any = false;
-            if (hasSeamed && recoverPass < 1 && !keepValidPartials) {
+            if (hasSeamed && recoverPass < 1) {
                 for (const Region& rg : rs.regions) {
                     if (regionExploded(exploded, rg.id)) continue;
                     if (rg.type != SurfType::Cylinder || rg.closed360) continue;
                     explodeRegion(rg.id);
                     any = true;
                 }
-            } else if (!keepValidPartials) {
+            } else {
                 // Closed but BRepCheck-invalid: explode the invalid analytic
                 // faces (post-fit failure), uncollapse, rebuild neighbours.
                 std::vector<char> seen((size_t)std::max(0, maxId) + 1, 0);

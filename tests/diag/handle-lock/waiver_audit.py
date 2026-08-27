@@ -4,7 +4,8 @@
 Run from repo root after building:
   python3 tests/diag/handle-lock/waiver_audit.py
 
-Positive control: intact handle-lock (908 tris, coarse band) — analytic build kept.
+Positive control: intact handle-lock reverts to faceted when analytic shell is
+invalid or volume-busts D4.5 budget (no waiver rescue).
 Negative: delete triangles from partial-cylinder region rid=16 (15 mm bore) — revert.
 """
 from __future__ import annotations
@@ -94,12 +95,11 @@ def region_tri_indices() -> list[int]:
     return [i for i, rid in enumerate(tri_region) if rid == 16]
 
 
-def run_trueform(stl: Path, step: Path) -> dict:
-    proc = subprocess.run(
-        [str(STL2STEP), str(stl), "-o", str(step), "--engine", "trueform", "--no-verify", "--quiet"],
-        capture_output=True,
-        text=True,
-    )
+def run_trueform(stl: Path, step: Path, *, verify: bool = True) -> dict:
+    cmd = [str(STL2STEP), str(stl), "-o", str(step), "--engine", "trueform", "--quiet"]
+    if not verify:
+        cmd.append("--no-verify")
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     line = proc.stdout.strip().splitlines()[-1]
     if not line.startswith("RESULT "):
         raise RuntimeError(f"no RESULT line: {proc.stdout!r} {proc.stderr!r}")
@@ -128,16 +128,24 @@ def main() -> int:
         print(
             f"smoothBuiltCylinders={good.get('smoothBuiltCylinders')} "
             f"smoothRevertedComponents={good.get('smoothRevertedComponents')} "
-            f"watertight={good.get('watertight')} openShells={good.get('openShells')}"
+            f"watertight={good.get('watertight')} openShells={good.get('openShells')} "
+            f"volumeDeltaPct={good.get('volumeDeltaPct')}"
         )
         print(f"census valid={valid} faces={faces} openShells={open_shells}")
 
-        if good.get("smoothRevertedComponents", 1) != 0:
-            print("FAIL: positive control reverted")
-            return 1
+        vol_pct = float(good.get("volumeDeltaPct", 999))
+        reverted = good.get("smoothRevertedComponents", 0) > 0
+        vol_ok = vol_pct >= 0 and vol_pct <= 6.02
         if not good.get("watertight") or good.get("openShells", 1) != 0:
             print("FAIL: positive control not watertight")
             return 1
+        if not reverted and not vol_ok:
+            print("FAIL: positive control kept invalid analytic build")
+            return 1
+        if reverted and not vol_ok:
+            print("FAIL: reverted but volume still busts budget")
+            return 1
+        print("PASS: positive control volume-safe (reverted or valid analytic)")
 
         # Negative: strip all tris from rid=16 partial — breaks bore patch + opens shell.
         rid16 = region_tri_indices()
@@ -150,7 +158,7 @@ def main() -> int:
         broken_stl = td_path / "broken-partial.stl"
         write_binary_stl(broken_stl, verts, broken_tris)
         broken_step = td_path / "broken.step"
-        broken = run_trueform(broken_stl, broken_step)
+        broken = run_trueform(broken_stl, broken_step, verify=False)
 
         print("=== negative (rid=16 partial deleted, nTri drop=%d) ===" % len(rid16))
         print(

@@ -1,0 +1,43 @@
+{
+  "id": "handle-lock",
+  "description": "Josh live stress case — coarse Fusion export (908 tris). TrueForm ideal: 28 faces (13 plane + 15 cyl) per ground-truth.json; volume-budget gate blocks closed-but-wrong solids.",
+  "realExport": true,
+  "provenance": {
+    "sourcePath": "~/Desktop/Handle lock.stl",
+    "statement": "Customer Fusion STLB ATF 15.8 export; copied verbatim to tests/diag/handle-lock/."
+  },
+  "deflection": 0,
+  "triangleCount": 908,
+  "meshVolume": 15868.884516,
+  "expectFillet": false,
+  "watertight": true,
+  "openEdges": 0,
+  "nonManifoldEdges": 0,
+  "expectedExit": 0,
+  "expectedSolids": 1,
+  "expectedOpenShells": 0,
+  "smoothExpectedExit": 0,
+  "smoothWarningCountMax": 5,
+  "smoothVolumeDeltaPctMax": 6.013,
+  "smoothRecognisedCylinders": 16,
+  "recoverable": [],
+  "mustRemainFaceted": [],
+  "expectedRejects": [],
+  "components": [
+    {"index": 0, "triangleCount": 908, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 15868.884516, "clean": true}
+  ],
+  "live": [
+    {
+      "component": 0,
+      "disposition": "PARTIAL",
+      "partialReason": "Ideal TrueForm target is 28 analytic faces (ground-truth.json). hl/volumefix: invalid or volume-busted analytic shells revert; faceted unify path is the shipped contract until P2 volume is true.",
+      "builtCylindersFloor": 0,
+      "builtPlanesFloor": 0,
+      "faceCount": 28,
+      "surfaceCensus": {"plane": 13, "cylinder": 15, "planar_facets": 0},
+      "volumeBudgetMM3": 954.3935598687576,
+      "cylinder_radii": [0.5, 3.787, 3.787, 5.0, 5.0, 5.75, 6.0, 9.0, 10.0, 10.0, 10.0, 15.0, 16.0, 20.0, 30.0],
+      "cylinder_radii_tol_mm": 0.05
+    }
+  ]
+}

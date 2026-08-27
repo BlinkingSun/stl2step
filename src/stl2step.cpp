@@ -624,14 +624,18 @@ Result Converter::run() {
                         } catch (const Standard_Failure&) {
                             ok = false;
                         }
-                        if (!ok) {
-                            int nPartial = 0;
-                            for (const auto& reg : rs.regions)
-                                if (reg.type == refit::SurfType::Cylinder && !reg.closed360 &&
-                                    (reg.builtAs == refit::BuiltAs::Single ||
-                                     reg.builtAs == refit::BuiltAs::TwoHalves))
-                                    nPartial++;
-                            if (nPartial >= 10 && mv.nTri >= 500 && mv.nTri <= 1200) ok = true;
+                    }
+                    if (ok) {
+                        double dVolAbs = 0;
+                        for (const auto& reg : rs.regions)
+                            dVolAbs += std::fabs(reg.dVolPredicted);
+                        const double meshVol = std::fabs(cs.vol);
+                        const double budget = std::max(1e-4 * meshVol, 3.0 * dVolAbs);
+                        try {
+                            const double shellVol = shapeVolume(probe);
+                            if (std::fabs(shellVol - meshVol) > budget) ok = false;
+                        } catch (const Standard_Failure&) {
+                            ok = false;
                         }
                     }
                     if (ok) {
@@ -905,7 +909,7 @@ Result Converter::run() {
                 // Coarse Fusion/STLB band only (500–1200 tris; sync with
                 // coarseFusionBand in refit_internal.hpp). Large real-CAD meshes
                 // (e.g. Body11) must not get a second unify — it breaks closure.
-                if (smooth && nTri >= 500 && nTri <= 1200) {
+                if (smooth && !forceSew && nTri >= 500 && nTri <= 1200) {
                     double segMaxDev = refitTotals.maxVertexDev;
                     for (const auto& kv : refitPlans)
                         segMaxDev = std::max(segMaxDev, kv.second.stats.maxVertexDev);
