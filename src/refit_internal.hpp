@@ -178,10 +178,27 @@ struct ArcStripDetect {
     double radius = 0;
     double spanRad = 0;
     bool staticNormals = false;
+    double chainScore = 0.0;  // arch-chain signal strength (lane ARCHCHAINS)
+    bool fromArchChain = false;
 };
 
 bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
                          const DerivedTols& tol, ArcStripDetect& out);
+
+// Point-to-point arch chain (lane ARCHCHAINS): equal-area strip chain with uniform
+// dihedral steps; R = w/(2 sin(θ/2)). Returns chainScore in out.chainScore.
+bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
+                     const DerivedTols& tol, ArcStripDetect& out);
+
+// Core chain-chord radius from an ordered tri path; axis filters circumferential edges.
+bool radiusFromArchChain(const MeshView& mv, const std::vector<int>& chain,
+                         const gp_Dir& axis, double& radiusOut, double& chainScoreOut,
+                         double rHint = 0.0);
+
+// Build path chain from patch tris and compute arch-chain radius (evaluateCommit hook).
+bool archChainRadiusFromPatch(const MeshView& mv, const std::vector<int>& tris,
+                              const gp_Dir& axis, double& radiusOut,
+                              double& chainScoreOut, double rHint = 0.0);
 
 bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWork& work);
 

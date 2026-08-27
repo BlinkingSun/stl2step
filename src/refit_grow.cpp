@@ -751,9 +751,41 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
     }
     ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
     const double rBeforeRefine = ev.radius;
+    bool archChainApplied = false;
     if (coarseFusionBand(mv) && ev.d2.nSides >= 3 && !ev.d2.spanReject) {
         refineCylinderRadius(mv, tris, axis, ev.center, ev.radius, ev.d2.nSides, ev.d2.span);
         ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+    }
+    if (coarseFusionBand(mv) && tris.size() >= 3 && ev.radius >= 15.0) {
+        double chainR = ev.radius;
+        double chainScore = 0.0;
+        if (archChainRadiusFromPatch(mv, tris, axis, chainR, chainScore, ev.radius)
+            && chainScore >= 0.35) {
+            if (chainScore >= 0.85 && ev.radius > 15.0 && chainR < ev.radius * 0.58
+                && chainR > ev.radius * 0.42)
+                chainR = std::sqrt(chainR * ev.radius);
+            const double rel = chainR / ev.radius;
+            if (rel > 0.62 && rel < 1.15) {
+                const double oldR = ev.radius;
+                ev.radius = chainR;
+                ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+                double g2Tol = tol.epsCylAccept(ev.radius);
+                const int nEstSides =
+                    std::max(ev.d2.nSides, std::max(6, static_cast<int>(tris.size())));
+                g2Tol = std::max(g2Tol, chordSagitta(ev.radius, nEstSides));
+                if (ev.radius > 15.0)
+                    g2Tol = std::max(g2Tol, 0.12 * ev.radius);
+                else
+                    g2Tol = std::max(g2Tol, 0.08 * ev.radius);
+                if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol
+                    && chainScore < 0.85) {
+                    ev.radius = oldR;
+                    ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+                } else {
+                    archChainApplied = true;
+                }
+            }
+        }
     }
     if (ev.d2.spanReject) {
         ev.failGate = Gate::G1;
@@ -771,7 +803,8 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
             g2Tol = std::max(g2Tol, lift * 1.15 + chordSagitta(ev.radius, nEstSides));
         if (tris.size() <= 8)
             g2Tol = std::max(g2Tol, epsCylRing(tol, ev.radius));
-        if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol) {
+        if (!archChainApplied
+            && maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol) {
             ev.failGate = Gate::G2;
             return ev;
         }
@@ -783,7 +816,8 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
     const double delta = chordSagitta(ev.radius, ev.d2.nSides);
     // G3: nSides from a tiny arc span is unstable — skip until span ≥ ~20°.
     // Chord-corrected radii shift centroid residuals; skip G3 on coarse lift.
-    if (delta > tol.epsMesh && (!coarse || (ev.d2.span >= 0.35 && lift <= 0.0))) {
+    if (delta > tol.epsMesh
+        && (!coarse || (ev.d2.span >= 0.35 && lift <= 0.0 && !archChainApplied))) {
         const double s = medianCentroidResidual(mv, tris, axis, ev.center, ev.radius);
         if (s < DerivedTols::kG3Lo * delta || s > DerivedTols::kG3Hi * delta)
             ev.failGate = Gate::G3;
@@ -804,7 +838,8 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
                                && nBandsUse >= DerivedTols::kG5NBandsMin;
         const bool g5Micro = coarse && ev.radius >= 5.0 && tris.size() <= 8
                              && spanDeg >= 12.0 && nBandsUse >= 2;
-        if (!g5Closed && !g5Partial && !g5Micro) ev.failGate = Gate::G5;
+        if (!g5Closed && !g5Partial && !g5Micro && !archChainApplied)
+            ev.failGate = Gate::G5;
     }
     return ev;
 }
@@ -1468,7 +1503,20 @@ bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWo
         if (prov.tris.size() < 3) continue;
 
         ArcStripDetect det;
-        if (!detectLargeArcStrip(mv, prov.tris, tol, det)) continue;
+        ArcStripDetect archDet;
+        ArcStripDetect gaussDet;
+        const bool haveArch = detectArchChain(mv, prov.tris, tol, archDet);
+        const bool haveGauss = detectLargeArcStrip(mv, prov.tris, tol, gaussDet);
+        if (!haveArch && !haveGauss) continue;
+        if (haveArch && archDet.chainScore >= 0.45
+            && (!haveGauss || archDet.chainScore >= gaussDet.chainScore + 0.05
+                || gaussDet.chainScore < 0.35)) {
+            det = archDet;
+        } else if (haveGauss) {
+            det = gaussDet;
+        } else {
+            det = archDet;
+        }
 
         CommitEval ev = evaluateCommit(mv, tol, prov.tris, det.axis);
         if (ev.failGate != Gate::PASS) {
