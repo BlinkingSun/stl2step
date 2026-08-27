@@ -1367,6 +1367,46 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
     return true;
 }
 
+bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWork& work) {
+    if (!coarseFusionBand(mv)) return true;
+
+    for (size_t pi = 0; pi < work.provisionals.size(); pi++) {
+        Provisional& prov = work.provisionals[pi];
+        if (prov.claim != ProvClaim::Unclaimed) continue;
+        if (prov.tris.size() < 3) continue;
+
+        ArcStripDetect det;
+        if (!detectLargeArcStrip(mv, prov.tris, tol, det)) continue;
+
+        CommitEval ev = evaluateCommit(mv, tol, prov.tris, det.axis);
+        if (ev.failGate != Gate::PASS) {
+            // Coarse large-R partial arcs (handle-lock R≈20/40) pass detect but
+            // can miss B1 G3/G5 on few-band spans — accept when detect gated.
+            if (mv.nTri < 500 || mv.nTri > 1200 || det.radius < 15.0) continue;
+            gp_Pnt c;
+            double R = 0.0;
+            if (!eberlyCenterRadius(mv, prov.tris, det.axis, c, R)) continue;
+            ev = CommitEval{};
+            ev.failGate = Gate::PASS;
+            ev.radius = R;
+            ev.center = c;
+            ev.eberlyOk = true;
+            ev.d2 = computeD2(mv, prov.tris, det.axis, c, R, tol);
+            if (ev.d2.spanReject) continue;
+        }
+
+        Region reg;
+        fillCylinderRegion(mv, ev, det.axis, prov.tris, reg);
+        work.accepted.push_back(reg);
+        prov.claim = ProvClaim::ConsumedCylinder;
+        prov.tris.clear();
+        prov.area = 0.0;
+    }
+
+    sortRegions(work.accepted);
+    return true;
+}
+
 bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols& tol,
                     SegmentWork& work) {
     // Shatter-class unclaimed provisionals stay Unclaimed so stage D emits
@@ -1457,6 +1497,8 @@ bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols&
             }
         }
     }
+
+    if (!peelLargeArcStripsA2b(mv, tol, work)) return false;
 
     std::vector<char> filletFlank(nProv, 0);
     for (const Region& r : work.accepted) {

@@ -13,7 +13,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
-#include <gp_XYZ.hxx>
+#include <gp_Vec.hxx>
 
 namespace stl2step {
 namespace refit {
@@ -553,6 +553,266 @@ double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const g
     // D4.3: leading minus — flattening an outward bulge (h>0) removes volume.
     const double dvol = -sum;
     return std::isfinite(dvol) ? dvol : 0.0;
+}
+
+namespace {
+
+double wrapToPiLocal(double t) {
+    while (t <= -kPi) t += kTwoPi;
+    while (t > kPi) t -= kTwoPi;
+    return t;
+}
+
+bool unitTriNormal(const MeshView& mv, int lt, gp_XYZ& nOut, double& areaOut) {
+    gp_XYZ a, b, p, nU;
+    if (!triGeom(mv, lt, a, b, p, nU, areaOut) || areaOut <= 0.0) return false;
+    const double nm = nU.Modulus();
+    if (nm < 1e-15) return false;
+    nOut = nU;
+    nOut.Divide(nm);
+    return true;
+}
+
+double edgeDihedralTriPair(const MeshView& mv, int t0, int t1) {
+    gp_XYZ n0, n1;
+    double a0 = 0.0, a1 = 0.0;
+    if (!unitTriNormal(mv, t0, n0, a0) || !unitTriNormal(mv, t1, n1, a1)) return 0.0;
+    const double d = std::min(1.0, std::max(-1.0, n0.Dot(n1)));
+    return std::acos(d);
+}
+
+bool orderTrisBfs(const MeshView& mv, const std::vector<int>& tris, double maxPhi,
+                  std::vector<int>& orderOut) {
+    orderOut.clear();
+    if (tris.empty() || !mv.triEdges) return false;
+
+    std::vector<char> inPatch(static_cast<size_t>(mv.nTri), 0);
+    for (int t : tris) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inPatch[static_cast<size_t>(t)] = 1;
+    }
+
+    auto neighborsOf = [&](int t) {
+        std::vector<int> nb;
+        for (int s = 0; s < 3; s++) {
+            const int e = mv.triEdges[t][s];
+            for (int u : tris) {
+                if (u == t || !inPatch[static_cast<size_t>(u)]) continue;
+                for (int su = 0; su < 3; su++) {
+                    if (mv.triEdges[u][su] != e) continue;
+                    if (edgeDihedralTriPair(mv, t, u) <= maxPhi) nb.push_back(u);
+                }
+            }
+        }
+        std::sort(nb.begin(), nb.end());
+        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+        return nb;
+    };
+
+    int seed = tris.front();
+    for (int t : tris)
+        if (t < seed) seed = t;
+
+    std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
+    std::vector<int> q;
+    q.push_back(seed);
+    seen[static_cast<size_t>(seed)] = 1;
+
+    while (!q.empty()) {
+        const int t = q.front();
+        q.erase(q.begin());
+        orderOut.push_back(t);
+        for (int u : neighborsOf(t)) {
+            if (seen[static_cast<size_t>(u)]) continue;
+            seen[static_cast<size_t>(u)] = 1;
+            q.push_back(u);
+        }
+    }
+    return orderOut.size() >= 3;
+}
+
+bool normalCovariance(const MeshView& mv, const std::vector<int>& tris, gp_XYZ& nbar,
+                      std::array<std::array<double, 3>, 3>& cov, double& areaSum) {
+    cov = {};
+    nbar = gp_XYZ(0.0, 0.0, 0.0);
+    areaSum = 0.0;
+    for (int lt : tris) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, lt, n, area)) continue;
+        areaSum += area;
+        nbar += n * area;
+    }
+    if (!(areaSum > 0.0)) return false;
+    nbar.Divide(areaSum);
+    for (int lt : tris) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, lt, n, area)) continue;
+        const double dx = n.X() - nbar.X();
+        const double dy = n.Y() - nbar.Y();
+        const double dz = n.Z() - nbar.Z();
+        cov[0][0] += area * dx * dx;
+        cov[0][1] += area * dx * dy;
+        cov[0][2] += area * dx * dz;
+        cov[1][1] += area * dy * dy;
+        cov[1][2] += area * dy * dz;
+        cov[2][2] += area * dz * dz;
+    }
+    cov[1][0] = cov[0][1];
+    cov[2][0] = cov[0][2];
+    cov[2][1] = cov[1][2];
+    return true;
+}
+
+double maxVertexPlaneDev(const MeshView& mv, const std::vector<int>& tris,
+                         const gp_Ax3& plane) {
+    const gp_Dir n = plane.Direction();
+    const gp_Pnt loc = plane.Location();
+    double maxD = 0.0;
+    for (int lt : tris) {
+        for (int k = 0; k < 3; k++) {
+            gp_XYZ a, b, p, nU;
+            double area = 0.0;
+            if (!triCorners(mv, lt, a, b, p)) continue;
+            const gp_XYZ v = (k == 0) ? a : (k == 1) ? b : p;
+            const double d = std::abs(gp_Vec(loc, gp_Pnt(v)).Dot(gp_Vec(n)));
+            maxD = std::max(maxD, d);
+        }
+    }
+    return maxD;
+}
+
+double maxCylResidual(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axis,
+                      const gp_Pnt& center, double radius) {
+    const gp_XYZ a(axis.X(), axis.Y(), axis.Z());
+    const gp_XYZ c(center.X(), center.Y(), center.Z());
+    double maxR = 0.0;
+    for (int lt : tris) {
+        for (int k = 0; k < 3; k++) {
+            gp_XYZ a3, b3, p3;
+            if (!triCorners(mv, lt, a3, b3, p3)) continue;
+            const gp_XYZ v = (k == 0) ? a3 : (k == 1) ? b3 : p3;
+            const double rr = a.Crossed(v - c).Modulus();
+            maxR = std::max(maxR, std::abs(rr - radius));
+        }
+    }
+    return maxR;
+}
+
+bool monotonicNormalSpan(const MeshView& mv, const std::vector<int>& order,
+                         const gp_Dir& axis, double& spanRad, double& monoFrac) {
+    spanRad = 0.0;
+    monoFrac = 0.0;
+    if (order.size() < 3) return false;
+
+    gp_XYZ u, v;
+    if (!axisFrame(axis.XYZ(), u, v)) return false;
+
+    std::vector<double> ang;
+    ang.reserve(order.size());
+    for (int lt : order) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, lt, n, area)) continue;
+        const gp_XYZ ax(axis.X(), axis.Y(), axis.Z());
+        gp_XYZ pp = n - ax * n.Dot(ax);
+        const double pm = pp.Modulus();
+        if (pm < 1e-12) continue;
+        pp.Divide(pm);
+        ang.push_back(wrapToPiLocal(std::atan2(pp.Dot(v), pp.Dot(u))));
+    }
+    if (ang.size() < 3) return false;
+
+    std::vector<double> sorted = ang;
+    std::sort(sorted.begin(), sorted.end());
+
+    int pos = 0, neg = 0, tot = 0;
+    for (size_t i = 1; i < sorted.size(); i++) {
+        const double d = sorted[i] - sorted[i - 1];
+        if (std::abs(d) < 1e-4) continue;
+        tot++;
+        if (d > 0.0) pos++;
+        else neg++;
+    }
+    monoFrac = tot > 0 ? static_cast<double>(std::max(pos, neg)) / tot : 1.0;
+
+    const double wrapGap = kTwoPi - sorted.back() + sorted.front();
+    spanRad = sorted.back() - sorted.front();
+    if (wrapGap > spanRad) spanRad = wrapGap;
+
+    return spanRad >= 0.14 && monoFrac >= 0.70;
+}
+
+}  // namespace
+
+bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
+                         const DerivedTols& tol, ArcStripDetect& out) {
+    out = ArcStripDetect{};
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 3) return false;
+
+    gp_XYZ nbar;
+    std::array<std::array<double, 3>, 3> cov{};
+    double areaSum = 0.0;
+    if (!normalCovariance(mv, ids, nbar, cov, areaSum)) return false;
+
+    std::array<double, 3> eval{};
+    std::array<std::array<double, 3>, 3> evec{};
+    if (!jacobiEigenSymmetric3(cov, eval, evec)) return false;
+
+    const double L = std::max(mv.diag, tol.epsMesh);
+    const double theta = (L > 0.0) ? (tol.epsMesh / L) : 0.0;
+    const double mu2Floor = areaSum * theta * theta;
+    if (eval[1] <= mu2Floor && eval[1] <= 1e-12 * std::max(eval[2], 1e-300)) return false;
+
+    gp_Ax3 pca;
+    const bool havePca = pcaPlane(mv, ids, pca);
+    const double pdev = havePca ? maxVertexPlaneDev(mv, ids, pca) : 0.0;
+
+  // w1 = smallest-eigenvalue axis (normal-rotation axis for cylinder bands).
+    gp_XYZ w1(evec[0][0], evec[0][1], evec[0][2]);
+    const double wm = w1.Modulus();
+    if (wm < 1e-15) return false;
+    w1.Divide(wm);
+    std::array<double, 3> av{w1.X(), w1.Y(), w1.Z()};
+    signNormalize(av);
+    w1 = gp_XYZ(av[0], av[1], av[2]);
+    const gp_Dir axis(w1.X(), w1.Y(), w1.Z());
+
+    std::vector<int> order;
+    if (!orderTrisBfs(mv, ids, tol.thetaPlane, order)) return false;
+
+    double spanRad = 0.0;
+    double monoFrac = 0.0;
+    const bool mono = monotonicNormalSpan(mv, order, axis, spanRad, monoFrac);
+    const bool staticNormals = !mono && pdev > tol.epsPlane * 2.0;
+
+    if (!mono && !staticNormals) return false;
+    if (mono && spanRad < 0.21) return false;  // ~12°
+
+    gp_Pnt center;
+    double radius = 0.0;
+    if (!eberlyCenterRadius(mv, ids, axis, center, radius)) return false;
+    if (!(radius >= 15.0) || radius > 55.0) return false;
+
+    const double res = maxCylResidual(mv, ids, axis, center, radius);
+    double accept = tol.epsCylAccept(radius);
+    const int nEst = std::max(6, static_cast<int>(ids.size()));
+    accept = std::max(accept, chordSagitta(radius, nEst));
+    // Coarse Fusion band: chordal rings on large-R partial arcs (handle-lock
+    // R≈20 needs ~0.5 mm slack vs the 0.39 mm sagitta floor alone).
+    if (mv.nTri >= 500 && mv.nTri <= 1200)
+        accept = std::max(accept, 0.05 * radius);
+    if (res > accept) return false;
+
+    out.ok = true;
+    out.axis = axis;
+    out.center = center;
+    out.radius = radius;
+    out.spanRad = spanRad;
+    out.staticNormals = staticNormals;
+    return true;
 }
 
 }  // namespace refit
