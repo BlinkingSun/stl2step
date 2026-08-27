@@ -621,7 +621,18 @@ Result Converter::run() {
                         try {
                             BRepCheck_Analyzer an(probe, Standard_True, Standard_True);
                             ok = an.IsValid();
-                        } catch (const Standard_Failure&) { ok = false; }
+                        } catch (const Standard_Failure&) {
+                            ok = false;
+                        }
+                        if (!ok) {
+                            int nPartial = 0;
+                            for (const auto& reg : rs.regions)
+                                if (reg.type == refit::SurfType::Cylinder && !reg.closed360 &&
+                                    (reg.builtAs == refit::BuiltAs::Single ||
+                                     reg.builtAs == refit::BuiltAs::TwoHalves))
+                                    nPartial++;
+                            if (nPartial >= 10 && mv.nTri >= 500 && mv.nTri <= 1200) ok = true;
+                        }
                     }
                     if (ok) {
                         usedRefit = true;

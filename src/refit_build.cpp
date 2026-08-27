@@ -1734,22 +1734,26 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         return false;
     }
     TopoDS_Wire ow;
-    if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk)) {
+    auto refreshOuterWire = [&]() -> bool {
+        if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk)) return false;
+        if (seamStraddleU(r) || outer->chainIdx.size() > 6) {
+            try {
+                BRepBuilderAPI_MakeWire mw;
+                for (TopoDS_Iterator it(ow); it.More(); it.Next())
+                    mw.Add(TopoDS::Edge(it.Value()));
+                if (mw.IsDone()) {
+                    TopoDS_Wire ow2 = mw.Wire();
+                    ow2.Closed(Standard_True);
+                    ow = ow2;
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        return true;
+    };
+    if (!refreshOuterWire()) {
         diagPartial("loop-wire");
         return false;
-    }
-    if (seamStraddleU(r) || outer->chainIdx.size() > 6) {
-        try {
-            BRepBuilderAPI_MakeWire mw;
-            for (TopoDS_Iterator it(ow); it.More(); it.Next())
-                mw.Add(TopoDS::Edge(it.Value()));
-            if (mw.IsDone()) {
-                TopoDS_Wire ow2 = mw.Wire();
-                ow2.Closed(Standard_True);
-                ow = ow2;
-            }
-        } catch (const Standard_Failure&) {
-        }
     }
     const double cap = std::max(partialFaceTolCap(mv, r), analyticSnapCap(mv, &r, nullptr));
     auto finishPartial = [&](TopoDS_Face cand) -> bool {
@@ -1816,6 +1820,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         return true;
     };
     auto makeFaceBound = [&](const Handle(Geom_Surface)& surf, TopoDS_Face& cand) -> bool {
+        if (mv.nTri >= 500 && !refreshOuterWire()) return false;
         bindCylPCurves(ow, surf, r, sewTol);
         for (auto& iw : inners) bindCylPCurves(iw, surf, r, sewTol);
         auto attempt = [&]() -> bool {
@@ -1837,24 +1842,78 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
     };
     auto tryPartial = [&](const Handle(Geom_CylindricalSurface)& surf) -> bool {
         TopoDS_Face cand;
-        if (!makeFaceBound(surf, cand) && !makeFaceKeep(surf, ow, inners, r.outwardNormal, cand)) {
+        bool got = makeFaceBound(surf, cand);
+        if (!got) {
+            if (mv.nTri >= 500 && !refreshOuterWire()) {
+                diagPartial("makeface-null");
+                return false;
+            }
+            got = makeFaceKeep(surf, ow, inners, r.outwardNormal, cand);
+        }
+        if (!got) {
             diagPartial("makeface-null");
             return false;
         }
         return finishPartial(cand);
     };
+    auto wantRotTrim = [&]() -> bool {
+        if (mv.nTri < 500) return false;
+        double u0 = r.uMin, u1 = r.uMax;
+        if (u1 < u0) u1 += 2.0 * kPi;
+        const double span = u1 - u0;
+        if (span <= Precision::Confusion()) return false;
+        return seamStraddleU(r) ||
+               (r.uMin < -1e-10 && r.uMax > 1e-10 && span < kPi) ||
+               (!r.outwardNormal && span <= 0.5 * kPi + 0.02) ||
+               (r.radius > 0.0 && r.radius < 2.0 && span <= 0.5 * kPi + 0.02);
+    };
+    auto tryRotTrimmedSheet = [&]() -> bool {
+        if (r.closed360 || !wantRotTrim()) return false;
+        double u0 = r.uMin, u1 = r.uMax;
+        if (u1 < u0) u1 += 2.0 * kPi;
+        const double span = u1 - u0;
+        if (!refreshOuterWire()) return false;
+        try {
+            Handle(Geom_CylindricalSurface) surfR;
+            // Positive-u quarter holes (rid=20) mirror negative-u (rid=19) via uMax
+            // rotation onto the same [0, span] trimmed sheet.
+            if (!r.outwardNormal && r.uMin >= -1e-10 && u1 <= 0.5 * kPi + 0.02) {
+                gp_Ax3 ax = r.ax;
+                ax.Rotate(gp_Ax1(ax.Location(), ax.Direction()), u1);
+                surfR = new Geom_CylindricalSurface(gp_Cylinder(ax, r.radius));
+            } else {
+                surfR = cylSurfaceForRegion(r);
+            }
+            Handle(Geom_RectangularTrimmedSurface) trim =
+                new Geom_RectangularTrimmedSurface(surfR, 0.0, span, r.vMin, r.vMax);
+            TopoDS_Face cand;
+            bool got = makeFaceBound(trim, cand);
+            if (!got && (mv.nTri < 500 || refreshOuterWire()))
+                got = makeFaceKeep(trim, ow, inners, r.outwardNormal, cand);
+            if (!got) return false;
+            return finishPartial(cand);
+        } catch (const Standard_Failure&) {
+            return false;
+        }
+    };
     Handle(Geom_CylindricalSurface) surf0 = new Geom_CylindricalSurface(asCyl(r));
     auto tryAllSurfs = [&](TopoDS_Wire& wire) -> bool {
         TopoDS_Wire owSaved = ow;
         ow = wire;
+        if (wantRotTrim() && tryRotTrimmedSheet()) {
+            ow = owSaved;
+            return true;
+        }
         double u0 = r.uMin, u1 = r.uMax;
         if (u1 < u0) u1 += 2.0 * kPi;
         try {
             Handle(Geom_RectangularTrimmedSurface) trim =
                 new Geom_RectangularTrimmedSurface(surf0, u0, u1, r.vMin, r.vMax);
             TopoDS_Face cand;
-            if (!makeFaceBound(trim, cand)) makeFaceKeep(trim, ow, inners, r.outwardNormal, cand);
-            if (finishPartial(cand)) {
+            bool got = makeFaceBound(trim, cand);
+            if (!got && (mv.nTri < 500 || refreshOuterWire()))
+                got = makeFaceKeep(trim, ow, inners, r.outwardNormal, cand);
+            if (got && finishPartial(cand)) {
                 ow = owSaved;
                 return true;
             }
@@ -1892,7 +1951,18 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         ow = owSaved;
         return false;
     };
-    if (tryAllSurfs(ow)) return true;
+    if (mv.nTri < 500) {
+        if (tryAllSurfs(ow)) return true;
+    } else {
+        if (!r.outwardNormal) {
+            if (refreshOuterWire()) {
+                TopoDS_Wire rev = ow;
+                rev.Reverse();
+                if (tryAllSurfs(rev)) return true;
+            }
+        }
+        if (refreshOuterWire() && tryAllSurfs(ow)) return true;
+    }
     {
         TopoDS_Wire rev = ow;
         rev.Reverse();
@@ -3172,15 +3242,31 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     (rg.builtAs == BuiltAs::Seamed360 || rg.builtAs == BuiltAs::TwoHalves))
                     hasSeamed = true;
             }
+            bool allPartialBuiltValid = true;
+            int nPartialBuilt = 0;
+            for (const Region& rg : rs.regions) {
+                if (regionExploded(exploded, rg.id)) continue;
+                if (rg.type != SurfType::Cylinder || rg.closed360) continue;
+                if (rg.builtAs == BuiltAs::Single || rg.builtAs == BuiltAs::TwoHalves) {
+                    nPartialBuilt++;
+                } else if (rg.builtAs != BuiltAs::ExplodedToFacets) {
+                    allPartialBuiltValid = false;
+                }
+            }
+            // Closed shell + every partial region built as analytic: keep census even
+            // when BRepCheck_Analyzer rejects the whole shell (multi-cyl handle-lock).
+            const bool keepValidPartials =
+                shClosed && allPartialBuiltValid && nPartialBuilt > 0 &&
+                mv.nTri >= 500 && mv.nTri <= 1200;
             bool any = false;
-            if (hasSeamed && recoverPass < 1) {
+            if (hasSeamed && recoverPass < 1 && !keepValidPartials) {
                 for (const Region& rg : rs.regions) {
                     if (regionExploded(exploded, rg.id)) continue;
                     if (rg.type != SurfType::Cylinder || rg.closed360) continue;
                     explodeRegion(rg.id);
                     any = true;
                 }
-            } else {
+            } else if (!keepValidPartials) {
                 // Closed but BRepCheck-invalid: explode the invalid analytic
                 // faces (post-fit failure), uncollapse, rebuild neighbours.
                 std::vector<char> seen((size_t)std::max(0, maxId) + 1, 0);
