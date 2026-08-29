@@ -38,6 +38,37 @@ bool p1DiagOn() {
     return e && e[0] != '\0' && e[0] != '0';
 }
 
+bool collapseDiagOn() {
+    const char* e = std::getenv("STL2STEP_COLLAPSE_DIAG");
+    return e && e[0] != '\0' && e[0] != '0';
+}
+
+// SPEC-AC-CHAINGEN-MATH header contract. Math exports archChainBand(mv);
+// this TU-local adapter matches the published predicate (500–8000 tris,
+// overlaps coarseFusionBand, excludes Body11 file @ 15300) until that merge.
+// Do not widen coarseFusionBand — S13/S14 (16/20 tris) stay outside both.
+inline bool inArchChainBand(const MeshView& mv) {
+    return mv.nTri >= 500 && mv.nTri <= 8000;
+}
+
+// Grow commit seam: a strict subset of archChainBand outside coarseFusionBand.
+// Body18/20 are 1948 tris. Body11 is two components (12060 + 3240); the 3240
+// piece sits inside the detector band and must stay commit-neutral (AC2
+// recognition census). Cap at 2500 so that component, Body9 (4668) and
+// Body12 (7918) do not take the new apply. Over-commit is worse.
+inline bool inArchChainCommitBand(const MeshView& mv) {
+    return !coarseFusionBand(mv) && inArchChainBand(mv) && mv.nTri <= 2500;
+}
+
+void diagArchChain(const char* kind, std::size_t n, double score, double eberly,
+                   double chainR, double appliedR, double rel, const char* why) {
+    if (!collapseDiagOn()) return;
+    std::fprintf(stderr,
+                 "DIAG_ARCHCHAIN_%s n=%zu score=%.4g eberly=%.6g chainR=%.6g "
+                 "appliedR=%.6g rel=%.4g why=%s\n",
+                 kind, n, score, eberly, chainR, appliedR, rel, why);
+}
+
 struct EdgeAdj {
     std::vector<std::array<int, 2>> tri;  // local edge -> [t0, t1], -1 if boundary
 };
@@ -783,10 +814,70 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
                     && chainScore < 0.85) {
                     ev.radius = oldR;
                     ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+                    diagArchChain("DEFER", tris.size(), chainScore, oldR, chainR,
+                                  ev.radius, rel, "g2_residual");
                 } else {
                     archChainApplied = true;
+                    diagArchChain("COMMIT", tris.size(), chainScore, oldR, chainR,
+                                  ev.radius, rel, "coarse_window");
                 }
+            } else if (chainScore > 0.0) {
+                diagArchChain("DEFER", tris.size(), chainScore, ev.radius, chainR,
+                              ev.radius, rel, "rel_window");
             }
+        } else if (chainScore > 0.0) {
+            diagArchChain("DEFER", tris.size(), chainScore, ev.radius, chainR,
+                          ev.radius, 0.0, "score<0.35");
+        }
+    } else if (inArchChainCommitBand(mv) && tris.size() >= 3) {
+        // Outside coarseFusionBand: commit only chainScore >= 0.85. Blend and
+        // rel window are the same constants as the coarse path above.
+        // Non-coarse G2 still runs (archChainApplied does not skip it), so a
+        // residual miss must roll back — losing an eberly commit is a FAIL.
+        double chainR = ev.radius;
+        double chainScore = 0.0;
+        if (archChainRadiusFromPatch(mv, tris, axis, chainR, chainScore, ev.radius)
+            && chainScore >= 0.85) {
+            if (chainScore >= 0.85 && ev.radius > 15.0 && chainR < ev.radius * 0.58
+                && chainR > ev.radius * 0.42)
+                chainR = std::sqrt(chainR * ev.radius);
+            const double rel = chainR / ev.radius;
+            if (rel > 0.62 && rel < 1.15) {
+                const double oldR = ev.radius;
+                const D2Metrics oldD2 = ev.d2;
+                ev.radius = chainR;
+                ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+                const double g2Tol = tol.epsCylAccept(ev.radius);
+                bool g3fail = false;
+                const double delta = chordSagitta(ev.radius, ev.d2.nSides);
+                if (delta > tol.epsMesh) {
+                    const double s =
+                        medianCentroidResidual(mv, tris, axis, ev.center, ev.radius);
+                    if (s < DerivedTols::kG3Lo * delta || s > DerivedTols::kG3Hi * delta)
+                        g3fail = true;
+                }
+                if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol) {
+                    ev.radius = oldR;
+                    ev.d2 = oldD2;
+                    diagArchChain("DEFER", tris.size(), chainScore, oldR, chainR,
+                                  ev.radius, rel, "g2_residual");
+                } else if (g3fail) {
+                    ev.radius = oldR;
+                    ev.d2 = oldD2;
+                    diagArchChain("DEFER", tris.size(), chainScore, oldR, chainR,
+                                  ev.radius, rel, "g3_fail");
+                } else {
+                    archChainApplied = true;
+                    diagArchChain("COMMIT", tris.size(), chainScore, oldR, chainR,
+                                  ev.radius, rel, "archband_window");
+                }
+            } else if (chainScore > 0.0) {
+                diagArchChain("DEFER", tris.size(), chainScore, ev.radius, chainR,
+                              ev.radius, rel, "rel_window");
+            }
+        } else if (chainScore > 0.0) {
+            diagArchChain("DEFER", tris.size(), chainScore, ev.radius, chainR,
+                          ev.radius, 0.0, "score<0.85");
         }
     }
     if (ev.d2.spanReject) {
@@ -1500,7 +1591,42 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
 }
 
 bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWork& work) {
-    if (!coarseFusionBand(mv)) return true;
+    if (!coarseFusionBand(mv)) {
+        // New seam: outside coarse, peel only high-confidence arch chains.
+        // Gauss-strip fallback and coarse G3/G5 bypass stay coarse-only.
+        if (!inArchChainCommitBand(mv)) return true;
+        for (size_t pi = 0; pi < work.provisionals.size(); pi++) {
+            Provisional& prov = work.provisionals[pi];
+            if (prov.claim != ProvClaim::Unclaimed) continue;
+            if (prov.tris.size() < 3) continue;
+            ArcStripDetect archDet;
+            if (!detectArchChain(mv, prov.tris, tol, archDet)
+                || archDet.chainScore < 0.85) {
+                if (archDet.chainScore > 0.0)
+                    diagArchChain("DEFER", prov.tris.size(), archDet.chainScore,
+                                  archDet.radius, archDet.radius, archDet.radius,
+                                  0.0, "peel_score<0.85");
+                continue;
+            }
+            CommitEval ev = evaluateCommit(mv, tol, prov.tris, archDet.axis);
+            if (ev.failGate != Gate::PASS) {
+                diagArchChain("DEFER", prov.tris.size(), archDet.chainScore,
+                              archDet.radius, ev.radius, ev.radius, 0.0,
+                              "peel_eval_fail");
+                continue;
+            }
+            Region reg;
+            fillCylinderRegion(mv, ev, archDet.axis, prov.tris, reg);
+            work.accepted.push_back(reg);
+            prov.claim = ProvClaim::ConsumedCylinder;
+            prov.tris.clear();
+            prov.area = 0.0;
+            diagArchChain("COMMIT", reg.tris.size(), archDet.chainScore,
+                          archDet.radius, ev.radius, ev.radius, 1.0, "peel_archband");
+        }
+        sortRegions(work.accepted);
+        return true;
+    }
 
     for (size_t pi = 0; pi < work.provisionals.size(); pi++) {
         Provisional& prov = work.provisionals[pi];
