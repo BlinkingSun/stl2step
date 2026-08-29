@@ -31,6 +31,7 @@
 // newer OCCT distributions (vcpkg); the list type's own Iterator is portable.
 #include <BRepCheck_ListOfStatus.hxx>
 #include <BRepCheck_Result.hxx>
+#include <BRepCheck_Status.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
 #include <BRepTools_WireExplorer.hxx>
@@ -1247,6 +1248,279 @@ bool diagPlatesEnabled() {
     return cached != 0;
 }
 
+bool collapseDiagEnabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+const char* brepCheckName(int st) {
+    switch (st) {
+        case BRepCheck_NoError: return "NoError";
+        case BRepCheck_InvalidPointOnCurve: return "InvalidPointOnCurve";
+        case BRepCheck_InvalidPointOnCurveOnSurface: return "InvalidPointOnCurveOnSurface";
+        case BRepCheck_InvalidPointOnSurface: return "InvalidPointOnSurface";
+        case BRepCheck_No3DCurve: return "No3DCurve";
+        case BRepCheck_Multiple3DCurve: return "Multiple3DCurve";
+        case BRepCheck_Invalid3DCurve: return "Invalid3DCurve";
+        case BRepCheck_NoCurveOnSurface: return "NoCurveOnSurface";
+        case BRepCheck_InvalidCurveOnSurface: return "InvalidCurveOnSurface";
+        case BRepCheck_InvalidCurveOnClosedSurface: return "InvalidCurveOnClosedSurface";
+        case BRepCheck_InvalidSameRangeFlag: return "InvalidSameRangeFlag";
+        case BRepCheck_InvalidSameParameterFlag: return "InvalidSameParameterFlag";
+        case BRepCheck_InvalidDegeneratedFlag: return "InvalidDegeneratedFlag";
+        case BRepCheck_FreeEdge: return "FreeEdge";
+        case BRepCheck_InvalidMultiConnexity: return "InvalidMultiConnexity";
+        case BRepCheck_InvalidRange: return "InvalidRange";
+        case BRepCheck_EmptyWire: return "EmptyWire";
+        case BRepCheck_RedundantEdge: return "RedundantEdge";
+        case BRepCheck_SelfIntersectingWire: return "SelfIntersectingWire";
+        case BRepCheck_NoSurface: return "NoSurface";
+        case BRepCheck_InvalidWire: return "InvalidWire";
+        case BRepCheck_RedundantWire: return "RedundantWire";
+        case BRepCheck_IntersectingWires: return "IntersectingWires";
+        case BRepCheck_InvalidImbricationOfWires: return "InvalidImbricationOfWires";
+        case BRepCheck_EmptyShell: return "EmptyShell";
+        case BRepCheck_RedundantFace: return "RedundantFace";
+        case BRepCheck_InvalidImbricationOfShells: return "InvalidImbricationOfShells";
+        case BRepCheck_UnorientableShape: return "UnorientableShape";
+        case BRepCheck_NotClosed: return "NotClosed";
+        case BRepCheck_NotConnected: return "NotConnected";
+        case BRepCheck_SubshapeNotInShape: return "SubshapeNotInShape";
+        case BRepCheck_BadOrientation: return "BadOrientation";
+        case BRepCheck_BadOrientationOfSubshape: return "BadOrientationOfSubshape";
+        case BRepCheck_InvalidPolygonOnTriangulation: return "InvalidPolygonOnTriangulation";
+        case BRepCheck_InvalidToleranceValue: return "InvalidToleranceValue";
+        case BRepCheck_EnclosedRegion: return "EnclosedRegion";
+        case BRepCheck_CheckFail: return "CheckFail";
+        default: return "?";
+    }
+}
+
+void dumpBRepStatuses(const Handle(BRepCheck_Result)& res) {
+    if (res.IsNull()) return;
+    for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next()) {
+        const int st = (int)it.Value();
+        if (st == (int)BRepCheck_NoError) continue;
+        std::fprintf(stderr, " st=%d(%s)", st, brepCheckName(st));
+    }
+}
+
+double pcurveSignedArea(const TopoDS_Face& f, const TopoDS_Wire& w) {
+    double A = 0.0;
+    try {
+        for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
+            const TopoDS_Edge e = ex.Current();
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+            if (pc.IsNull()) continue;
+            const int N = 12;
+            gp_Pnt2d p0 = pc->Value(a);
+            for (int i = 1; i <= N; i++) {
+                const double t = a + (b - a) * (double)i / (double)N;
+                gp_Pnt2d p1 = pc->Value(t);
+                A += p0.X() * p1.Y() - p1.X() * p0.Y();
+                p0 = p1;
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return 0.5 * A;
+}
+
+void dumpFaceTopo(int rid, const TopoDS_Face& f, const char* tag, const char* phase) {
+    if (!collapseDiagEnabled() || f.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(f, Standard_True);
+        int nW = 0, nE = 0, nPc = 0, nClosedW = 0, nWalkStall = 0;
+        double uvA = 0.0;
+        for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) {
+            nW++;
+            const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+            if (w.Closed() || BRep_Tool::IsClosed(w)) nClosedW++;
+            int nWe = 0, nIt = 0;
+            for (TopoDS_Iterator it(w); it.More(); it.Next())
+                if (it.Value().ShapeType() == TopAbs_EDGE) nIt++;
+            int nWalk = 0;
+            try {
+                for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) nWalk++;
+            } catch (const Standard_Failure&) {
+            }
+            if (nWalk < nIt) nWalkStall++;
+            nWe = nIt;
+            nE += nWe;
+            uvA += pcurveSignedArea(f, w);
+            for (TopExp_Explorer ex(w, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                Standard_Real a = 0, b = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                if (!pc.IsNull()) nPc++;
+            }
+        }
+        std::fprintf(stderr,
+                     "DIAG_PARTIAL_TOPO rid=%d phase=%s tag=%s valid=%d nW=%d nE=%d closedW=%d "
+                     "walkStall=%d pc=%d/%d uvA=%.4f faceOri=%s",
+                     rid, phase ? phase : "-", tag ? tag : "-", an.IsValid() ? 1 : 0, nW, nE,
+                     nClosedW, nWalkStall, nPc, nE, uvA,
+                     f.Orientation() == TopAbs_FORWARD ? "F" : "R");
+        dumpBRepStatuses(an.Result(f));
+        std::fprintf(stderr, "\n");
+        int wi = 0;
+        for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), wi++) {
+            const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+            Handle(BRepCheck_Result) wr = an.Result(w);
+            std::fprintf(stderr, "DIAG_PARTIAL_WIRE rid=%d wi=%d closed=%d uvA=%.4f", rid, wi,
+                         (w.Closed() || BRep_Tool::IsClosed(w)) ? 1 : 0, pcurveSignedArea(f, w));
+            dumpBRepStatuses(wr);
+            std::fprintf(stderr, "\n");
+            int ei = 0;
+            try {
+                for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next(), ei++) {
+                    const TopoDS_Edge e = ex.Current();
+                    Handle(BRepCheck_Result) er = an.Result(e);
+                    Standard_Real a = 0, b = 0;
+                    Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                    Standard_Real f3 = 0, l3 = 0;
+                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+                    const char* cty = "none";
+                    if (!c3.IsNull()) {
+                        if (c3->DynamicType() == STANDARD_TYPE(Geom_Line)) cty = "line";
+                        else if (c3->DynamicType() == STANDARD_TYPE(Geom_Circle)) cty = "circ";
+                        else if (c3->DynamicType() == STANDARD_TYPE(Geom_Ellipse)) cty = "elips";
+                        else cty = "other";
+                    }
+                    gp_Pnt2d uv0, uv1;
+                    if (!pc.IsNull()) {
+                        uv0 = pc->Value(a);
+                        uv1 = pc->Value(b);
+                    }
+                    TopoDS_Vertex va = ex.CurrentVertex();
+                    gp_Pnt pa = va.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(va);
+                    std::fprintf(stderr,
+                                 "DIAG_PARTIAL_EDGE rid=%d wi=%d ei=%d hasPC=%d cty=%s "
+                                 "pcUV=(%.4f,%.4f)->(%.4f,%.4f) c3Range=[%.4f,%.4f] eOri=%s "
+                                 "v=(%.3f,%.3f,%.3f)",
+                                 rid, wi, ei, pc.IsNull() ? 0 : 1, cty,
+                                 pc.IsNull() ? 0.0 : uv0.X(), pc.IsNull() ? 0.0 : uv0.Y(),
+                                 pc.IsNull() ? 0.0 : uv1.X(), pc.IsNull() ? 0.0 : uv1.Y(), f3, l3,
+                                 e.Orientation() == TopAbs_FORWARD ? "F" : "R", pa.X(), pa.Y(),
+                                 pa.Z());
+                    dumpBRepStatuses(er);
+                    std::fprintf(stderr, "\n");
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+    } catch (const Standard_Failure&) {
+        std::fprintf(stderr, "DIAG_PARTIAL_TOPO rid=%d phase=%s tag=%s threw\n", rid,
+                     phase ? phase : "-", tag ? tag : "-");
+    }
+}
+
+void dumpShellCheck(const TopoDS_Shell& sh, const std::vector<TopoDS_Face>& built,
+                    const std::vector<int>& builtRid, const RegionSet& rs) {
+    if (!collapseDiagEnabled() || sh.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(sh, Standard_True);
+        std::fprintf(stderr, "DIAG_SHELL valid=%d closed=%d nF=%zu", an.IsValid() ? 1 : 0,
+                     BRep_Tool::IsClosed(sh) ? 1 : 0, built.size());
+        dumpBRepStatuses(an.Result(sh));
+        std::fprintf(stderr, "\n");
+        for (size_t i = 0; i < built.size(); i++) {
+            const TopoDS_Face& f = built[i];
+            if (f.IsNull()) continue;
+            const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+            Handle(BRepCheck_Result) fr = an.Result(f);
+            bool faceBad = false;
+            BRepCheck_Analyzer fan(f, Standard_True);
+            if (!fan.IsValid()) faceBad = true;
+            if (!fr.IsNull()) {
+                for (BRepCheck_ListOfStatus::Iterator it(fr->Status()); it.More(); it.Next())
+                    if (it.Value() != BRepCheck_NoError) faceBad = true;
+            }
+            if (!faceBad) continue;
+            const Region* rr = regionById(rs, rid);
+            const char* ty = "facet";
+            double R = 0.0;
+            int nTri = 0;
+            if (rr) {
+                ty = (rr->type == SurfType::Cylinder) ? "cyl"
+                     : (rr->type == SurfType::Plane)  ? "pln"
+                                                      : "oth";
+                R = rr->radius;
+                nTri = (int)rr->tris.size();
+            }
+            std::fprintf(stderr,
+                         "DIAG_SHELL_FACE rid=%d type=%s R=%.4f nTri=%d faceValid=%d ori=%s", rid,
+                         ty, R, nTri, fan.IsValid() ? 1 : 0,
+                         f.Orientation() == TopAbs_FORWARD ? "F" : "R");
+            dumpBRepStatuses(fr);
+            dumpBRepStatuses(fan.Result(f));
+            std::fprintf(stderr, "\n");
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape anc;
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(sh, TopAbs_FACE, faceMap);
+        std::vector<int> faceRid((size_t)faceMap.Extent() + 1, -1);
+        for (size_t i = 0; i < built.size(); i++) {
+            int idx = faceMap.FindIndex(built[i]);
+            if (idx > 0 && i < builtRid.size()) faceRid[(size_t)idx] = builtRid[i];
+        }
+        int nBadE = 0;
+        for (int i = 1; i <= anc.Extent(); i++) {
+            const TopoDS_Edge& e = TopoDS::Edge(anc.FindKey(i));
+            Handle(BRepCheck_Result) er = an.Result(e);
+            bool bad = false;
+            if (!er.IsNull()) {
+                for (BRepCheck_ListOfStatus::Iterator it(er->Status()); it.More(); it.Next())
+                    if (it.Value() != BRepCheck_NoError) bad = true;
+            }
+            if (!bad) continue;
+            if (nBadE >= 40) {
+                std::fprintf(stderr, "DIAG_SHELL_EDGE ... truncated\n");
+                break;
+            }
+            int r0 = -1, r1 = -1;
+            bool aFwd = false, bFwd = false;
+            const int nAnc = anc(i).Extent();
+            if (nAnc >= 1) {
+                const TopoDS_Face& fa = TopoDS::Face(anc(i).First());
+                int ia = faceMap.FindIndex(fa);
+                if (ia > 0) r0 = faceRid[(size_t)ia];
+                for (TopExp_Explorer ex(fa, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    if (ex.Current().IsSame(e)) {
+                        aFwd = ex.Current().Orientation() == TopAbs_FORWARD;
+                        break;
+                    }
+                }
+            }
+            if (nAnc >= 2) {
+                const TopoDS_Face& fb = TopoDS::Face(anc(i).Last());
+                int ib = faceMap.FindIndex(fb);
+                if (ib > 0) r1 = faceRid[(size_t)ib];
+                for (TopExp_Explorer ex(fb, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    if (ex.Current().IsSame(e)) {
+                        bFwd = ex.Current().Orientation() == TopAbs_FORWARD;
+                        break;
+                    }
+                }
+            }
+            std::fprintf(stderr,
+                         "DIAG_SHELL_EDGE rids=%d,%d nAnc=%d sameOri=%d aFwd=%d bFwd=%d", r0, r1,
+                         nAnc, (aFwd == bFwd) ? 1 : 0, aFwd ? 1 : 0, bFwd ? 1 : 0);
+            dumpBRepStatuses(er);
+            std::fprintf(stderr, "\n");
+            nBadE++;
+        }
+    } catch (const Standard_Failure&) {
+        std::fprintf(stderr, "DIAG_SHELL threw\n");
+    }
+}
+
 void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f) {
     if (!diagPlatesEnabled()) return;
     try {
@@ -1463,6 +1737,23 @@ void bindCylPCurves(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, const Regi
     Handle(Geom_CylindricalSurface) cyl = Handle(Geom_CylindricalSurface)::DownCast(surf);
     const bool rotated = !cyl.IsNull() &&
                          cyl->Position().XDirection().Angle(r.ax.XDirection()) > 1e-9;
+    auto toUV = [&](const gp_Pnt& p, double& u, double& v) {
+        if (rotated) {
+            gp_Ax3 ax = cyl->Position();
+            u = azimuthOnAx(ax, p);
+            v = vOnAx(ax, p);
+        } else {
+            u = regionU(r, p);
+            v = regionV(r, p);
+        }
+    };
+    auto unwrapU = [&](double u1, double u2) {
+        if (!seamStraddleU(r) || rotated) {
+            while (u2 - u1 > kPi) u2 -= 2.0 * kPi;
+            while (u1 - u2 > kPi) u2 += 2.0 * kPi;
+        }
+        return u2;
+    };
     BRep_Builder B;
     for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
         TopoDS_Edge eW = ex.Current();
@@ -1470,42 +1761,60 @@ void bindCylPCurves(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, const Regi
             addPcurvesOnSurface(surf, eW, false, sewTol);
             continue;
         }
-        TopoDS_Vertex va = ex.CurrentVertex();
-        TopoDS_Vertex vtx1, vtx2;
-        TopExp::Vertices(eW, vtx1, vtx2, Standard_False);
-        TopoDS_Vertex vb = vtx1.IsSame(va) ? vtx2 : vtx1;
-        if (va.IsNull() || vb.IsNull()) continue;
-        gp_Pnt pa = BRep_Tool::Pnt(va);
-        gp_Pnt pb = BRep_Tool::Pnt(vb);
-        // Trim endpoints must lie on the fitted cylinder sheet, not on the
-        // inscribed mesh polygon (partial-face chord sag).
-        pa = projectPntOnCylinder(r, pa);
-        pb = projectPntOnCylinder(r, pb);
+        // 3D ends from the oriented adaptor. Complementary makeArc keeps
+        // e.Reverse() (plate_half_hole volume gate); TopExp::Vertices
+        // (unoriented) then reports both ends as the same slot and the
+        // old bind skipped the cap pcurve (mag=0 → rid=11 st=32).
+        gp_Pnt pa, pb;
+        bool gotEnds = false;
+        try {
+            BRepAdaptor_Curve ad(eW);
+            const double t0 = ad.FirstParameter();
+            const double t1 = ad.LastParameter();
+            if (t1 - t0 > Precision::PConfusion()) {
+                pa = projectPntOnCylinder(r, ad.Value(t0));
+                pb = projectPntOnCylinder(r, ad.Value(t1));
+                gotEnds = pa.Distance(pb) > Precision::Confusion();
+            }
+        } catch (const Standard_Failure&) {
+        }
+        if (!gotEnds) {
+            Standard_Real f = 0, l = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, f, l);
+            if (!c3.IsNull() && l - f > Precision::PConfusion()) {
+                pa = projectPntOnCylinder(r, c3->Value(f));
+                pb = projectPntOnCylinder(r, c3->Value(l));
+                gotEnds = pa.Distance(pb) > Precision::Confusion();
+            }
+        }
+        if (!gotEnds) {
+            TopoDS_Vertex vtx1, vtx2;
+            TopExp::Vertices(eW, vtx1, vtx2, Standard_True);
+            if (vtx1.IsNull() || vtx2.IsNull() || vtx1.IsSame(vtx2)) continue;
+            pa = projectPntOnCylinder(r, BRep_Tool::Pnt(vtx1));
+            pb = projectPntOnCylinder(r, BRep_Tool::Pnt(vtx2));
+        }
         double u1, v1, u2, v2;
-        if (rotated) {
-            gp_Ax3 ax = cyl->Position();
-            u1 = azimuthOnAx(ax, pa);
-            v1 = vOnAx(ax, pa);
-            u2 = azimuthOnAx(ax, pb);
-            v2 = vOnAx(ax, pb);
-        } else {
-            u1 = regionU(r, pa);
-            v1 = regionV(r, pa);
-            u2 = regionU(r, pb);
-            v2 = regionV(r, pb);
-        }
-        // Closed / non-straddle: shortest-arc. Seam-straddling partials keep
-        // the RULING-b unwrapped U so a 180° arc is not flipped.
-        if (!seamStraddleU(r) || rotated) {
-            while (u2 - u1 > kPi) u2 -= 2.0 * kPi;
-            while (u1 - u2 > kPi) u2 += 2.0 * kPi;
-        }
+        toUV(pa, u1, v1);
+        toUV(pb, u2, v2);
+        u2 = unwrapU(u1, u2);
         gp_Vec2d duv(u2 - u1, v2 - v1);
         double mag = duv.Magnitude();
-        if (mag < Precision::PConfusion()) continue;
+        if (mag < Precision::PConfusion()) {
+            if (collapseDiagEnabled())
+                std::fprintf(stderr,
+                             "DIAG_PCBIND skip-degen rid=%d uv=(%.4f,%.4f)->(%.4f,%.4f) mag=%.3g "
+                             "rotated=%d\n",
+                             r.id, u1, v1, u2, v2, mag, rotated ? 1 : 0);
+            continue;
+        }
         Handle(Geom2d_Line) ln = new Geom2d_Line(gp_Pnt2d(u1, v1), gp_Dir2d(duv));
         B.UpdateEdge(eW, ln, surf, TopLoc_Location(), sewTol);
         B.Range(eW, surf, TopLoc_Location(), 0.0, mag);
+        if (collapseDiagEnabled())
+            std::fprintf(stderr,
+                         "DIAG_PCBIND rid=%d uv=(%.4f,%.4f)->(%.4f,%.4f) mag=%.4f rotated=%d\n",
+                         r.id, u1, v1, u2, v2, mag, rotated ? 1 : 0);
     }
 }
 
@@ -1716,9 +2025,11 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
                           const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
                           double sewTol, TopoDS_Face& outF) {
     auto diagPartial = [&](const char* why) {
-        if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0')
+        if (collapseDiagEnabled())
             std::fprintf(stderr, "DIAG_PARTIAL rid=%d %s\n", r.id, why);
     };
+    const char* surfTag = "unset";
+    const char* wireTag = "fwd";
     const Loop* outer = nullptr;
     std::vector<TopoDS_Wire> inners;
     for (const Loop& lp : r.loops) {
@@ -1755,18 +2066,38 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         diagPartial("loop-wire");
         return false;
     }
+    if (collapseDiagEnabled()) {
+        double u0 = r.uMin, u1 = r.uMax;
+        if (u1 < u0) u1 += 2.0 * kPi;
+        int nOuterCh = outer ? (int)outer->chainIdx.size() : 0;
+        std::fprintf(stderr,
+                     "DIAG_PARTIAL_RID rid=%d R=%.4f nTri=%d outward=%d closed360=%d "
+                     "u=[%.4f,%.4f] span=%.4f v=[%.4f,%.4f] nOuterCh=%d nInner=%zu "
+                     "dVol=%.3f nSides=%d\n",
+                     r.id, r.radius, (int)r.tris.size(), r.outwardNormal ? 1 : 0,
+                     r.closed360 ? 1 : 0, r.uMin, r.uMax, u1 - u0, r.vMin, r.vMax, nOuterCh,
+                     inners.size(), r.dVolPredicted, r.nSides);
+    }
     const double cap = std::max(partialFaceTolCap(mv, r), analyticSnapCap(mv, &r, nullptr));
     auto finishPartial = [&](TopoDS_Face cand) -> bool {
         if (cand.IsNull()) return false;
+        char tagbuf[96];
+        std::snprintf(tagbuf, sizeof(tagbuf), "%s/%s", surfTag, wireTag);
+        dumpFaceTopo(r.id, cand, tagbuf, "raw");
         {
             TopoDS_Face want = cand, other = cand;
             setFaceOutward(want, r.outwardNormal);
             setFaceOutward(other, !r.outwardNormal);
-            if (faceIsValid(want)) cand = want;
-            else if (faceIsValid(other)) cand = other;
+            const bool wantOk = faceIsValid(want);
+            const bool otherOk = faceIsValid(other);
+            if (wantOk) cand = want;
+            else if (otherOk) cand = other;
             else cand = want;
+            if (collapseDiagEnabled() && otherOk && !wantOk)
+                std::fprintf(stderr, "DIAG_PARTIAL rid=%d flipped-outward tag=%s\n", r.id, tagbuf);
         }
         if (!faceIsValid(cand)) {
+            dumpFaceTopo(r.id, cand, tagbuf, "pre-fix");
             addPcurvesOnFace(cand, sewTol, false);
         }
         if (!faceIsValid(cand)) {
@@ -1787,24 +2118,20 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             }
             setFaceOutward(cand, r.outwardNormal);
             addPcurvesOnFace(cand, sewTol, false);
+            dumpFaceTopo(r.id, cand, tagbuf, "post-fix");
         }
         if (!ensureFaceValid(cand, cap)) {
-            if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0') {
+            dumpFaceTopo(r.id, cand, tagbuf, "ensure");
+            if (collapseDiagEnabled()) {
                 double maxD = 0.0;
                 for (TopExp_Explorer vx(cand, TopAbs_VERTEX); vx.More(); vx.Next())
                     maxD = std::max(maxD, cylRadialDev(r, BRep_Tool::Pnt(TopoDS::Vertex(vx.Current()))));
-                std::fprintf(stderr, "DIAG_PARTIAL rid=%d maxCylDev=%.4f cap=%.4f valid=%d", r.id,
-                             maxD, cap, faceIsValid(cand) ? 1 : 0);
+                std::fprintf(stderr,
+                             "DIAG_PARTIAL rid=%d maxCylDev=%.4f cap=%.4f valid=%d tag=%s", r.id,
+                             maxD, cap, faceIsValid(cand) ? 1 : 0, tagbuf);
                 try {
                     BRepCheck_Analyzer an(cand, Standard_True);
-                    if (!an.IsValid()) {
-                        Handle(BRepCheck_Result) res = an.Result(cand);
-                        if (!res.IsNull()) {
-                            for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More();
-                                 it.Next())
-                                std::fprintf(stderr, " st=%d", (int)it.Value());
-                        }
-                    }
+                    if (!an.IsValid()) dumpBRepStatuses(an.Result(cand));
                 } catch (const Standard_Failure&) {
                 }
                 std::fprintf(stderr, "\n");
@@ -1813,9 +2140,13 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             return false;
         }
         if (!faceIsValid(cand)) {
+            dumpFaceTopo(r.id, cand, tagbuf, "face-invalid");
             diagPartial("face-invalid");
             return false;
         }
+        if (collapseDiagEnabled())
+            std::fprintf(stderr, "DIAG_PARTIAL rid=%d valid=1 tag=%s ori=%s\n", r.id, tagbuf,
+                         cand.Orientation() == TopAbs_FORWARD ? "F" : "R");
         outF = cand;
         return true;
     };
@@ -1868,6 +2199,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
                (r.radius > 0.0 && r.radius < 2.0 && span <= 0.5 * kPi + 0.02);
     };
     auto tryRotTrimmedSheet = [&]() -> bool {
+        surfTag = "rot-trim";
         if (r.closed360 || !wantRotTrim()) return false;
         double u0 = r.uMin, u1 = r.uMax;
         if (u1 < u0) u1 += 2.0 * kPi;
@@ -1907,6 +2239,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         double u0 = r.uMin, u1 = r.uMax;
         if (u1 < u0) u1 += 2.0 * kPi;
         try {
+            surfTag = "rect-trim";
             Handle(Geom_RectangularTrimmedSurface) trim =
                 new Geom_RectangularTrimmedSurface(surf0, u0, u1, r.vMin, r.vMax);
             TopoDS_Face cand;
@@ -1921,6 +2254,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         }
         if (seamStraddleU(r)) {
             try {
+                surfTag = "seam-box";
                 BRepBuilderAPI_MakeFace box(asCyl(r), u0, u1, r.vMin, r.vMax);
                 if (box.IsDone()) {
                     Handle(Geom_Surface) sbox = BRep_Tool::Surface(box.Face());
@@ -1937,11 +2271,13 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             } catch (const Standard_Failure&) {
             }
         }
+        surfTag = "untrim";
         if (tryPartial(surf0)) {
             ow = owSaved;
             return true;
         }
         if (!r.closed360 && std::fabs(r.uMin) > 1e-14) {
+            surfTag = "rot-ax";
             Handle(Geom_CylindricalSurface) surf1 = cylSurfaceForRegion(r);
             if (tryPartial(surf1)) {
                 ow = owSaved;
@@ -1952,20 +2288,24 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         return false;
     };
     if (mv.nTri < 500) {
+        wireTag = "fwd";
         if (tryAllSurfs(ow)) return true;
     } else {
         if (!r.outwardNormal) {
             if (refreshOuterWire()) {
                 TopoDS_Wire rev = ow;
                 rev.Reverse();
+                wireTag = "rev-hole";
                 if (tryAllSurfs(rev)) return true;
             }
         }
+        wireTag = "fwd";
         if (refreshOuterWire() && tryAllSurfs(ow)) return true;
     }
     {
         TopoDS_Wire rev = ow;
         rev.Reverse();
+        wireTag = "rev";
         if (tryAllSurfs(rev)) return true;
     }
     diagPartial("all-failed");
@@ -3235,6 +3575,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         }
 
         if (recoverPass < 2 && !shellIsValid(sh)) {
+            dumpShellCheck(sh, built, builtRid, rs);
             bool hasSeamed = false;
             for (const Region& rg : rs.regions) {
                 if (regionExploded(exploded, rg.id)) continue;
