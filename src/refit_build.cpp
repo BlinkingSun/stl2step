@@ -835,8 +835,98 @@ AnalyticCurve bestCylCylConstructed(const Region& a, const Region& b, const Mesh
     return best;
 }
 
+const char* cylCylClassName(const Region& a, const Region& b, double epsPlane) {
+    if (!axesNearParallel8(a.ax.Direction(), b.ax.Direction())) return "skew";
+    const double d = distAxesCyl(a.ax, b.ax);
+    if (d <= Precision::Confusion()) return "coax";
+    if (cylCylTangentContact(a, b, epsPlane)) return "nearTan";
+    if (cylCylParallelOffset(a, b, epsPlane)) return "parOff";
+    return "other";
+}
+
+// A constructed generator is only shareable if it is a generator of BOTH
+// cylinders. Off-axis (8° "parallel") lines sit on one surface and orphan
+// on the other — Body9's MakeEdge-succeeds / J6-opens class.
+bool constructedLinOnBothCylinders(const AnalyticCurve& c, const Region& a, const Region& b,
+                                   double tol) {
+    if (c.kind != AnalyticCurve::Lin) return false;
+    if (!(tol > 0.0) || !std::isfinite(tol)) return false;
+    if (!axesNearParallel8(c.lin.Direction(), a.ax.Direction())) return false;
+    if (!axesNearParallel8(c.lin.Direction(), b.ax.Direction())) return false;
+    gp_Ax3 linAx(c.lin.Location(), c.lin.Direction());
+    const double dA = distAxesCyl(linAx, a.ax);
+    const double dB = distAxesCyl(linAx, b.ax);
+    return std::fabs(dA - a.radius) <= tol && std::fabs(dB - b.radius) <= tol;
+}
+
+double cylCylOnSurfaceTol(const Region& a, const Region& b, const MeshView& mv, double sewTol) {
+    const double eps = derivedEpsPlane(mv);
+    const double fit = std::max(a.maxVertexDev, b.maxVertexDev);
+    const double sew = (sewTol > 0.0) ? sewTol : Precision::Confusion();
+    return std::max(std::max(eps, fit) * 2.0, sew);
+}
+
+bool regionHasChain(const Region& r, int ci) {
+    for (const Loop& lp : r.loops) {
+        for (int idx : lp.chainIdx)
+            if (idx == ci) return true;
+    }
+    return false;
+}
+
+bool bothRegionsReferenceChain(const RegionSet& rs, const BoundaryChain& ch, int ci) {
+    const Region* A = regionById(rs, ch.regA);
+    const Region* B = regionById(rs, ch.regB);
+    if (!A || !B) return false;
+    return regionHasChain(*A, ci) && regionHasChain(*B, ci);
+}
+
+bool faceHasEdgeTShape(const TopoDS_Face& f, const TopoDS_Edge& e) {
+    if (f.IsNull() || e.IsNull()) return false;
+    try {
+        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+            if (ex.Current().IsSame(e)) return true;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return false;
+}
+
+int matchCollapsedChainToSegment(const MeshView& mv, const RegionSet& rs,
+                                 const std::vector<char>& collapsed, const gp_Pnt& pa,
+                                 const gp_Pnt& pb, double tol) {
+    int best = -1;
+    double bestD = 1e300;
+    for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+        if (ci >= collapsed.size() || !collapsed[ci]) continue;
+        const BoundaryChain& ch = rs.chains[ci];
+        if (ch.meshVerts.size() < 2) continue;
+        gp_Pnt p0 = pntOf(mv, ch.meshVerts.front());
+        gp_Pnt p1 = pntOf(mv, ch.meshVerts.back());
+        const double d00 = pa.Distance(p0), d01 = pa.Distance(p1);
+        const double d10 = pb.Distance(p0), d11 = pb.Distance(p1);
+        const double d = std::min(std::min(d00 + d11, d01 + d10), std::min(d00 + d10, d01 + d11));
+        if (d < bestD) {
+            bestD = d;
+            best = (int)ci;
+        }
+    }
+    return (best >= 0 && bestD <= 2.0 * tol) ? best : -1;
+}
+
+void emitDiagFallback(int ci, const BoundaryChain& ch, const char* cls, const char* outcome,
+                      int nA, int nB, double residual, size_t nV) {
+    if (!diagJ6Enabled()) return;
+    std::fprintf(stderr,
+                 "DIAG_FALLBACK ci=%d class=%s outcome=%s nFaceA=%d nFaceB=%d "
+                 "regA=%d regB=%d residual=%.4f nV=%zu\n",
+                 ci, cls, outcome, nA, nB, ch.regA, ch.regB, residual, nV);
+}
+
 AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView& mv,
-                                const BoundaryChain& ch, double sewTol, WarnFn warn) {
+                                const BoundaryChain& ch, double sewTol, WarnFn warn,
+                                bool* usedCylCylFallback = nullptr) {
+    if (usedCylCylFallback) *usedCylCylFallback = false;
     const double tolAng = Precision::Angular();
     const double tol = std::max(sewTol, Precision::Confusion());
     try {
@@ -899,12 +989,30 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
             AnalyticCurve c = pickIntAna(iq, mv, ch, sewTol, acceptR);
             const double epsPl = derivedEpsPlane(mv);
+            bool constructed = false;
             // Near-tangent fillet|bore and arch|arch: IntAna empty on coarse
             // meshes — construct the shared generator from fitted geometry.
-            if (c.kind == AnalyticCurve::None && cylCylTangentContact(A, B, epsPl))
+            if (c.kind == AnalyticCurve::None && cylCylTangentContact(A, B, epsPl)) {
                 c = constructedCylCylGenerator(A, B);
-            if (c.kind == AnalyticCurve::None && cylCylParallelOffset(A, B, epsPl))
+                constructed = (c.kind != AnalyticCurve::None);
+            }
+            if (c.kind == AnalyticCurve::None && cylCylParallelOffset(A, B, epsPl)) {
                 c = bestCylCylConstructed(A, B, mv, ch, acceptR);
+                constructed = (c.kind != AnalyticCurve::None);
+            }
+            // Log off-surface constructions; do not discard here. A line can
+            // still be dual-referenced (Body18). Orphans are rejected after
+            // both faces exist (dual-face / J6 free-edge ledger).
+            if (constructed) {
+                if (usedCylCylFallback) *usedCylCylFallback = true;
+                const double onTol = cylCylOnSurfaceTol(A, B, mv, sewTol);
+                if (diagJ6Enabled() && !constructedLinOnBothCylinders(c, A, B, onTol))
+                    std::fprintf(stderr,
+                                 "DIAG_FALLBACK class=%s outcome=off-surface "
+                                 "regA=%d regB=%d onTol=%.4f nV=%zu\n",
+                                 cylCylClassName(A, B, epsPl), ch.regA, ch.regB, onTol,
+                                 ch.meshVerts.size());
+            }
             if (c.kind == AnalyticCurve::None) {
                 if (diagP2Enabled()) {
                     IntAna_ResultType ty = iq.IsDone() ? iq.TypeInter() : IntAna_Empty;
@@ -2939,14 +3047,18 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         auto restoreShared = [&]() {
             // OCCT UpdateVertex will not decrease tolerance. Recreate the
             // slot TShapes so R1/R2 do not inherit fat tols from a discarded
-            // analytic attempt (adjudication F6).
+            // analytic attempt (adjudication F6). Assign a fresh handle —
+            // in-place MakeVertex leaves snapped TShapes alive when leftover
+            // faces still reference them, which dropped R2 triangles (Body9
+            // volΔ 0.030937 → 0.030954).
             BRep_Builder Bb;
             for (size_t i = 0; i < verts.size(); i++) {
                 if (verts[i].IsNull() && vsnap[i].t <= 0) continue;
                 try {
-                    TopoDS_Vertex& slot = const_cast<TopoDS_Vertex&>(verts[i]);
-                    Bb.MakeVertex(slot, vsnap[i].p,
+                    TopoDS_Vertex nv;
+                    Bb.MakeVertex(nv, vsnap[i].p,
                                   vsnap[i].t > 0 ? vsnap[i].t : Precision::Confusion());
+                    const_cast<TopoDS_Vertex&>(verts[i]) = nv;
                 } catch (const Standard_Failure&) {
                 }
             }
@@ -2960,11 +3072,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         // ids cascades to zero cylinders on Body11. IA_CYLCYL_NOGEOM (cyl|cyl
         // IntAna none) is legal polyline and is never enrolled.
         std::vector<char> chainEdgeFail(rs.chains.size(), 0);
+        std::vector<char> fallbackBanned(rs.chains.size(), 0);
+        std::vector<char> collapseBanned(rs.chains.size(), 0);
+        std::vector<char> fallbackUsed(rs.chains.size(), 0);
         int recoverPass = 0;
         int rounds = 0;
+        int fallbackGuardPass = 0;
+        int j6UncollapsePass = 0;
 
         auto rebuildCollapsed = [&]() {
             chainEdgeFail.assign(rs.chains.size(), 0);
+            fallbackUsed.assign(rs.chains.size(), 0);
             int diagCollapse = 0;
             if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0')
                 diagCollapse = 1;
@@ -2993,21 +3111,51 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     continue;
                 }
                 // analytic | analytic
+                const bool bothCyl =
+                    A->type == SurfType::Cylinder && B->type == SurfType::Cylinder;
+                // Banned collapse: keep mesh polyline. No IntAna warning (AC #2)
+                // and no chainEdgeFail enrollment (Body11).
+                if (collapseBanned[ci] || (bothCyl && fallbackBanned[ci])) {
+                    nNone++;
+                    continue;
+                }
                 AnalyticCurve curve;
-                WarnFn chainWarn = (recoverPass == 0 && rounds == 0) ? warn : nullptr;
+                bool usedFallback = false;
+                WarnFn chainWarn =
+                    (recoverPass == 0 && rounds == 0 && fallbackGuardPass == 0 &&
+                     j6UncollapsePass == 0)
+                        ? warn
+                        : nullptr;
                 if (ch.tangent) {
                     if (A->type == SurfType::Cylinder && B->type == SurfType::Plane)
                         curve = constructedGenerator(*A, *B);
                     else if (B->type == SurfType::Cylinder && A->type == SurfType::Plane)
                         curve = constructedGenerator(*B, *A);
-                    else if (A->type == SurfType::Cylinder && B->type == SurfType::Cylinder)
+                    else if (bothCyl) {
                         curve = bestCylCylConstructed(
                             *A, *B, mv, ch, intAnaAcceptResidual(mv, ch, sewTol, A, B));
-                    else
+                        usedFallback = (curve.kind != AnalyticCurve::None);
+                    } else
                         curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
                 } else {
-                    curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
+                    curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn, &usedFallback);
                 }
+                if (usedFallback && curve.kind != AnalyticCurve::None) {
+                    const double epsPl = derivedEpsPlane(mv);
+                    const char* cls = cylCylClassName(*A, *B, epsPl);
+                    if (!bothRegionsReferenceChain(rs, ch, (int)ci)) {
+                        emitDiagFallback((int)ci, ch, cls, "reject-loop", 0, 0, 0.0,
+                                         ch.meshVerts.size());
+                        curve = {};
+                        usedFallback = false;
+                    } else if (curve.kind == AnalyticCurve::Lin &&
+                               !constructedLinOnBothCylinders(
+                                   curve, *A, *B, cylCylOnSurfaceTol(*A, *B, mv, sewTol))) {
+                        emitDiagFallback((int)ci, ch, cls, "off-surface", 0, 0,
+                                         chainResidual(curve, mv, ch), ch.meshVerts.size());
+                    }
+                }
+                fallbackUsed[ci] = usedFallback ? 1 : 0;
                 // IntAna none: cyl|cyl is legal polyline (IA_CYLCYL_NOGEOM).
                 // plane|plane and plane|cyl misses are post-fit edge failures.
                 if (curve.kind == AnalyticCurve::None) {
@@ -3354,6 +3502,74 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         }
 
+        // Dual-face incidence guard (SPEC): a constructed cyl|cyl fallback
+        // lands only when both adjacent analytic faces reference the same
+        // TShape. Asymmetric incidence is an orphan — revert that chain to
+        // the pre-353f0fe polyline and rebuild. Both-missing (MakeFace copy)
+        // is logged, not rejected, so handle-lock TShape sharing is not
+        // second-guessed. Local sew probe is not used.
+        if (!unstable && fallbackGuardPass < 2) {
+            bool rejected = false;
+            int nSewed = 0, nOrphan = 0, nCopied = 0;
+            for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+                if (!fallbackUsed[ci] || !collapsed[ci] || geom[ci].edges.empty()) continue;
+                const BoundaryChain& ch = rs.chains[ci];
+                const Region* A = regionById(rs, ch.regA);
+                const Region* B = regionById(rs, ch.regB);
+                const double epsPl = derivedEpsPlane(mv);
+                const char* cls =
+                    (A && B) ? cylCylClassName(*A, *B, epsPl) : "other";
+                bool aBuilt = false, bBuilt = false, aHas = false, bHas = false;
+                for (size_t i = 0; i < built.size(); i++) {
+                    const bool hit = faceHasEdgeTShape(built[i], geom[ci].edges[0]);
+                    if (builtRid[i] == ch.regA) {
+                        aBuilt = true;
+                        if (hit) aHas = true;
+                    }
+                    if (builtRid[i] == ch.regB) {
+                        bBuilt = true;
+                        if (hit) bHas = true;
+                    }
+                }
+                const double resid = 0.0;
+                if (aBuilt && bBuilt && aHas && bHas) {
+                    nSewed++;
+                    emitDiagFallback((int)ci, ch, cls, "sewed", 1, 1, resid,
+                                     ch.meshVerts.size());
+                } else if (aBuilt && bBuilt && aHas != bHas) {
+                    nOrphan++;
+                    emitDiagFallback((int)ci, ch, cls, "orphan", aHas ? 1 : 0, bHas ? 1 : 0,
+                                     resid, ch.meshVerts.size());
+                    fallbackBanned[ci] = 1;
+                    collapsed[ci] = 0;
+                    geom[ci] = {};
+                    rejected = true;
+                } else if (aBuilt && bBuilt && !aHas && !bHas) {
+                    nCopied++;
+                    emitDiagFallback((int)ci, ch, cls, "copied", 0, 0, resid,
+                                     ch.meshVerts.size());
+                } else {
+                    nOrphan++;
+                    emitDiagFallback((int)ci, ch, cls, "orphan-unbuilt", aHas ? 1 : 0,
+                                     bHas ? 1 : 0, resid, ch.meshVerts.size());
+                    fallbackBanned[ci] = 1;
+                    collapsed[ci] = 0;
+                    geom[ci] = {};
+                    rejected = true;
+                }
+            }
+            if (diagJ6Enabled())
+                std::fprintf(stderr,
+                             "DIAG_FALLBACK_SUM sewed=%d orphan=%d copied=%d "
+                             "guardPass=%d rejected=%d\n",
+                             nSewed, nOrphan, nCopied, fallbackGuardPass, (int)rejected);
+            if (rejected) {
+                restoreShared();
+                fallbackGuardPass++;
+                goto try_rebuild;
+            }
+        }
+
         if (unstable) {
             for (Region& r : rs.regions) {
                 if (r.reject == Reject::FaceBuildFailed) r.reject = Reject::ChainUnstable;
@@ -3510,6 +3726,63 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             emit(warn, "J6: shell not closed freeEdges=" + std::to_string(freeE) +
                            " faces=" + std::to_string(built.size()) +
                            " recover=" + std::to_string(recoverPass));
+            // Targeted J6 heal: uncollapse analytic chains whose terminals
+            // match a free edge. Those TShapes did not pair. Mesh polyline
+            // shares meshE and is the pre-353f0fe path for that chain only.
+            // Skip large multi-hole parts (Body11, 15300 tris): mixed
+            // uncollapse + abort-recover zeroes the 127-cyl floor. The
+            // 8-file J6 set is all < 8000 tris.
+            if (j6UncollapsePass < 1 && freeE > 0 && mv.nTri < 10000) {
+                const double matchTol =
+                    std::max(std::max(0.5, sewTol * 20.0), derivedEpsPlane(mv) * 4.0);
+                std::vector<int> heal;
+                auto addHeal = [&](int ci) {
+                    if (ci < 0 || (size_t)ci >= collapseBanned.size()) return;
+                    if (std::find(heal.begin(), heal.end(), ci) != heal.end()) return;
+                    heal.push_back(ci);
+                };
+                for (int i = 1; i <= anc.Extent(); i++) {
+                    if (anc(i).Extent() >= 2) continue;
+                    const TopoDS_Edge& e = TopoDS::Edge(anc.FindKey(i));
+                    TopoDS_Vertex va, vb;
+                    TopExp::Vertices(e, va, vb, Standard_True);
+                    gp_Pnt pa = BRep_Tool::Pnt(va), pb = BRep_Tool::Pnt(vb);
+                    addHeal(matchCollapsedChainToSegment(mv, rs, collapsed, pa, pb, matchTol));
+                }
+                if (!heal.empty()) {
+                    for (int ci : heal) {
+                        collapseBanned[(size_t)ci] = 1;
+                        if ((size_t)ci < fallbackBanned.size()) fallbackBanned[(size_t)ci] = 1;
+                        collapsed[(size_t)ci] = 0;
+                        geom[(size_t)ci] = {};
+                        if (diagJ6Enabled()) {
+                            const BoundaryChain& ch = rs.chains[(size_t)ci];
+                            const Region* A = regionById(rs, ch.regA);
+                            const Region* B = regionById(rs, ch.regB);
+                            const char* cls = (A && B && A->type == SurfType::Cylinder &&
+                                               B->type == SurfType::Cylinder)
+                                                  ? cylCylClassName(*A, *B, derivedEpsPlane(mv))
+                                                  : "mixed";
+                            emitDiagFallback(ci, ch, cls, "j6-uncollapse", 0, 0, 0.0,
+                                             ch.meshVerts.size());
+                        }
+                    }
+                    if (diagJ6Enabled())
+                        std::fprintf(stderr, "DIAG_FALLBACK_SUM j6-uncollapse=%zu freeWas=%d\n",
+                                     heal.size(), freeE);
+                    restoreShared();
+                    j6UncollapsePass++;
+                    goto try_rebuild;
+                }
+            }
+            // Revert-class (Body9/12/18/20): after the heal, do not explode
+            // recover — that dirties vertex TShapes and worsens R2 volΔ.
+            // Body11 never enters this branch (nTri >= 10000 skips the heal).
+            if (j6UncollapsePass > 0) {
+                restoreShared();
+                out.clear();
+                return false;
+            }
             // Clean R1 to all-facets only when no Seamed360 survived. Rebuilding
             // seamed holes against exploded plates invents cap circles and
             // steals neighbour TShapes (S03/S16). That is AC4 escalation.

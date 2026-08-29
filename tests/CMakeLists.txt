@@ -18,3 +18,14 @@ foreach(_stl2step_test_dir harness corpus gates)
     endif()
 endforeach()
 unset(_stl2step_test_dir)
+
+# SPEC AC-J6HEAL API probe — calls stl2step::convert() directly. Not a ctest
+# (lane AC pins 27/27). Built whenever the core library is.
+if(TARGET stl2step::core)
+    add_executable(j6heal_api_probe j6heal_api_probe.cpp)
+    target_compile_features(j6heal_api_probe PRIVATE cxx_std_17)
+    target_link_libraries(j6heal_api_probe PRIVATE stl2step::core)
+    if(COMMAND stl2step_adhoc_sign)
+        stl2step_adhoc_sign(j6heal_api_probe)
+    endif()
+endif()
