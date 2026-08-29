@@ -142,3 +142,28 @@ endif()
 unset(_stl2step_gates_runner)
 unset(_stl2step_gates_cube)
 unset(_stl2step_gates_corpus)
+
+# --- gates-sweep ---
+# Standalone 11-file TrueForm sweep (scripts/stress_sweep.py). Not part of
+# gates_full and not sharded. SKIPs (exit 77) when the private STL corpus
+# is absent so CI stays green.
+if(TARGET stl2step)
+    get_filename_component(_stl2step_sweep_root
+        "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+    set(_stl2step_sweep_py "${_stl2step_sweep_root}/scripts/stress_sweep.py")
+    if(EXISTS "${_stl2step_sweep_py}")
+        add_test(NAME stress_sweep
+            COMMAND "${Python3_EXECUTABLE}" "${_stl2step_sweep_py}"
+                --binary "$<TARGET_FILE:stl2step>"
+                --jobs 4
+                --json "${CMAKE_CURRENT_BINARY_DIR}/stress_sweep.json"
+                --markdown "${CMAKE_CURRENT_BINARY_DIR}/stress_sweep.md")
+        set_tests_properties(stress_sweep PROPERTIES
+            LABELS "stress-sweep;private-corpus"
+            TIMEOUT 600
+            SKIP_RETURN_CODE 77
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>")
+    endif()
+    unset(_stl2step_sweep_py)
+    unset(_stl2step_sweep_root)
+endif()
