@@ -3295,7 +3295,8 @@ void collectResidualCulprits(const MeshView& mv, const RegionSet& rs, const Topo
                      shippedAbs, meshVol);
     if (nAnalytic <= 0) return;
     const double meshAbs = std::fabs(meshVol);
-    const double kR = 3.0;
+    const double kR = 3.0;      // unchanged
+    const double kArc = 1.05;   // D4 §3: max plate ratio 235.37/224.2 = 1.050, +5% margin
     struct ResidRow {
         int rid = -1;
         double vface = 0, vchord = 0, dvol = 0, sub = 0, err = 0;
@@ -3315,7 +3316,12 @@ void collectResidualCulprits(const MeshView& mv, const RegionSet& rs, const Topo
         }
         const double vchord = regionChordVol(mv, r);
         const double resid = vface - vchord;
-        const double sub = std::max(1e-4 * meshAbs / (double)nAnalytic, kR * std::fabs(r.dVolPredicted));
+        const bool predictorBlind = (r.type == SurfType::Plane
+                                     && std::fabs(r.dVolPredicted) < 1e-6);
+        const double arcTerm = predictorBlind ? kArc * std::fabs(resid) : 0.0;
+        const double sub = std::max({1e-4 * meshAbs / (double)nAnalytic,
+                                     kR * std::fabs(r.dVolPredicted),
+                                     arcTerm});
         row.vface = vface;
         row.vchord = vchord;
         row.dvol = r.dVolPredicted;
