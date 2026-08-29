@@ -1,0 +1,8 @@
+{
+  "id": "hl-ratchet",
+  "authority": "hl-ratchet.json",
+  "fixtureId": "handle-lock",
+  "floor": 1,
+  "floorField": "smoothBuiltCylinders",
+  "notes": "ONE moving census floor for handle-lock. Orchestrator --ratchet-up only. tests/corpus/handle-lock.expected.json live[].builtCylindersFloor stays frozen at 0."
+}
