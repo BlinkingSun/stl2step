@@ -142,3 +142,50 @@ endif()
 unset(_stl2step_gates_runner)
 unset(_stl2step_gates_cube)
 unset(_stl2step_gates_corpus)
+
+# --- gates-ratchet ---
+# Census-growth ratchet + waiver_audit (lane gates-ratchet). Additive only.
+if(TARGET stl2step AND TARGET stl2step_census)
+    set(_gr_hl_script "${CMAKE_CURRENT_SOURCE_DIR}/hl_census_ratchet.py")
+    set(_gr_hl_stl "${CMAKE_CURRENT_SOURCE_DIR}/../corpus/handle-lock.stl")
+    set(_gr_hl_ratchet "${CMAKE_CURRENT_SOURCE_DIR}/baseline/hl-ratchet.json")
+    if(EXISTS "${_gr_hl_script}" AND EXISTS "${_gr_hl_stl}" AND EXISTS "${_gr_hl_ratchet}")
+        add_test(NAME hl_census_ratchet
+            COMMAND ${Python3_EXECUTABLE} "${_gr_hl_script}"
+                --binary "$<TARGET_FILE:stl2step>"
+                --census "$<TARGET_FILE:stl2step_census>"
+                --stl "${_gr_hl_stl}"
+                --ratchet "${_gr_hl_ratchet}")
+        set_tests_properties(hl_census_ratchet PROPERTIES
+            LABELS "gates"
+            TIMEOUT 180
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;$<TARGET_FILE:stl2step_census>;${_gr_hl_stl};${_gr_hl_ratchet}")
+        add_test(NAME hl_census_ratchet_selftest
+            COMMAND ${Python3_EXECUTABLE} "${_gr_hl_script}" --self-test)
+        set_tests_properties(hl_census_ratchet_selftest PROPERTIES
+            LABELS "gates"
+            TIMEOUT 30)
+    endif()
+    unset(_gr_hl_script)
+    unset(_gr_hl_stl)
+    unset(_gr_hl_ratchet)
+endif()
+if(TARGET stl2step AND TARGET stl2step_census AND TARGET stl2step_regiondump)
+    set(_gr_waiver "${CMAKE_CURRENT_SOURCE_DIR}/../diag/handle-lock/waiver_audit.py")
+    set(_gr_hl_script "${CMAKE_CURRENT_SOURCE_DIR}/hl_census_ratchet.py")
+    if(EXISTS "${_gr_waiver}" AND EXISTS "${_gr_hl_script}")
+        add_test(NAME waiver_audit
+            COMMAND ${Python3_EXECUTABLE} "${_gr_hl_script}"
+                --waiver-audit
+                --waiver "${_gr_waiver}"
+                --binary "$<TARGET_FILE:stl2step>"
+                --census "$<TARGET_FILE:stl2step_census>"
+                --dump "$<TARGET_FILE:stl2step_regiondump>")
+        set_tests_properties(waiver_audit PROPERTIES
+            LABELS "gates"
+            TIMEOUT 180
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;$<TARGET_FILE:stl2step_census>;$<TARGET_FILE:stl2step_regiondump>;${_gr_waiver}")
+    endif()
+    unset(_gr_waiver)
+    unset(_gr_hl_script)
+endif()
