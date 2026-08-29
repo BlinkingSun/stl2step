@@ -76,14 +76,7 @@ def write_binary_stl(path: Path, verts: list[tuple[float, float, float]], tris: 
 
 
 def region_tri_indices() -> list[int]:
-    """Mesh triangle indices belonging to partial cylinder rid=16 (15 mm bore)."""
-    out = subprocess.run(
-        [str(REGIONDUMP), str(STL), "--diag"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    # regiondump --diag prints triRegion inline; use JSON mode instead.
+    """Mesh triangle indices of the 15 mm bore (rid was 16 at 34ae192)."""
     proc = subprocess.run(
         [str(REGIONDUMP), str(STL)],
         check=True,
@@ -91,8 +84,16 @@ def region_tri_indices() -> list[int]:
         text=True,
     )
     doc = json.loads(proc.stdout)
-    tri_region = doc["comps"][0]["regionSet"]["triRegion"]
-    return [i for i, rid in enumerate(tri_region) if rid == 16]
+    for r in doc["comps"][0]["regionSet"]["regions"]:
+        if str(r.get("type", "")).lower() != "cylinder":
+            continue
+        rad = float(r.get("radius", 0.0))
+        if rad < 14.95 or rad > 15.05:
+            continue
+        tris = r.get("tris") or []
+        if len(tris) >= 20:
+            return list(tris)
+    return []
 
 
 def run_trueform(stl: Path, step: Path, *, verify: bool = True) -> dict:

@@ -9,11 +9,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <thread>
 #include <utility>
 #include <vector>
 
+#include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Vec.hxx>
@@ -41,6 +45,42 @@ bool p1DiagOn() {
 bool collapseDiagOn() {
     const char* e = std::getenv("STL2STEP_COLLAPSE_DIAG");
     return e && e[0] != '\0' && e[0] != '0';
+}
+
+bool lawbandDiagOn() {
+    const char* e = std::getenv("STL2STEP_LAWBAND_DIAG");
+    return e && e[0] != '\0' && e[0] != '0';
+}
+
+template <typename F>
+void lawParallelFor(size_t n, F&& fn) {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    if (n < 8 || hw == 1) {
+        for (size_t i = 0; i < n; i++) fn(i);
+        return;
+    }
+    std::vector<std::thread> pool;
+    const size_t chunk = (n + hw - 1) / hw;
+    for (unsigned t = 0; t < hw; t++) {
+        const size_t lo = static_cast<size_t>(t) * chunk;
+        const size_t hi = std::min(n, lo + chunk);
+        if (lo >= hi) break;
+        pool.emplace_back([&, lo, hi]() {
+            for (size_t i = lo; i < hi; i++) fn(i);
+        });
+    }
+    for (auto& th : pool) th.join();
+}
+
+bool triInLawBand(const SegmentWork& work, int t) {
+    for (const Region& r : work.accepted) {
+        if (!r.lawBand) continue;
+        for (int u : r.tris) {
+            if (u == t) return true;
+        }
+    }
+    return false;
 }
 
 // Header export archChainBand is 500–8000. Grow commit is a strict subset
@@ -461,7 +501,11 @@ D2Metrics computeD2(const MeshView& mv, const std::vector<int>& tris,
     }
     const gp_XYZ dps = ps - loc;
     const double ads = dps.Dot(aw);
-    const gp_XYZ xDir = dps - aw * ads;
+    gp_XYZ xDir = dps - aw * ads;
+    if (xDir.Modulus() < 1e-12) {
+        gp_XYZ tmp = (std::abs(aw.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+        xDir = aw.Crossed(tmp);
+    }
     const gp_Dir xD = normalizeXYZ(xDir);
 
     m.ax = gp_Ax3(Loc, a, xD);
@@ -765,30 +809,34 @@ struct CommitEval {
 
 CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
                           const std::vector<int>& tris, const gp_Dir& axis,
-                          double rHint = 0.0) {
+                          double rHint = 0.0, bool lawBand = false) {
     CommitEval ev;
     ev.g = centeredGauss(mv, tris, axis, tol);
     double cTilt = 0.0, devTilt = 0.0;
     axisTiltStats(mv, tris, axis, cTilt, devTilt);
-    ev.eberlyOk = eberlyCenterRadius(mv, tris, axis, ev.center, ev.radius);
+    // RULE 4.1d: lawBand radius comes from the inverse. Kasa/eberly is not
+    // a radius source (refit_grow.cpp:773).
+    if (!lawBand)
+        ev.eberlyOk = eberlyCenterRadius(mv, tris, axis, ev.center, ev.radius);
     ev.failGate = Gate::PASS;
     if (!testG1CommitSeedAxis(ev.g, tol, cTilt, devTilt)) {
         ev.failGate = Gate::G1;
         return ev;
     }
-    if (!ev.eberlyOk) {
+    if (!lawBand && !ev.eberlyOk) {
         ev.failGate = Gate::G4;
         return ev;
     }
     ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
     const double rBeforeRefine = ev.radius;
     bool archChainApplied = false;
-    if (coarseFusionBand(mv) && ev.d2.nSides >= 3 && !ev.d2.spanReject) {
+    // RULE 4.1d: do not sec-lift an already-inscribed lawBand.
+    if (!lawBand && coarseFusionBand(mv) && ev.d2.nSides >= 3 && !ev.d2.spanReject) {
         refineCylinderRadius(mv, tris, axis, ev.center, ev.radius, ev.d2.nSides, ev.d2.span,
                              rHint);
         ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
     }
-    if (coarseFusionBand(mv) && tris.size() >= 3 && ev.radius >= 15.0) {
+    if (!lawBand && coarseFusionBand(mv) && tris.size() >= 3 && ev.radius >= 15.0) {
         double chainR = ev.radius;
         double chainScore = 0.0;
         if (archChainRadiusFromPatch(mv, tris, axis, chainR, chainScore, ev.radius)
@@ -828,7 +876,7 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
             diagArchChain("DEFER", tris.size(), chainScore, ev.radius, chainR,
                           ev.radius, 0.0, "score<0.35");
         }
-    } else if (inArchChainCommitBand(mv) && tris.size() >= 3) {
+    } else if (!lawBand && inArchChainCommitBand(mv) && tris.size() >= 3) {
         // Outside coarseFusionBand: commit only chainScore >= 0.85. Blend and
         // rel window are the same constants as the coarse path above.
         // Non-coarse G2 still runs (archChainApplied does not skip it), so a
@@ -1036,8 +1084,10 @@ void mergeCoaxialCylinders(const MeshView& mv, const DerivedTols& tol, SegmentWo
         for (size_t i = 0; i < work.accepted.size(); ++i) {
             Region& A = work.accepted[i];
             if (A.type != SurfType::Cylinder) continue;
+            if (A.lawBand) continue;
             for (size_t j = i + 1; j < work.accepted.size(); ++j) {
                 const Region& B = work.accepted[j];
+                if (B.lawBand) continue;
                 const bool adjacent = regionsShareMeshEdge(mv, A, B);
                 if (!coaxialCylinderMergeable(A, B, tol, adjacent)) continue;
                 if (!adjacent && axisLineSeparation(A.ax, B.ax) > tol.epsPlane) continue;
@@ -1095,6 +1145,168 @@ gp_Dir axisOf(const MeshView& mv, const std::vector<Provisional>& provs,
     }
     if (adoptedW1) *adoptedW1 = false;
     return seedAxis;
+}
+
+// Same-facet cluster vs the *seed* normal only (no running-mean drift).
+// 2° first pass keeps staggered high-N bands (F515) intact; 1° leftover
+// pass splits the F521/F520 1.67° junction the 2° gate swallows.
+constexpr double kLawStripNormalCos = 0.9993908270190957;
+constexpr double kLawStripNormalCosTight = 0.9998476951563913;
+constexpr double kLawRRelGrow = 5e-4;
+
+struct LawStrip {
+    std::vector<int> tris;
+    int minTri = 0;
+    int chartId = -1;
+    double R = 0.0;
+    gp_Ax1 axis;
+    bool valid = false;
+};
+
+void clusterLawStrips(const MeshView& mv, const std::vector<int>& ids,
+                      int chartId, std::vector<LawStrip>& out,
+                      double nCos = kLawStripNormalCos, bool seedOnly = false) {
+    if (ids.empty()) return;
+    std::vector<char> inPatch(static_cast<size_t>(mv.nTri), 0);
+    for (int t : ids) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inPatch[static_cast<size_t>(t)] = 1;
+    }
+    std::vector<char> used(static_cast<size_t>(mv.nTri), 0);
+    const EdgeAdj ea = buildEdgeAdj(mv);
+    for (int seed : ids) {
+        if (seed < 0 || static_cast<size_t>(seed) >= mv.nTri || used[static_cast<size_t>(seed)])
+            continue;
+        std::vector<int> comp;
+        std::vector<int> stack = {seed};
+        gp_XYZ nRef(triNormalLocal(mv, seed).X(), triNormalLocal(mv, seed).Y(),
+                    triNormalLocal(mv, seed).Z());
+        const gp_XYZ nSeed = nRef;
+        used[static_cast<size_t>(seed)] = 1;
+        comp.push_back(seed);
+        while (!stack.empty()) {
+            const int t = stack.back();
+            stack.pop_back();
+            for (int s = 0; s < 3; s++) {
+                const int e = mv.triEdges[t][s];
+                const int u = (ea.tri[e][0] == t) ? ea.tri[e][1] : ea.tri[e][0];
+                if (u < 0 || !inPatch[static_cast<size_t>(u)] || used[static_cast<size_t>(u)])
+                    continue;
+                const gp_Dir nu = triNormalLocal(mv, u);
+                const gp_XYZ nU(nu.X(), nu.Y(), nu.Z());
+                const gp_XYZ nGate = seedOnly ? nSeed : nRef;
+                if (std::abs(nGate.Dot(nU)) < nCos) continue;
+                used[static_cast<size_t>(u)] = 1;
+                comp.push_back(u);
+                stack.push_back(u);
+                if (!seedOnly) {
+                    nRef += nU;
+                    const double nm = nRef.Modulus();
+                    if (nm > 1e-15) nRef.Divide(nm);
+                }
+            }
+        }
+        std::sort(comp.begin(), comp.end());
+        LawStrip st;
+        st.tris = std::move(comp);
+        st.minTri = st.tris.front();
+        st.chartId = chartId;
+        out.push_back(std::move(st));
+    }
+}
+
+bool stripsShareEdge(const MeshView& mv, const LawStrip& a, const LawStrip& b) {
+    std::vector<char> inB(static_cast<size_t>(mv.nTri), 0);
+    for (int t : b.tris) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inB[static_cast<size_t>(t)] = 1;
+    }
+    const EdgeAdj ea = buildEdgeAdj(mv);
+    for (int t : a.tris) {
+        for (int s = 0; s < 3; s++) {
+            const int e = mv.triEdges[t][s];
+            const int u = (ea.tri[e][0] == t) ? ea.tri[e][1] : ea.tri[e][0];
+            if (u >= 0 && inB[static_cast<size_t>(u)]) return true;
+        }
+    }
+    return false;
+}
+
+bool bandsShareAnyEdge(const MeshView& mv, const LawBand& a, const LawBand& b) {
+    std::vector<char> inB(static_cast<size_t>(mv.nTri), 0);
+    for (int t : b.tris) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inB[static_cast<size_t>(t)] = 1;
+    }
+    const EdgeAdj ea = buildEdgeAdj(mv);
+    for (int t : a.tris) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        for (int s = 0; s < 3; s++) {
+            const int e = mv.triEdges[t][s];
+            const int u = (ea.tri[e][0] == t) ? ea.tri[e][1] : ea.tri[e][0];
+            if (u >= 0 && inB[static_cast<size_t>(u)]) return true;
+        }
+    }
+    return false;
+}
+
+bool axesNearlyCoaxial(const gp_Ax1& a, const gp_Ax1& b, double lineTol) {
+    if (std::abs(a.Direction().Dot(b.Direction())) < 1.0 - 1e-3) return false;
+    gp_Vec delta(b.Location(), a.Location());
+    gp_Vec perp = delta - delta.Dot(gp_Vec(b.Direction())) * gp_Vec(b.Direction());
+    return perp.Magnitude() <= lineTol;
+}
+
+void peelLawBandFromProvisionals(const MeshView& mv, const std::vector<int>& claimed,
+                                 SegmentWork& work) {
+    std::vector<char> taken(static_cast<size_t>(mv.nTri), 0);
+    for (int t : claimed) {
+        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) taken[static_cast<size_t>(t)] = 1;
+    }
+    for (Provisional& p : work.provisionals) {
+        if (p.tris.empty()) continue;
+        std::vector<int> keep;
+        keep.reserve(p.tris.size());
+        bool lost = false;
+        for (int t : p.tris) {
+            if (t >= 0 && static_cast<size_t>(t) < taken.size() && taken[static_cast<size_t>(t)]) {
+                lost = true;
+                continue;
+            }
+            keep.push_back(t);
+        }
+        if (!lost) continue;
+        p.tris = std::move(keep);
+        if (p.tris.empty()) {
+            p.area = 0.0;
+            p.claim = ProvClaim::ConsumedCylinder;
+            continue;
+        }
+        gp_Ax3 fit;
+        if (pcaPlane(mv, p.tris, fit)) p.plane = fit;
+        p.area = 0.0;
+        for (int t : p.tris) p.area += triAreaLocal(mv, t);
+        computeProvDeviations(mv, p);
+    }
+}
+
+void fillLawBandRegion(const MeshView& mv, const DerivedTols& tol, const LawBand& band,
+                       Region& reg) {
+    const gp_Dir axis = band.axis.Direction();
+    const gp_Pnt center = band.axis.Location();
+    CommitEval ev;
+    ev.failGate = Gate::PASS;
+    ev.eberlyOk = true;
+    ev.center = center;
+    ev.radius = band.R;
+    ev.d2 = computeD2(mv, band.tris, axis, center, band.R, tol);
+    if (band.closed360) {
+        ev.d2.closed360 = true;
+        ev.d2.uMin = 0.0;
+        ev.d2.uMax = 2.0 * M_PI;
+        ev.d2.span = 2.0 * M_PI;
+    }
+    fillCylinderRegion(mv, ev, axis, band.tris, reg);
+    reg.lawBand = true;
+    reg.radius = band.R;
+    reg.closed360 = band.closed360 || reg.closed360;
 }
 
 }  // namespace
@@ -1174,6 +1386,7 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
             for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
                 if (triLabel[t] >= 0) continue;
                 if (work.triChart[t] != chart) continue;
+                if (triInLawBand(work, t)) continue;
                 const double a = triAreaLocal(mv, t);
                 if (a > bestArea || (a == bestArea && t < seed)) {
                     bestArea = a;
@@ -1212,6 +1425,7 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
                     const int u = nb.second;
                     if (triLabel[u] >= 0) continue;
                     if (work.triChart[u] != chart) continue;
+                    if (triInLawBand(work, u)) continue;
                     const double phi = edgeDihedralAbs(mv, e, ea);
                     if (phi > tol.thetaSharp) continue;
 
@@ -1261,15 +1475,35 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
 
 bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTols& tol,
                       SegmentWork& work) {
+    if (lawbandDiagOn())
+        std::fprintf(stderr, "DIAG_B1_ENTER nProv=%zu nAcc=%zu\n",
+                     work.provisionals.size(), work.accepted.size());
+    for (Provisional& p : work.provisionals) {
+        std::vector<int> ok;
+        ok.reserve(p.tris.size());
+        for (int t : p.tris) {
+            if (t >= 0 && static_cast<size_t>(t) < mv.nTri) ok.push_back(t);
+        }
+        p.tris.swap(ok);
+        if (p.tris.empty()) p.claim = ProvClaim::ConsumedCylinder;
+    }
     if (work.provisionals.empty()) return true;
 
+    if (lawbandDiagOn()) std::fprintf(stderr, "DIAG_B1_SANITIZED\n");
     const EdgeAdj ea = buildEdgeAdj(mv);
+    if (lawbandDiagOn()) std::fprintf(stderr, "DIAG_B1_EDGEADJ\n");
     std::vector<int> triToProv(mv.nTri, -1);
     for (size_t pi = 0; pi < work.provisionals.size(); pi++) {
-        for (int t : work.provisionals[pi].tris) triToProv[t] = static_cast<int>(pi);
+        for (int t : work.provisionals[pi].tris) {
+            if (t >= 0 && static_cast<size_t>(t) < mv.nTri)
+                triToProv[static_cast<size_t>(t)] = static_cast<int>(pi);
+        }
     }
+    if (lawbandDiagOn()) std::fprintf(stderr, "DIAG_B1_TRIPROV\n");
 
-    const ProvAdjList adj = buildProvAdjacency(mv, ea, triToProv);
+    ProvAdjList adj = buildProvAdjacency(mv, ea, triToProv);
+    if (adj.size() < work.provisionals.size()) adj.resize(work.provisionals.size());
+    if (lawbandDiagOn()) std::fprintf(stderr, "DIAG_B1_ADJ n=%zu\n", adj.size());
     const double lateralSin = std::sin(tol.thetaSharp);
 
     struct Seed {
@@ -1816,6 +2050,461 @@ bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols&
     if (p1DiagOn())
         std::fprintf(stderr, "A3: committed=%zu island-skip=%d areaMin=%.5g\n",
                      work.accepted.size(), nIsland, areaMin);
+    sortRegions(work.accepted);
+    return true;
+}
+
+bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols& tol,
+                    SegmentWork& work) {
+    if (!archChainBand(mv)) {
+        if (lawbandDiagOn()) {
+            std::fprintf(stderr,
+                         "DIAG_LAWCAL dLo=0.000000 dHi=0.000000 aLoDeg=0.0000 aHiDeg=0.0000 "
+                         "nD=0 nA=0 empty=1\n");
+            std::fprintf(stderr, "DIAG_LAWDECLINE reason=out_of_band nTri=%zu\n", mv.nTri);
+        }
+        return true;
+    }
+    if (mv.nTri == 0 || !mv.triEdges) return true;
+
+    const int nCharts = work.nCharts > 0 ? work.nCharts : 1;
+    std::vector<std::vector<int>> perChart(static_cast<size_t>(nCharts));
+    for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+        int c = 0;
+        if (!work.triChart.empty() && static_cast<size_t>(t) < work.triChart.size())
+            c = work.triChart[t];
+        if (c < 0 || c >= nCharts) c = 0;
+        perChart[static_cast<size_t>(c)].push_back(t);
+    }
+
+    std::vector<LawStrip> strips;
+    for (int c = 0; c < nCharts; c++) {
+        if (perChart[static_cast<size_t>(c)].empty()) continue;
+        clusterLawStrips(mv, perChart[static_cast<size_t>(c)], c, strips);
+    }
+
+    const int nS = static_cast<int>(strips.size());
+    std::vector<std::vector<int>> adj(static_cast<size_t>(std::max(nS, 0)));
+    {
+        const EdgeAdj ea = buildEdgeAdj(mv);
+        std::vector<int> triStrip(static_cast<size_t>(mv.nTri), -1);
+        for (int i = 0; i < nS; i++) {
+            for (int t : strips[static_cast<size_t>(i)].tris) {
+                if (t >= 0 && static_cast<size_t>(t) < mv.nTri)
+                    triStrip[static_cast<size_t>(t)] = i;
+            }
+        }
+        for (int e = 0; e < static_cast<int>(mv.nEdge); e++) {
+            const int t0 = ea.tri[e][0];
+            const int t1 = ea.tri[e][1];
+            if (t0 < 0 || t1 < 0) continue;
+            const int a = triStrip[static_cast<size_t>(t0)];
+            const int b = triStrip[static_cast<size_t>(t1)];
+            if (a < 0 || b < 0 || a == b) continue;
+            if (strips[static_cast<size_t>(a)].chartId != strips[static_cast<size_t>(b)].chartId)
+                continue;
+            adj[static_cast<size_t>(a)].push_back(b);
+            adj[static_cast<size_t>(b)].push_back(a);
+        }
+        for (auto& n : adj) {
+            std::sort(n.begin(), n.end());
+            n.erase(std::unique(n.begin(), n.end()), n.end());
+        }
+    }
+
+    auto unionStripTris = [&](const std::vector<int>& members) {
+        std::vector<int> tris;
+        for (int m : members) {
+            for (int t : strips[static_cast<size_t>(m)].tris) tris.push_back(t);
+        }
+        std::sort(tris.begin(), tris.end());
+        tris.erase(std::unique(tris.begin(), tris.end()), tris.end());
+        return tris;
+    };
+
+    // N>=3 path seeds: a single facet cannot recover the axis (shared edge is
+    // the diagonal). A connected triple carries enough generators.
+    std::vector<std::array<int, 3>> triples;
+    for (int i = 0; i < nS; i++) {
+        for (int j : adj[static_cast<size_t>(i)]) {
+            if (j <= i) continue;
+            for (int k : adj[static_cast<size_t>(i)]) {
+                if (k <= j) continue;
+                triples.push_back({i, j, k});
+            }
+            for (int k : adj[static_cast<size_t>(j)]) {
+                if (k == i || k <= j) continue;
+                bool viaI = false;
+                for (int x : adj[static_cast<size_t>(i)]) {
+                    if (x == k) {
+                        viaI = true;
+                        break;
+                    }
+                }
+                if (viaI) continue;
+                triples.push_back({i, j, k});
+            }
+        }
+    }
+    for (int a = 0; a < nS; a++) {
+        for (int b : adj[static_cast<size_t>(a)]) {
+            for (int c : adj[static_cast<size_t>(b)]) {
+                if (c == a) continue;
+                std::array<int, 3> t{a, b, c};
+                std::sort(t.begin(), t.end());
+                if (t[0] != t[1] && t[1] != t[2]) triples.push_back(t);
+            }
+        }
+    }
+    std::sort(triples.begin(), triples.end());
+    triples.erase(std::unique(triples.begin(), triples.end()), triples.end());
+
+    struct Grown {
+        LawBand band;
+        bool ok = false;
+        int nSplit = 0;
+    };
+    std::vector<Grown> grown(triples.size());
+
+    lawParallelFor(triples.size(), [&](size_t ti) {
+        const auto trip = triples[ti];
+        std::vector<int> members = {trip[0], trip[1], trip[2]};
+        LawBand seedB;
+        if (!lawChainAccept(mv, unionStripTris(members), tol, seedB)) return;
+
+        std::vector<char> in(static_cast<size_t>(nS), 0);
+        in[static_cast<size_t>(trip[0])] = 1;
+        in[static_cast<size_t>(trip[1])] = 1;
+        in[static_cast<size_t>(trip[2])] = 1;
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            std::vector<int> cand;
+            for (int m : members) {
+                for (int nb : adj[static_cast<size_t>(m)]) {
+                    if (in[static_cast<size_t>(nb)]) continue;
+                    cand.push_back(nb);
+                }
+            }
+            std::sort(cand.begin(), cand.end(), [&](int a, int b) {
+                return strips[static_cast<size_t>(a)].minTri <
+                       strips[static_cast<size_t>(b)].minTri;
+            });
+            cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+            for (int nb : cand) {
+                std::vector<int> trial = members;
+                trial.push_back(nb);
+                LawBand tb;
+                if (!lawChainAccept(mv, unionStripTris(trial), tol, tb)) continue;
+                members.push_back(nb);
+                in[static_cast<size_t>(nb)] = 1;
+                seedB = std::move(tb);
+                changed = true;
+                break;
+            }
+        }
+        grown[ti].band = std::move(seedB);
+        grown[ti].ok = true;
+    });
+
+    // A2 provisionals that already isolate a band (or a chimera to split).
+    for (const Provisional& p : work.provisionals) {
+        if (p.claim != ProvClaim::Unclaimed || p.tris.size() < 3) continue;
+        LawBand pb;
+        if (!lawChainAccept(mv, p.tris, tol, pb)) continue;
+        Grown g;
+        g.band = std::move(pb);
+        g.ok = true;
+        grown.push_back(std::move(g));
+    }
+
+    std::vector<int> order;
+    for (size_t i = 0; i < grown.size(); i++) {
+        if (grown[i].ok) order.push_back(static_cast<int>(i));
+    }
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        const LawBand& A = grown[static_cast<size_t>(a)].band;
+        const LawBand& B = grown[static_cast<size_t>(b)].band;
+        if (A.N != B.N) return A.N > B.N;
+        if (A.tris.size() != B.tris.size()) return A.tris.size() > B.tris.size();
+        const int ma = A.tris.empty() ? 0 : A.tris.front();
+        const int mb = B.tris.empty() ? 0 : B.tris.front();
+        return ma < mb;
+    });
+
+    std::vector<char> taken(static_cast<size_t>(mv.nTri), 0);
+    std::vector<LawBand> accepted;
+    int nSplit = 0;
+    for (int oi : order) {
+        const LawBand& b = grown[static_cast<size_t>(oi)].band;
+        bool hit = false;
+        for (int t : b.tris) {
+            if (t >= 0 && static_cast<size_t>(t) < taken.size() && taken[static_cast<size_t>(t)]) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) continue;
+        accepted.push_back(b);
+        nSplit += grown[static_cast<size_t>(oi)].nSplit;
+        for (int t : b.tris) {
+            if (t >= 0 && static_cast<size_t>(t) < taken.size()) taken[static_cast<size_t>(t)] = 1;
+        }
+    }
+
+    // Second pass on leftover tris (short arcs like F521; incomplete grows).
+    {
+        std::vector<int> left;
+        for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+            if (!taken[static_cast<size_t>(t)]) left.push_back(t);
+        }
+        std::vector<LawStrip> leftS;
+        clusterLawStrips(mv, left, 0, leftS, kLawStripNormalCosTight, true);
+        const int nL = static_cast<int>(leftS.size());
+        std::vector<std::vector<int>> ladj(static_cast<size_t>(std::max(nL, 0)));
+        const EdgeAdj eaL = buildEdgeAdj(mv);
+        std::vector<int> triS(static_cast<size_t>(mv.nTri), -1);
+        for (int i = 0; i < nL; i++) {
+            for (int t : leftS[static_cast<size_t>(i)].tris) {
+                if (t >= 0 && static_cast<size_t>(t) < mv.nTri)
+                    triS[static_cast<size_t>(t)] = i;
+            }
+        }
+        for (int e = 0; e < static_cast<int>(mv.nEdge); e++) {
+            const int t0 = eaL.tri[e][0], t1 = eaL.tri[e][1];
+            if (t0 < 0 || t1 < 0) continue;
+            const int a = triS[static_cast<size_t>(t0)], b = triS[static_cast<size_t>(t1)];
+            if (a < 0 || b < 0 || a == b) continue;
+            ladj[static_cast<size_t>(a)].push_back(b);
+            ladj[static_cast<size_t>(b)].push_back(a);
+        }
+        for (auto& n : ladj) {
+            std::sort(n.begin(), n.end());
+            n.erase(std::unique(n.begin(), n.end()), n.end());
+        }
+        auto unionLeft = [&](const std::vector<int>& mem) {
+            std::vector<int> ts;
+            for (int m : mem)
+                for (int t : leftS[static_cast<size_t>(m)].tris) ts.push_back(t);
+            std::sort(ts.begin(), ts.end());
+            ts.erase(std::unique(ts.begin(), ts.end()), ts.end());
+            return ts;
+        };
+        std::vector<std::array<int, 3>> ltrip;
+        for (int a = 0; a < nL; a++) {
+            for (int b : ladj[static_cast<size_t>(a)]) {
+                for (int c : ladj[static_cast<size_t>(b)]) {
+                    if (c == a) continue;
+                    std::array<int, 3> t{a, b, c};
+                    std::sort(t.begin(), t.end());
+                    if (t[0] != t[1] && t[1] != t[2]) ltrip.push_back(t);
+                }
+            }
+        }
+        std::sort(ltrip.begin(), ltrip.end());
+        ltrip.erase(std::unique(ltrip.begin(), ltrip.end()), ltrip.end());
+        for (const auto& tr : ltrip) {
+            std::vector<int> mem = {tr[0], tr[1], tr[2]};
+            LawBand sb;
+            if (!lawChainAccept(mv, unionLeft(mem), tol, sb)) continue;
+            std::vector<char> in(static_cast<size_t>(nL), 0);
+            in[static_cast<size_t>(tr[0])] = in[static_cast<size_t>(tr[1])] =
+                in[static_cast<size_t>(tr[2])] = 1;
+            bool ch = true;
+            while (ch) {
+                ch = false;
+                for (int m : mem) {
+                    for (int nb : ladj[static_cast<size_t>(m)]) {
+                        if (in[static_cast<size_t>(nb)]) continue;
+                        std::vector<int> trial = mem;
+                        trial.push_back(nb);
+                        LawBand tb;
+                        if (!lawChainAccept(mv, unionLeft(trial), tol, tb)) continue;
+                        mem.push_back(nb);
+                        in[static_cast<size_t>(nb)] = 1;
+                        sb = std::move(tb);
+                        ch = true;
+                    }
+                    if (ch) break;
+                }
+            }
+            bool hit = false;
+            for (int t : sb.tris) {
+                if (t >= 0 && static_cast<size_t>(t) < taken.size() && taken[static_cast<size_t>(t)]) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) continue;
+            accepted.push_back(sb);
+            for (int t : sb.tris) {
+                if (t >= 0 && static_cast<size_t>(t) < taken.size()) taken[static_cast<size_t>(t)] = 1;
+            }
+        }
+        // Absorb leftover tris into an existing band when accept still holds.
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (LawBand& b : accepted) {
+                std::vector<char> inB(static_cast<size_t>(mv.nTri), 0);
+                for (int t : b.tris) {
+                    if (t >= 0 && static_cast<size_t>(t) < mv.nTri)
+                        inB[static_cast<size_t>(t)] = 1;
+                }
+                std::vector<int> extra;
+                for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+                    if (taken[static_cast<size_t>(t)] || inB[static_cast<size_t>(t)]) continue;
+                    bool nbr = false;
+                    for (int s = 0; s < 3 && mv.triEdges; s++) {
+                        const int e = mv.triEdges[t][s];
+                        const int u = (eaL.tri[e][0] == t) ? eaL.tri[e][1] : eaL.tri[e][0];
+                        if (u >= 0 && inB[static_cast<size_t>(u)]) {
+                            nbr = true;
+                            break;
+                        }
+                    }
+                    if (nbr) extra.push_back(t);
+                }
+                if (extra.empty()) continue;
+                for (int tAdd : extra) {
+                    std::vector<int> trial = b.tris;
+                    trial.push_back(tAdd);
+                    LawBand nb;
+                    if (!lawChainAccept(mv, trial, tol, nb)) continue;
+                    taken[static_cast<size_t>(tAdd)] = 1;
+                    b = std::move(nb);
+                    grew = true;
+                }
+                // Staggered interiors (F515) reject a single-tri add but accept
+                // the leftover on-cylinder ring as a batch.
+                extra.clear();
+                for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+                    if (taken[static_cast<size_t>(t)] || inB[static_cast<size_t>(t)])
+                        continue;
+                    bool nbr = false;
+                    for (int s = 0; s < 3 && mv.triEdges; s++) {
+                        const int e = mv.triEdges[t][s];
+                        const int u = (eaL.tri[e][0] == t) ? eaL.tri[e][1] : eaL.tri[e][0];
+                        if (u >= 0 && inB[static_cast<size_t>(u)]) {
+                            nbr = true;
+                            break;
+                        }
+                    }
+                    if (!nbr) continue;
+                    const gp_XYZ ax = b.axis.Direction().XYZ();
+                    const gp_XYZ n = gp_XYZ(triNormalLocal(mv, t).X(),
+                                            triNormalLocal(mv, t).Y(),
+                                            triNormalLocal(mv, t).Z());
+                    // End caps sit on the same circle but are axial; a neighboring
+                    // wall of a different radius is radial but fails the rho test.
+                    if (std::abs(n.Dot(ax)) > 0.35) continue;
+                    const gp_XYZ loc = b.axis.Location().XYZ();
+                    const double tau = std::max(
+                        {5e-5, 4.0 * mv.weldTol, 1e-6 * mv.diag, kLawRRelGrow * b.R});
+                    bool onCyl = true;
+                    for (int c = 0; c < 3; c++) {
+                        const gp_XYZ p = localTriVert(mv, t, c);
+                        const gp_XYZ d = p - loc;
+                        const gp_XYZ rad = d - ax * d.Dot(ax);
+                        if (std::abs(rad.Modulus() - b.R) > tau) {
+                            onCyl = false;
+                            break;
+                        }
+                    }
+                    if (onCyl) extra.push_back(t);
+                }
+                if (extra.empty()) continue;
+                std::vector<int> trial = b.tris;
+                trial.insert(trial.end(), extra.begin(), extra.end());
+                LawBand nb;
+                if (!lawChainAccept(mv, trial, tol, nb)) continue;
+                for (int t : extra) taken[static_cast<size_t>(t)] = 1;
+                b = std::move(nb);
+                grew = true;
+            }
+        }
+    }
+
+    if (!accepted.empty()) {
+        LawBand meshPin;
+        (void)lawChainAccept(mv, accepted.front().tris, tol, meshPin);
+    }
+
+    int nMerged = 0;
+    bool merged = true;
+    while (merged) {
+        merged = false;
+        for (size_t i = 0; i < accepted.size(); i++) {
+            for (size_t j = i + 1; j < accepted.size(); j++) {
+                if (!bandsShareAnyEdge(mv, accepted[i], accepted[j])) continue;
+                if (!lawBandsMergeable(accepted[i], accepted[j], tol)) continue;
+                std::vector<int> mt = accepted[i].tris;
+                mt.insert(mt.end(), accepted[j].tris.begin(), accepted[j].tris.end());
+                std::sort(mt.begin(), mt.end());
+                mt.erase(std::unique(mt.begin(), mt.end()), mt.end());
+                LawBand nb;
+                if (!lawChainAccept(mv, mt, tol, nb)) continue;
+                accepted[i] = std::move(nb);
+                accepted.erase(accepted.begin() + static_cast<std::ptrdiff_t>(j));
+                ++nMerged;
+                merged = true;
+                break;
+            }
+            if (merged) break;
+        }
+    }
+
+    const TessLawInterval li = lawCalibrate(accepted);
+    if (li.empty) {
+        if (lawbandDiagOn()) {
+            std::fprintf(stderr, "DIAG_LAWDECLINE reason=empty_cal nCand=%zu\n",
+                         accepted.size());
+        }
+        return true;
+    }
+    // RULE 4.2e.2: a wide d-window with many d-limited chains is mixed
+    // export — decline wholesale (legacy byte-identical). Handle-lock's
+    // interval is ~1% wide with nD=14; Body9 was ~36% with nD=24.
+    // A single-preset lock needs several d-limited chains (handle-lock has
+    // 14). Fewer than 5 is a foreign/partial component (Body11's in-band
+    // leftover accepted nD=2) — decline (RULE 4.2e.3).
+    if (li.nDLimited < 5) {
+        if (lawbandDiagOn()) {
+            std::fprintf(stderr,
+                         "DIAG_LAWDECLINE reason=few_dlimited nD=%d nCand=%zu\n",
+                         li.nDLimited, accepted.size());
+        }
+        return true;
+    }
+    if (li.dHi > li.dLo) {
+        const double mid = 0.5 * (li.dLo + li.dHi);
+        if (mid > 0.0 && (li.dHi - li.dLo) / mid >= 0.05) {
+            if (lawbandDiagOn()) {
+                std::fprintf(stderr,
+                             "DIAG_LAWDECLINE reason=wide_cal dLo=%.6f dHi=%.6f nD=%d\n",
+                             li.dLo, li.dHi, li.nDLimited);
+            }
+            return true;
+        }
+    }
+
+    for (const LawBand& b : accepted) {
+        if (b.tris.size() < 3 || !(b.R > 0.0) || b.N < 2) continue;
+        Region reg;
+        fillLawBandRegion(mv, tol, b, reg);
+        const int rid = reg.tris.empty() ? -1 : reg.tris.front();
+        if (lawbandDiagOn()) {
+            std::fprintf(stderr,
+                         "DIAG_LAWCLAIM rid=%d n=%zu N=%d R=%.6f lawBand=1 merged=%d split=%d\n",
+                         rid, reg.tris.size(), b.N, b.R, nMerged, nSplit);
+        }
+        work.accepted.push_back(std::move(reg));
+        peelLawBandFromProvisionals(mv, b.tris, work);
+    }
+
+    if (lawbandDiagOn())
+        std::fprintf(stderr, "DIAG_LAWCLAIM_DONE accepted=%zu provisionals=%zu\n",
+                     work.accepted.size(), work.provisionals.size());
     sortRegions(work.accepted);
     return true;
 }

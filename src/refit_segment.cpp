@@ -44,6 +44,7 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     if (!chartsA1(mv, p, tol, work)) return false;
 
     if (!growProvisionalA2(mv, p, tol, work)) return false;
+    if (!claimLawBandsL(mv, p, tol, work)) return false;
     if (!claimCylindersB1(mv, p, tol, work)) return false;
 
     if (p.doFillets) {
