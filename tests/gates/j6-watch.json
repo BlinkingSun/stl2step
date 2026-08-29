@@ -1,0 +1,31 @@
+{
+  "id": "j6-watch",
+  "description": "J6 freeEdges red-lines (never worse) + PARKED Lane-I stretch. Private STLs only; skip-if-missing.",
+  "source": "_team/reports/spike-diag.md main @ fd4954d",
+  "env": "STL2STEP_PRIVATE_CORPUS",
+  "stlNameKey": "stl",
+  "parkedGateId": "j6-lane-i",
+  "parkReason": "Lane I stretch (14/26/14/8) not met on main @ fd4954d — j6heal wave; --unpark j6-lane-i surfaces honest reds",
+  "bodies": {
+    "Body9": {
+      "stl": "Body9.stl",
+      "redlineFreeEdges": 34,
+      "parkedLaneI": 14
+    },
+    "Body12": {
+      "stl": "Body12.stl",
+      "redlineFreeEdges": 81,
+      "parkedLaneI": 26
+    },
+    "Body18": {
+      "stl": "Body18.stl",
+      "redlineFreeEdges": 18,
+      "parkedLaneI": 14
+    },
+    "Body20": {
+      "stl": "Body20.stl",
+      "redlineFreeEdges": 32,
+      "parkedLaneI": 8
+    }
+  }
+}

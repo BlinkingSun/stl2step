@@ -142,3 +142,27 @@ endif()
 unset(_stl2step_gates_runner)
 unset(_stl2step_gates_cube)
 unset(_stl2step_gates_corpus)
+
+# --- gates-j6watch ---
+# J6 freeEdges watch on private Body9/12/18/20. Always registered so CI
+# sees the label; SKIP (77) when STL2STEP_PRIVATE_CORPUS / default is absent.
+# Do not bake a private path into this file. API self-test needs no meshes.
+set(_j6watch_script "${CMAKE_CURRENT_SOURCE_DIR}/j6_freeedges_watch.py")
+if(EXISTS "${_j6watch_script}")
+    add_test(NAME j6_freeedges_watch_api
+        COMMAND "${Python3_EXECUTABLE}" "${_j6watch_script}" --self-test)
+    set_tests_properties(j6_freeedges_watch_api PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step)
+        add_test(NAME j6_freeedges_watch
+            COMMAND "${Python3_EXECUTABLE}" "${_j6watch_script}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --jobs 4)
+        set_tests_properties(j6_freeedges_watch PROPERTIES
+            LABELS "gates;private-corpus"
+            TIMEOUT 600
+            SKIP_RETURN_CODE 77)
+    endif()
+endif()
+unset(_j6watch_script)
