@@ -43,22 +43,20 @@ bool collapseDiagOn() {
     return e && e[0] != '\0' && e[0] != '0';
 }
 
-// SPEC-AC-CHAINGEN-MATH header contract. Math exports archChainBand(mv);
-// this TU-local adapter matches the published predicate (500–8000 tris,
-// overlaps coarseFusionBand, excludes Body11 file @ 15300) until that merge.
-// Do not widen coarseFusionBand — S13/S14 (16/20 tris) stay outside both.
-inline bool inArchChainBand(const MeshView& mv) {
-    return mv.nTri >= 500 && mv.nTri <= 8000;
+// Header export archChainBand is 500–8000. Grow commit is a strict subset
+// outside coarseFusionBand. Body18/20 are 1948 tris. Body11 is two components
+// (12060 + 3240); the 3240 piece sits inside the detector band and must stay
+// commit-neutral (AC2 recognition census). Cap at 2500 so that component,
+// Body9 (4668) and Body12 (7918) do not take the new apply. Over-commit is
+// worse. Do not widen coarseFusionBand — S13/S14 stay outside both.
+inline bool inArchChainCommitBand(const MeshView& mv) {
+    return !coarseFusionBand(mv) && archChainBand(mv) && mv.nTri <= 2500;
 }
 
-// Grow commit seam: a strict subset of archChainBand outside coarseFusionBand.
-// Body18/20 are 1948 tris. Body11 is two components (12060 + 3240); the 3240
-// piece sits inside the detector band and must stay commit-neutral (AC2
-// recognition census). Cap at 2500 so that component, Body9 (4668) and
-// Body12 (7918) do not take the new apply. Over-commit is worse.
-inline bool inArchChainCommitBand(const MeshView& mv) {
-    return !coarseFusionBand(mv) && inArchChainBand(mv) && mv.nTri <= 2500;
-}
+// Handshake with refit_build.cpp J6 sewability ledger: in-band arch-chain
+// commits stamp filletNbrA so new plane|cyl / cyl|cyl boundaries are guarded.
+// FilletStrip is the only other writer; it keys off Origin::FilletStrip first.
+constexpr int kArchChainSewMark = -2;
 
 void diagArchChain(const char* kind, std::size_t n, double score, double eberly,
                    double chainR, double appliedR, double rel, const char* why) {
@@ -762,6 +760,7 @@ struct CommitEval {
     double radius = 0;
     D2Metrics d2;
     bool eberlyOk = false;
+    bool archChain = false;  // in-band apply that passed the closure gate
 };
 
 CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
@@ -867,7 +866,13 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
                     diagArchChain("DEFER", tris.size(), chainScore, oldR, chainR,
                                   ev.radius, rel, "g3_fail");
                 } else {
+                    // Closure-aware (AC-SEAMFIX): stamp the apply so J6's
+                    // sewability ledger can see the new edge classes. Keep
+                    // the commit — the ledger (not a band disable) is what
+                    // closes Body18. Unclosed applies still go through; the
+                    // dual-face + collapseBanned path orphans them to polyline.
                     archChainApplied = true;
+                    ev.archChain = true;
                     diagArchChain("COMMIT", tris.size(), chainScore, oldR, chainR,
                                   ev.radius, rel, "archband_window");
                 }
@@ -970,6 +975,12 @@ void fillCylinderRegion(const MeshView& mv, const CommitEval& ev, const gp_Dir& 
         }
     }
     reg.rmsVertexDev = nV > 0 ? std::sqrt(sumSq / nV) : 0.0;
+    if (ev.archChain) {
+        // Survive refit_chains remapFilletNbr (maps nb<0 → -1). Negative snap
+        // is otherwise unused; build keys the extended J6 ledger off this.
+        reg.maxVertexSnap = -1.0;
+        reg.filletNbrA = kArchChainSewMark;
+    }
 }
 
 double axisLineSeparation(const gp_Ax3& a, const gp_Ax3& b) {

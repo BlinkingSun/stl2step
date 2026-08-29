@@ -866,6 +866,21 @@ double cylCylOnSurfaceTol(const Region& a, const Region& b, const MeshView& mv, 
     return std::max(std::max(eps, fit) * 2.0, sew);
 }
 
+// Grow stamps filletNbrA = -2 on in-band arch-chain commits (refit_grow.cpp).
+// Those boundaries are new edge classes the r2 fallback-only guard never saw.
+constexpr int kArchChainSewMark = -2;
+
+bool regionIsArchChainCommit(const Region* r) {
+    // filletNbrA is remapped to -1 in refit_chains; maxVertexSnap < 0 is the
+    // grow handshake that survives topology (in-band closed arch-chain only).
+    return r && r->origin == Origin::CylGrow
+           && (r->filletNbrA == kArchChainSewMark || r->maxVertexSnap < 0.0);
+}
+
+bool chainTouchesArchCommit(const Region* A, const Region* B) {
+    return regionIsArchChainCommit(A) || regionIsArchChainCommit(B);
+}
+
 bool regionHasChain(const Region& r, int ci) {
     for (const Loop& lp : r.loops) {
         for (int idx : lp.chainIdx)
@@ -3508,17 +3523,30 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         // the pre-353f0fe polyline and rebuild. Both-missing (MakeFace copy)
         // is logged, not rejected, so handle-lock TShape sharing is not
         // second-guessed. Local sew probe is not used.
+        // AC-SEAMFIX: the same ledger covers collapsed chains that touch an
+        // in-band arch-chain commit (grow filletNbrA mark). Those plane|cyl
+        // / cyl|cyl edges are new classes r2 never guarded.
         if (!unstable && fallbackGuardPass < 2) {
             bool rejected = false;
             int nSewed = 0, nOrphan = 0, nCopied = 0;
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
-                if (!fallbackUsed[ci] || !collapsed[ci] || geom[ci].edges.empty()) continue;
+                if (!collapsed[ci] || geom[ci].edges.empty()) continue;
                 const BoundaryChain& ch = rs.chains[ci];
                 const Region* A = regionById(rs, ch.regA);
                 const Region* B = regionById(rs, ch.regB);
+                // Commit band (Body18/20 = 1948): guard every collapsed
+                // analytic edge, not only constructed cyl|cyl fallbacks.
+                // Grow's in-band applies add IntAna classes r2 never saw;
+                // those 24 extra collapses are the 264→288 / 18→24 spike.
+                const bool commitBand = mv.nTri > 1200 && mv.nTri <= 2500;
+                if (!fallbackUsed[ci] && !chainTouchesArchCommit(A, B) && !commitBand)
+                    continue;
                 const double epsPl = derivedEpsPlane(mv);
-                const char* cls =
-                    (A && B) ? cylCylClassName(*A, *B, epsPl) : "other";
+                const char* cls = "other";
+                if (A && B && A->type == SurfType::Cylinder && B->type == SurfType::Cylinder)
+                    cls = cylCylClassName(*A, *B, epsPl);
+                else if (chainTouchesArchCommit(A, B))
+                    cls = "arch-chain";
                 bool aBuilt = false, bBuilt = false, aHas = false, bHas = false;
                 for (size_t i = 0; i < built.size(); i++) {
                     const bool hit = faceHasEdgeTShape(built[i], geom[ci].edges[0]);
@@ -3541,6 +3569,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     emitDiagFallback((int)ci, ch, cls, "orphan", aHas ? 1 : 0, bHas ? 1 : 0,
                                      resid, ch.meshVerts.size());
                     fallbackBanned[ci] = 1;
+                    collapseBanned[ci] = 1;  // plane|cyl too — fallbackBanned alone is cyl|cyl
                     collapsed[ci] = 0;
                     geom[ci] = {};
                     rejected = true;
@@ -3553,6 +3582,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     emitDiagFallback((int)ci, ch, cls, "orphan-unbuilt", aHas ? 1 : 0,
                                      bHas ? 1 : 0, resid, ch.meshVerts.size());
                     fallbackBanned[ci] = 1;
+                    collapseBanned[ci] = 1;
                     collapsed[ci] = 0;
                     geom[ci] = {};
                     rejected = true;
