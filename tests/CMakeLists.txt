@@ -29,3 +29,14 @@ if(TARGET stl2step::core)
         stl2step_adhoc_sign(j6heal_api_probe)
     endif()
 endif()
+
+# SPEC AC-CASCADE API probe — calls stl2step::convert() directly. Not a ctest
+# (lane pins 27/27 + hl_census_ratchet + cascade_no_waiver).
+if(TARGET stl2step::core)
+    add_executable(cascade_api_probe cascade_api_probe.cpp)
+    target_compile_features(cascade_api_probe PRIVATE cxx_std_17)
+    target_link_libraries(cascade_api_probe PRIVATE stl2step::core)
+    if(COMMAND stl2step_adhoc_sign)
+        stl2step_adhoc_sign(cascade_api_probe)
+    endif()
+endif()

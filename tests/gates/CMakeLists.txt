@@ -214,6 +214,23 @@ if(EXISTS "${_j6watch_script}")
 endif()
 unset(_j6watch_script)
 
+# --- cascade-r4 ---
+# D1 §5.1 resurrection ban. Greps src/; no engine required.
+set(_cascade_nowaiver "${CMAKE_CURRENT_SOURCE_DIR}/cascade_no_waiver.py")
+if(EXISTS "${_cascade_nowaiver}")
+    add_test(NAME cascade_no_waiver
+        COMMAND "${Python3_EXECUTABLE}" "${_cascade_nowaiver}")
+    set_tests_properties(cascade_no_waiver PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    add_test(NAME cascade_no_waiver_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_cascade_nowaiver}" --self-test)
+    set_tests_properties(cascade_no_waiver_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+endif()
+unset(_cascade_nowaiver)
+
 # --- gates-sweep ---
 # Standalone 11-file TrueForm sweep (scripts/stress_sweep.py). Not part of
 # gates_full and not sharded. SKIPs (exit 77) when the private STL corpus

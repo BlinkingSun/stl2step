@@ -11,16 +11,22 @@
 #include "refit.hpp"
 
 #include <algorithm>
+#include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepGProp.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -48,6 +54,7 @@
 #include <Geom_RectangularTrimmedSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <GProp_GProps.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <IntAna_QuadQuadGeo.hxx>
@@ -61,6 +68,7 @@
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListIteratorOfListOfShape.hxx>
 #include <TopAbs.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -1378,6 +1386,88 @@ bool collapseDiagEnabled() {
         cached = (v && v[0] && v[0] != '0') ? 1 : 0;
     }
     return cached != 0;
+}
+
+// STL2STEP_FAIL_RID — parsed once (G0.1). rid 0 is legal; do not copy the
+// DIAG `v[0] != '0'` idiom. Unset/empty ⇒ disabled. Malformed ⇒ disabled.
+struct FailRidKnob {
+    bool ready = false;
+    bool enabled = false;
+    bool malformed = false;
+    bool warned = false;
+    std::vector<int> ids;
+};
+
+FailRidKnob& failRidKnob() {
+    static FailRidKnob k;
+    if (k.ready) return k;
+    k.ready = true;
+    const char* v = std::getenv("STL2STEP_FAIL_RID");
+    if (!v || !v[0]) return k;
+    const char* p = v;
+    std::vector<int> ids;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!*p) break;
+        if (*p == ',') {
+            k.malformed = true;
+            break;
+        }
+        errno = 0;
+        char* end = nullptr;
+        const long x = std::strtol(p, &end, 10);
+        if (end == p || errno == ERANGE || x < static_cast<long>(INT_MIN) ||
+            x > static_cast<long>(INT_MAX)) {
+            k.malformed = true;
+            break;
+        }
+        ids.push_back(static_cast<int>(x));
+        p = end;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == ',') {
+            ++p;
+            continue;
+        }
+        if (*p) {
+            k.malformed = true;
+            break;
+        }
+    }
+    if (k.malformed || ids.empty()) {
+        k.enabled = false;
+        k.ids.clear();
+        return k;
+    }
+    k.enabled = true;
+    k.ids = std::move(ids);
+    return k;
+}
+
+bool failRidHits(int id) {
+    const FailRidKnob& k = failRidKnob();
+    if (!k.enabled) return false;
+    for (int x : k.ids)
+        if (x == id) return true;
+    return false;
+}
+
+void emitFailRidWarningOnce(WarnFn warn) {
+    FailRidKnob& k = failRidKnob();
+    if (!k.malformed || k.warned) return;
+    k.warned = true;
+    emit(warn, "STL2STEP_FAIL_RID: malformed value, ignored");
+}
+
+void diagCascadeInject() {
+    if (!collapseDiagEnabled()) return;
+    const FailRidKnob& k = failRidKnob();
+    if (!k.enabled) return;
+    std::fprintf(stderr, "DIAG_CASCADE inject=");
+    for (size_t i = 0; i < k.ids.size(); i++) {
+        if (i) std::fputc(',', stderr);
+        std::fprintf(stderr, "%d", k.ids[i]);
+    }
+    std::fputc('\n', stderr);
 }
 
 const char* brepCheckName(int st) {
@@ -2955,6 +3045,530 @@ double mixedEdgeDeviation(const MeshView& mv, const TopoDS_Vertex& v1, const Top
     return std::max(dev(m), std::max(dev(a), dev(b)));
 }
 
+// --- cascade ladder (D1 §1). Shared helper callable from A/B/C; wave-2 uses B. ---
+
+enum class CascadeRung { None, U0, U1, U2 };
+
+struct CascadeState {
+    int u0Rounds = 0;
+    bool u1Done = false;
+    bool u2Done = false;
+};
+
+struct CascadeHit {
+    int rid = -1;
+    const char* src = "face";  // face | shell | resid
+    bool faceValid = true;
+    double residErr = 0;
+};
+
+struct CascadePlan {
+    CascadeRung rung = CascadeRung::None;
+    std::vector<int> explode;
+    bool hostR2 = false;
+};
+
+bool brepStatusBad(const Handle(BRepCheck_Result)& res) {
+    if (res.IsNull()) return false;
+    for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
+        if (it.Value() != BRepCheck_NoError) return true;
+    return false;
+}
+
+void addCascadeHit(std::vector<CascadeHit>& hits, int rid, const char* src, bool faceValid,
+                   double residErr = 0) {
+    if (rid < 0) return;
+    for (CascadeHit& h : hits) {
+        if (h.rid != rid) continue;
+        if (residErr > h.residErr) h.residErr = residErr;
+        if (h.faceValid && !faceValid) h.faceValid = false;
+        if (std::strcmp(h.src, "face") != 0 && std::strcmp(src, "face") == 0) h.src = src;
+        return;
+    }
+    hits.push_back({rid, src, faceValid, residErr});
+}
+
+int countAnalyticCylinders(const RegionSet& rs) {
+    int n = 0;
+    for (const Region& r : rs.regions)
+        if (r.type == SurfType::Cylinder) ++n;
+    return n;
+}
+
+int countExplodedCylinders(const RegionSet& rs, const std::vector<char>& exploded) {
+    int n = 0;
+    for (const Region& r : rs.regions)
+        if (r.type == SurfType::Cylinder && regionExploded(exploded, r.id)) ++n;
+    return n;
+}
+
+int countIncidentChains(const RegionSet& rs, int rid) {
+    int n = 0;
+    for (const BoundaryChain& ch : rs.chains)
+        if (chainTouches(ch, rid)) ++n;
+    return n;
+}
+
+std::vector<int> regionNeighbours(const RegionSet& rs, int rid) {
+    std::vector<int> out;
+    for (const BoundaryChain& ch : rs.chains) {
+        if (!chainTouches(ch, rid)) continue;
+        const int o = otherReg(ch, rid);
+        if (o < 0) continue;
+        if (std::find(out.begin(), out.end(), o) == out.end()) out.push_back(o);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool seamedClosed360(const Region* r) {
+    return r && r->type == SurfType::Cylinder && r->closed360 &&
+           (r->builtAs == BuiltAs::Seamed360 || r->builtAs == BuiltAs::TwoHalves);
+}
+
+std::vector<int> cylinderOneHop(const RegionSet& rs, int rid, const std::vector<char>& exploded) {
+    std::vector<int> out;
+    for (const BoundaryChain& ch : rs.chains) {
+        if (!chainTouches(ch, rid)) continue;
+        const int o = otherReg(ch, rid);
+        const Region* rr = regionById(rs, o);
+        if (!rr || rr->type != SurfType::Cylinder) continue;
+        if (regionExploded(exploded, o)) continue;
+        if (rr->closed360) continue;  // RULE 3.2 / U2: closed360 never U1 collateral
+        if (std::find(out.begin(), out.end(), o) == out.end()) out.push_back(o);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void collectFaceCulprits(const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                         const std::vector<char>& exploded, std::vector<CascadeHit>& hits) {
+    for (size_t i = 0; i < built.size(); i++) {
+        const int id = (i < builtRid.size()) ? builtRid[i] : -1;
+        if (id < 0 || regionExploded(exploded, id)) continue;
+        const bool ok = faceIsValid(built[i]);
+        if (!ok) addCascadeHit(hits, id, "face", false);
+    }
+}
+
+void collectShellCulprits(const TopoDS_Shape& sh, const std::vector<TopoDS_Face>& built,
+                          const std::vector<int>& builtRid, const RegionSet& rs,
+                          const std::vector<char>& exploded, std::vector<CascadeHit>& hits) {
+    if (sh.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(sh, Standard_True);
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(sh, TopAbs_FACE, faceMap);
+        std::vector<int> faceRid((size_t)faceMap.Extent() + 1, -1);
+        std::vector<char> faceOk((size_t)faceMap.Extent() + 1, 1);
+        for (size_t i = 0; i < built.size(); i++) {
+            const int idx = faceMap.FindIndex(built[i]);
+            if (idx <= 0 || i >= builtRid.size()) continue;
+            faceRid[(size_t)idx] = builtRid[i];
+            faceOk[(size_t)idx] = faceIsValid(built[i]) ? 1 : 0;
+        }
+        auto markFace = [&](const TopoDS_Shape& fsh) {
+            const int idx = faceMap.FindIndex(fsh);
+            if (idx <= 0) return;
+            const int rid = faceRid[(size_t)idx];
+            if (rid < 0 || regionExploded(exploded, rid)) return;
+            addCascadeHit(hits, rid, "shell", faceOk[(size_t)idx] != 0);
+        };
+        for (int i = 1; i <= faceMap.Extent(); i++) {
+            if (brepStatusBad(an.Result(faceMap(i)))) markFace(faceMap(i));
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape wanc, eanc;
+        TopExp::MapShapesAndAncestors(sh, TopAbs_WIRE, TopAbs_FACE, wanc);
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, eanc);
+        for (int i = 1; i <= wanc.Extent(); i++) {
+            if (!brepStatusBad(an.Result(wanc.FindKey(i)))) continue;
+            for (TopTools_ListIteratorOfListOfShape it(wanc(i)); it.More(); it.Next())
+                markFace(it.Value());
+        }
+        for (int i = 1; i <= eanc.Extent(); i++) {
+            if (!brepStatusBad(an.Result(eanc.FindKey(i)))) continue;
+            for (TopTools_ListIteratorOfListOfShape it(eanc(i)); it.More(); it.Next())
+                markFace(it.Value());
+        }
+        (void)rs;
+    } catch (const Standard_Failure&) {
+    }
+}
+
+template <typename Fn>
+void cascadeParallelFor(size_t n, Fn fn) {
+    if (n == 0) return;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const size_t workers = std::min((size_t)hw, n);
+    if (workers <= 1) {
+        for (size_t i = 0; i < n; i++) fn(i);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(workers);
+    for (size_t w = 0; w < workers; w++) {
+        pool.emplace_back([=]() {
+            for (size_t i = w; i < n; i += workers) fn(i);
+        });
+    }
+    for (auto& t : pool) t.join();
+}
+
+double meshTriChordVol(const MeshView& mv, int localTri) {
+    if (localTri < 0 || (size_t)localTri >= mv.nTri || !mv.compTris || !mv.tris || !mv.pts)
+        return 0.0;
+    const int gt = mv.compTris[localTri];
+    if (gt < 0) return 0.0;
+    const int* t = mv.tris[gt];
+    const gp_XYZ a = mv.pts[t[0]], b = mv.pts[t[1]], c = mv.pts[t[2]];
+    return a.Dot(b.Crossed(c)) / 6.0;
+}
+
+double meshViewVolume(const MeshView& mv) {
+    double v = 0;
+    for (size_t k = 0; k < mv.nTri; k++) v += meshTriChordVol(mv, (int)k);
+    return v;
+}
+
+double regionChordVol(const MeshView& mv, const Region& r) {
+    double v = 0;
+    for (int t : r.tris) v += meshTriChordVol(mv, t);
+    return v;
+}
+
+double faceVolumeContribution(const TopoDS_Face& f) {
+    if (f.IsNull()) return 0.0;
+    try {
+        BRepAdaptor_Surface sa(f, Standard_False);
+        if (sa.GetType() == GeomAbs_Plane) {
+            // VolumeProperties(OnlyClosed=false) returns ~0 on a lone plane.
+            // Pyramid: (1/3) (c · n) Area, n follows face orientation.
+            GProp_GProps sp;
+            BRepGProp::SurfaceProperties(f, sp);
+            const double area = sp.Mass();
+            gp_Dir n = sa.Plane().Axis().Direction();
+            if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+            return sp.CentreOfMass().XYZ().Dot(gp_XYZ(n.X(), n.Y(), n.Z())) * area / 3.0;
+        }
+        GProp_GProps gp;
+        BRepGProp::VolumeProperties(f, gp, Standard_False);
+        return gp.Mass();
+    } catch (const Standard_Failure&) {
+        return 0.0;
+    }
+}
+
+double shapeVolSafe(const TopoDS_Shape& s) {
+    if (s.IsNull()) return 0.0;
+    try {
+        GProp_GProps gp;
+        BRepGProp::VolumeProperties(s, gp);
+        return gp.Mass();
+    } catch (const Standard_Failure&) {
+        return 0.0;
+    }
+}
+
+bool regionShippedAnalytic(const Region& r, const std::vector<char>& exploded) {
+    if (regionExploded(exploded, r.id)) return false;
+    if (!isAnalytic(&r)) return false;
+    return r.builtAs == BuiltAs::Single || r.builtAs == BuiltAs::Seamed360 ||
+           r.builtAs == BuiltAs::TwoHalves;
+}
+
+void collectResidualCulprits(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape& sh,
+                             const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                             const std::vector<char>& exploded, double meshVol,
+                             std::vector<CascadeHit>& hits, double& allAbs, double& shippedAbs) {
+    allAbs = 0;
+    shippedAbs = 0;
+    int nAnalytic = 0;
+    for (const Region& r : rs.regions) {
+        allAbs += std::fabs(r.dVolPredicted);
+        if (regionShippedAnalytic(r, exploded)) {
+            shippedAbs += std::fabs(r.dVolPredicted);
+            ++nAnalytic;
+        }
+    }
+            if (collapseDiagEnabled())
+        std::fprintf(stderr, "DIAG_CASCADE budget all=%.6f shipped=%.6f mesh=%.6f\n", allAbs,
+                     shippedAbs, meshVol);
+    if (nAnalytic <= 0) return;
+    const double meshAbs = std::fabs(meshVol);
+    const double kR = 3.0;
+    struct ResidRow {
+        int rid = -1;
+        double vface = 0, vchord = 0, dvol = 0, sub = 0, err = 0;
+        bool shipped = false, pass = true, planeSkip = false;
+    };
+    std::vector<ResidRow> rows(rs.regions.size());
+    cascadeParallelFor(rs.regions.size(), [&](size_t i) {
+        const Region& r = rs.regions[i];
+        ResidRow& row = rows[i];
+        row.rid = r.id;
+        if (!regionShippedAnalytic(r, exploded)) return;
+        row.shipped = true;
+        double vface = 0;
+        for (size_t fi = 0; fi < built.size(); fi++) {
+            if ((fi < builtRid.size() ? builtRid[fi] : -1) != r.id) continue;
+            vface += faceVolumeContribution(built[fi]);
+        }
+        const double vchord = regionChordVol(mv, r);
+        const double resid = vface - vchord;
+        const double sub = std::max(1e-4 * meshAbs / (double)nAnalytic, kR * std::fabs(r.dVolPredicted));
+        row.vface = vface;
+        row.vchord = vchord;
+        row.dvol = r.dVolPredicted;
+        row.sub = sub;
+        row.err = std::fabs(resid - r.dVolPredicted);
+        row.pass = row.err <= sub;
+        row.planeSkip = (r.type == SurfType::Plane && std::fabs(r.dVolPredicted) < 1e-6);
+        // BRepGProp returned ~0 while the mesh patch has real volume — not a
+        // landmine, a measurement miss. Do not explode.
+        if (std::fabs(vface) < 1e-3 && std::fabs(vchord) > 1.0) {
+            row.pass = true;
+            row.planeSkip = true;
+        }
+    });
+    for (const ResidRow& row : rows) {
+        if (!row.shipped) continue;
+        if (collapseDiagEnabled())
+            std::fprintf(stderr,
+                         "DIAG_CASCADE resid rid=%d vface=%.6f vchord=%.6f dVolPred=%.6f "
+                         "sub=%.6f pass=%d\n",
+                         row.rid, row.vface, row.vchord, row.dvol, row.sub, row.pass ? 1 : 0);
+        // Actuate only the +121% landmine class (|dVol| large). Fixture-scale
+        // cylinders must not die on a Vface/Vchord convention miss.
+        const Region* rr = regionById(rs, row.rid);
+        if (rr && rr->closed360) continue;
+        if (!row.pass && !row.planeSkip && std::fabs(row.dvol) > 100.0)
+            addCascadeHit(hits, row.rid, "resid", true, row.err);
+    }
+    (void)sh;
+}
+
+void sortHitsWorstFirst(std::vector<CascadeHit>& hits) {
+    std::sort(hits.begin(), hits.end(), [](const CascadeHit& a, const CascadeHit& b) {
+        if (a.residErr != b.residErr) return a.residErr > b.residErr;
+        return a.rid < b.rid;
+    });
+}
+
+void uniqueSorted(std::vector<int>& v) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+}
+
+bool wouldSaturate(const RegionSet& rs, const std::vector<char>& exploded,
+                   const std::vector<int>& extra) {
+    const int nCyl = countAnalyticCylinders(rs);
+    if (nCyl <= 0) return false;
+    int would = countExplodedCylinders(rs, exploded);
+    for (int id : extra) {
+        const Region* r = regionById(rs, id);
+        if (!r || r->type != SurfType::Cylinder) continue;
+        if (regionExploded(exploded, id)) continue;
+        ++would;
+    }
+    // RULE 1.5: escalate to U2 when exploded set would exceed 50% (ties round up).
+    const int cap = (nCyl + 1) / 2;
+    return would > cap;
+}
+
+bool touchesClosed360Cyl(const RegionSet& rs, int rid) {
+    for (const BoundaryChain& ch : rs.chains) {
+        if (!chainTouches(ch, rid)) continue;
+        const Region* o = regionById(rs, otherReg(ch, rid));
+        if (!o || o->type != SurfType::Cylinder || !o->closed360) continue;
+        if (o->builtAs == BuiltAs::Seamed360 || o->builtAs == BuiltAs::TwoHalves ||
+            o->builtAs == BuiltAs::Single)
+            return true;
+    }
+    return false;
+}
+
+bool isHubPlane(const RegionSet& rs, int rid) {
+    const Region* r = regionById(rs, rid);
+    if (!r || r->type == SurfType::Cylinder) return false;
+    const int nCyl = countAnalyticCylinders(rs);
+    if (nCyl <= 0) return false;
+    int hop = 0;
+    for (const BoundaryChain& ch : rs.chains) {
+        if (!chainTouches(ch, rid)) continue;
+        const Region* o = regionById(rs, otherReg(ch, rid));
+        if (o && o->type == SurfType::Cylinder) ++hop;
+    }
+    // Plane 0 shares a chain with 15/16 cylinders — exploding it is the blanket.
+    return hop * 2 > nCyl;
+}
+
+// U0 set: face-invalid cylinders first (the true unit), then non-hub planes,
+// then one hub plane (smallest chain count) only if nothing else remains.
+// Exploding every hub plate in one pass opens the shell (census 0, RULE 1.4).
+std::vector<int> selectU0Explode(const std::vector<CascadeHit>& culprits, const RegionSet& rs,
+                                const std::vector<char>& exploded) {
+    std::vector<int> cyls, smallPln, hubs;
+    std::vector<int> badPlanes;
+    for (const CascadeHit& h : culprits) {
+        if (h.rid < 0 || regionExploded(exploded, h.rid)) continue;
+        const Region* r = regionById(rs, h.rid);
+        if (!r) continue;
+        if (r->type == SurfType::Cylinder) {
+            if (r->closed360) continue;
+            cyls.push_back(h.rid);
+        }
+        else if (touchesClosed360Cyl(rs, h.rid))
+            continue;  // RULE 3.2/S03: exploding plates against seamed holes steals TShapes
+        else if (isHubPlane(rs, h.rid))
+            hubs.push_back(h.rid);
+        else
+            smallPln.push_back(h.rid);
+    }
+    // Join-suspect: cylinder 1-hop from >=2 *non-hub* invalid planes.
+    // Hub plates (0/1) touch almost every cylinder; they must not recruit the
+    // blanket. rid=11 touches invalid plates 2 and 9 (spike M4).
+    if (!smallPln.empty()) {
+        for (const Region& r : rs.regions) {
+            if (r.type != SurfType::Cylinder || regionExploded(exploded, r.id)) continue;
+            if (r.closed360) continue;
+            int nBad = 0;
+            for (const BoundaryChain& ch : rs.chains) {
+                if (!chainTouches(ch, r.id)) continue;
+                const int o = otherReg(ch, r.id);
+                if (std::find(smallPln.begin(), smallPln.end(), o) != smallPln.end())
+                    ++nBad;
+            }
+            if (nBad >= 2) cyls.push_back(r.id);
+        }
+    }
+    uniqueSorted(cyls);
+    uniqueSorted(smallPln);
+    uniqueSorted(hubs);
+    if (!cyls.empty()) {
+        uniqueSorted(cyls);
+        if (wouldSaturate(rs, exploded, cyls)) {
+            std::sort(cyls.begin(), cyls.end(), [&](int a, int b) {
+                const int ca = countIncidentChains(rs, a), cb = countIncidentChains(rs, b);
+                if (ca != cb) return ca < cb;
+                return a < b;
+            });
+            std::vector<int> keep;
+            for (int id : cyls) {
+                keep.push_back(id);
+                if (wouldSaturate(rs, exploded, keep)) {
+                    keep.pop_back();
+                    break;
+                }
+            }
+            return keep.empty() ? std::vector<int>{cyls.front()} : keep;
+        }
+        return cyls;
+    }
+    if (!smallPln.empty()) return smallPln;
+    if (hubs.empty()) return {};
+    std::sort(hubs.begin(), hubs.end(), [&](int a, int b) {
+        const int ca = countIncidentChains(rs, a), cb = countIncidentChains(rs, b);
+        if (ca != cb) return ca < cb;
+        return a < b;
+    });
+    return {hubs.front()};
+}
+
+std::vector<int> u2BlanketRids(const RegionSet& rs, const std::vector<char>& exploded) {
+    std::vector<int> out;
+    for (const Region& rg : rs.regions) {
+        if (regionExploded(exploded, rg.id)) continue;
+        if (rg.type != SurfType::Cylinder || rg.closed360) continue;
+        out.push_back(rg.id);
+    }
+    return out;
+}
+
+// Shared helper — A/B/C may call; wave-2 site B is the only caller.
+CascadePlan cascadeLadderPlan(CascadeState& st, const std::vector<CascadeHit>& culprits,
+                              const RegionSet& rs, const std::vector<char>& exploded,
+                              bool residActuator) {
+    CascadePlan plan;
+    if (st.u2Done) {
+        plan.hostR2 = true;
+        return plan;
+    }
+    std::vector<int> u0;
+    if (residActuator) {
+        for (const CascadeHit& h : culprits) {
+            if (h.rid < 0 || regionExploded(exploded, h.rid)) continue;
+            u0.push_back(h.rid);
+            break;  // RULE 2.3: explode-worst, one per pass
+        }
+    } else {
+        u0 = selectU0Explode(culprits, rs, exploded);
+    }
+
+    const bool satU0 = wouldSaturate(rs, exploded, u0);
+    if (!satU0 && st.u0Rounds < 2 && !u0.empty()) {
+        plan.rung = CascadeRung::U0;
+        plan.explode = std::move(u0);
+        st.u0Rounds++;
+        return plan;
+    }
+
+    std::vector<int> u1;
+    if (!st.u1Done) {
+        for (const CascadeHit& h : culprits) {
+            if (h.rid < 0 || regionExploded(exploded, h.rid)) continue;
+            const auto nbrs = cylinderOneHop(rs, h.rid, exploded);
+            u1.insert(u1.end(), nbrs.begin(), nbrs.end());
+        }
+        uniqueSorted(u1);
+    }
+    const bool satU1 = st.u1Done || wouldSaturate(rs, exploded, u1);
+    if (!satU1 && (st.u0Rounds >= 2 || u0.empty()) && !st.u1Done) {
+        st.u1Done = true;
+        if (!u1.empty()) {
+            plan.rung = CascadeRung::U1;
+            plan.explode = std::move(u1);
+            return plan;
+        }
+        // empty U1 → fall through to U2 in the same decide
+    } else if (!st.u1Done && satU1) {
+        st.u1Done = true;
+    }
+
+    st.u2Done = true;
+    plan.rung = CascadeRung::U2;
+    plan.explode = u2BlanketRids(rs, exploded);
+    if (plan.explode.empty()) plan.hostR2 = true;
+    return plan;
+}
+
+const char* cascadeRungName(CascadeRung r) {
+    switch (r) {
+        case CascadeRung::U0: return "U0";
+        case CascadeRung::U1: return "U1";
+        case CascadeRung::U2: return "U2";
+        default: return "-";
+    }
+}
+
+void diagCascadeCulprits(const std::vector<CascadeHit>& hits) {
+    if (!collapseDiagEnabled()) return;
+    for (const CascadeHit& h : hits)
+        std::fprintf(stderr, "DIAG_CASCADE culprit rid=%d src=%s faceValid=%d\n", h.rid, h.src,
+                     h.faceValid ? 1 : 0);
+}
+
+void diagCascadeExplode(int rid, CascadeRung rung, const RegionSet& rs) {
+    if (!collapseDiagEnabled()) return;
+    const auto nbrs = regionNeighbours(rs, rid);
+    std::fprintf(stderr, "DIAG_CASCADE explode rid=%d rung=%s chains=%d nbrs=[", rid,
+                 cascadeRungName(rung), countIncidentChains(rs, rid));
+    for (size_t i = 0; i < nbrs.size(); i++) {
+        if (i) std::fputc(',', stderr);
+        std::fprintf(stderr, "%d", nbrs[i]);
+    }
+    std::fprintf(stderr, "]\n");
+}
+
 }  // namespace
 
 void fitAnalyticTolerances(const TopoDS_Shape& shape) {
@@ -3094,6 +3708,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         int rounds = 0;
         int fallbackGuardPass = 0;
         int j6UncollapsePass = 0;
+        CascadeState cascadeSt;
+        emitFailRidWarningOnce(warn);
+        diagCascadeInject();
 
         auto rebuildCollapsed = [&]() {
             chainEdgeFail.assign(rs.chains.size(), 0);
@@ -3350,6 +3967,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         };
 
         auto buildOneRegion = [&](Region& r, std::vector<TopoDS_Face>& acc) -> bool {
+            if (failRidHits(r.id)) {
+                r.reject = Reject::FaceBuildFailed;
+                r.builtAs = BuiltAs::NotBuilt;
+                return false;
+            }
             if (regionExploded(exploded, r.id)) return true;
             r.builtAs = BuiltAs::NotBuilt;
             if (r.type == SurfType::Cone || r.type == SurfType::Sphere || r.type == SurfType::Torus) {
@@ -3877,42 +4499,79 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             return false;
         }
 
-        if (recoverPass < 2 && !shellIsValid(sh)) {
-            dumpShellCheck(sh, built, builtRid, rs);
-            bool hasSeamed = false;
-            for (const Region& rg : rs.regions) {
-                if (regionExploded(exploded, rg.id)) continue;
-                if (rg.type == SurfType::Cylinder && rg.closed360 &&
-                    (rg.builtAs == BuiltAs::Seamed360 || rg.builtAs == BuiltAs::TwoHalves))
-                    hasSeamed = true;
-            }
+        auto applyCascadePlan = [&](const CascadePlan& plan) -> bool {
             bool any = false;
-            if (hasSeamed && recoverPass < 1) {
-                for (const Region& rg : rs.regions) {
-                    if (regionExploded(exploded, rg.id)) continue;
-                    if (rg.type != SurfType::Cylinder || rg.closed360) continue;
-                    explodeRegion(rg.id);
-                    any = true;
-                }
-            } else {
-                // Closed but BRepCheck-invalid: explode the invalid analytic
-                // faces (post-fit failure), uncollapse, rebuild neighbours.
-                std::vector<char> seen((size_t)std::max(0, maxId) + 1, 0);
-                for (size_t i = 0; i < built.size(); i++) {
-                    int id = (i < builtRid.size()) ? builtRid[i] : -1;
-                    if (id < 0 || (size_t)id >= seen.size() || seen[(size_t)id]) continue;
-                    if (regionExploded(exploded, id)) continue;
-                    if (faceIsValid(built[i])) continue;
-                    const Region* rr = regionById(rs, id);
-                    if (rr && rr->type == SurfType::Cylinder) continue;
-                    explodeRegion(id);
-                    seen[(size_t)id] = 1;
-                    any = true;
-                }
+            for (int id : plan.explode) {
+                if (id < 0 || regionExploded(exploded, id)) continue;
+                diagCascadeExplode(id, plan.rung, rs);
+                explodeRegion(id);
+                any = true;
             }
-            if (any) {
+            return any;
+        };
+
+        const bool shValid = shellIsValid(sh);
+        // Site B is closed-but-invalid only. Open shells are site C (untouched).
+        if (BRep_Tool::IsClosed(sh) && !shValid) {
+            dumpShellCheck(sh, built, builtRid, rs);
+            std::vector<CascadeHit> culprits;
+            collectFaceCulprits(built, builtRid, exploded, culprits);
+            collectShellCulprits(sh, built, builtRid, rs, exploded, culprits);
+            diagCascadeCulprits(culprits);
+            // RULE 1.4: empty culprit set + invalid shell ⇒ escalate, never ship.
+            CascadePlan plan = cascadeLadderPlan(cascadeSt, culprits, rs, exploded, false);
+            if (applyCascadePlan(plan)) {
                 recoverPass++;
                 goto try_rebuild;
+            }
+            if (plan.hostR2 || cascadeSt.u2Done || !shValid) {
+                restoreShared();
+                out.clear();
+                return false;
+            }
+        } else if (BRep_Tool::IsClosed(sh) && shValid) {
+            // RULE 2.2 / 2.3 / 2.4 — detector + explode-worst on a closed valid shell.
+            const double meshVol = meshViewVolume(mv);
+            std::vector<CascadeHit> residHits;
+            double allAbs = 0, shippedAbs = 0;
+            collectResidualCulprits(mv, rs, sh, built, builtRid, exploded, meshVol, residHits,
+                                    allAbs, shippedAbs);
+            const double shellVol = shapeVolSafe(sh);
+            const double meshAbs = std::fabs(meshVol);
+            const double tightBudget = std::max(1e-4 * meshAbs, 3.0 * shippedAbs);
+            const bool tightFail = std::fabs(shellVol - meshVol) > tightBudget;
+            if (tightFail && residHits.empty()) {
+                // Aggregate-only miss: explode the landmine-class worst |dVol|.
+                // Never pick a closed360 hole (S03/S16 / full_360_hole).
+                int worst = -1;
+                double worstAbs = -1;
+                for (const Region& r : rs.regions) {
+                    if (!regionShippedAnalytic(r, exploded)) continue;
+                    if (r.closed360) continue;
+                    const double a = std::fabs(r.dVolPredicted);
+                    if (a <= 100.0) continue;
+                    if (a > worstAbs) {
+                        worstAbs = a;
+                        worst = r.id;
+                    }
+                }
+                if (worst >= 0) addCascadeHit(residHits, worst, "resid", true, worstAbs);
+            }
+            if (!residHits.empty()) {
+                sortHitsWorstFirst(residHits);
+                diagCascadeCulprits(residHits);
+                CascadePlan plan = cascadeLadderPlan(cascadeSt, residHits, rs, exploded, true);
+                if (applyCascadePlan(plan)) {
+                    recoverPass++;
+                    goto try_rebuild;
+                }
+                if (plan.hostR2 && tightFail && !cascadeSt.u2Done) {
+                    restoreShared();
+                    out.clear();
+                    return false;
+                }
+                // After U2 the host D4.5 probe (RULE 2.0) is the volume authority.
+                // Do not R2 a closed+valid U2 shell here — that is census 0.
             }
         }
 
