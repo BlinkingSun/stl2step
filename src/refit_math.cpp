@@ -8,7 +8,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <thread>
 #include <vector>
+
+#ifndef STL2STEP_ARCHCHAIN_BAND_MAX
+#define STL2STEP_ARCHCHAIN_BAND_MAX 8000
+#endif
+static_assert(STL2STEP_ARCHCHAIN_BAND_MAX < 15300,
+              "archChainBand upper bound must exclude Body11 file (15300 tris)");
 
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
@@ -241,6 +251,8 @@ bool kasaFit2(const double* xs, const double* ys, std::size_t n, double& cx, dou
 
 }  // namespace
 
+static void maybeInventoryArchChains(const MeshView& mv);
+
 // evec[k][i] = component i of eigenvector k; eval/evec ordered λ0 ≤ λ1 ≤ λ2.
 bool jacobiEigenSymmetric3(const std::array<std::array<double, 3>, 3>& m,
                            std::array<double, 3>& eval,
@@ -370,6 +382,7 @@ bool pcaPlane(const MeshView& mv, const std::vector<int>& tris, gp_Ax3& plane) {
 
 bool eberlyCenterRadius(const MeshView& mv, const std::vector<int>& tris,
                         const gp_Dir& axis, gp_Pnt& center, double& radius) {
+    maybeInventoryArchChains(mv);
     std::vector<int> ids;
     sortedUniqueTris(tris, ids);
     if (ids.empty() || !mv.pts || !mv.tris || !mv.compTris) return false;
@@ -1310,7 +1323,226 @@ bool coefficientOfVariationOk(const std::vector<double>& vals, int skipEnds, dou
     return cv <= maxCv;
 }
 
+bool coefficientOfVariation(const std::vector<double>& vals, int skipEnds, double& cvOut) {
+    cvOut = 0.0;
+    if (vals.size() < 2) return false;
+    const size_t lo = static_cast<size_t>(std::max(0, skipEnds));
+    const size_t hi = vals.size() - static_cast<size_t>(std::max(0, skipEnds));
+    if (hi <= lo + 1) return false;
+    double sum = 0.0;
+    double sumSq = 0.0;
+    size_t n = 0;
+    for (size_t i = lo; i < hi; i++) {
+        if (!(vals[i] > 0.0)) return false;
+        sum += vals[i];
+        sumSq += vals[i] * vals[i];
+        n++;
+    }
+    if (n < 2) return false;
+    const double mean = sum / static_cast<double>(n);
+    if (!(mean > 0.0)) return false;
+    const double var = sumSq / static_cast<double>(n) - mean * mean;
+    cvOut = (var <= 0.0) ? 0.0 : std::sqrt(var) / mean;
+    return std::isfinite(cvOut);
+}
+
+bool collapseDiagOn() {
+    const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG");
+    return v && v[0] && v[0] != '0';
+}
+
+void emitArchChainDiag(int rid, int n, double areaCv, double angCv, double R, double signal) {
+    if (!collapseDiagOn()) return;
+    const int rMilli = static_cast<int>(std::lround(R * 1000.0));
+    static std::mutex mu;
+    static std::vector<std::array<int, 3>> seen;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const auto& s : seen) {
+            if (s[0] == rid && s[1] == n && s[2] == rMilli) return;
+        }
+        seen.push_back({rid, n, rMilli});
+    }
+    std::fprintf(stderr,
+                 "DIAG_ARCHCHAIN rid=%d n=%d areaCV=%.6f angCV=%.6f R=%.6f signal=%.6f\n",
+                 rid, n, areaCv, angCv, R, signal);
+}
+
+bool chainAreaAngCV(const MeshView& mv, const std::vector<int>& chain,
+                    double& areaCv, double& angCv) {
+    areaCv = 0.0;
+    angCv = 0.0;
+    if (chain.size() < 3) return false;
+    std::vector<double> areas;
+    areas.reserve(chain.size());
+    for (int t : chain) {
+        gp_XYZ n;
+        double area = 0.0;
+        if (!unitTriNormal(mv, t, n, area) || !(area > 0.0)) return false;
+        areas.push_back(area);
+    }
+    std::vector<double> arcThetas;
+    for (size_t i = 1; i < chain.size(); i++) {
+        const double th = edgeDihedralTriPair(mv, chain[i - 1], chain[i]);
+        if (th >= 0.012 && th <= kPi - 0.04) arcThetas.push_back(th);
+    }
+    const int areaSkip = chain.size() >= 10 ? 2 : 1;
+    if (!coefficientOfVariation(areas, areaSkip, areaCv)) return false;
+    if (arcThetas.size() >= 2) (void)coefficientOfVariation(arcThetas, 0, angCv);
+    return true;
+}
+
+template <typename F>
+void parallelFor(size_t n, F&& fn) {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    if (n < 32 || hw == 1) {
+        for (size_t i = 0; i < n; i++) fn(i);
+        return;
+    }
+    std::vector<std::thread> pool;
+    const size_t chunk = (n + hw - 1) / hw;
+    for (unsigned t = 0; t < hw; t++) {
+        const size_t lo = static_cast<size_t>(t) * chunk;
+        const size_t hi = std::min(n, lo + chunk);
+        if (lo >= hi) break;
+        pool.emplace_back([&, lo, hi]() {
+            for (size_t i = lo; i < hi; i++) fn(i);
+        });
+    }
+    for (auto& th : pool) th.join();
+}
+
+void buildEdgeTriAdj(const MeshView& mv, std::vector<std::array<int, 2>>& e2t) {
+    e2t.assign(mv.nEdge, {-1, -1});
+    if (!mv.triEdges) return;
+    for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+        for (int s = 0; s < 3; s++) {
+            const int e = mv.triEdges[t][s];
+            if (e < 0 || static_cast<size_t>(e) >= mv.nEdge) continue;
+            if (e2t[static_cast<size_t>(e)][0] < 0)
+                e2t[static_cast<size_t>(e)][0] = t;
+            else if (e2t[static_cast<size_t>(e)][1] < 0)
+                e2t[static_cast<size_t>(e)][1] = t;
+        }
+    }
+}
+
+void walkArcPath(const MeshView& mv, const std::vector<std::array<int, 2>>& e2t,
+                 const std::vector<char>& alive, int start, std::vector<int>& out) {
+    out.clear();
+    if (start < 0 || static_cast<size_t>(start) >= mv.nTri || !alive[static_cast<size_t>(start)])
+        return;
+    if (!mv.triEdges) return;
+    std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
+    int cur = start;
+    int prev = -1;
+    while (cur >= 0 && !seen[static_cast<size_t>(cur)]) {
+        out.push_back(cur);
+        seen[static_cast<size_t>(cur)] = 1;
+        int next = -1;
+        double bestPhi = 0.0;
+        for (int s = 0; s < 3; s++) {
+            const int e = mv.triEdges[cur][s];
+            if (e < 0 || static_cast<size_t>(e) >= e2t.size()) continue;
+            const int a = e2t[static_cast<size_t>(e)][0];
+            const int b = e2t[static_cast<size_t>(e)][1];
+            const int u = (a == cur) ? b : ((b == cur) ? a : -1);
+            if (u < 0 || u == prev || !alive[static_cast<size_t>(u)] ||
+                seen[static_cast<size_t>(u)])
+                continue;
+            const double phi = edgeDihedralTriPair(mv, cur, u);
+            if (phi < 0.012 || phi > kPi - 0.012) continue;
+            if (next < 0 || phi > bestPhi) {
+                next = u;
+                bestPhi = phi;
+            }
+        }
+        prev = cur;
+        cur = next;
+    }
+}
+
+void inventoryArchChains(const MeshView& mv) {
+    if (!archChainBand(mv) || mv.nTri < 3 || !mv.triEdges || mv.nEdge == 0) return;
+
+    DerivedTols tol;
+    tol.epsMesh = std::max({mv.weldTol, 1e-4 * mv.diag, 1e-3});
+    tol.epsPlane = std::max({tol.epsMesh, mv.sewTol, 0.02});
+
+    std::vector<std::array<int, 2>> e2t;
+    buildEdgeTriAdj(mv, e2t);
+    std::vector<char> alive(static_cast<size_t>(mv.nTri), 1);
+
+    const size_t n = mv.nTri;
+    const int maxRounds = static_cast<int>(std::min(n, static_cast<size_t>(128)));
+    for (int round = 0; round < maxRounds; round++) {
+        std::vector<int> seeds;
+        seeds.reserve(n);
+        for (size_t t = 0; t < n; t++) {
+            if (alive[t]) seeds.push_back(static_cast<int>(t));
+        }
+        if (seeds.size() < 3) break;
+
+        std::vector<std::vector<int>> found(seeds.size());
+        parallelFor(seeds.size(), [&](size_t i) {
+            walkArcPath(mv, e2t, alive, seeds[i], found[i]);
+        });
+
+        size_t bestI = 0;
+        size_t bestN = 0;
+        for (size_t i = 0; i < found.size(); i++) {
+            if (found[i].size() > bestN) {
+                bestN = found[i].size();
+                bestI = i;
+            }
+        }
+        if (bestN < 3) break;
+
+        const std::vector<int>& chain = found[bestI];
+        ArcStripDetect det;
+        (void)detectArchChain(mv, chain, tol, det);
+        for (int t : chain) {
+            if (t >= 0 && static_cast<size_t>(t) < alive.size())
+                alive[static_cast<size_t>(t)] = 0;
+        }
+    }
+}
+
 }  // namespace
+
+static void maybeInventoryArchChains(const MeshView& mv) {
+    if (!collapseDiagOn()) return;
+    if (!archChainBand(mv)) return;
+
+    struct Key {
+        const void* pts = nullptr;
+        const void* comp = nullptr;
+        size_t nTri = 0;
+        bool operator==(const Key& o) const {
+            return pts == o.pts && comp == o.comp && nTri == o.nTri;
+        }
+    };
+
+    static std::mutex mu;
+    static Key seen[8];
+    static int nSeen = 0;
+    static thread_local int depth = 0;
+    if (depth > 0) return;
+    const Key key{mv.pts, mv.compTris, mv.nTri};
+
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (int i = 0; i < nSeen; i++) {
+            if (seen[i] == key) return;
+        }
+        if (nSeen < 8) seen[nSeen++] = key;
+    }
+
+    ++depth;
+    inventoryArchChains(mv);
+    --depth;
+}
 
 bool radiusFromArchChainPairs(const MeshView& mv, const std::vector<int>& tris,
                               const gp_Dir& axis, double& radiusOut, double& chainScoreOut,
@@ -1443,12 +1675,22 @@ bool archChainRadiusFromPatch(const MeshView& mv, const std::vector<int>& tris,
     const bool okPairs =
         ids.size() >= 3
         && radiusFromArchChainPairs(mv, ids, axis, pairR, pairScore, rHint);
+    bool ok = okChain;
     if (okPairs && pairScore >= chainScoreOut) {
         radiusOut = pairR;
         chainScoreOut = pairScore;
-        return true;
+        ok = true;
     }
-    return okChain;
+    if (ok && radiusOut > 0.0 && !chain.empty()) {
+        double areaCv = 0.0, angCv = 0.0;
+        (void)chainAreaAngCV(mv, chain, areaCv, angCv);
+        int rid = chain[0];
+        for (int t : chain)
+            if (t < rid) rid = t;
+        emitArchChainDiag(rid, static_cast<int>(chain.size()), areaCv, angCv, radiusOut,
+                          chainScoreOut);
+    }
+    return ok;
 }
 
 bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
@@ -1524,6 +1766,7 @@ bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
 bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
                      const DerivedTols& tol, ArcStripDetect& out) {
     out = ArcStripDetect{};
+    if (!archChainBand(mv)) return false;
     std::vector<int> ids;
     sortedUniqueTris(tris, ids);
     if (ids.size() < 3) return false;
@@ -1553,6 +1796,19 @@ bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
     double chainScore = 0.0;
     if (!radiusFromArchChain(mv, chain, axis, chainR, chainScore, 0.0)) return false;
 
+    double areaCv = 0.0;
+    double angCv = 0.0;
+    (void)chainAreaAngCV(mv, chain, areaCv, angCv);
+    out.areaCV = areaCv;
+    out.angCV = angCv;
+    out.chainN = static_cast<int>(chain.size());
+    out.chainScore = chainScore;
+
+    int rid = chain[0];
+    for (int t : chain)
+        if (t < rid) rid = t;
+    emitArchChainDiag(rid, static_cast<int>(chain.size()), areaCv, angCv, chainR, chainScore);
+
     double spanRad = 0.0;
     double monoFrac = 0.0;
     (void)monotonicNormalSpan(mv, chain, axis, spanRad, monoFrac);
@@ -1563,7 +1819,10 @@ bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
 
     if (chainScore >= 0.45) radius = chainR;
 
-    if (!(radius >= 8.0) || radius > 55.0) return false;
+    // Coarse band keeps the shipped R>=8 floor (handle-lock identity).
+    // Outside coarse, inside archChainBand, high-confidence chains may go to R>=2.
+    const double rFloor = (!coarseFusionBand(mv) && chainScore >= 0.85) ? 2.0 : 8.0;
+    if (!(radius >= rFloor) || radius > 55.0) return false;
 
     const double res = maxCylResidual(mv, ids, axis, center, radius);
     double accept = tol.epsCylAccept(radius);
@@ -1579,7 +1838,6 @@ bool detectArchChain(const MeshView& mv, const std::vector<int>& tris,
     out.radius = radius;
     out.spanRad = spanRad;
     out.staticNormals = false;
-    out.chainScore = chainScore;
     out.fromArchChain = true;
     return true;
 }

@@ -105,8 +105,17 @@ struct DerivedTols {
 // Coarse Fusion/STLB export band (handle-lock @ 908 tris). Lane B coarse gates
 // and adaptCoarseSegmentParams must stay in sync — unscoped B (nTri<=1200 or
 // global evaluateCommit/A3 changes) breaks p2real S13/S14 fillet fixtures.
+// DO NOT WIDEN: S13/S14 (16/20 tris, fillet R=2/2.5) sit outside this band.
 inline bool coarseFusionBand(const MeshView& mv) {
     return mv.nTri >= 500 && mv.nTri <= 1200;
+}
+
+// Arch-chain detector applicability (chaingen-math). Overlaps coarseFusionBand
+// on [500, 1200]; upper bound ~8000 excludes Body11 file (15300 tris) and its
+// 12060-tri body. S13/S14 stay outside both predicates. Grow commit remains
+// gated by coarseFusionBand until the grow lane wires this predicate.
+inline bool archChainBand(const MeshView& mv) {
+    return mv.nTri >= 500 && mv.nTri <= 8000;
 }
 
 // Working state threaded A1 -> D. Region ids and loops are filled in buildTopologyD.
@@ -180,6 +189,9 @@ struct ArcStripDetect {
     bool staticNormals = false;
     double chainScore = 0.0;  // arch-chain signal strength (lane ARCHCHAINS)
     bool fromArchChain = false;
+    double areaCV = 0.0;      // relative area CV of the ordered chain
+    double angCV = 0.0;       // relative dihedral CV of arc links
+    int chainN = 0;           // triangle count of the ordered chain
 };
 
 bool detectLargeArcStrip(const MeshView& mv, const std::vector<int>& tris,
