@@ -50,6 +50,7 @@ ALL_GATE_IDS = (
     "include-allowlist",
     "calibration",
     "R-ladder",
+    "G-LAW",
 )
 
 # Gates whose implementation has landed (off-path + smooth-on).
@@ -68,6 +69,7 @@ LIVE_GATES: Set[str] = {
     "include-allowlist",
     "R-ladder",
     "calibration",
+    "G-LAW",
 }
 
 HARD_GATES: Set[str] = {
@@ -82,6 +84,7 @@ HARD_GATES: Set[str] = {
     "I-checker",
     "include-allowlist",
     "R-ladder",
+    "G-LAW",
 }
 
 SOFT_GATES: Set[str] = {"G5"}
@@ -952,6 +955,80 @@ def gate_r_ladder(ctx: GateContext) -> GateOutcome:
     return outcome_from_so(so.check_r_ladder(smooth_ctx(ctx)))
 
 
+def gate_g_law(ctx: GateContext) -> GateOutcome:
+    """G-LAW — handle-lock supervised recognition (regiondump vs tri-labels)."""
+    gate_id = "G-LAW"
+    if gate_id not in LIVE_GATES:
+        return xfail_not_landed(gate_id, ctx.fixture.id, "ac2-l4")
+    if ctx.fixture.id != "handle-lock":
+        return go(
+            ctx,
+            gate_id,
+            "SKIP",
+            "G-LAW: handle-lock only (single-fixture supervised gate)",
+            hard=True,
+        )
+    if not (ctx.dump_path and ctx.dump_path.is_file()):
+        return go(
+            ctx,
+            gate_id,
+            "XFAIL",
+            "G-LAW: --dump <stl2step_regiondump> not supplied or missing",
+            hard=True,
+        )
+    script = REPO_ROOT / "tests" / "gates" / "law_recognition.py"
+    if not script.is_file():
+        return go(ctx, gate_id, "FAIL", f"G-LAW driver missing: {script}")
+
+    bare = ctx.work_dir / f"{ctx.fixture.id}.regionset.json"
+    made = subprocess.run(
+        [
+            str(ctx.dump_path),
+            str(ctx.fixture.stl),
+            "--component",
+            "0",
+            "--bare",
+            "--out",
+            str(bare),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if made.returncode != 0 or not bare.is_file():
+        return go(
+            ctx,
+            gate_id,
+            "FAIL",
+            f"G-LAW regiondump failed: {(made.stderr or made.stdout).strip()[:400]}",
+        )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--dump",
+            str(ctx.dump_path),
+            "--regiondump",
+            str(bare),
+            "--stl",
+            str(ctx.fixture.stl),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stdout + proc.stderr).strip()[-2000:]
+        return go(ctx, gate_id, "FAIL", f"G-LAW: {detail}", hard=True)
+    return go(
+        ctx,
+        gate_id,
+        "PASS",
+        "G-LAW: band recall / purity / radius ratchet + RULE 4.2a PASS",
+        hard=True,
+    )
+
+
 GATE_REGISTRY: Dict[str, Callable[[GateContext], GateOutcome]] = {
     "G0.1": gate_g0_1_off_path_identity,
     "G0.2": gate_g0_2_refit_closedness,
@@ -967,6 +1044,7 @@ GATE_REGISTRY: Dict[str, Callable[[GateContext], GateOutcome]] = {
     "include-allowlist": gate_include_allowlist,
     "calibration": gate_calibration,
     "R-ladder": gate_r_ladder,
+    "G-LAW": gate_g_law,
 }
 
 
