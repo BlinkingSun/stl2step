@@ -44,3 +44,14 @@ if(TARGET stl2step::core)
         stl2step_adhoc_sign(cascade_api_probe)
     endif()
 endif()
+
+# SPEC AC2-L3 RULE 2.2 scoped-adoption probe — convert() + C4/C5/C6. Not a ctest
+# (C8 pins the clean count).
+if(TARGET stl2step::core)
+    add_executable(rule22_adopt_api rule22_adopt_api.cpp)
+    target_compile_features(rule22_adopt_api PRIVATE cxx_std_17)
+    target_link_libraries(rule22_adopt_api PRIVATE stl2step::core)
+    if(COMMAND stl2step_adhoc_sign)
+        stl2step_adhoc_sign(rule22_adopt_api)
+    endif()
+endif()
