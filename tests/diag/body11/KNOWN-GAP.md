@@ -99,6 +99,17 @@ by D1 §M1). The gap 1 → 13 is blocked by planar-plate face validity, not by t
    rid=16 → 15.000 within 0.3 % via growth `R_ref`. Sequential after the above; not measurable
    until the plates ship.
 
+**`prism_build_unit` C1 face census 28 = 13p + 15c — PARKED (D10, 2026-08-30).**
+Shipped floor is **35 = 20p + 15c**, evidence `_team/reports/f3-unify.md`: `nExact=0` adjacent coplanar
+pairs at `Precision::Confusion()`; all 15 cylinders GT-exact; `volumeDeltaPct=0.000000`; watertight+valid.
+Blocked on **two independent items**:
+**(a) Class B — 4 unique-normal slivers** (1.57e-6..6.37e-5 mm², normals 2.76°–35.6° off any truth plane):
+profile-loop closure defect, D9 §2.3, remedy in `src/refit_profile.cpp` (lane F2). Clearing (a) → **31 = 16p + 15c**.
+**(b) Class A — 3 slab-seam/boss splits** (17.94 / 4.66 / 1.88e-5 mm², `ang` 9.9e-8..3.5e-6, `dd` 2.7e-5..1.0e-3):
+architectural consequence of **D7 RULE 5.2b** (union of axially disjoint prisms). Requires a lateral-seam
+merge ruling; **not fixable under G1–G5 and no lane may attempt it by inflating tolerance.**
+Clearing (a)+(b) → **28 = 13p + 15c**. **Unpark only when both land.**
+
 **Standing constraints for any v-next lane** (carried, not re-litigated): `GT_REL_TOL=0.003` is not
 loosened; no rid special-casing; no shared-edge tol ≥ the S09 poison threshold; no ladder or gate
 edits; `src/stl2step.cpp:614-652` (D4.5 probe) frozen at

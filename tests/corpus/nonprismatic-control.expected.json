@@ -30,7 +30,8 @@
       "builtCylindersFloor": 0,
       "builtPlanesFloor": 0,
       "faceCount": 26,
-      "surfaceCensus": {"plane": 2, "cylinder": 2, "planar_facets": 0}
+      "surfaceCensus": {"plane": 26, "cylinder": 0, "planar_facets": 0},
+      "volumeBudgetMM3": 0.2016000132
     }
   ]
 }
