@@ -33,6 +33,7 @@ REPO = Path(__file__).resolve().parents[2]
 DEFAULT_STL = REPO / "tests" / "corpus" / "handle-lock.stl"
 DEFAULT_LABELS = REPO / "tests" / "gates" / "labels" / "handle-lock.tri-labels.json"
 DEFAULT_RATCHET = REPO / "tests" / "gates" / "baseline" / "law-ratchet.json"
+# Provenance cross-check only (untracked in git). Authority is DEFAULT_LABELS (190347 bytes).
 SOURCE_LABELS = REPO / "_team" / "reports" / "ac2" / "tri-labels.json"
 RATCHET_NAME = "law-ratchet.json"
 SRC = REPO / "src"
@@ -422,18 +423,30 @@ def make_improvement_dump(base: Dict[str, Any], tri_info: Dict[int, TriLabel], c
     return dump
 
 
-def verify_fixture(labels_path: Path, source_path: Path) -> List[str]:
+def verify_fixture(labels_path: Path, source_path: Path) -> Tuple[List[str], List[str]]:
+    """Validate tracked labels fixture; optionally cross-check untracked provenance source.
+
+    The tracked fixture (tests/gates/labels/handle-lock.tri-labels.json) is the data
+    authority. SOURCE_LABELS (_team/reports/ac2/tri-labels.json) is untracked and only
+    present in full checkouts; when absent the byte-identity cross-check is skipped with
+    a note. A present but differing source is a hard FAIL.
+    """
     fails: List[str] = []
+    notes: List[str] = []
     if not labels_path.is_file():
-        return [f"fixture missing: {labels_path}"]
-    if not source_path.is_file():
-        return [f"source labels missing: {source_path}"]
+        return [f"fixture missing: {labels_path}"], notes
     a = labels_path.read_bytes()
-    b = source_path.read_bytes()
-    if a != b:
-        fails.append(
-            f"fixture not byte-identical to {source_path} "
-            f"(fixture {len(a)} bytes, source {len(b)} bytes)"
+    if source_path.is_file():
+        b = source_path.read_bytes()
+        if a != b:
+            fails.append(
+                f"fixture not byte-identical to {source_path} "
+                f"(fixture {len(a)} bytes, source {len(b)} bytes)"
+            )
+    else:
+        notes.append(
+            f"provenance cross-check skipped: {source_path} absent "
+            f"(tracked fixture {labels_path} is authority, {len(a)} bytes)"
         )
     doc = json.loads(a.decode("utf-8"))
     if int(doc.get("n_tri") or 0) != 908:
@@ -444,7 +457,7 @@ def verify_fixture(labels_path: Path, source_path: Path) -> List[str]:
         fails.append(f"n_faces={doc.get('n_faces')} expected 28")
     if len(doc.get("triangles") or []) != 908:
         fails.append(f"triangles rows={len(doc.get('triangles') or [])} expected 908")
-    return fails
+    return fails, notes
 
 
 def _self_test() -> int:
@@ -458,7 +471,9 @@ def _self_test() -> int:
         else:
             print(f"SELFTEST PASS: {msg}")
 
-    fixture_fails = verify_fixture(DEFAULT_LABELS, SOURCE_LABELS)
+    fixture_fails, fixture_notes = verify_fixture(DEFAULT_LABELS, SOURCE_LABELS)
+    for note in fixture_notes:
+        print(f"SELFTEST NOTE: {note}")
     check(fixture_fails == [], f"fixture integrity ({fixture_fails or 'ok'})")
 
     tri_info, cyl_faces = load_labels(DEFAULT_LABELS)
@@ -548,7 +563,9 @@ def run_gate(args: argparse.Namespace) -> int:
     dump_bin = args.dump.resolve() if args.dump else None
     dump_path = args.regiondump.resolve() if args.regiondump else None
 
-    fixture_fails = verify_fixture(labels_path, SOURCE_LABELS)
+    fixture_fails, fixture_notes = verify_fixture(labels_path, SOURCE_LABELS)
+    for note in fixture_notes:
+        print(f"G-LAW NOTE: {note}")
     if fixture_fails:
         for f in fixture_fails:
             print(f"G-LAW FAIL: {f}", file=sys.stderr)
