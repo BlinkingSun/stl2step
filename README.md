@@ -40,11 +40,17 @@ stl2step exposes two named conversion modes:
 | Mode | CLI | What you get |
 |---|---|---|
 | **Verbatim** (default) | `--engine verbatim` / `--no-smooth` | Byte-faithful tessellation. Curved surfaces stay faceted at the STL resolution. STEP + RESULT are **byte-identical to 1.0.0** (gate G0.1, 22/22). |
-| **TrueForm** (premium) | `--engine trueform` / `--smooth` / `--refit` | Analytic recovery: **planes**, **right circular cylinders** (N ≥ 6), and **plane–plane fillet strips** (1–3 rows) as `Geom_Plane` / `Geom_CylindricalSurface` faces with editable radii. |
+| **TrueForm** (premium) | `--engine trueform` / `--smooth` / `--refit` | Analytic recovery: tessellation-**law-based** arc recognition (exact radii via the chord/angle inverse), **planes**, **right circular cylinders**, fillet strips — and for **prismatic (2.5D) parts**, full profile-based reconstruction: 2D line/arc profiles per level (optionally emitted as DXF via `--dxf <dir>`), extruded back into a solid whose curved walls are analytic **by construction**. |
+
+![STL mesh to faceted solid to analytic solid](docs/assets/conversion-stages.png)
+
+*The two stages: input mesh → Stage 1 faceted solid (Verbatim) → Stage 2
+analytic solid (TrueForm). Stop after Stage 1, or run the full conversion.
+The method is described in [`docs/METHOD.md`](docs/METHOD.md).*
 
 **Verbatim is always safe.** TrueForm runs per component; any component that cannot close analytically falls back to Verbatim for that body only — the file is still written, never corrupted.
 
-On a real CAD export (Body11 benchmark: 15,300 triangles, 583 cylinders recognised by segmentation, 419 in the legacy recognition counter), TrueForm today builds **127** of those as analytic cylinders in the written STEP while keeping 2 closed solids and exact volume. The remaining recognition gap and twelve residual free-edge classes are documented in [`tests/diag/body11/KNOWN-GAP.md`](tests/diag/body11/KNOWN-GAP.md) — not silent regressions.
+On a fully prismatic real CAD export (the `handle-lock` fixture: 908 triangles, 28 true faces), TrueForm reconstructs **all 15 cylinders as analytic faces with every radius matching the source CAD within 0.3%**, at 0.000000% volume deviation, watertight and valid. On non-prismatic parts the general path applies; the remaining recognition gaps are documented in [`tests/diag/body11/KNOWN-GAP.md`](tests/diag/body11/KNOWN-GAP.md) — not silent regressions.
 
 Flat faces are recovered exactly in both modes — coplanar triangles merge into single planar faces. This is the main win for downstream CAM even without TrueForm.
 

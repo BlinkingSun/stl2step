@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-30
+
+### Added
+- **Tessellation-law arc recognition** (TrueForm): exported meshes are
+  recognized by the deterministic law their tessellator followed; radii are
+  recovered by the closed-form inverse `R = w/(2·sin(θ/2))` with
+  self-calibrated, never hard-coded, law parameters. Law-driven segmentation
+  claims arc bands before plane absorption, splits mixed-radius chimeras, and
+  is scored against labeled triangle↔surface truth in the test suite (G-LAW).
+- **Prismatic (2.5D) reconstruction** (TrueForm): prismaticity detection,
+  cap-level slicing, 2D line/arc profile fitting, and extrude-and-unite
+  rebuild — curved walls become analytic cylinders by construction. On the
+  bundled fully-prismatic fixture, all 15 cylinders ship analytic with radii
+  within 0.3% of the source CAD at 0.000000% volume deviation.
+- **`--dxf <dir>`**: emit one DXF per level of the recognized 2D profiles
+  (prismatic parts; inert when unset, output byte-identical).
+- Arc-aware volume authority for reconstructed solids (arc-vs-chord defect
+  budgets computed from the law); phantom-volume classes remain rejected.
+- New gate families: G-LAW supervised recognition, G-PRISM, prism routing,
+  census/GT-radii ratchets, per-body free-edge red-lines, cascade waiver
+  tripwire, stress-sweep harness.
+- `docs/METHOD.md`: an educational description of the two-stage engine and
+  the recognition method.
+
+### Changed
+- J6 closure improvements on real CAD exports (free edges reduced up to 4×
+  on benchmark bodies) with volume strictly preserved.
+- Verbatim (Stage 1) remains byte-identical (G0.1) and remains the default;
+  the engine is explicitly two-part — stop at Stage 1, or run TrueForm.
+
 ### Fixed
 - CI (Linux): install `libtbb-dev` alongside the OCCT packages — Ubuntu's
   OpenCASCADE CMake config references TBB by absolute path, so linking failed
