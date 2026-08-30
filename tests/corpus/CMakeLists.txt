@@ -111,10 +111,13 @@ add_test(NAME corpus_determinism
     else()
         set(_engine_check_cmd "${CMAKE_CURRENT_SOURCE_DIR}/run_engine_check.sh")
     endif()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME corpus_engine_convert
         COMMAND ${_engine_check_cmd}
                 $<TARGET_FILE:stl2step>)
+    # PYTHON: Git Bash `python3` is the Windows Store stub (Permission denied).
+    # PYTHONUTF8=1: CMake ENVIRONMENT (not `set X=1 &&`, which poisons the value).
     set_tests_properties(corpus_engine_convert PROPERTIES
-        ENVIRONMENT "CORPUS=${_corpus_out_dir};CENSUS=$<TARGET_FILE:stl2step_census>"
+        ENVIRONMENT "CORPUS=${_corpus_out_dir};CENSUS=$<TARGET_FILE:stl2step_census>;PYTHON=${Python3_EXECUTABLE};PYTHONUTF8=1"
         DEPENDS corpus_generate)
 endif()

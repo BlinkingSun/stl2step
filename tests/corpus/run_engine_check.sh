@@ -6,6 +6,24 @@ set -euo pipefail
 STL2STEP="$1"
 CENSUS="${CENSUS:-}"
 CORPUS="${CORPUS:-tests/corpus}"
+# Prefer CMake-injected PYTHON (real interpreter). Git Bash `python3` on
+# Windows is often the Store alias (.../WindowsApps/python3) — Permission denied.
+if [[ -z "${PYTHON:-}" ]]; then
+  for _c in python3 python; do
+    _resolved=$(command -v "$_c" 2>/dev/null || true)
+    case "$_resolved" in
+      *WindowsApps*) continue ;;
+    esac
+    if [[ -n "$_resolved" ]] && "$_c" -c "import sys" >/dev/null 2>&1; then
+      PYTHON=$_c
+      break
+    fi
+  done
+fi
+if [[ -z "${PYTHON:-}" ]]; then
+  echo "FAIL: no usable Python (set PYTHON=... or install CPython)" >&2
+  exit 1
+fi
 FAIL=0
 for stl in "$CORPUS"/*.stl; do
   [[ -f "$stl" ]] || continue
@@ -21,7 +39,7 @@ for stl in "$CORPUS"/*.stl; do
     FAIL=1
     continue
   fi
-  python3 - "$id" "$rc" "$sidecar" /tmp/"${id}"_result.json <<'PY' || { FAIL=1; continue; }
+  "$PYTHON" - "$id" "$rc" "$sidecar" /tmp/"${id}"_result.json <<'PY' || { FAIL=1; continue; }
 import json, sys
 id, rc, sc_path, res_path = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 sc = json.load(open(sc_path))
@@ -50,14 +68,14 @@ if ok:
 sys.exit(0 if ok else 1)
 PY
 
-  smooth_exit=$(python3 -c "import json; print(json.load(open('$sidecar')).get('smoothExpectedExit', -1))")
+  smooth_exit=$("$PYTHON" -c "import json; print(json.load(open('$sidecar')).get('smoothExpectedExit', -1))")
   if [[ "$smooth_exit" != "-1" ]]; then
     sout="/tmp/${id}_smooth.step"
     set +e
     "$STL2STEP" "$stl" "$sout" --quiet --smooth >/tmp/"${id}"_smooth_result.json 2>/tmp/"${id}"_smooth_stderr.txt
     src=$?
     set -e
-    python3 - "$id" "$src" "$sidecar" /tmp/"${id}"_smooth_result.json <<'PY' || { FAIL=1; continue; }
+    "$PYTHON" - "$id" "$src" "$sidecar" /tmp/"${id}"_smooth_result.json <<'PY' || { FAIL=1; continue; }
 import json, sys
 id, rc, sc_path, res_path = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 sc = json.load(open(sc_path))
@@ -107,7 +125,7 @@ if ok:
 sys.exit(0 if ok else 1)
 PY
     if [[ -n "$CENSUS" && -x "$CENSUS" ]]; then
-      python3 - "$id" "$sidecar" "$sout" "$CENSUS" <<'PY' || { FAIL=1; continue; }
+      "$PYTHON" - "$id" "$sidecar" "$sout" "$CENSUS" <<'PY' || { FAIL=1; continue; }
 import json, subprocess, sys
 id, sc_path, step, census = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 sc = json.load(open(sc_path))

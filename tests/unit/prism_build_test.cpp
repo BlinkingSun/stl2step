@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <cstdio>
 #include <cstdlib>
@@ -431,9 +432,11 @@ int main(int argc, char** argv) {
     dumpFaceTable("API", solid);
 
     // D10: pin the shipped artifact (convert + host unify), not the pre-unify API solid.
+    // temp_directory_path(): /tmp is not a writable dir on MSVC/Windows.
     stl2step::Options optPin;
     optPin.input = stl;
-    optPin.output = "/tmp/p3-r3-api.step";
+    optPin.output =
+        (std::filesystem::temp_directory_path() / "stl2step-p3-r3-api.step").string();
     optPin.smooth = true;
     optPin.verify = true;
     const stl2step::Result r = stl2step::convert(optPin);

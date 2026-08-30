@@ -55,7 +55,7 @@ rem Git Bash + unix tools (bash for build_baseline.sh / run_engine_check.sh,
 rem diff for the corpus determinism check). Appended, so nothing is shadowed.
 set PATH=%PATH%;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin
 rem Windows Python defaults stdout to cp1252; the gate runner prints U+2264.
-set PYTHONUTF8=1
+set "PYTHONUTF8=1"
 cd /d D:\stl2step-ci
 "%CMAKE%" -S repo -B build ^
   -DCMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
