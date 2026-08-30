@@ -47,7 +47,8 @@ add_library(stl2step_core
     src/refit_chains.cpp
     src/refit_segment.cpp
     src/refit_build.cpp
-    src/refit_lawband.cpp)
+    src/refit_lawband.cpp
+    src/dxf_export.cpp)
 add_library(stl2step::core ALIAS stl2step_core)
 
 target_compile_features(stl2step_core PUBLIC cxx_std_17)
