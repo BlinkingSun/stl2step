@@ -25,6 +25,8 @@ endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/prismscan/CMakeLists.txt")
     add_subdirectory(tools/prismscan)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/profile_dump/CMakeLists.txt")
+    add_subdirectory(tools/profile_dump)
 endif()
 
 # SPEC AC-J6HEAL API probe — calls stl2step::convert() directly. Not a ctest
