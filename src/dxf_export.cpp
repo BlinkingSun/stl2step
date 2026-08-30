@@ -8,17 +8,14 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
-
-#include <clocale>
-#ifdef __APPLE__
-#include <xlocale.h>
-#endif
 
 namespace stl2step {
 namespace refit {
@@ -49,21 +46,21 @@ static bool isFullTurn(double phi) {
     return std::fabs(ap - t) <= bound || ap >= t - bound;
 }
 
-// Per-thread C numeric locale so %.16g is byte-stable (no comma, no locale).
-struct CNumeric {
-    locale_t loc = static_cast<locale_t>(0);
-    locale_t old = static_cast<locale_t>(0);
-    CNumeric() {
-        loc = newlocale(LC_NUMERIC_MASK, "C", static_cast<locale_t>(0));
-        if (loc) old = uselocale(loc);
-    }
-    ~CNumeric() {
-        if (old) uselocale(old);
-        if (loc) freelocale(loc);
-    }
-    CNumeric(const CNumeric&) = delete;
-    CNumeric& operator=(const CNumeric&) = delete;
-};
+// Locale-independent float writer: classic() imbue, no thread-locale mutation.
+static std::string fmtClassic(double v, std::ios_base::fmtflags field, int prec,
+                              bool showPos = false) {
+    std::ostringstream oss;
+    oss.imbue(std::locale::classic());
+    oss.setf(field, std::ios::floatfield);
+    oss << std::setprecision(prec);
+    if (showPos) oss << std::showpos;
+    oss << v;
+    return oss.str();
+}
+
+static std::string fmtG16(double v) {
+    return fmtClassic(v, std::ios::fmtflags(0), 16);
+}
 
 static void appendLine(std::string& s, const char* t) {
     s += t;
@@ -81,13 +78,12 @@ static void appendNum(std::string& s, double v) {
         appendLine(s, "0");
         return;
     }
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.16g", v);
-    if (std::strcmp(buf, "-0") == 0 || std::strcmp(buf, "-0.0") == 0) {
+    const std::string t = fmtG16(v);
+    if (t == "-0" || t == "-0.0") {
         appendLine(s, "0");
         return;
     }
-    appendLine(s, buf);
+    appendLine(s, t.c_str());
 }
 
 static void pairS(std::string& s, int code, const char* val) {
@@ -177,8 +173,6 @@ static int countDeclined(const Profile& p) {
 }
 
 static std::string buildDxf(const Profile& p, const PrismLevels& lv) {
-    CNumeric cnum;
-
     double y0 = 0.0, y1 = 0.0;
     if (p.slab >= 0 && p.slab + 1 < static_cast<int>(lv.y.size())) {
         y0 = lv.y[static_cast<size_t>(p.slab)];
@@ -202,12 +196,9 @@ static std::string buildDxf(const Profile& p, const PrismLevels& lv) {
         std::snprintf(ib, sizeof(ib), "%d", p.slab);
         proj += ib;
         proj += " y0=";
-        char yb[64];
-        std::snprintf(yb, sizeof(yb), "%.16g", y0);
-        proj += yb;
+        proj += fmtG16(y0);
         proj += " y1=";
-        std::snprintf(yb, sizeof(yb), "%.16g", y1);
-        proj += yb;
+        proj += fmtG16(y1);
         pairS(s, 1, proj.c_str());
     }
     pairS(s, 0, "ENDSEC");
@@ -219,10 +210,13 @@ static std::string buildDxf(const Profile& p, const PrismLevels& lv) {
         pairS(s, 999, buf);
     }
     {
-        char buf[96];
-        std::snprintf(buf, sizeof(buf), "axis=%.16g,%.16g,%.16g",
-                      lv.axis.X(), lv.axis.Y(), lv.axis.Z());
-        pairS(s, 999, buf);
+        std::string axis = "axis=";
+        axis += fmtG16(lv.axis.X());
+        axis += ',';
+        axis += fmtG16(lv.axis.Y());
+        axis += ',';
+        axis += fmtG16(lv.axis.Z());
+        pairS(s, 999, axis.c_str());
     }
 
     pairS(s, 0, "SECTION");
@@ -258,10 +252,7 @@ static std::string buildDxf(const Profile& p, const PrismLevels& lv) {
 }
 
 static std::string fmtNameCoord(double v) {
-    CNumeric cnum;
-    char buf[48];
-    std::snprintf(buf, sizeof(buf), "%+.9f", v);
-    return buf;
+    return fmtClassic(v, std::ios::fixed, 9, true);
 }
 
 }  // namespace
