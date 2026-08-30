@@ -37,19 +37,10 @@ if(COMMAND stl2step_adhoc_sign)
     stl2step_adhoc_sign(stl2step_lawband_test)
 endif()
 
-set(_anat "${_stl2step_root}/_team/reports/ac2/band-anatomy.json")
-if(NOT EXISTS "${_anat}")
-    set(_anat "/Users/jroberts/Desktop/Internal Development/Tools/stl2step/_team/reports/ac2/band-anatomy.json")
-endif()
+set(_anat "${_stl2step_root}/tests/gates/labels/handle-lock.band-anatomy.json")
 set(_stl "${_stl2step_root}/tests/corpus/handle-lock.stl")
-set(_mis "${_stl2step_root}/_team/reports/ac2/misfit-map.json")
-if(NOT EXISTS "${_mis}")
-    set(_mis "/Users/jroberts/Desktop/Internal Development/Tools/stl2step/_team/reports/ac2/misfit-map.json")
-endif()
-set(_lab "${_stl2step_root}/_team/reports/ac2/tri-labels.json")
-if(NOT EXISTS "${_lab}")
-    set(_lab "/Users/jroberts/Desktop/Internal Development/Tools/stl2step/_team/reports/ac2/tri-labels.json")
-endif()
+set(_mis "${_stl2step_root}/tests/gates/labels/handle-lock.misfit-map.json")
+set(_lab "${_stl2step_root}/tests/gates/labels/handle-lock.tri-labels.json")
 
 add_test(NAME lawband_unit
     COMMAND stl2step_lawband_test

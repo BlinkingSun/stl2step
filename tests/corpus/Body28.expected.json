@@ -3,7 +3,7 @@
   "description": "Real CAD export — contrast fixture (1 component, plate-scale part, 344 recognised cylinders, 0 built today)",
   "realExport": true,
   "provenance": {
-    "sourcePath": "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body28.stl",
+    "sourcePath": "Body28.stl",
     "statement": "Real CAD export from the user's own work; not authored for this project and not derived from any corpus fixture."
   },
   "deflection": 0,

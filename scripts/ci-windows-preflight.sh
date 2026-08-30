@@ -4,7 +4,11 @@
 # (Windows counts 2x on metered private-repo Actions; the vcpkg OCCT
 # build alone is ~3.5h on a cold hosted runner).
 #
-#   scripts/ci-windows-preflight.sh [user@host]   # default: shop PC
+#   scripts/ci-windows-preflight.sh <user@host>
+#   STL2STEP_WIN_HOST=<user@host> scripts/ci-windows-preflight.sh
+#
+# Host is required ($1 or STL2STEP_WIN_HOST). No baked-in user, hostname,
+# or LAN address.
 #
 # One-time prep on the PC (already done 2026-08-26): VS 2022 Build Tools
 # with MSVC + SDK + bundled CMake, and D:\stl2step-ci\install-occt.cmd
@@ -16,7 +20,12 @@
 # generator, Release, ctest -C Release.
 set -uo pipefail
 
-HOST="${1:-fireb@192.168.200.98}"
+HOST="${1:-${STL2STEP_WIN_HOST:-}}"
+if [ -z "$HOST" ]; then
+  echo "usage: scripts/ci-windows-preflight.sh <user@host>" >&2
+  echo "   or: STL2STEP_WIN_HOST=<user@host> scripts/ci-windows-preflight.sh" >&2
+  exit 1
+fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo"

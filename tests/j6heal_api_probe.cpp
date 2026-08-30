@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -27,10 +28,22 @@ int parseFreeEdges(const std::vector<std::string>& warnings) {
 
 struct Case {
     const char* name;
-    const char* stl;
+    std::string stl;
     double volCeil;
     int freeCeil;  // -1 = must be closed (no J6)
 };
+
+bool fileExists(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return static_cast<bool>(in);
+}
+
+std::string joinCorpus(const char* root, const char* leaf) {
+    std::string out(root);
+    if (!out.empty() && out.back() != '/' && out.back() != '\\') out += '/';
+    out += leaf;
+    return out;
+}
 
 int runOne(const Case& c, const std::string& outDir, std::string& line) {
     stl2step::Options opt;
@@ -70,36 +83,50 @@ int runOne(const Case& c, const std::string& outDir, std::string& line) {
 }  // namespace
 
 int main() {
+    const char* corpus = std::getenv("STL2STEP_PRIVATE_CORPUS");
+    if (!corpus || !corpus[0]) {
+        std::fprintf(stderr, "SKIP: STL2STEP_PRIVATE_CORPUS unset\n");
+        return 77;
+    }
+
     const char* outDir = std::getenv("J6HEAL_OUT");
     if (!outDir || !outDir[0]) outDir = "/tmp/j6heal-r2-api";
     std::string mkdir = std::string("mkdir -p '") + outDir + "'";
     if (std::system(mkdir.c_str()) != 0) return 2;
 
-    const Case cases[] = {
-        {"handle-lock",
-         "tests/diag/handle-lock/handle-lock.stl", 0.0, -1},
-        {"Body9",
-         "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body9.stl", 0.030937,
-         34},
-        {"Body12",
-         "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body12.stl", 0.0, 81},
-        {"Body18",
-         "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body18.stl", 0.0, 18},
-        {"Body20",
-         "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body20.stl", 0.0, 32},
+    const Case wanted[] = {
+        {"handle-lock", "tests/diag/handle-lock/handle-lock.stl", 0.0, -1},
+        {"Body9", joinCorpus(corpus, "Body9.stl"), 0.030937, 34},
+        {"Body12", joinCorpus(corpus, "Body12.stl"), 0.0, 81},
+        {"Body18", joinCorpus(corpus, "Body18.stl"), 0.0, 18},
+        {"Body20", joinCorpus(corpus, "Body20.stl"), 0.0, 32},
     };
 
-    std::vector<std::string> lines(sizeof(cases) / sizeof(cases[0]));
-    std::vector<int> codes(lines.size(), 1);
+    std::vector<Case> cases;
+    cases.reserve(sizeof(wanted) / sizeof(wanted[0]));
+    for (const Case& c : wanted) {
+        if (!fileExists(c.stl)) {
+            std::fprintf(stderr, "SKIP %s: missing %s\n", c.name, c.stl.c_str());
+            continue;
+        }
+        cases.push_back(c);
+    }
+    if (cases.empty()) {
+        std::fprintf(stderr, "SKIP: no probe STLs under STL2STEP_PRIVATE_CORPUS\n");
+        return 77;
+    }
+
+    std::vector<std::string> lines(cases.size());
+    std::vector<int> codes(cases.size(), 1);
     std::vector<std::thread> pool;
-    pool.reserve(lines.size());
-    for (size_t i = 0; i < lines.size(); i++) {
+    pool.reserve(cases.size());
+    for (size_t i = 0; i < cases.size(); i++) {
         pool.emplace_back([&, i]() { codes[i] = runOne(cases[i], outDir, lines[i]); });
     }
     for (auto& t : pool) t.join();
 
     int fail = 0;
-    for (size_t i = 0; i < lines.size(); i++) {
+    for (size_t i = 0; i < cases.size(); i++) {
         std::printf("%s rc=%d\n", lines[i].c_str(), codes[i]);
         if (codes[i] != 0) fail++;
     }

@@ -192,7 +192,7 @@ endif()
 
 # --- gates-j6watch ---
 # J6 freeEdges watch on private Body9/12/18/20. Always registered so CI
-# sees the label; SKIP (77) when STL2STEP_PRIVATE_CORPUS / default is absent.
+# sees the label; SKIP (77) when STL2STEP_PRIVATE_CORPUS is unset or absent.
 # Do not bake a private path into this file. API self-test needs no meshes.
 set(_j6watch_script "${CMAKE_CURRENT_SOURCE_DIR}/j6_freeedges_watch.py")
 if(EXISTS "${_j6watch_script}")

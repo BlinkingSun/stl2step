@@ -6,10 +6,10 @@ Body9=34, Body12=81, Body18=18, Body20=32 (never worse). Lane-I stretch
 targets 14/26/14/8 are PARKED unless `--unpark j6-lane-i` (same register
 convention as run_gates.py).
 
-Private meshes resolve via env `STL2STEP_PRIVATE_CORPUS` (default
-`~/Desktop/Internal Development/3D files/STL`). Missing corpus or missing
-STLs → exit 77 (ctest SKIP_RETURN_CODE), never FAIL. Paths are never
-required inputs in committed fixtures.
+Private meshes resolve via env `STL2STEP_PRIVATE_CORPUS` (or
+`--private-corpus`). Unset/empty env, missing corpus, or missing STLs →
+exit 77 (ctest SKIP_RETURN_CODE), never FAIL. Paths are never required
+inputs in committed fixtures.
 
 Stdlib only. Files convert in parallel (ThreadPoolExecutor); each CLI
 gets a slice of cores.
@@ -31,9 +31,6 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_BASELINE = Path(__file__).resolve().parent / "j6-watch.json"
-DEFAULT_PRIVATE_CORPUS = (
-    Path.home() / "Desktop" / "Internal Development" / "3D files" / "STL"
-)
 ENV_PRIVATE_CORPUS = "STL2STEP_PRIVATE_CORPUS"
 SKIP_EXIT = 77
 FREE_EDGES_RE = re.compile(r"freeEdges=(\d+)")
@@ -74,28 +71,22 @@ class Outcome:
     details: Dict[str, Any] = field(default_factory=dict)
 
 
-def default_private_corpus() -> Path:
-    return DEFAULT_PRIVATE_CORPUS
-
-
 def resolve_corpus(
     cli_path: Optional[Path] = None,
     env: Optional[Dict[str, str]] = None,
 ) -> Path:
     """Resolve the private STL directory.
 
-    Precedence: --private-corpus, then STL2STEP_PRIVATE_CORPUS, then default.
-    An empty env value is treated as absent (caller SKIPs).
+    Precedence: --private-corpus, then STL2STEP_PRIVATE_CORPUS.
+    Unset or empty env is treated as absent (caller SKIPs). No home-path default.
     """
     if cli_path is not None:
         return Path(cli_path).expanduser()
     environ = os.environ if env is None else env
-    if ENV_PRIVATE_CORPUS in environ:
-        raw = environ[ENV_PRIVATE_CORPUS].strip()
-        if not raw:
-            return Path()
-        return Path(raw).expanduser()
-    return default_private_corpus()
+    raw = (environ.get(ENV_PRIVATE_CORPUS) or "").strip()
+    if not raw:
+        return Path()
+    return Path(raw).expanduser()
 
 
 def corpus_is_absent(corpus: Path) -> bool:
@@ -383,7 +374,7 @@ def self_test() -> int:
     check(SKIP_EXIT == 77, "SKIP exit is 77")
 
     defaulted = resolve_corpus(env={})
-    check(defaulted == default_private_corpus(), "unset env uses default path")
+    check(corpus_is_absent(defaulted), "unset env => absent corpus")
 
     if errors:
         print("SELF-TEST FAIL:")
@@ -404,7 +395,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument(
         "--private-corpus",
         type=Path,
-        help=f"Private STL directory (else ${ENV_PRIVATE_CORPUS}, else default)",
+        help=f"Private STL directory (else ${ENV_PRIVATE_CORPUS}; unset SKIPs)",
     )
     p.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE, help="j6-watch JSON")
     p.add_argument(

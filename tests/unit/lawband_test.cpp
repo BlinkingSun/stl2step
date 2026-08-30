@@ -99,8 +99,8 @@ static std::vector<int> byFace(const std::vector<FaceLabel>& labs, int face,
 
 int main(int argc, char** argv) {
     const char* stl = argc > 1 ? argv[1] : "tests/corpus/handle-lock.stl";
-    const char* anatP = argc > 2 ? argv[2] : "_team/reports/ac2/band-anatomy.json";
-    const char* labP = argc > 3 ? argv[3] : "_team/reports/ac2/tri-labels.json";
+    const char* anatP = argc > 2 ? argv[2] : "tests/gates/labels/handle-lock.band-anatomy.json";
+    const char* labP = argc > 3 ? argv[3] : "tests/gates/labels/handle-lock.tri-labels.json";
     (void)argc;
 
     HarnessMesh mesh;

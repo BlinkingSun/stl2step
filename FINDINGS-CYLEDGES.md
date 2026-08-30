@@ -69,7 +69,7 @@ wiring is Lane E / closure follow-on, not edge construction.
 ### Body12.stl (second fixture)
 
 ```sh
-./build/stl2step "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body12.stl" \
+./build/stl2step "$STL2STEP_PRIVATE_CORPUS/Body12.stl" \
   -o /tmp/b12.step --engine trueform --quiet
 # cyl|cyl warnings: 108 (skew/non-parallel mother lode — needs further conic accept)
 ```

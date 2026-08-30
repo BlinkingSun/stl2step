@@ -3,8 +3,7 @@
 Minimal meshes that reproduce Body11 `--smooth` failure classes on
 `main @ 6e3348d`. Drive with `python3 tests/diag/body11/run_repros.py`.
 
-Canonical Body11 (not copied here):
-`/Users/jroberts/Desktop/Internal Development/3D files/STL/Body11.stl`
+Canonical Body11 (not copied here): `$STL2STEP_PRIVATE_CORPUS/Body11.stl`
 
 | Mesh | Class reproduced today | Notes |
 |---|---|---|

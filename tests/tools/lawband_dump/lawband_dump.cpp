@@ -58,7 +58,7 @@ static std::vector<int> toLocal(const MeshView& mv, const std::vector<int>& glob
 int main(int argc, char** argv) {
     const char* stl = argc > 1 ? argv[1] : "tests/corpus/handle-lock.stl";
     const char* anat = argc > 2 ? argv[2]
-                                : "_team/reports/ac2/band-anatomy.json";
+                                : "tests/gates/labels/handle-lock.band-anatomy.json";
     HarnessMesh mesh;
     std::string err;
     if (!loadMesh(stl, 1.0, 0.0, 0.0, mesh, err) || mesh.comps.empty()) {

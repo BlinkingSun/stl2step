@@ -1,0 +1,1822 @@
+{
+  "ok": true,
+  "commit": "34ae192",
+  "truthFaces": 28,
+  "truthPlanes": 13,
+  "truthCylinders": 15,
+  "ourRegions": 25,
+  "ourPlanes": 9,
+  "ourCylinders": 16,
+  "shipBuiltPlanes": 9,
+  "shipBuiltCylinders": 1,
+  "shipFaces": 102,
+  "shipVolume": 15864.420305023677,
+  "truthVolume": 15868.826797794893,
+  "headline": {
+    "geomRid6": "rid=6 (R=20.2468, 28 tri) sits on true F21 R15 (26/28) \u2014 blend \u221a(27.3285\u00b715.000)=20.2468; NOT the R20 fillet",
+    "geomF6": "true F6 R20 (6 tri, 10\u00b0) absorbed by plane rid=4 \u2014 never a cylinder region",
+    "geomRid16": "rid=16 (R=15.578) is F27 R10 + F23 R30 leftover, not the 15 mm bore",
+    "R16": "true F7 R16 is 1:1 rid=14 (38 tri, R=15.9999); rid=5 is a 4-tri junk R16.01, not a split half",
+    "ship": "smoothBuiltCylinders=1 (F11 R5.75 only); 14/15 true cyls lost"
+  },
+  "radiusProximity": [
+    {
+      "rid": 3,
+      "ourR": 5.750000542,
+      "nTri": 96,
+      "closed360": true,
+      "proxTrueFace": 11,
+      "proxTrueR": 5.75,
+      "proxDmm": 5.42e-07,
+      "geomPrimaryTrue": 11,
+      "geomHist": {
+        "11": 96
+      }
+    },
+    {
+      "rid": 5,
+      "ourR": 16.011702646,
+      "nTri": 4,
+      "closed360": false,
+      "proxTrueFace": 7,
+      "proxTrueR": 16,
+      "proxDmm": 0.011702646,
+      "geomPrimaryTrue": 18,
+      "geomHist": {
+        "18": 2,
+        "21": 2
+      }
+    },
+    {
+      "rid": 6,
+      "ourR": 20.246772612,
+      "nTri": 28,
+      "closed360": false,
+      "proxTrueFace": 6,
+      "proxTrueR": 20,
+      "proxDmm": 0.246772612,
+      "geomPrimaryTrue": 21,
+      "geomHist": {
+        "21": 26,
+        "22": 2
+      }
+    },
+    {
+      "rid": 7,
+      "ourR": 29.999442857,
+      "nTri": 18,
+      "closed360": false,
+      "proxTrueFace": 23,
+      "proxTrueR": 30,
+      "proxDmm": -0.000557143,
+      "geomPrimaryTrue": 23,
+      "geomHist": {
+        "23": 14,
+        "24": 4
+      }
+    },
+    {
+      "rid": 8,
+      "ourR": 9.999992942,
+      "nTri": 32,
+      "closed360": false,
+      "proxTrueFace": 12,
+      "proxTrueR": 10,
+      "proxDmm": -7.058e-06,
+      "geomPrimaryTrue": 25,
+      "geomHist": {
+        "25": 32
+      }
+    },
+    {
+      "rid": 11,
+      "ourR": 10.000059898,
+      "nTri": 18,
+      "closed360": false,
+      "proxTrueFace": 12,
+      "proxTrueR": 10,
+      "proxDmm": 5.9898e-05,
+      "geomPrimaryTrue": 12,
+      "geomHist": {
+        "12": 18
+      }
+    },
+    {
+      "rid": 12,
+      "ourR": 5.000012445,
+      "nTri": 20,
+      "closed360": false,
+      "proxTrueFace": 4,
+      "proxTrueR": 5,
+      "proxDmm": 1.2445e-05,
+      "geomPrimaryTrue": 4,
+      "geomHist": {
+        "4": 20
+      }
+    },
+    {
+      "rid": 13,
+      "ourR": 5.993822534,
+      "nTri": 25,
+      "closed360": false,
+      "proxTrueFace": 15,
+      "proxTrueR": 6,
+      "proxDmm": -0.006177466,
+      "geomPrimaryTrue": 15,
+      "geomHist": {
+        "0": 1,
+        "15": 24
+      }
+    },
+    {
+      "rid": 14,
+      "ourR": 15.999850901,
+      "nTri": 38,
+      "closed360": false,
+      "proxTrueFace": 7,
+      "proxTrueR": 16,
+      "proxDmm": -0.000149099,
+      "geomPrimaryTrue": 7,
+      "geomHist": {
+        "7": 38
+      }
+    },
+    {
+      "rid": 15,
+      "ourR": 4.999999691,
+      "nTri": 24,
+      "closed360": false,
+      "proxTrueFace": 4,
+      "proxTrueR": 5,
+      "proxDmm": -3.09e-07,
+      "geomPrimaryTrue": 17,
+      "geomHist": {
+        "17": 24
+      }
+    },
+    {
+      "rid": 16,
+      "ourR": 15.57805475,
+      "nTri": 14,
+      "closed360": false,
+      "proxTrueFace": 7,
+      "proxTrueR": 16,
+      "proxDmm": -0.42194525,
+      "geomPrimaryTrue": 27,
+      "geomHist": {
+        "23": 2,
+        "27": 12
+      }
+    },
+    {
+      "rid": 17,
+      "ourR": 9.999950204,
+      "nTri": 14,
+      "closed360": false,
+      "proxTrueFace": 12,
+      "proxTrueR": 10,
+      "proxDmm": -4.9796e-05,
+      "geomPrimaryTrue": 27,
+      "geomHist": {
+        "27": 14
+      }
+    },
+    {
+      "rid": 18,
+      "ourR": 9.019539163,
+      "nTri": 40,
+      "closed360": false,
+      "proxTrueFace": 19,
+      "proxTrueR": 9.0,
+      "proxDmm": 0.019539163,
+      "geomPrimaryTrue": 19,
+      "geomHist": {
+        "19": 40
+      }
+    },
+    {
+      "rid": 19,
+      "ourR": 3.78712609,
+      "nTri": 20,
+      "closed360": false,
+      "proxTrueFace": 9,
+      "proxTrueR": 3.787157516,
+      "proxDmm": -3.1426e-05,
+      "geomPrimaryTrue": 9,
+      "geomHist": {
+        "9": 20
+      }
+    },
+    {
+      "rid": 20,
+      "ourR": 3.787147582,
+      "nTri": 20,
+      "closed360": false,
+      "proxTrueFace": 9,
+      "proxTrueR": 3.787157516,
+      "proxDmm": -9.933e-06,
+      "geomPrimaryTrue": 14,
+      "geomHist": {
+        "14": 20
+      }
+    },
+    {
+      "rid": 23,
+      "ourR": 0.500705778,
+      "nTri": 29,
+      "closed360": false,
+      "proxTrueFace": 0,
+      "proxTrueR": 0.5,
+      "proxDmm": 0.000705778,
+      "geomPrimaryTrue": 0,
+      "geomHist": {
+        "0": 29
+      }
+    }
+  ],
+  "stageCounts": {
+    "ladder culprit": 13,
+    "segmentation split": 1,
+    "shipped": 1
+  },
+  "faces": [
+    {
+      "trueFaceId": 0,
+      "type": "cylinder",
+      "trueRadius": 0.5,
+      "trueUSpanRad": 1.574024045,
+      "trueArea": 6.59122569,
+      "trueOrigin": [
+        250.327260921,
+        -290.327680868,
+        141.164075315
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        -0.0
+      ],
+      "nMeshTris": 34,
+      "meanTriDist": 0.003044412,
+      "maxTriDist": 0.003821489,
+      "ourRegionIds": [
+        23,
+        21,
+        13
+      ],
+      "regionTriCounts": {
+        "13": 1,
+        "21": 4,
+        "23": 29
+      },
+      "segmentation": "SPLIT",
+      "ourPrimaryRid": 23,
+      "builtAnalytic": false,
+      "ourRadius": 0.500705778,
+      "radiusErrorMM": 0.000705778,
+      "radiusErrorPct": 0.141155643,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": 0.000705778,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=23 rung=U2; prior DIAG_PARTIAL rid=23 valid=1 tag=rot-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 29,
+        "nTrueFaceTris": 34,
+        "eberlyOnTrueAxis": 0.499987728,
+        "eberlyOnOurAxis": 0.499982515,
+        "eberlyOnRegion": 0.500705778,
+        "archChainOnTrueFace": 0.926901758,
+        "archChainThetaMedDeg": 7.515341458,
+        "archChainOnRegion": 0.926589302,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.000233313,
+        "band": {
+          "nStrips": 23,
+          "nTris": 34,
+          "thetaMed_deg": 3.5,
+          "thetaMean_deg": 3.857142857142857,
+          "angSpan_deg": 81.61306936132131,
+          "vtxResidSigned": {
+            "mean": -1.492732081190872e-06,
+            "maxAbs": 7.96898704974458e-06,
+            "rms": 4.481304894183682e-06,
+            "n": 102
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 1,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 61.500000916,
+      "trueArea": 1751.434630277,
+      "trueOrigin": [
+        275.247812798,
+        -288.827872258,
+        142.750002127
+      ],
+      "trueAxisOrNormal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "nMeshTris": 182,
+      "meanTriDist": 5.395e-06,
+      "maxTriDist": 1.4359e-05,
+      "ourRegionIds": [
+        0
+      ],
+      "regionTriCounts": {
+        "0": 182
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 0,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=0 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 2,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 4.851689907,
+      "trueArea": 40.63290297,
+      "trueOrigin": [
+        250.81349617,
+        -288.827684603,
+        140.661430692
+      ],
+      "trueAxisOrNormal": [
+        -0.999614035,
+        7.677e-06,
+        0.027780932
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 6.49e-07,
+      "maxTriDist": 6.55e-07,
+      "ourRegionIds": [
+        21
+      ],
+      "regionTriCounts": {
+        "21": 2
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 21,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=21 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 3,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 42.746553937,
+      "trueArea": 1326.457012851,
+      "trueOrigin": [
+        275.247877118,
+        -280.452872258,
+        142.750002127
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 201,
+      "meanTriDist": 4.967e-06,
+      "maxTriDist": 1.436e-05,
+      "ourRegionIds": [
+        1
+      ],
+      "regionTriCounts": {
+        "1": 201
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 1,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=1 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 4,
+      "type": "cylinder",
+      "trueRadius": 5,
+      "trueUSpanRad": 1.396263402,
+      "trueArea": 78.19075049,
+      "trueOrigin": [
+        266.354737145,
+        -289.577803959,
+        121.000001729
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        -0.0
+      ],
+      "nMeshTris": 20,
+      "meanTriDist": 0.010825268,
+      "maxTriDist": 0.010835831,
+      "ourRegionIds": [
+        12
+      ],
+      "regionTriCounts": {
+        "12": 20
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 12,
+      "builtAnalytic": false,
+      "ourRadius": 5.000012445,
+      "radiusErrorMM": 1.2445e-05,
+      "radiusErrorPct": 0.000248896,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": 1.2445e-05,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=12 rung=U0; prior DIAG_PARTIAL rid=12 valid=1 tag=rect-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 20,
+        "nTrueFaceTris": 20,
+        "eberlyOnTrueAxis": 5.000012445,
+        "eberlyOnOurAxis": 5.000012445,
+        "eberlyOnRegion": 5.000012445,
+        "archChainOnTrueFace": 4.999958612,
+        "archChainThetaMedDeg": 8.000101222,
+        "archChainOnRegion": 4.999958612,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.001713962,
+        "band": {
+          "nStrips": 20,
+          "nTris": 20,
+          "thetaMed_deg": 3.0,
+          "thetaMean_deg": 3.9473684210526314,
+          "angSpan_deg": 74.6705154380321,
+          "vtxResidSigned": {
+            "mean": -3.665263493305796e-07,
+            "maxAbs": 1.4043987424550153e-05,
+            "rms": 5.881929846538986e-06,
+            "n": 60
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 5,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 12.260690114,
+      "trueArea": 120.626154367,
+      "trueOrigin": [
+        258.997812706,
+        -288.827747458,
+        133.929373805
+      ],
+      "trueAxisOrNormal": [
+        0.984807753,
+        -7.563e-06,
+        0.173648178
+      ],
+      "nMeshTris": 4,
+      "meanTriDist": 2.755e-06,
+      "maxTriDist": 4.247e-06,
+      "ourRegionIds": [
+        4
+      ],
+      "regionTriCounts": {
+        "4": 4
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 4,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=4 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 6,
+      "type": "cylinder",
+      "trueRadius": 20,
+      "trueUSpanRad": 0.174532925,
+      "trueArea": 29.23426497,
+      "trueOrigin": [
+        278.997806945,
+        -289.577901057,
+        135.679147075
+      ],
+      "trueAxisOrNormal": [
+        -7.68e-06,
+        -1.0,
+        -0.0
+      ],
+      "nMeshTris": 6,
+      "meanTriDist": 0.007521269,
+      "maxTriDist": 0.007529108,
+      "ourRegionIds": [
+        4
+      ],
+      "regionTriCounts": {
+        "4": 6
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 4,
+      "builtAnalytic": false,
+      "ourRadius": null,
+      "radiusErrorMM": null,
+      "radiusErrorPct": null,
+      "estimator": "unknown",
+      "estimatorBiasPredMM": 0.001530474,
+      "estimatorBiasNote": "no P1 cyl region; true-tris eberly/chain already = CAD R (S2 residual ~0)",
+      "stageLost": "segmentation split",
+      "diagEvidence": "true F6 R=20 tris absorbed by plane rid=4 (no cylinder region); hist={4: 6}",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 0,
+        "nTrueFaceTris": 6,
+        "eberlyOnTrueAxis": 20.001530474,
+        "eberlyOnOurAxis": 20.001530474,
+        "eberlyOnRegion": null,
+        "archChainOnTrueFace": 20.0015312,
+        "archChainThetaMedDeg": 3.33309229,
+        "archChainOnRegion": null,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.000761568,
+        "band": {
+          "nStrips": 6,
+          "nTris": 6,
+          "thetaMed_deg": 1.0,
+          "thetaMean_deg": 1.6,
+          "angSpan_deg": 7.778089167415863,
+          "vtxResidSigned": {
+            "mean": -4.953367701195551e-07,
+            "maxAbs": 1.325576557675845e-05,
+            "rms": 8.16134372658944e-06,
+            "n": 18
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 7,
+      "type": "cylinder",
+      "trueRadius": 16,
+      "trueUSpanRad": 1.54391992,
+      "trueArea": 69.78518038,
+      "trueOrigin": [
+        274.997875817,
+        -280.652870338,
+        120.000002027
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 38,
+      "meanTriDist": 0.010592946,
+      "maxTriDist": 0.010601629,
+      "ourRegionIds": [
+        14
+      ],
+      "regionTriCounts": {
+        "14": 38
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 14,
+      "builtAnalytic": false,
+      "ourRadius": 15.999850901,
+      "radiusErrorMM": -0.000149099,
+      "radiusErrorPct": -0.000931869,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -1.8789e-05,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE culprit rid=14 src=face faceValid=0; explode rid=14 rung=U0; prior DIAG_PARTIAL rid=14 valid=1 tag=rot-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 38,
+        "nTrueFaceTris": 38,
+        "eberlyOnTrueAxis": 15.999981212,
+        "eberlyOnOurAxis": 15.999981211,
+        "eberlyOnRegion": 15.999981211,
+        "archChainOnTrueFace": 15.999831078,
+        "archChainThetaMedDeg": 4.423035766,
+        "archChainOnRegion": 15.999835562,
+        "archDiag": {
+          "kind": "COMMIT",
+          "n": 38,
+          "score": 1.0,
+          "eberly": 16.0,
+          "chainR": 15.9999,
+          "appliedR": 15.9999,
+          "rel": 1.0,
+          "why": "coarse_window"
+        },
+        "blendSqrt": 15.9999,
+        "secHalfThetaBiasMM": 0.001370876,
+        "band": {
+          "nStrips": 38,
+          "nTris": 38,
+          "thetaMed_deg": 1.5,
+          "thetaMean_deg": 2.1666666666666665,
+          "angSpan_deg": 357.05198032461595,
+          "vtxResidSigned": {
+            "mean": -5.278531323383325e-07,
+            "maxAbs": 1.269950058535585e-05,
+            "rms": 5.334445927408941e-06,
+            "n": 114
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 8,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 10.320855101,
+      "trueArea": 86.437161467,
+      "trueOrigin": [
+        258.997801186,
+        -290.327747458,
+        116.000001729
+      ],
+      "trueAxisOrNormal": [
+        -1.0,
+        7.68e-06,
+        0.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 1.1613e-05,
+      "maxTriDist": 1.2161e-05,
+      "ourRegionIds": [
+        4
+      ],
+      "regionTriCounts": {
+        "4": 2
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 4,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=4 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 9,
+      "type": "cylinder",
+      "trueRadius": 3.787157516,
+      "trueUSpanRad": 1.570796327,
+      "trueArea": 49.821644836,
+      "trueOrigin": [
+        255.21064367,
+        -290.327718373,
+        146.000002176
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 20,
+      "meanTriDist": 0.010372138,
+      "maxTriDist": 0.010380093,
+      "ourRegionIds": [
+        19
+      ],
+      "regionTriCounts": {
+        "19": 20
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 19,
+      "builtAnalytic": false,
+      "ourRadius": 3.78712609,
+      "radiusErrorMM": -3.1426e-05,
+      "radiusErrorPct": -0.000829792,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -3.1426e-05,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=19 rung=U2; prior DIAG_PARTIAL rid=19 valid=1 tag=rot-trim/rev-hole (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 20,
+        "nTrueFaceTris": 20,
+        "eberlyOnTrueAxis": 3.78712609,
+        "eberlyOnOurAxis": 3.78712609,
+        "eberlyOnRegion": 3.78712609,
+        "archChainOnTrueFace": 3.787209551,
+        "archChainThetaMedDeg": 8.999892668,
+        "archChainOnRegion": 3.787209523,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.001298209,
+        "band": {
+          "nStrips": 20,
+          "nTris": 20,
+          "thetaMed_deg": 3.0,
+          "thetaMean_deg": 4.421052631578947,
+          "angSpan_deg": 84.00554405493467,
+          "vtxResidSigned": {
+            "mean": 3.4457855168682864e-06,
+            "maxAbs": 1.5456674607783327e-05,
+            "rms": 8.6114173532213e-06,
+            "n": 60
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 10,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 0.461633748,
+      "trueArea": 3.86618264,
+      "trueOrigin": [
+        254.749009922,
+        -290.327714827,
+        149.787159691
+      ],
+      "trueAxisOrNormal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 4.54e-06,
+      "maxTriDist": 4.54e-06,
+      "ourRegionIds": [
+        24
+      ],
+      "regionTriCounts": {
+        "24": 2
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 24,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=24 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 11,
+      "type": "cylinder",
+      "trueRadius": 5.75,
+      "trueUSpanRad": 6.283185307,
+      "trueArea": 302.574642449,
+      "trueOrigin": [
+        295.997813256,
+        -288.828031617,
+        142.750002127
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 96,
+      "meanTriDist": 0.010941436,
+      "maxTriDist": 0.010954351,
+      "ourRegionIds": [
+        3
+      ],
+      "regionTriCounts": {
+        "3": 96
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 3,
+      "builtAnalytic": true,
+      "ourRadius": 5.750000542,
+      "radiusErrorMM": 5.42e-07,
+      "radiusErrorPct": 9.429e-06,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": 5.42e-07,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": null,
+      "diagEvidence": "RESULT smoothBuiltCylinders=1; ship census R=5.750001; DIAG_CASCADE resid rid=3 pass=1",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 96,
+        "nTrueFaceTris": 96,
+        "eberlyOnTrueAxis": 5.750000542,
+        "eberlyOnOurAxis": 5.750000542,
+        "eberlyOnRegion": 5.750000542,
+        "archChainOnTrueFace": 5.750049324,
+        "archChainThetaMedDeg": 7.499856173,
+        "archChainOnRegion": 5.750049276,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.00136867,
+        "band": {
+          "nStrips": 96,
+          "nTris": 96,
+          "thetaMed_deg": 2.5,
+          "thetaMean_deg": 3.7368421052631575,
+          "angSpan_deg": 355.00310799681375,
+          "vtxResidSigned": {
+            "mean": 5.421862649586847e-07,
+            "maxAbs": 1.5124937359445312e-05,
+            "rms": 7.539956522021524e-06,
+            "n": 288
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 12,
+      "type": "cylinder",
+      "trueRadius": 10,
+      "trueUSpanRad": 0.802701613,
+      "trueArea": 89.902580684,
+      "trueOrigin": [
+        275.753937365,
+        -290.327876145,
+        126.000001729
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 18,
+      "meanTriDist": 0.00883659,
+      "maxTriDist": 0.008840149,
+      "ourRegionIds": [
+        11
+      ],
+      "regionTriCounts": {
+        "11": 18
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 11,
+      "builtAnalytic": false,
+      "ourRadius": 10.000059898,
+      "radiusErrorMM": 5.9898e-05,
+      "radiusErrorPct": 0.000598981,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": 5.9898e-05,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=11 rung=U0; prior DIAG_PARTIAL rid=11 valid=1 tag=rect-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 18,
+        "nTrueFaceTris": 18,
+        "eberlyOnTrueAxis": 10.000059898,
+        "eberlyOnOurAxis": 10.000059898,
+        "eberlyOnRegion": 10.000059898,
+        "archChainOnTrueFace": 9.999961902,
+        "archChainThetaMedDeg": 5.110218146,
+        "archChainOnRegion": 9.999961896,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.00152328,
+        "band": {
+          "nStrips": 18,
+          "nTris": 18,
+          "thetaMed_deg": 2.0,
+          "thetaMean_deg": 2.5294117647058827,
+          "angSpan_deg": 42.5856994197297,
+          "vtxResidSigned": {
+            "mean": 5.959993269281464e-08,
+            "maxAbs": 1.16211642495756e-05,
+            "rms": 4.148503584073009e-06,
+            "n": 54
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 13,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 9.399205979,
+      "trueArea": 105.27110697,
+      "trueOrigin": [
+        279.997801349,
+        -290.327908737,
+        116.000001729
+      ],
+      "trueAxisOrNormal": [
+        0.0,
+        -0.0,
+        -1.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 1.729e-06,
+      "maxTriDist": 1.729e-06,
+      "ourRegionIds": [
+        9
+      ],
+      "regionTriCounts": {
+        "9": 2
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 9,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=9 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 14,
+      "type": "cylinder",
+      "trueRadius": 3.787157516,
+      "trueUSpanRad": 1.570796327,
+      "trueArea": 49.821644836,
+      "trueOrigin": [
+        254.749009922,
+        -290.327714827,
+        146.000002176
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 20,
+      "meanTriDist": 0.010374093,
+      "maxTriDist": 0.010377749,
+      "ourRegionIds": [
+        20
+      ],
+      "regionTriCounts": {
+        "20": 20
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 20,
+      "builtAnalytic": false,
+      "ourRadius": 3.787147582,
+      "radiusErrorMM": -9.933e-06,
+      "radiusErrorPct": -0.000262294,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -9.933e-06,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=20 rung=U2; prior DIAG_PARTIAL rid=20 valid=1 tag=rot-trim/rev-hole (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 20,
+        "nTrueFaceTris": 20,
+        "eberlyOnTrueAxis": 3.787147582,
+        "eberlyOnOurAxis": 3.787147582,
+        "eberlyOnRegion": 3.787147582,
+        "archChainOnTrueFace": 3.787054506,
+        "archChainThetaMedDeg": 9.000222625,
+        "archChainOnRegion": 3.787054506,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.001298209,
+        "band": {
+          "nStrips": 20,
+          "nTris": 20,
+          "thetaMed_deg": 3.0,
+          "thetaMean_deg": 4.421052631578947,
+          "angSpan_deg": 84.00556641766613,
+          "vtxResidSigned": {
+            "mean": 1.463771581537247e-06,
+            "maxAbs": 8.348080815956394e-06,
+            "rms": 4.974929521567946e-06,
+            "n": 60
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 15,
+      "type": "cylinder",
+      "trueRadius": 6,
+      "trueUSpanRad": 1.539784101,
+      "trueArea": 77.3741511,
+      "trueOrigin": [
+        250.497800821,
+        -290.327682178,
+        146.661430692
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 24,
+      "meanTriDist": 0.010971887,
+      "maxTriDist": 0.010977529,
+      "ourRegionIds": [
+        13
+      ],
+      "regionTriCounts": {
+        "13": 24
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 13,
+      "builtAnalytic": false,
+      "ourRadius": 5.993822534,
+      "radiusErrorMM": -0.006177466,
+      "radiusErrorPct": -0.102957761,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -0.006177466,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=13 rung=U2; prior DIAG_PARTIAL rid=13 valid=1 tag=rot-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 25,
+        "nTrueFaceTris": 24,
+        "eberlyOnTrueAxis": 5.999987112,
+        "eberlyOnOurAxis": 5.999966182,
+        "eberlyOnRegion": 5.993822534,
+        "archChainOnTrueFace": 6.0001982,
+        "archChainThetaMedDeg": 7.351740337,
+        "archChainOnRegion": 6.000104498,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.001428177,
+        "band": {
+          "nStrips": 24,
+          "nTris": 24,
+          "thetaMed_deg": 2.5,
+          "thetaMean_deg": 3.6304347826086953,
+          "angSpan_deg": 83.32483154135456,
+          "vtxResidSigned": {
+            "mean": -3.39607311655104e-07,
+            "maxAbs": 8.804356280478487e-06,
+            "rms": 5.07189206336266e-06,
+            "n": 72
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 16,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 11.323138237,
+      "trueArea": 94.831282733,
+      "trueOrigin": [
+        244.497800821,
+        -290.327636098,
+        140.661430692
+      ],
+      "trueAxisOrNormal": [
+        -1.0,
+        7.68e-06,
+        0.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 4.01e-06,
+      "maxTriDist": 4.557e-06,
+      "ourRegionIds": [
+        10
+      ],
+      "regionTriCounts": {
+        "10": 2
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 10,
+      "builtAnalytic": true,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": null,
+      "diagEvidence": "DIAG_CASCADE resid rid=10 (still analytic at D4.5); RESULT smoothBuiltPlanes=9",
+      "fit": null
+    },
+    {
+      "trueFaceId": 17,
+      "type": "cylinder",
+      "trueRadius": 5,
+      "trueUSpanRad": 1.570796327,
+      "trueArea": 65.777096185,
+      "trueOrigin": [
+        249.497800821,
+        -290.327674498,
+        157.984568929
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 24,
+      "meanTriDist": 0.009515033,
+      "maxTriDist": 0.009520131,
+      "ourRegionIds": [
+        15
+      ],
+      "regionTriCounts": {
+        "15": 24
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 15,
+      "builtAnalytic": false,
+      "ourRadius": 4.999999691,
+      "radiusErrorMM": -3.09e-07,
+      "radiusErrorPct": -6.172e-06,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -3.09e-07,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=15 rung=U2; prior DIAG_PARTIAL rid=15 valid=1 tag=rect-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 24,
+        "nTrueFaceTris": 24,
+        "eberlyOnTrueAxis": 4.999999691,
+        "eberlyOnOurAxis": 4.999999691,
+        "eberlyOnRegion": 4.999999691,
+        "archChainOnTrueFace": 5.000269818,
+        "archChainThetaMedDeg": 7.499567044,
+        "archChainOnRegion": 5.000269695,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.001190148,
+        "band": {
+          "nStrips": 24,
+          "nTris": 24,
+          "thetaMed_deg": 2.5,
+          "thetaMean_deg": 3.695652173913043,
+          "angSpan_deg": 85.00315805897543,
+          "vtxResidSigned": {
+            "mean": -2.9295933505017285e-07,
+            "maxAbs": 7.837209336614137e-06,
+            "rms": 4.36992836095538e-06,
+            "n": 72
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 18,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 23.890423172,
+      "trueArea": 200.082294068,
+      "trueOrigin": [
+        250.961852406,
+        -290.327685742,
+        162.984568929
+      ],
+      "trueAxisOrNormal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 4.435e-06,
+      "maxTriDist": 4.435e-06,
+      "ourRegionIds": [
+        5
+      ],
+      "regionTriCounts": {
+        "5": 2
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 5,
+      "builtAnalytic": false,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=5 rung=U2",
+      "fit": null
+    },
+    {
+      "trueFaceId": 19,
+      "type": "cylinder",
+      "trueRadius": 9.0,
+      "trueUSpanRad": 1.955155623,
+      "trueArea": 49.709831715,
+      "trueOrigin": [
+        277.618583581,
+        -280.652890465,
+        126.490910346
+      ],
+      "trueAxisOrNormal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "nMeshTris": 40,
+      "meanTriDist": 0.010364943,
+      "maxTriDist": 0.010593175,
+      "ourRegionIds": [
+        18
+      ],
+      "regionTriCounts": {
+        "18": 40
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 18,
+      "builtAnalytic": false,
+      "ourRadius": 9.019539163,
+      "radiusErrorMM": 0.019539163,
+      "radiusErrorPct": 0.217101815,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": 0.019539163,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=18 rung=U2; prior DIAG_PARTIAL rid=18 valid=1 tag=rot-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 40,
+        "nTrueFaceTris": 40,
+        "eberlyOnTrueAxis": 9.019539163,
+        "eberlyOnOurAxis": 9.019539163,
+        "eberlyOnRegion": 9.019539163,
+        "archChainOnTrueFace": 8.999935607,
+        "archChainThetaMedDeg": 5.895981861,
+        "archChainOnRegion": 8.999928527,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.003085132,
+        "band": {
+          "nStrips": 40,
+          "nTris": 40,
+          "thetaMed_deg": 3.0,
+          "thetaMean_deg": 2.9615384615384617,
+          "angSpan_deg": 115.29837787490172,
+          "vtxResidSigned": {
+            "mean": 0.0009250968476580912,
+            "maxAbs": 0.03698223630387609,
+            "rms": 0.005847182557645875,
+            "n": 120
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 20,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 26.290736122,
+      "trueArea": 424.977617426,
+      "trueOrigin": [
+        279.412657788,
+        -277.627904243,
+        126.000001878
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 59,
+      "meanTriDist": 4.054e-06,
+      "maxTriDist": 1.3337e-05,
+      "ourRegionIds": [
+        2
+      ],
+      "regionTriCounts": {
+        "2": 59
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 2,
+      "builtAnalytic": false,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=2 rung=U0; culprit faceValid=0",
+      "fit": null
+    },
+    {
+      "trueFaceId": 21,
+      "type": "cylinder",
+      "trueRadius": 15,
+      "trueUSpanRad": 1.121466229,
+      "trueArea": 140.884195044,
+      "trueOrigin": [
+        286.899298263,
+        -290.327961741,
+        169.500002302
+      ],
+      "trueAxisOrNormal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "nMeshTris": 28,
+      "meanTriDist": 0.010693125,
+      "maxTriDist": 0.010703495,
+      "ourRegionIds": [
+        6,
+        5
+      ],
+      "regionTriCounts": {
+        "5": 2,
+        "6": 26
+      },
+      "segmentation": "SPLIT",
+      "ourPrimaryRid": 6,
+      "builtAnalytic": false,
+      "ourRadius": 20.246772612,
+      "radiusErrorMM": 5.246772612,
+      "radiusErrorPct": 34.978484079,
+      "estimator": "arch-chain-blend \u221a(R_chain\u00b7R_eberly)",
+      "estimatorBiasPredMM": 5.2468,
+      "estimatorBiasNote": "blend \u221a(eberly\u00b7chain) matches appliedR",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=6 rung=U2; prior DIAG_PARTIAL rid=6 valid=1 tag=rot-trim/rev-hole (face built, then ladder); ALSO fit bias ourR=20.2468 vs true 15",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 28,
+        "nTrueFaceTris": 28,
+        "eberlyOnTrueAxis": 15.000010404,
+        "eberlyOnOurAxis": 15.0000104,
+        "eberlyOnRegion": 20.123567695,
+        "archChainOnTrueFace": 14.999659587,
+        "archChainThetaMedDeg": 4.589788989,
+        "archChainOnRegion": 15.000698448,
+        "archDiag": {
+          "kind": "COMMIT",
+          "n": 28,
+          "score": 1.0,
+          "eberly": 27.3285,
+          "chainR": 20.2468,
+          "appliedR": 20.2468,
+          "rel": 0.7409,
+          "why": "coarse_window"
+        },
+        "blendSqrt": 20.2468,
+        "secHalfThetaBiasMM": 0.002284921,
+        "band": {
+          "nStrips": 28,
+          "nTris": 28,
+          "thetaMed_deg": 2.0,
+          "thetaMean_deg": 2.259259259259259,
+          "angSpan_deg": 61.196284828111885,
+          "vtxResidSigned": {
+            "mean": -4.1461157819169683e-07,
+            "maxAbs": 1.4722487437168752e-05,
+            "rms": 7.280657556745672e-06,
+            "n": 84
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 22,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 9.098503473,
+      "trueArea": 76.199966586,
+      "trueOrigin": [
+        244.497800821,
+        -290.327636098,
+        154.500002302
+      ],
+      "trueAxisOrNormal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 2.302e-06,
+      "maxTriDist": 2.302e-06,
+      "ourRegionIds": [
+        6
+      ],
+      "regionTriCounts": {
+        "6": 2
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 6,
+      "builtAnalytic": false,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=6 rung=U2",
+      "fit": null
+    },
+    {
+      "trueFaceId": 23,
+      "type": "cylinder",
+      "trueRadius": 30,
+      "trueUSpanRad": 0.458912954,
+      "trueArea": 115.301879804,
+      "trueOrigin": [
+        309.480060373,
+        -290.328135161,
+        103.340624607
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        -0.0
+      ],
+      "nMeshTris": 16,
+      "meanTriDist": 0.010967092,
+      "maxTriDist": 0.010975129,
+      "ourRegionIds": [
+        7,
+        16
+      ],
+      "regionTriCounts": {
+        "7": 14,
+        "16": 2
+      },
+      "segmentation": "SPLIT",
+      "ourPrimaryRid": 7,
+      "builtAnalytic": false,
+      "ourRadius": 29.999442857,
+      "radiusErrorMM": -0.000557143,
+      "radiusErrorPct": -0.001857142,
+      "estimator": "arch-chain",
+      "estimatorBiasPredMM": -0.000265224,
+      "estimatorBiasNote": "R=w/(2 sin(\u03b8/2)) pair median",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE culprit rid=7 src=face faceValid=0; explode rid=7 rung=U0; prior DIAG_PARTIAL rid=7 valid=1 tag=rot-trim/rev-hole (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 18,
+        "nTrueFaceTris": 16,
+        "eberlyOnTrueAxis": 29.999752074,
+        "eberlyOnOurAxis": 29.999748884,
+        "eberlyOnRegion": 40.091865513,
+        "archChainOnTrueFace": 29.999734343,
+        "archChainThetaMedDeg": 3.28675022,
+        "archChainOnRegion": 29.999734776,
+        "archDiag": {
+          "kind": "COMMIT",
+          "n": 18,
+          "score": 1.0,
+          "eberly": 40.0919,
+          "chainR": 29.9994,
+          "appliedR": 29.9994,
+          "rel": 0.7483,
+          "why": "coarse_window"
+        },
+        "blendSqrt": 29.9994,
+        "secHalfThetaBiasMM": 0.002570393,
+        "band": {
+          "nStrips": 16,
+          "nTris": 16,
+          "thetaMed_deg": 1.5,
+          "thetaMean_deg": 1.6,
+          "angSpan_deg": 24.102881396688446,
+          "vtxResidSigned": {
+            "mean": 7.140783215101957e-07,
+            "maxAbs": 1.0382148531107305e-05,
+            "rms": 5.300544929811552e-06,
+            "n": 48
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 24,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 7.134335624,
+      "trueArea": 64.407131135,
+      "trueOrigin": [
+        294.487477503,
+        -290.328020018,
+        131.000001952
+      ],
+      "trueAxisOrNormal": [
+        0.719235703,
+        -5.524e-06,
+        -0.69476615
+      ],
+      "nMeshTris": 4,
+      "meanTriDist": 3.784e-06,
+      "maxTriDist": 7.244e-06,
+      "ourRegionIds": [
+        7
+      ],
+      "regionTriCounts": {
+        "7": 4
+      },
+      "segmentation": "MERGE",
+      "ourPrimaryRid": 7,
+      "builtAnalytic": false,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=7 rung=U0; culprit faceValid=0",
+      "fit": null
+    },
+    {
+      "trueFaceId": 25,
+      "type": "cylinder",
+      "trueRadius": 10,
+      "trueUSpanRad": 1.570796327,
+      "trueArea": 131.554192369,
+      "trueOrigin": [
+        295.997801736,
+        -290.328031617,
+        144.500002302
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 32,
+      "meanTriDist": 0.010706849,
+      "maxTriDist": 0.010719277,
+      "ourRegionIds": [
+        8
+      ],
+      "regionTriCounts": {
+        "8": 32
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 8,
+      "builtAnalytic": false,
+      "ourRadius": 9.999992942,
+      "radiusErrorMM": -7.058e-06,
+      "radiusErrorPct": -7.0576e-05,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -7.058e-06,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=8 rung=U2; prior DIAG_PARTIAL rid=8 valid=1 tag=rect-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 32,
+        "nTrueFaceTris": 32,
+        "eberlyOnTrueAxis": 9.999992942,
+        "eberlyOnOurAxis": 9.999992942,
+        "eberlyOnRegion": 9.999992942,
+        "archChainOnTrueFace": 9.99985684,
+        "archChainThetaMedDeg": 5.625116284,
+        "archChainOnRegion": 9.999857245,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.00152328,
+        "band": {
+          "nStrips": 32,
+          "nTris": 32,
+          "thetaMed_deg": 2.0,
+          "thetaMean_deg": 2.7741935483870974,
+          "angSpan_deg": 86.2513651292209,
+          "vtxResidSigned": {
+            "mean": -4.991609644326248e-07,
+            "maxAbs": 1.395373675627809e-05,
+            "rms": 7.69170811299763e-06,
+            "n": 96
+          },
+          "inscribed": true
+        }
+      }
+    },
+    {
+      "trueFaceId": 26,
+      "type": "plane",
+      "trueRadius": 0.0,
+      "trueUSpanRad": 3.50000035,
+      "trueArea": 29.312502933,
+      "trueOrigin": [
+        305.997801736,
+        -290.328108417,
+        154.500002302
+      ],
+      "trueAxisOrNormal": [
+        1.0,
+        -7.68e-06,
+        0.0
+      ],
+      "nMeshTris": 2,
+      "meanTriDist": 1.2164e-05,
+      "maxTriDist": 1.2711e-05,
+      "ourRegionIds": [
+        22
+      ],
+      "regionTriCounts": {
+        "22": 2
+      },
+      "segmentation": "1:1",
+      "ourPrimaryRid": 22,
+      "builtAnalytic": false,
+      "ourRadius": 0.0,
+      "radiusErrorMM": 0.0,
+      "radiusErrorPct": 0.0,
+      "estimator": null,
+      "estimatorBiasPredMM": 0.0,
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=22 rung=U0; culprit faceValid=0",
+      "fit": null
+    },
+    {
+      "trueFaceId": 27,
+      "type": "cylinder",
+      "trueRadius": 10,
+      "trueUSpanRad": 1.227007668,
+      "trueArea": 102.761892194,
+      "trueOrigin": [
+        295.997801736,
+        -290.328031617,
+        141.000001952
+      ],
+      "trueAxisOrNormal": [
+        7.68e-06,
+        1.0,
+        0.0
+      ],
+      "nMeshTris": 26,
+      "meanTriDist": 0.00989766,
+      "maxTriDist": 0.009903632,
+      "ourRegionIds": [
+        17,
+        16
+      ],
+      "regionTriCounts": {
+        "16": 12,
+        "17": 14
+      },
+      "segmentation": "SPLIT",
+      "ourPrimaryRid": 17,
+      "builtAnalytic": false,
+      "ourRadius": 9.999950204,
+      "radiusErrorMM": -4.9796e-05,
+      "radiusErrorPct": -0.00049796,
+      "estimator": "eberly",
+      "estimatorBiasPredMM": -4.9796e-05,
+      "estimatorBiasNote": "Kasa/eberly on region verts",
+      "stageLost": "ladder culprit",
+      "diagEvidence": "DIAG_CASCADE explode rid=17 rung=U2; prior DIAG_PARTIAL rid=17 valid=1 tag=rect-trim/fwd (face built, then ladder)",
+      "fit": {
+        "vertexSet": "region unique verts",
+        "nRegionTris": 14,
+        "nTrueFaceTris": 26,
+        "eberlyOnTrueAxis": 9.999984388,
+        "eberlyOnOurAxis": 9.999984388,
+        "eberlyOnRegion": 9.999950204,
+        "archChainOnTrueFace": 9.99979481,
+        "archChainThetaMedDeg": 5.40799412,
+        "archChainOnRegion": 10.000184719,
+        "archDiag": null,
+        "blendSqrt": null,
+        "secHalfThetaBiasMM": 0.00152328,
+        "band": {
+          "nStrips": 26,
+          "nTris": 26,
+          "thetaMed_deg": 2.0,
+          "thetaMean_deg": 2.6599999999999997,
+          "angSpan_deg": 66.69828753515651,
+          "vtxResidSigned": {
+            "mean": -1.707636185890657e-06,
+            "maxAbs": 1.3805915294540227e-05,
+            "rms": 6.912068205460419e-06,
+            "n": 78
+          },
+          "inscribed": true
+        }
+      }
+    }
+  ],
+  "regionToTrue": {
+    "0": {
+      "1": 182
+    },
+    "1": {
+      "3": 201
+    },
+    "2": {
+      "20": 59
+    },
+    "3": {
+      "11": 96
+    },
+    "4": {
+      "5": 4,
+      "6": 6,
+      "8": 2
+    },
+    "5": {
+      "18": 2,
+      "21": 2
+    },
+    "6": {
+      "21": 26,
+      "22": 2
+    },
+    "7": {
+      "23": 14,
+      "24": 4
+    },
+    "8": {
+      "25": 32
+    },
+    "9": {
+      "13": 2
+    },
+    "10": {
+      "16": 2
+    },
+    "11": {
+      "12": 18
+    },
+    "12": {
+      "4": 20
+    },
+    "13": {
+      "0": 1,
+      "15": 24
+    },
+    "14": {
+      "7": 38
+    },
+    "15": {
+      "17": 24
+    },
+    "16": {
+      "23": 2,
+      "27": 12
+    },
+    "17": {
+      "27": 14
+    },
+    "18": {
+      "19": 40
+    },
+    "19": {
+      "9": 20
+    },
+    "20": {
+      "14": 20
+    },
+    "21": {
+      "0": 4,
+      "2": 2
+    },
+    "22": {
+      "26": 2
+    },
+    "23": {
+      "0": 29
+    },
+    "24": {
+      "10": 2
+    }
+  }
+}

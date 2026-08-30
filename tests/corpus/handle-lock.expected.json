@@ -3,7 +3,7 @@
   "description": "Josh live stress case — coarse Fusion export (908 tris). TrueForm ideal: 28 faces (13 plane + 15 cyl) per ground-truth.json; volume-budget gate blocks closed-but-wrong solids.",
   "realExport": true,
   "provenance": {
-    "sourcePath": "~/Desktop/Handle lock.stl",
+    "sourcePath": "Handle lock.stl",
     "statement": "Customer Fusion STLB ATF 15.8 export; copied verbatim to tests/diag/handle-lock/."
   },
   "deflection": 0,

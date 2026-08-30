@@ -101,7 +101,7 @@ Census: surfaces.cylinder=1  radii=[5.750001]   (GT: 15 cyl, 13 planes)
 ### Body12 digest (unchanged vs CYLEDGES scope)
 
 ```sh
-./build/stl2step "/Users/jroberts/Desktop/Internal Development/3D files/STL/Body12.stl" \
+./build/stl2step "$STL2STEP_PRIVATE_CORPUS/Body12.stl" \
   -o /tmp/b12-pf.step --engine trueform --quiet
 shasum -a 256 /tmp/b12-pf.step
 # 70c721d503f2af723d1397b2e6e001dd748da43b6e4dae747e5a25b1c8af68d1

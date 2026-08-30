@@ -2,8 +2,8 @@
 """TrueForm 11-file stress-sweep harness (stdlib only).
 
 Replaces hand-rolled STRESS-SWEEP tables. One stl2step process per file;
-files run in parallel up to ``-j``. Private STLs are skip-if-missing via
-``STL2STEP_PRIVATE_CORPUS`` (default: ~/Desktop/Internal Development/3D files/STL).
+files run in parallel up to ``-j``. Private STLs are skip-if-missing via ``STL2STEP_PRIVATE_CORPUS``.
+Unset/empty env or a missing corpus directory → exit 77.
 
 Exit codes:
   0  — table written (every present file produced a RESULT)
@@ -27,9 +27,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PRIVATE_CORPUS = Path(
-    "~/Desktop/Internal Development/3D files/STL"
-).expanduser()
 PRIVATE_ENV = "STL2STEP_PRIVATE_CORPUS"
 PRIVATE_BODY_IDS: Tuple[int, ...] = (1, 2, 9, 10, 11, 12, 13, 18, 20, 28)
 SKIP_RC = 77
@@ -212,13 +209,13 @@ def resolve_private_corpus(
     env: Optional[Mapping[str, str]] = None,
     override: Optional[Path] = None,
 ) -> Path:
-    """Resolve the private STL directory. Empty/missing env uses the default."""
+    """Resolve the private STL directory. Unset/empty env → empty path (SKIP)."""
     if override is not None:
         return Path(override).expanduser()
     src = os.environ if env is None else env
     raw = (src.get(PRIVATE_ENV) or "").strip()
     if not raw:
-        return DEFAULT_PRIVATE_CORPUS
+        return Path()
     return Path(raw).expanduser()
 
 
@@ -564,8 +561,9 @@ def _self_test() -> int:
     empty = Path("/no/such/stl2step-private-corpus")
     if private_corpus_present(empty):
         errors.append("empty corpus reported present")
-    if resolve_private_corpus(env={}, override=None) != DEFAULT_PRIVATE_CORPUS:
-        errors.append("unset env did not fall back to default")
+    unset = resolve_private_corpus(env={}, override=None)
+    if unset != Path() and str(unset) != ".":
+        errors.append("unset env did not yield empty path")
     forced = resolve_private_corpus(env={PRIVATE_ENV: str(empty)})
     if forced != empty:
         errors.append(f"env override ignored: {forced}")
