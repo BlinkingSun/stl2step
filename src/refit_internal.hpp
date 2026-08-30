@@ -38,6 +38,7 @@
 #include <utility>
 #include <vector>
 
+#include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
@@ -213,6 +214,46 @@ bool archChainRadiusFromPatch(const MeshView& mv, const std::vector<int>& tris,
                               double& chainScoreOut, double rHint = 0.0);
 
 bool peelLargeArcStripsA2b(const MeshView& mv, const DerivedTols& tol, SegmentWork& work);
+
+// src/refit_internal.hpp  — Stage L (law-band recognition), D4 §1-2.
+// d and alpha are PER-EXPORT unknowns: intervals, never points (RULE 4.2b).
+struct TessLawInterval {
+    double dLo = 0.0, dHi = 0.0;        // mm, chordal deviation; empty when dHi <= dLo
+    double alphaLo = 0.0, alphaHi = 0.0;// rad, adjacent-normal cap; alphaHi<=alphaLo => unconstrained
+    int    nDLimited = 0, nAlphaLimited = 0;
+    bool   empty = true;                // RULE 4.2c: true => decline wholesale
+};
+
+struct LawBand {
+    std::vector<int>    tris;           // owning triangles
+    std::vector<double> theta;          // per-strip generator angle, rad
+    std::vector<double> w;              // per-strip circumferential chord, mm
+    double  R = 0.0;                    // median w_i/(2 sin(theta_i/2))  -- RULE 4.1d
+    gp_Ax1  axis;                       // from Delta-theta ~ 0 generator edges
+    double  phi = 0.0;                  // sum theta_i, or 2*pi when closed
+    int     N = 0;                      // strips == theta.size()
+    bool    closed360 = false;
+    double  cvTheta = 0.0, cvR = 0.0, maxVertResid = 0.0;  // Tier-1 residuals
+    bool    lowConfidence = false;      // RULE 4.2d: N == 2
+};
+
+// Tier 1 -- parameter-free. No d, no alpha, no degree threshold.
+bool lawChainAccept(const MeshView& mv, const std::vector<int>& tris,
+                    const DerivedTols& tol, LawBand& out);
+
+// Tier 2 -- constraint intersection over accepted bands. Never gates Tier 1.
+TessLawInterval lawCalibrate(const std::vector<LawBand>& bands);
+
+// Advisory only (RULE 4.2b). Returns the SET of N consistent with the interval.
+bool lawNConsistent(const LawBand& b, const TessLawInterval& li);
+
+// RULE 4.1b/4.1c. Merge iff coaxial + R-consistent + shared generator + still equal-theta.
+bool lawBandsMergeable(const LawBand& a, const LawBand& b, const DerivedTols& tol);
+
+// Stage L entry (owned by L2). Runs AFTER growProvisionalA2, BEFORE claimCylindersB1
+// and commitPlanesA3. Gated to archChainBand(mv). RULE 4.1a.
+bool claimLawBandsL(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                    SegmentWork& work);
 
 }}  // namespace stl2step::refit
 

@@ -138,6 +138,7 @@ struct Region {
                                     // Computed as sign of sum_t area(t)*(n_t . rho_hat(cent_t)),
                                     // rho_hat = unit radial direction from the axis.
                                     // This is exactly the sigma of dVolPredicted (I9).
+    bool     lawBand = false;
     // membership
     std::vector<int> tris;          // LOCAL triangle indices
     std::vector<Loop> loops;        // P1 owns loop extraction (mesh topology work).

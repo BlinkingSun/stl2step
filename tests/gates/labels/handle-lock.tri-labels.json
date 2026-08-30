@@ -1,0 +1,8181 @@
+{
+  "source_stl": "tests/corpus/handle-lock.stl",
+  "source_step": "tests/diag/handle-lock/handle-lock-original.step",
+  "n_tri": 908,
+  "n_faces": 28,
+  "n_ambiguous": 0,
+  "triangles": [
+    {
+      "tri_id": 0,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.518e-06,
+      "mean_dev_mm": 3.68e-06,
+      "normal_agree": 0.998738807
+    },
+    {
+      "tri_id": 1,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.518e-06,
+      "mean_dev_mm": 5.405e-06,
+      "normal_agree": 0.999035625
+    },
+    {
+      "tri_id": 2,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.518e-06,
+      "mean_dev_mm": 5.292e-06,
+      "normal_agree": 0.999978231
+    },
+    {
+      "tri_id": 3,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.569e-06,
+      "mean_dev_mm": 3.443e-06,
+      "normal_agree": 0.999685113
+    },
+    {
+      "tri_id": 4,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.569e-06,
+      "mean_dev_mm": 4.55e-06,
+      "normal_agree": 0.999823356
+    },
+    {
+      "tri_id": 5,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 5.109e-06,
+      "mean_dev_mm": 3.215e-06,
+      "normal_agree": 0.999921348
+    },
+    {
+      "tri_id": 6,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 5.109e-06,
+      "mean_dev_mm": 2.575e-06,
+      "normal_agree": 0.999978918
+    },
+    {
+      "tri_id": 7,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 2.566e-06,
+      "mean_dev_mm": 1.55e-06,
+      "normal_agree": 0.99999936
+    },
+    {
+      "tri_id": 8,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 2.032e-06,
+      "mean_dev_mm": 1.265e-06,
+      "normal_agree": 0.999979184
+    },
+    {
+      "tri_id": 9,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.969e-06,
+      "mean_dev_mm": 3.905e-06,
+      "normal_agree": 0.999921423
+    },
+    {
+      "tri_id": 10,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.969e-06,
+      "mean_dev_mm": 4.384e-06,
+      "normal_agree": 0.999820942
+    },
+    {
+      "tri_id": 11,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.969e-06,
+      "mean_dev_mm": 5.579e-06,
+      "normal_agree": 0.99968466
+    },
+    {
+      "tri_id": 12,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.021e-06,
+      "mean_dev_mm": 4.929e-06,
+      "normal_agree": 0.998742373
+    },
+    {
+      "tri_id": 13,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.021e-06,
+      "mean_dev_mm": 5.013e-06,
+      "normal_agree": 0.999033399
+    },
+    {
+      "tri_id": 14,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.605e-06,
+      "mean_dev_mm": 6.392e-06,
+      "normal_agree": 0.99997931
+    },
+    {
+      "tri_id": 15,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.605e-06,
+      "mean_dev_mm": 6.596e-06,
+      "normal_agree": 0.999685402
+    },
+    {
+      "tri_id": 16,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.633e-06,
+      "mean_dev_mm": 5.609e-06,
+      "normal_agree": 0.999820155
+    },
+    {
+      "tri_id": 17,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.633e-06,
+      "mean_dev_mm": 3.779e-06,
+      "normal_agree": 0.999921522
+    },
+    {
+      "tri_id": 18,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 4.642e-06,
+      "mean_dev_mm": 2.965e-06,
+      "normal_agree": 0.999979132
+    },
+    {
+      "tri_id": 19,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.574e-06,
+      "mean_dev_mm": 3.609e-06,
+      "normal_agree": 0.999999356
+    },
+    {
+      "tri_id": 20,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.574e-06,
+      "mean_dev_mm": 3.639e-06,
+      "normal_agree": 0.999978926
+    },
+    {
+      "tri_id": 21,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.574e-06,
+      "mean_dev_mm": 2.558e-06,
+      "normal_agree": 0.999919938
+    },
+    {
+      "tri_id": 22,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 2.129e-06,
+      "mean_dev_mm": 1.076e-06,
+      "normal_agree": 0.999821355
+    },
+    {
+      "tri_id": 23,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 2.129e-06,
+      "mean_dev_mm": 1.489e-06,
+      "normal_agree": 0.99968513
+    },
+    {
+      "tri_id": 24,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.605e-06,
+      "mean_dev_mm": 6.583e-06,
+      "normal_agree": 0.999292005
+    },
+    {
+      "tri_id": 25,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 7.518e-06,
+      "mean_dev_mm": 4.586e-06,
+      "normal_agree": 0.999290372
+    },
+    {
+      "tri_id": 26,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 6.569e-06,
+      "mean_dev_mm": 4.603e-06,
+      "normal_agree": 0.999030596
+    },
+    {
+      "tri_id": 27,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 5.109e-06,
+      "mean_dev_mm": 1.771e-06,
+      "normal_agree": 0.999035971
+    },
+    {
+      "tri_id": 28,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 5.109e-06,
+      "mean_dev_mm": 2.464e-06,
+      "normal_agree": 0.999033683
+    },
+    {
+      "tri_id": 29,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 4.19e-06,
+      "mean_dev_mm": 1.985e-06,
+      "normal_agree": 0.999034973
+    },
+    {
+      "tri_id": 30,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 4.19e-06,
+      "mean_dev_mm": 1.464e-06,
+      "normal_agree": 0.999032902
+    },
+    {
+      "tri_id": 31,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 4.642e-06,
+      "mean_dev_mm": 3.275e-06,
+      "normal_agree": 0.999032737
+    },
+    {
+      "tri_id": 32,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 4.642e-06,
+      "mean_dev_mm": 3.515e-06,
+      "normal_agree": 0.999034229
+    },
+    {
+      "tri_id": 33,
+      "true_face_id": 515,
+      "face_type": "cylinder",
+      "radius_mm": 0.5,
+      "max_dev_mm": 5.55e-06,
+      "mean_dev_mm": 4.554e-06,
+      "normal_agree": 0.999038142
+    },
+    {
+      "tri_id": 34,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5095e-05,
+      "mean_dev_mm": 1.3824e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 35,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5095e-05,
+      "mean_dev_mm": 1.3824e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 36,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5095e-05,
+      "mean_dev_mm": 1.3502e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 37,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5095e-05,
+      "mean_dev_mm": 1.4381e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 38,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.408e-05,
+      "mean_dev_mm": 1.1873e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 39,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3968e-05,
+      "mean_dev_mm": 1.1217e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 40,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2111e-05,
+      "mean_dev_mm": 7.051e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 41,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2111e-05,
+      "mean_dev_mm": 7.712e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 42,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 7.218e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 43,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 8.844e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 44,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 9.215e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 45,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 6.519e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 46,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 5.005e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 47,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 6.361e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 48,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1788e-05,
+      "mean_dev_mm": 9.689e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 49,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1788e-05,
+      "mean_dev_mm": 8.097e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 50,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 8.959e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 51,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 7.561e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 52,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.594e-06,
+      "mean_dev_mm": 3.752e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 53,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.698e-06,
+      "mean_dev_mm": 3.119e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 54,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.698e-06,
+      "mean_dev_mm": 3.821e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 55,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3153e-05,
+      "mean_dev_mm": 7.595e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 56,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3153e-05,
+      "mean_dev_mm": 9.047e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 57,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0054e-05,
+      "mean_dev_mm": 5.649e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 58,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.599e-06,
+      "mean_dev_mm": 5.497e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 59,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.599e-06,
+      "mean_dev_mm": 5.471e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 60,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.032e-05,
+      "mean_dev_mm": 7.925e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 61,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.1663e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 62,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.3178e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 63,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.2591e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 64,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.1299e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 65,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0268e-05,
+      "mean_dev_mm": 7.442e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 66,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0268e-05,
+      "mean_dev_mm": 6.41e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 67,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.465e-06,
+      "mean_dev_mm": 3.318e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 68,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.465e-06,
+      "mean_dev_mm": 3.774e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 69,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.465e-06,
+      "mean_dev_mm": 3.818e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 70,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.088e-06,
+      "mean_dev_mm": 4.692e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 71,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.088e-06,
+      "mean_dev_mm": 3.966e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 72,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 7.134e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 73,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 6.403e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 74,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2459e-05,
+      "mean_dev_mm": 9.661e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 75,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2459e-05,
+      "mean_dev_mm": 8.935e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 76,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3565e-05,
+      "mean_dev_mm": 1.1491e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 77,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3565e-05,
+      "mean_dev_mm": 1.0774e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 78,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.2602e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 79,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.1892e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 80,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.2394e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 81,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.3227e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 82,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.2394e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 83,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.1892e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 84,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3934e-05,
+      "mean_dev_mm": 1.2611e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 85,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3593e-05,
+      "mean_dev_mm": 1.0784e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 86,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3593e-05,
+      "mean_dev_mm": 1.1538e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 87,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.257e-05,
+      "mean_dev_mm": 8.972e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 88,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.257e-05,
+      "mean_dev_mm": 9.781e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 89,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0876e-05,
+      "mean_dev_mm": 6.486e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 90,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0876e-05,
+      "mean_dev_mm": 7.363e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 91,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.526e-06,
+      "mean_dev_mm": 4.111e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 92,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.526e-06,
+      "mean_dev_mm": 5.062e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 93,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.54e-06,
+      "mean_dev_mm": 4.042e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 94,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.54e-06,
+      "mean_dev_mm": 4.317e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 95,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.465e-06,
+      "mean_dev_mm": 3.212e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 96,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0268e-05,
+      "mean_dev_mm": 5.987e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 97,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0268e-05,
+      "mean_dev_mm": 6.478e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 98,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.0758e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 99,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.1385e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 100,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.3309e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 101,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.2459e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 102,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2709e-05,
+      "mean_dev_mm": 9.651e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 103,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.599e-06,
+      "mean_dev_mm": 5.494e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 104,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.599e-06,
+      "mean_dev_mm": 4.59e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 105,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.462e-06,
+      "mean_dev_mm": 3.544e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 106,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 7.381e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 107,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 5.837e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 108,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 7.057e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 109,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 6.536e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 110,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 7.04e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 111,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 8.489e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 112,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 1.233e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 113,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1943e-05,
+      "mean_dev_mm": 1.0113e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 114,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1943e-05,
+      "mean_dev_mm": 8.607e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 115,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.271e-06,
+      "mean_dev_mm": 5.228e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 116,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.271e-06,
+      "mean_dev_mm": 4.232e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 117,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.621e-06,
+      "mean_dev_mm": 2.655e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 118,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4067e-05,
+      "mean_dev_mm": 6.742e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 119,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4067e-05,
+      "mean_dev_mm": 7.651e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 120,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4067e-05,
+      "mean_dev_mm": 8.967e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 121,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.998e-06,
+      "mean_dev_mm": 7.277e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 122,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.998e-06,
+      "mean_dev_mm": 6.149e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 123,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0513e-05,
+      "mean_dev_mm": 7.491e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 124,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0513e-05,
+      "mean_dev_mm": 8.075e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 125,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5033e-05,
+      "mean_dev_mm": 1.0087e-05,
+      "normal_agree": 0.999999997
+    },
+    {
+      "tri_id": 126,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5033e-05,
+      "mean_dev_mm": 9.803e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 127,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.661e-06,
+      "mean_dev_mm": 6.103e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 128,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 4.715e-06,
+      "mean_dev_mm": 3.585e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 129,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.411e-06,
+      "mean_dev_mm": 5.078e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 130,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4928e-05,
+      "mean_dev_mm": 9.351e-06,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 131,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4928e-05,
+      "mean_dev_mm": 9.518e-06,
+      "normal_agree": 0.999999967
+    },
+    {
+      "tri_id": 132,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.912e-06,
+      "mean_dev_mm": 5.251e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 133,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.556e-06,
+      "mean_dev_mm": 8.3e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 134,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0292e-05,
+      "mean_dev_mm": 9.615e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 135,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1071e-05,
+      "mean_dev_mm": 1.0307e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 136,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 1.0653e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 137,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2111e-05,
+      "mean_dev_mm": 1.0999e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 138,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3968e-05,
+      "mean_dev_mm": 1.247e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 139,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5095e-05,
+      "mean_dev_mm": 1.3465e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 140,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5095e-05,
+      "mean_dev_mm": 1.2586e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 141,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5193e-05,
+      "mean_dev_mm": 1.4359e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 142,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5193e-05,
+      "mean_dev_mm": 1.4429e-05,
+      "normal_agree": 0.999999661
+    },
+    {
+      "tri_id": 143,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4581e-05,
+      "mean_dev_mm": 1.4016e-05,
+      "normal_agree": 0.999999979
+    },
+    {
+      "tri_id": 144,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3954e-05,
+      "mean_dev_mm": 1.3647e-05,
+      "normal_agree": 0.999999992
+    },
+    {
+      "tri_id": 145,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3513e-05,
+      "mean_dev_mm": 1.3385e-05,
+      "normal_agree": 0.999999996
+    },
+    {
+      "tri_id": 146,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3513e-05,
+      "mean_dev_mm": 1.3242e-05,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 147,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 1.1326e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 148,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 8.548e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 149,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 6.198e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 150,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 8.095e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 151,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 4.291e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 152,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 4.381e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 153,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1654e-05,
+      "mean_dev_mm": 7.621e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 154,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0588e-05,
+      "mean_dev_mm": 6.684e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 155,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.842e-06,
+      "mean_dev_mm": 5.306e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 156,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.457e-06,
+      "mean_dev_mm": 3.523e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 157,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.493e-06,
+      "mean_dev_mm": 1.578e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 158,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.493e-06,
+      "mean_dev_mm": 1.379e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 159,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.869e-06,
+      "mean_dev_mm": 1.504e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 160,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.086e-06,
+      "mean_dev_mm": 4.192e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 161,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2524e-05,
+      "mean_dev_mm": 7.077e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 162,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2524e-05,
+      "mean_dev_mm": 6.802e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 163,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3444e-05,
+      "mean_dev_mm": 1.1077e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 164,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3444e-05,
+      "mean_dev_mm": 1.0202e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 165,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.899e-06,
+      "mean_dev_mm": 7.503e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 166,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 4.507e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 167,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.634e-06,
+      "mean_dev_mm": 5.269e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 168,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1971e-05,
+      "mean_dev_mm": 6.839e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 169,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1971e-05,
+      "mean_dev_mm": 5.396e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 170,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3572e-05,
+      "mean_dev_mm": 9.616e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 171,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3572e-05,
+      "mean_dev_mm": 8.025e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 172,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3572e-05,
+      "mean_dev_mm": 9.587e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 173,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0668e-05,
+      "mean_dev_mm": 8.619e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 174,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0668e-05,
+      "mean_dev_mm": 6.834e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 175,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3632e-05,
+      "mean_dev_mm": 8.714e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 176,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3632e-05,
+      "mean_dev_mm": 6.771e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 177,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3632e-05,
+      "mean_dev_mm": 1.0159e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 178,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4501e-05,
+      "mean_dev_mm": 1.338e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 179,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4501e-05,
+      "mean_dev_mm": 1.3088e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 180,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2755e-05,
+      "mean_dev_mm": 1.1887e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 181,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2755e-05,
+      "mean_dev_mm": 1.1781e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 182,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1689e-05,
+      "mean_dev_mm": 8.495e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 183,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1689e-05,
+      "mean_dev_mm": 8.639e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 184,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 6.559e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 185,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.408e-05,
+      "mean_dev_mm": 1.0286e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 186,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.998e-06,
+      "mean_dev_mm": 7.022e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 187,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 8.907e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 188,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 1.0218e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 189,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 1.1319e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 190,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 1.2881e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 191,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 1.3957e-05,
+      "normal_agree": 0.999999995
+    },
+    {
+      "tri_id": 192,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 1.2856e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 193,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 1.0126e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 194,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 7.105e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 195,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 6.562e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 196,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4652e-05,
+      "mean_dev_mm": 9.343e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 197,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 4.063e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 198,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.433e-06,
+      "mean_dev_mm": 5.791e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 199,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1938e-05,
+      "mean_dev_mm": 8.878e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 200,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4403e-05,
+      "mean_dev_mm": 1.1201e-05,
+      "normal_agree": 0.999999989
+    },
+    {
+      "tri_id": 201,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4403e-05,
+      "mean_dev_mm": 1.0764e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 202,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0627e-05,
+      "mean_dev_mm": 8.401e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 203,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.315e-06,
+      "mean_dev_mm": 6.367e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 204,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 4.696e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 205,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 3.417e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 206,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 2.747e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 207,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 2.725e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 208,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 5.217e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 209,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 6.694e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 210,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 8.624e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 211,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2375e-05,
+      "mean_dev_mm": 1.0976e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 212,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3767e-05,
+      "mean_dev_mm": 1.2718e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 213,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3767e-05,
+      "mean_dev_mm": 1.1565e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 214,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 7.516e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 215,
+      "true_face_id": 516,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3513e-05,
+      "mean_dev_mm": 1.1397e-05,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 216,
+      "true_face_id": 517,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.518e-06,
+      "mean_dev_mm": 4.368e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 217,
+      "true_face_id": 517,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.518e-06,
+      "mean_dev_mm": 4.357e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 218,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3513e-05,
+      "mean_dev_mm": 1.3242e-05,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 219,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3513e-05,
+      "mean_dev_mm": 1.1397e-05,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 220,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 7.516e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 221,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3513e-05,
+      "mean_dev_mm": 1.3385e-05,
+      "normal_agree": 0.999999996
+    },
+    {
+      "tri_id": 222,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3954e-05,
+      "mean_dev_mm": 1.3647e-05,
+      "normal_agree": 0.999999992
+    },
+    {
+      "tri_id": 223,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4581e-05,
+      "mean_dev_mm": 1.4016e-05,
+      "normal_agree": 0.999999979
+    },
+    {
+      "tri_id": 224,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5194e-05,
+      "mean_dev_mm": 1.4429e-05,
+      "normal_agree": 0.999999661
+    },
+    {
+      "tri_id": 225,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5194e-05,
+      "mean_dev_mm": 1.436e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 226,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 6.198e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 227,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 8.547e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 228,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3047e-05,
+      "mean_dev_mm": 1.1325e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 229,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3766e-05,
+      "mean_dev_mm": 1.1565e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 230,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3766e-05,
+      "mean_dev_mm": 1.2718e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 231,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2375e-05,
+      "mean_dev_mm": 1.0976e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 232,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 8.624e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 233,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 6.694e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 234,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 5.217e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 235,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 4.381e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 236,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 4.291e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 237,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.493e-06,
+      "mean_dev_mm": 1.578e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 238,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.457e-06,
+      "mean_dev_mm": 3.523e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 239,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.841e-06,
+      "mean_dev_mm": 5.306e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 240,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 2.725e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 241,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3444e-05,
+      "mean_dev_mm": 7.109e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 242,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3444e-05,
+      "mean_dev_mm": 8.863e-06,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 243,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 2.747e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 244,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 3.418e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 245,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 4.696e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 246,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.315e-06,
+      "mean_dev_mm": 6.367e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 247,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0627e-05,
+      "mean_dev_mm": 8.401e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 248,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4403e-05,
+      "mean_dev_mm": 1.0764e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 249,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4403e-05,
+      "mean_dev_mm": 1.1201e-05,
+      "normal_agree": 0.999999989
+    },
+    {
+      "tri_id": 250,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1938e-05,
+      "mean_dev_mm": 8.878e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 251,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.433e-06,
+      "mean_dev_mm": 5.791e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 252,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 4.063e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 253,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1971e-05,
+      "mean_dev_mm": 8.956e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 254,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1971e-05,
+      "mean_dev_mm": 6.715e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 255,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.262e-06,
+      "mean_dev_mm": 4.507e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 256,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3572e-05,
+      "mean_dev_mm": 8.818e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 257,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3572e-05,
+      "mean_dev_mm": 5.929e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 258,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3572e-05,
+      "mean_dev_mm": 8.29e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 259,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.992e-06,
+      "mean_dev_mm": 6.165e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 260,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.992e-06,
+      "mean_dev_mm": 5.677e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 261,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0668e-05,
+      "mean_dev_mm": 6.569e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 262,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0668e-05,
+      "mean_dev_mm": 5.783e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 263,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3632e-05,
+      "mean_dev_mm": 9.713e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 264,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3632e-05,
+      "mean_dev_mm": 1.016e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 265,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4501e-05,
+      "mean_dev_mm": 1.338e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 266,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4501e-05,
+      "mean_dev_mm": 1.2469e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 267,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4501e-05,
+      "mean_dev_mm": 1.2718e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 268,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2754e-05,
+      "mean_dev_mm": 8.85e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 269,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2754e-05,
+      "mean_dev_mm": 9.113e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 270,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1689e-05,
+      "mean_dev_mm": 6.678e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 271,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1689e-05,
+      "mean_dev_mm": 9.489e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 272,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 9.192e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 273,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 1.0791e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 274,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.408e-05,
+      "mean_dev_mm": 1.0108e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 275,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.408e-05,
+      "mean_dev_mm": 1.2948e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 276,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3967e-05,
+      "mean_dev_mm": 8.695e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 277,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5094e-05,
+      "mean_dev_mm": 1.0127e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 278,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5094e-05,
+      "mean_dev_mm": 8.172e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 279,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5094e-05,
+      "mean_dev_mm": 1.2747e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 280,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.2084e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 281,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.0703e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 282,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 7.99e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 283,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.0474e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 284,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.3153e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 285,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.1783e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 286,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 8.139e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 287,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 6.585e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 288,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 8.153e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 289,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.0706e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 290,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.2836e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 291,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5045e-05,
+      "mean_dev_mm": 1.1566e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 292,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5167e-05,
+      "mean_dev_mm": 1.1607e-05,
+      "normal_agree": 0.999999995
+    },
+    {
+      "tri_id": 293,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5167e-05,
+      "mean_dev_mm": 1.1781e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 294,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3689e-05,
+      "mean_dev_mm": 1.1036e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 295,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2932e-05,
+      "mean_dev_mm": 1.0775e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 296,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3611e-05,
+      "mean_dev_mm": 1.1001e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 297,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3611e-05,
+      "mean_dev_mm": 7.687e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 298,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5038e-05,
+      "mean_dev_mm": 1.0537e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 299,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5038e-05,
+      "mean_dev_mm": 1.0448e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 300,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3345e-05,
+      "mean_dev_mm": 8.944e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 301,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0524e-05,
+      "mean_dev_mm": 6.845e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 302,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.048e-06,
+      "mean_dev_mm": 4.321e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 303,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 2.963e-06,
+      "mean_dev_mm": 2.544e-06,
+      "normal_agree": 0.999999995
+    },
+    {
+      "tri_id": 304,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.408e-05,
+      "mean_dev_mm": 1.1873e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 305,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3967e-05,
+      "mean_dev_mm": 1.1217e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 306,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2111e-05,
+      "mean_dev_mm": 9.746e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 307,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.556e-06,
+      "mean_dev_mm": 6.199e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 308,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.556e-06,
+      "mean_dev_mm": 5.791e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 309,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 6.148e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 310,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 6.504e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 311,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 7.946e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 312,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 5.005e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 313,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0671e-05,
+      "mean_dev_mm": 6.361e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 314,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1788e-05,
+      "mean_dev_mm": 9.689e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 315,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1788e-05,
+      "mean_dev_mm": 8.096e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 316,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 8.959e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 317,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 7.561e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 318,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.594e-06,
+      "mean_dev_mm": 3.751e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 319,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.698e-06,
+      "mean_dev_mm": 3.119e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 320,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3153e-05,
+      "mean_dev_mm": 6.894e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 321,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3153e-05,
+      "mean_dev_mm": 6.306e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 322,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3153e-05,
+      "mean_dev_mm": 9.047e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 323,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0054e-05,
+      "mean_dev_mm": 5.648e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 324,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.934e-06,
+      "mean_dev_mm": 3.582e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 325,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.599e-06,
+      "mean_dev_mm": 5.796e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 326,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.032e-05,
+      "mean_dev_mm": 7.925e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 327,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4144e-05,
+      "mean_dev_mm": 1.1355e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 328,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.2938e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 329,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.2591e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 330,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 9.042e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 331,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 9.612e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 332,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0268e-05,
+      "mean_dev_mm": 4.919e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 333,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0268e-05,
+      "mean_dev_mm": 5.575e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 334,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.465e-06,
+      "mean_dev_mm": 3.774e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 335,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.465e-06,
+      "mean_dev_mm": 3.817e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 336,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.089e-06,
+      "mean_dev_mm": 4.692e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 337,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.089e-06,
+      "mean_dev_mm": 3.966e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 338,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 7.134e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 339,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0628e-05,
+      "mean_dev_mm": 6.404e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 340,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2459e-05,
+      "mean_dev_mm": 9.661e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 341,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2459e-05,
+      "mean_dev_mm": 8.935e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 342,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3565e-05,
+      "mean_dev_mm": 1.1492e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 343,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3565e-05,
+      "mean_dev_mm": 1.0774e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 344,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3935e-05,
+      "mean_dev_mm": 1.2602e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 345,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3935e-05,
+      "mean_dev_mm": 1.1892e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 346,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3935e-05,
+      "mean_dev_mm": 1.2394e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 347,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3935e-05,
+      "mean_dev_mm": 1.3227e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 348,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3935e-05,
+      "mean_dev_mm": 1.2394e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 349,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3935e-05,
+      "mean_dev_mm": 1.2987e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 350,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3593e-05,
+      "mean_dev_mm": 1.2533e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 351,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.257e-05,
+      "mean_dev_mm": 1.1627e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 352,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1435e-05,
+      "mean_dev_mm": 1.0279e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 353,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1435e-05,
+      "mean_dev_mm": 8.5e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 354,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1435e-05,
+      "mean_dev_mm": 6.307e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 355,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1435e-05,
+      "mean_dev_mm": 5.202e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 356,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1435e-05,
+      "mean_dev_mm": 6.867e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 357,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 1.0174e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 358,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 1.1297e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 359,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 1.0302e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 360,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 8.832e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 361,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 6.91e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 362,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 5.319e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 363,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 6.245e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 364,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2148e-05,
+      "mean_dev_mm": 9.293e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 365,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.2495e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 366,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5069e-05,
+      "mean_dev_mm": 1.2272e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 367,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2709e-05,
+      "mean_dev_mm": 1.1485e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 368,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2709e-05,
+      "mean_dev_mm": 9.652e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 369,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.599e-06,
+      "mean_dev_mm": 6.727e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 370,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.647e-06,
+      "mean_dev_mm": 3.606e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 371,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.462e-06,
+      "mean_dev_mm": 3.545e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 372,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.462e-06,
+      "mean_dev_mm": 4.075e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 373,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 6.68e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 374,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 7.057e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 375,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1747e-05,
+      "mean_dev_mm": 6.536e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 376,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 7.04e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 377,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 8.489e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 378,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3259e-05,
+      "mean_dev_mm": 1.233e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 379,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1943e-05,
+      "mean_dev_mm": 1.0113e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 380,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1943e-05,
+      "mean_dev_mm": 8.607e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 381,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.271e-06,
+      "mean_dev_mm": 5.228e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 382,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.271e-06,
+      "mean_dev_mm": 4.232e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 383,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.621e-06,
+      "mean_dev_mm": 2.655e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 384,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4066e-05,
+      "mean_dev_mm": 6.742e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 385,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4066e-05,
+      "mean_dev_mm": 7.65e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 386,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4066e-05,
+      "mean_dev_mm": 8.967e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 387,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.556e-06,
+      "mean_dev_mm": 7.463e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 388,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2111e-05,
+      "mean_dev_mm": 9.385e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 389,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3967e-05,
+      "mean_dev_mm": 1.0855e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 390,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5094e-05,
+      "mean_dev_mm": 1.185e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 391,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5094e-05,
+      "mean_dev_mm": 1.2209e-05,
+      "normal_agree": 0.999999953
+    },
+    {
+      "tri_id": 392,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 7.468e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 393,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 6.878e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 394,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2908e-05,
+      "mean_dev_mm": 1.0905e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 395,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2908e-05,
+      "mean_dev_mm": 9.412e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 396,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 8.887e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 397,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 6.654e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 398,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2939e-05,
+      "mean_dev_mm": 9.635e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 399,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2939e-05,
+      "mean_dev_mm": 1.1307e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 400,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1331e-05,
+      "mean_dev_mm": 1.0685e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 401,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1071e-05,
+      "mean_dev_mm": 7.625e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 402,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1071e-05,
+      "mean_dev_mm": 7.838e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 403,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0292e-05,
+      "mean_dev_mm": 5.774e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 404,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0292e-05,
+      "mean_dev_mm": 8.056e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 405,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1399e-05,
+      "mean_dev_mm": 8.425e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 406,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3149e-05,
+      "mean_dev_mm": 1.1182e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 407,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3149e-05,
+      "mean_dev_mm": 9.971e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 408,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.997e-06,
+      "mean_dev_mm": 6.588e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 409,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.997e-06,
+      "mean_dev_mm": 4.372e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 410,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.899e-06,
+      "mean_dev_mm": 7.503e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 411,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3444e-05,
+      "mean_dev_mm": 1.0202e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 412,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2524e-05,
+      "mean_dev_mm": 7.077e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 413,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.086e-06,
+      "mean_dev_mm": 4.192e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 414,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.869e-06,
+      "mean_dev_mm": 1.504e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 415,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 3.493e-06,
+      "mean_dev_mm": 1.378e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 416,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0588e-05,
+      "mean_dev_mm": 6.683e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 417,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1653e-05,
+      "mean_dev_mm": 7.621e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 418,
+      "true_face_id": 518,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.2012e-05,
+      "mean_dev_mm": 8.095e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 419,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 9.623e-06,
+      "mean_dev_mm": 5.6e-06,
+      "normal_agree": 0.999728239
+    },
+    {
+      "tri_id": 420,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 4.17e-06,
+      "mean_dev_mm": 3.145e-06,
+      "normal_agree": 0.999728675
+    },
+    {
+      "tri_id": 421,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 4.471e-06,
+      "mean_dev_mm": 3.246e-06,
+      "normal_agree": 0.999728205
+    },
+    {
+      "tri_id": 422,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 9.448e-06,
+      "mean_dev_mm": 5.392e-06,
+      "normal_agree": 0.999728695
+    },
+    {
+      "tri_id": 423,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 9.453e-06,
+      "mean_dev_mm": 7.791e-06,
+      "normal_agree": 0.999728297
+    },
+    {
+      "tri_id": 424,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 1.4044e-05,
+      "mean_dev_mm": 1.0982e-05,
+      "normal_agree": 0.999728617
+    },
+    {
+      "tri_id": 425,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 1.4044e-05,
+      "mean_dev_mm": 1.0256e-05,
+      "normal_agree": 0.999729031
+    },
+    {
+      "tri_id": 426,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 1.4044e-05,
+      "mean_dev_mm": 8.157e-06,
+      "normal_agree": 0.999727895
+    },
+    {
+      "tri_id": 427,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.27e-06,
+      "mean_dev_mm": 3.508e-06,
+      "normal_agree": 0.999728207
+    },
+    {
+      "tri_id": 428,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 3.658e-06,
+      "mean_dev_mm": 2.304e-06,
+      "normal_agree": 0.999728681
+    },
+    {
+      "tri_id": 429,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.692e-06,
+      "mean_dev_mm": 3.483e-06,
+      "normal_agree": 0.999728698
+    },
+    {
+      "tri_id": 430,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.692e-06,
+      "mean_dev_mm": 4.703e-06,
+      "normal_agree": 0.999728223
+    },
+    {
+      "tri_id": 431,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.692e-06,
+      "mean_dev_mm": 5.661e-06,
+      "normal_agree": 0.999728466
+    },
+    {
+      "tri_id": 432,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.533e-06,
+      "mean_dev_mm": 4.857e-06,
+      "normal_agree": 0.999728454
+    },
+    {
+      "tri_id": 433,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.533e-06,
+      "mean_dev_mm": 4.773e-06,
+      "normal_agree": 0.999728115
+    },
+    {
+      "tri_id": 434,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.032e-06,
+      "mean_dev_mm": 4.273e-06,
+      "normal_agree": 0.999728762
+    },
+    {
+      "tri_id": 435,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.032e-06,
+      "mean_dev_mm": 3.345e-06,
+      "normal_agree": 0.99972864
+    },
+    {
+      "tri_id": 436,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.032e-06,
+      "mean_dev_mm": 2.419e-06,
+      "normal_agree": 0.999728279
+    },
+    {
+      "tri_id": 437,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 1.729e-06,
+      "mean_dev_mm": 1.318e-06,
+      "normal_agree": 0.999728477
+    },
+    {
+      "tri_id": 438,
+      "true_face_id": 519,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 1.729e-06,
+      "mean_dev_mm": 1.395e-06,
+      "normal_agree": 0.999728435
+    },
+    {
+      "tri_id": 439,
+      "true_face_id": 520,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.741e-06,
+      "mean_dev_mm": 4.988e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 440,
+      "true_face_id": 520,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.623e-06,
+      "mean_dev_mm": 4.949e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 441,
+      "true_face_id": 520,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.623e-06,
+      "mean_dev_mm": 5.995e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 442,
+      "true_face_id": 520,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.309e-06,
+      "mean_dev_mm": 4.146e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 443,
+      "true_face_id": 521,
+      "face_type": "cylinder",
+      "radius_mm": 20.0,
+      "max_dev_mm": 7.309e-06,
+      "mean_dev_mm": 6.214e-06,
+      "normal_agree": 0.999952941
+    },
+    {
+      "tri_id": 444,
+      "true_face_id": 521,
+      "face_type": "cylinder",
+      "radius_mm": 20.0,
+      "max_dev_mm": 1.0522e-05,
+      "mean_dev_mm": 8.364e-06,
+      "normal_agree": 0.999952994
+    },
+    {
+      "tri_id": 445,
+      "true_face_id": 521,
+      "face_type": "cylinder",
+      "radius_mm": 20.0,
+      "max_dev_mm": 1.0522e-05,
+      "mean_dev_mm": 7.954e-06,
+      "normal_agree": 0.999953079
+    },
+    {
+      "tri_id": 446,
+      "true_face_id": 521,
+      "face_type": "cylinder",
+      "radius_mm": 20.0,
+      "max_dev_mm": 1.0522e-05,
+      "mean_dev_mm": 6.467e-06,
+      "normal_agree": 0.999952856
+    },
+    {
+      "tri_id": 447,
+      "true_face_id": 521,
+      "face_type": "cylinder",
+      "radius_mm": 20.0,
+      "max_dev_mm": 1.3256e-05,
+      "mean_dev_mm": 7.378e-06,
+      "normal_agree": 0.999953027
+    },
+    {
+      "tri_id": 448,
+      "true_face_id": 521,
+      "face_type": "cylinder",
+      "radius_mm": 20.0,
+      "max_dev_mm": 1.3256e-05,
+      "mean_dev_mm": 8.676e-06,
+      "normal_agree": 0.999952908
+    },
+    {
+      "tri_id": 449,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 9.948e-06,
+      "mean_dev_mm": 4.898e-06,
+      "normal_agree": 0.999917233
+    },
+    {
+      "tri_id": 450,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.908e-06,
+      "mean_dev_mm": 3.218e-06,
+      "normal_agree": 0.999917089
+    },
+    {
+      "tri_id": 451,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 8.807e-06,
+      "mean_dev_mm": 5.533e-06,
+      "normal_agree": 0.999917097
+    },
+    {
+      "tri_id": 452,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 8.807e-06,
+      "mean_dev_mm": 5.024e-06,
+      "normal_agree": 0.999917224
+    },
+    {
+      "tri_id": 453,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 8.807e-06,
+      "mean_dev_mm": 4.115e-06,
+      "normal_agree": 0.999917229
+    },
+    {
+      "tri_id": 454,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.882e-06,
+      "mean_dev_mm": 2.807e-06,
+      "normal_agree": 0.999917095
+    },
+    {
+      "tri_id": 455,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.909e-06,
+      "mean_dev_mm": 3.991e-06,
+      "normal_agree": 0.999917131
+    },
+    {
+      "tri_id": 456,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.909e-06,
+      "mean_dev_mm": 3.839e-06,
+      "normal_agree": 0.999917192
+    },
+    {
+      "tri_id": 457,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.189e-06,
+      "mean_dev_mm": 4.608e-06,
+      "normal_agree": 0.999917289
+    },
+    {
+      "tri_id": 458,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.98e-06,
+      "mean_dev_mm": 5.632e-06,
+      "normal_agree": 0.999917267
+    },
+    {
+      "tri_id": 459,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 1.27e-05,
+      "mean_dev_mm": 9.289e-06,
+      "normal_agree": 0.999916955
+    },
+    {
+      "tri_id": 460,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 1.27e-05,
+      "mean_dev_mm": 9.239e-06,
+      "normal_agree": 0.99991715
+    },
+    {
+      "tri_id": 461,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 1.27e-05,
+      "mean_dev_mm": 9.932e-06,
+      "normal_agree": 0.999917398
+    },
+    {
+      "tri_id": 462,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 1.0059e-05,
+      "mean_dev_mm": 6.546e-06,
+      "normal_agree": 0.999917117
+    },
+    {
+      "tri_id": 463,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 1.0059e-05,
+      "mean_dev_mm": 4.359e-06,
+      "normal_agree": 0.999917056
+    },
+    {
+      "tri_id": 464,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.081e-06,
+      "mean_dev_mm": 2.366e-06,
+      "normal_agree": 0.999917093
+    },
+    {
+      "tri_id": 465,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.081e-06,
+      "mean_dev_mm": 2.699e-06,
+      "normal_agree": 0.999917202
+    },
+    {
+      "tri_id": 466,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 6.195e-06,
+      "mean_dev_mm": 4.606e-06,
+      "normal_agree": 0.999917271
+    },
+    {
+      "tri_id": 467,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 6.195e-06,
+      "mean_dev_mm": 4.746e-06,
+      "normal_agree": 0.999917175
+    },
+    {
+      "tri_id": 468,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.839e-06,
+      "mean_dev_mm": 6.178e-06,
+      "normal_agree": 0.999917015
+    },
+    {
+      "tri_id": 469,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.839e-06,
+      "mean_dev_mm": 5.798e-06,
+      "normal_agree": 0.999917164
+    },
+    {
+      "tri_id": 470,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.839e-06,
+      "mean_dev_mm": 6.883e-06,
+      "normal_agree": 0.999917159
+    },
+    {
+      "tri_id": 471,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.755e-06,
+      "mean_dev_mm": 5.211e-06,
+      "normal_agree": 0.999917134
+    },
+    {
+      "tri_id": 472,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.755e-06,
+      "mean_dev_mm": 5.148e-06,
+      "normal_agree": 0.999917187
+    },
+    {
+      "tri_id": 473,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.867e-06,
+      "mean_dev_mm": 2.736e-06,
+      "normal_agree": 0.999917125
+    },
+    {
+      "tri_id": 474,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.867e-06,
+      "mean_dev_mm": 2.081e-06,
+      "normal_agree": 0.999917201
+    },
+    {
+      "tri_id": 475,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 2.432e-06,
+      "mean_dev_mm": 1.269e-06,
+      "normal_agree": 0.99991714
+    },
+    {
+      "tri_id": 476,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 4.153e-06,
+      "mean_dev_mm": 2.481e-06,
+      "normal_agree": 0.999917216
+    },
+    {
+      "tri_id": 477,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.474e-06,
+      "mean_dev_mm": 4.686e-06,
+      "normal_agree": 0.999917115
+    },
+    {
+      "tri_id": 478,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.522e-06,
+      "mean_dev_mm": 6.383e-06,
+      "normal_agree": 0.999917203
+    },
+    {
+      "tri_id": 479,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.522e-06,
+      "mean_dev_mm": 5.689e-06,
+      "normal_agree": 0.99991722
+    },
+    {
+      "tri_id": 480,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 7.522e-06,
+      "mean_dev_mm": 4.109e-06,
+      "normal_agree": 0.999917109
+    },
+    {
+      "tri_id": 481,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 2.808e-06,
+      "mean_dev_mm": 2.537e-06,
+      "normal_agree": 0.999917211
+    },
+    {
+      "tri_id": 482,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 2.808e-06,
+      "mean_dev_mm": 2.337e-06,
+      "normal_agree": 0.999917116
+    },
+    {
+      "tri_id": 483,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 2.808e-06,
+      "mean_dev_mm": 1.464e-06,
+      "normal_agree": 0.999917128
+    },
+    {
+      "tri_id": 484,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 2.118e-06,
+      "mean_dev_mm": 1.234e-06,
+      "normal_agree": 0.999917196
+    },
+    {
+      "tri_id": 485,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 2.775e-06,
+      "mean_dev_mm": 1.668e-06,
+      "normal_agree": 0.999917131
+    },
+    {
+      "tri_id": 486,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 5.437e-06,
+      "mean_dev_mm": 3.443e-06,
+      "normal_agree": 0.999917194
+    },
+    {
+      "tri_id": 487,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 5.437e-06,
+      "mean_dev_mm": 4.237e-06,
+      "normal_agree": 0.999917234
+    },
+    {
+      "tri_id": 488,
+      "true_face_id": 522,
+      "face_type": "cylinder",
+      "radius_mm": 16.0,
+      "max_dev_mm": 5.437e-06,
+      "mean_dev_mm": 3.71e-06,
+      "normal_agree": 0.999917089
+    },
+    {
+      "tri_id": 489,
+      "true_face_id": 523,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3256e-05,
+      "mean_dev_mm": 1.1066e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 490,
+      "true_face_id": 523,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3256e-05,
+      "mean_dev_mm": 1.2161e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 491,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.3256e-05,
+      "mean_dev_mm": 1.1556e-05,
+      "normal_agree": 0.999657167
+    },
+    {
+      "tri_id": 492,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.5457e-05,
+      "mean_dev_mm": 1.229e-05,
+      "normal_agree": 0.99965632
+    },
+    {
+      "tri_id": 493,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.5457e-05,
+      "mean_dev_mm": 1.272e-05,
+      "normal_agree": 0.999656062
+    },
+    {
+      "tri_id": 494,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.5457e-05,
+      "mean_dev_mm": 1.3703e-05,
+      "normal_agree": 0.99965474
+    },
+    {
+      "tri_id": 495,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.4388e-05,
+      "mean_dev_mm": 1.1214e-05,
+      "normal_agree": 0.999655936
+    },
+    {
+      "tri_id": 496,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.4388e-05,
+      "mean_dev_mm": 1.1098e-05,
+      "normal_agree": 0.999656234
+    },
+    {
+      "tri_id": 497,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.0917e-05,
+      "mean_dev_mm": 8.289e-06,
+      "normal_agree": 0.999655959
+    },
+    {
+      "tri_id": 498,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.0917e-05,
+      "mean_dev_mm": 8.497e-06,
+      "normal_agree": 0.999656151
+    },
+    {
+      "tri_id": 499,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.616e-06,
+      "mean_dev_mm": 5.539e-06,
+      "normal_agree": 0.999655887
+    },
+    {
+      "tri_id": 500,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.616e-06,
+      "mean_dev_mm": 5.008e-06,
+      "normal_agree": 0.999656249
+    },
+    {
+      "tri_id": 501,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 4.511e-06,
+      "mean_dev_mm": 3.64e-06,
+      "normal_agree": 0.999656194
+    },
+    {
+      "tri_id": 502,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.1496e-05,
+      "mean_dev_mm": 6.791e-06,
+      "normal_agree": 0.999656812
+    },
+    {
+      "tri_id": 503,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.1496e-05,
+      "mean_dev_mm": 7.046e-06,
+      "normal_agree": 0.999656132
+    },
+    {
+      "tri_id": 504,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 1.1496e-05,
+      "mean_dev_mm": 7.75e-06,
+      "normal_agree": 0.999655273
+    },
+    {
+      "tri_id": 505,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.622e-06,
+      "mean_dev_mm": 4.7e-06,
+      "normal_agree": 0.999655936
+    },
+    {
+      "tri_id": 506,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.622e-06,
+      "mean_dev_mm": 4.111e-06,
+      "normal_agree": 0.999656203
+    },
+    {
+      "tri_id": 507,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.002e-06,
+      "mean_dev_mm": 3.904e-06,
+      "normal_agree": 0.999656227
+    },
+    {
+      "tri_id": 508,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.516e-06,
+      "mean_dev_mm": 5.294e-06,
+      "normal_agree": 0.999655926
+    },
+    {
+      "tri_id": 509,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.516e-06,
+      "mean_dev_mm": 5.686e-06,
+      "normal_agree": 0.999655601
+    },
+    {
+      "tri_id": 510,
+      "true_face_id": 524,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.516e-06,
+      "mean_dev_mm": 5.199e-06,
+      "normal_agree": 0.999656574
+    },
+    {
+      "tri_id": 511,
+      "true_face_id": 525,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 4.54e-06,
+      "mean_dev_mm": 4.54e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 512,
+      "true_face_id": 525,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 4.54e-06,
+      "mean_dev_mm": 4.54e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 513,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.168e-05,
+      "normal_agree": 0.999761462
+    },
+    {
+      "tri_id": 514,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.1105e-05,
+      "normal_agree": 0.999761372
+    },
+    {
+      "tri_id": 515,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.1712e-05,
+      "normal_agree": 0.99976134
+    },
+    {
+      "tri_id": 516,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.0808e-05,
+      "mean_dev_mm": 9.627e-06,
+      "normal_agree": 0.999761514
+    },
+    {
+      "tri_id": 517,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3247e-05,
+      "mean_dev_mm": 1.0535e-05,
+      "normal_agree": 0.999760718
+    },
+    {
+      "tri_id": 518,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3247e-05,
+      "mean_dev_mm": 1.1285e-05,
+      "normal_agree": 0.999761254
+    },
+    {
+      "tri_id": 519,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3247e-05,
+      "mean_dev_mm": 1.1399e-05,
+      "normal_agree": 0.999761568
+    },
+    {
+      "tri_id": 520,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3058e-05,
+      "mean_dev_mm": 1.0626e-05,
+      "normal_agree": 0.999762116
+    },
+    {
+      "tri_id": 521,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1897e-05,
+      "mean_dev_mm": 1.0239e-05,
+      "normal_agree": 0.999762001
+    },
+    {
+      "tri_id": 522,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1897e-05,
+      "mean_dev_mm": 1.0626e-05,
+      "normal_agree": 0.999760844
+    },
+    {
+      "tri_id": 523,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1897e-05,
+      "mean_dev_mm": 7.99e-06,
+      "normal_agree": 0.99976116
+    },
+    {
+      "tri_id": 524,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.053e-06,
+      "mean_dev_mm": 4.162e-06,
+      "normal_agree": 0.99976167
+    },
+    {
+      "tri_id": 525,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.019e-06,
+      "mean_dev_mm": 1.573e-06,
+      "normal_agree": 0.999761382
+    },
+    {
+      "tri_id": 526,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.285e-06,
+      "mean_dev_mm": 9.12e-07,
+      "normal_agree": 0.999761475
+    },
+    {
+      "tri_id": 527,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.68e-06,
+      "mean_dev_mm": 2.001e-06,
+      "normal_agree": 0.999761489
+    },
+    {
+      "tri_id": 528,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.68e-06,
+      "mean_dev_mm": 2.133e-06,
+      "normal_agree": 0.99976134
+    },
+    {
+      "tri_id": 529,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.623e-06,
+      "mean_dev_mm": 4.328e-06,
+      "normal_agree": 0.999761548
+    },
+    {
+      "tri_id": 530,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.623e-06,
+      "mean_dev_mm": 5.095e-06,
+      "normal_agree": 0.999761308
+    },
+    {
+      "tri_id": 531,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.623e-06,
+      "mean_dev_mm": 6.519e-06,
+      "normal_agree": 0.99976102
+    },
+    {
+      "tri_id": 532,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.212e-06,
+      "mean_dev_mm": 6.383e-06,
+      "normal_agree": 0.999761798
+    },
+    {
+      "tri_id": 533,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.212e-06,
+      "mean_dev_mm": 5.73e-06,
+      "normal_agree": 0.999761714
+    },
+    {
+      "tri_id": 534,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.212e-06,
+      "mean_dev_mm": 4.803e-06,
+      "normal_agree": 0.999761122
+    },
+    {
+      "tri_id": 535,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 4.023e-06,
+      "mean_dev_mm": 2.65e-06,
+      "normal_agree": 0.99976134
+    },
+    {
+      "tri_id": 536,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.173e-06,
+      "mean_dev_mm": 1.417e-06,
+      "normal_agree": 0.999761518
+    },
+    {
+      "tri_id": 537,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 2.127e-06,
+      "mean_dev_mm": 1.068e-06,
+      "normal_agree": 0.99976147
+    },
+    {
+      "tri_id": 538,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 2.127e-06,
+      "mean_dev_mm": 1.526e-06,
+      "normal_agree": 0.999761378
+    },
+    {
+      "tri_id": 539,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 2.127e-06,
+      "mean_dev_mm": 1.796e-06,
+      "normal_agree": 0.999761382
+    },
+    {
+      "tri_id": 540,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 2.127e-06,
+      "mean_dev_mm": 1.607e-06,
+      "normal_agree": 0.999761427
+    },
+    {
+      "tri_id": 541,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 4.775e-06,
+      "mean_dev_mm": 2.49e-06,
+      "normal_agree": 0.999761541
+    },
+    {
+      "tri_id": 542,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 5.625e-06,
+      "mean_dev_mm": 3.987e-06,
+      "normal_agree": 0.999761317
+    },
+    {
+      "tri_id": 543,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 5.625e-06,
+      "mean_dev_mm": 5.081e-06,
+      "normal_agree": 0.999761145
+    },
+    {
+      "tri_id": 544,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 5.625e-06,
+      "mean_dev_mm": 4.685e-06,
+      "normal_agree": 0.999761692
+    },
+    {
+      "tri_id": 545,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.183e-06,
+      "mean_dev_mm": 4.871e-06,
+      "normal_agree": 0.999761393
+    },
+    {
+      "tri_id": 546,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.183e-06,
+      "mean_dev_mm": 4.77e-06,
+      "normal_agree": 0.99976146
+    },
+    {
+      "tri_id": 547,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.183e-06,
+      "mean_dev_mm": 5.391e-06,
+      "normal_agree": 0.999761755
+    },
+    {
+      "tri_id": 548,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.449e-06,
+      "mean_dev_mm": 5.813e-06,
+      "normal_agree": 0.999761067
+    },
+    {
+      "tri_id": 549,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.449e-06,
+      "mean_dev_mm": 5.412e-06,
+      "normal_agree": 0.999761358
+    },
+    {
+      "tri_id": 550,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.449e-06,
+      "mean_dev_mm": 5.483e-06,
+      "normal_agree": 0.999761472
+    },
+    {
+      "tri_id": 551,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 5.662e-06,
+      "mean_dev_mm": 4.775e-06,
+      "normal_agree": 0.999761491
+    },
+    {
+      "tri_id": 552,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 7.93e-06,
+      "mean_dev_mm": 6.306e-06,
+      "normal_agree": 0.999761367
+    },
+    {
+      "tri_id": 553,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.2015e-05,
+      "mean_dev_mm": 8.423e-06,
+      "normal_agree": 0.999760924
+    },
+    {
+      "tri_id": 554,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.2015e-05,
+      "mean_dev_mm": 9.706e-06,
+      "normal_agree": 0.999761926
+    },
+    {
+      "tri_id": 555,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.2015e-05,
+      "mean_dev_mm": 8.798e-06,
+      "normal_agree": 0.999761615
+    },
+    {
+      "tri_id": 556,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.171e-06,
+      "mean_dev_mm": 5.518e-06,
+      "normal_agree": 0.999761213
+    },
+    {
+      "tri_id": 557,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.0441e-05,
+      "mean_dev_mm": 5.941e-06,
+      "normal_agree": 0.999761272
+    },
+    {
+      "tri_id": 558,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.0441e-05,
+      "mean_dev_mm": 6.627e-06,
+      "normal_agree": 0.999761573
+    },
+    {
+      "tri_id": 559,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3689e-05,
+      "mean_dev_mm": 1.0466e-05,
+      "normal_agree": 0.99976212
+    },
+    {
+      "tri_id": 560,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3689e-05,
+      "mean_dev_mm": 1.1423e-05,
+      "normal_agree": 0.99976159
+    },
+    {
+      "tri_id": 561,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.3602e-05,
+      "normal_agree": 0.999760624
+    },
+    {
+      "tri_id": 562,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.2546e-05,
+      "normal_agree": 0.999761344
+    },
+    {
+      "tri_id": 563,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.5125e-05,
+      "mean_dev_mm": 1.3151e-05,
+      "normal_agree": 0.999762258
+    },
+    {
+      "tri_id": 564,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.5125e-05,
+      "mean_dev_mm": 1.2507e-05,
+      "normal_agree": 0.999761458
+    },
+    {
+      "tri_id": 565,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.5125e-05,
+      "mean_dev_mm": 1.2847e-05,
+      "normal_agree": 0.999760657
+    },
+    {
+      "tri_id": 566,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1875e-05,
+      "mean_dev_mm": 1.0595e-05,
+      "normal_agree": 0.999761327
+    },
+    {
+      "tri_id": 567,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1542e-05,
+      "mean_dev_mm": 6.969e-06,
+      "normal_agree": 0.999761719
+    },
+    {
+      "tri_id": 568,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 8.369e-06,
+      "mean_dev_mm": 3.801e-06,
+      "normal_agree": 0.99976111
+    },
+    {
+      "tri_id": 569,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.4143e-05,
+      "mean_dev_mm": 5.726e-06,
+      "normal_agree": 0.999761039
+    },
+    {
+      "tri_id": 570,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.4143e-05,
+      "mean_dev_mm": 9.159e-06,
+      "normal_agree": 0.99976181
+    },
+    {
+      "tri_id": 571,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.4143e-05,
+      "mean_dev_mm": 9.392e-06,
+      "normal_agree": 0.999761914
+    },
+    {
+      "tri_id": 572,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1298e-05,
+      "mean_dev_mm": 6.458e-06,
+      "normal_agree": 0.999760939
+    },
+    {
+      "tri_id": 573,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.1121e-05,
+      "mean_dev_mm": 6.399e-06,
+      "normal_agree": 0.999761664
+    },
+    {
+      "tri_id": 574,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3443e-05,
+      "mean_dev_mm": 9.968e-06,
+      "normal_agree": 0.999761185
+    },
+    {
+      "tri_id": 575,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3443e-05,
+      "mean_dev_mm": 8.879e-06,
+      "normal_agree": 0.999761157
+    },
+    {
+      "tri_id": 576,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.3443e-05,
+      "mean_dev_mm": 6.53e-06,
+      "normal_agree": 0.999761692
+    },
+    {
+      "tri_id": 577,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.868e-06,
+      "mean_dev_mm": 5.338e-06,
+      "normal_agree": 0.999761062
+    },
+    {
+      "tri_id": 578,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.868e-06,
+      "mean_dev_mm": 7.389e-06,
+      "normal_agree": 0.999761767
+    },
+    {
+      "tri_id": 579,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.868e-06,
+      "mean_dev_mm": 7.805e-06,
+      "normal_agree": 0.999761862
+    },
+    {
+      "tri_id": 580,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 8.225e-06,
+      "mean_dev_mm": 6.71e-06,
+      "normal_agree": 0.99976099
+    },
+    {
+      "tri_id": 581,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.58e-06,
+      "mean_dev_mm": 4.19e-06,
+      "normal_agree": 0.999761284
+    },
+    {
+      "tri_id": 582,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.58e-06,
+      "mean_dev_mm": 2.921e-06,
+      "normal_agree": 0.999761567
+    },
+    {
+      "tri_id": 583,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.085e-06,
+      "mean_dev_mm": 1.756e-06,
+      "normal_agree": 0.999761317
+    },
+    {
+      "tri_id": 584,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.085e-06,
+      "mean_dev_mm": 2.419e-06,
+      "normal_agree": 0.999761548
+    },
+    {
+      "tri_id": 585,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.085e-06,
+      "mean_dev_mm": 2.623e-06,
+      "normal_agree": 0.99976143
+    },
+    {
+      "tri_id": 586,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 2.657e-06,
+      "mean_dev_mm": 2.304e-06,
+      "normal_agree": 0.999761387
+    },
+    {
+      "tri_id": 587,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.465e-06,
+      "mean_dev_mm": 2.573e-06,
+      "normal_agree": 0.999761383
+    },
+    {
+      "tri_id": 588,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.893e-06,
+      "mean_dev_mm": 3.162e-06,
+      "normal_agree": 0.999761473
+    },
+    {
+      "tri_id": 589,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.893e-06,
+      "mean_dev_mm": 2.481e-06,
+      "normal_agree": 0.999761525
+    },
+    {
+      "tri_id": 590,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.893e-06,
+      "mean_dev_mm": 1.639e-06,
+      "normal_agree": 0.99976134
+    },
+    {
+      "tri_id": 591,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 4.211e-06,
+      "mean_dev_mm": 1.745e-06,
+      "normal_agree": 0.999761545
+    },
+    {
+      "tri_id": 592,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 4.211e-06,
+      "mean_dev_mm": 2.701e-06,
+      "normal_agree": 0.999761307
+    },
+    {
+      "tri_id": 593,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 4.211e-06,
+      "mean_dev_mm": 3.701e-06,
+      "normal_agree": 0.999761395
+    },
+    {
+      "tri_id": 594,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.938e-06,
+      "mean_dev_mm": 3.063e-06,
+      "normal_agree": 0.999761422
+    },
+    {
+      "tri_id": 595,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 3.938e-06,
+      "mean_dev_mm": 2.18e-06,
+      "normal_agree": 0.99976132
+    },
+    {
+      "tri_id": 596,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 2.296e-06,
+      "mean_dev_mm": 1.432e-06,
+      "normal_agree": 0.999761542
+    },
+    {
+      "tri_id": 597,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.066e-06,
+      "mean_dev_mm": 3.689e-06,
+      "normal_agree": 0.999761674
+    },
+    {
+      "tri_id": 598,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.066e-06,
+      "mean_dev_mm": 5.835e-06,
+      "normal_agree": 0.999761174
+    },
+    {
+      "tri_id": 599,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.066e-06,
+      "mean_dev_mm": 5.413e-06,
+      "normal_agree": 0.999761169
+    },
+    {
+      "tri_id": 600,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.743e-06,
+      "mean_dev_mm": 3.116e-06,
+      "normal_agree": 0.999761679
+    },
+    {
+      "tri_id": 601,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.77e-06,
+      "mean_dev_mm": 4.125e-06,
+      "normal_agree": 0.999761685
+    },
+    {
+      "tri_id": 602,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.77e-06,
+      "mean_dev_mm": 6.291e-06,
+      "normal_agree": 0.999761149
+    },
+    {
+      "tri_id": 603,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 9.77e-06,
+      "mean_dev_mm": 6.793e-06,
+      "normal_agree": 0.99976104
+    },
+    {
+      "tri_id": 604,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 6.926e-06,
+      "mean_dev_mm": 5.775e-06,
+      "normal_agree": 0.999761828
+    },
+    {
+      "tri_id": 605,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.4348e-05,
+      "mean_dev_mm": 8.249e-06,
+      "normal_agree": 0.999761102
+    },
+    {
+      "tri_id": 606,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.4348e-05,
+      "mean_dev_mm": 1.1007e-05,
+      "normal_agree": 0.999760875
+    },
+    {
+      "tri_id": 607,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.4348e-05,
+      "mean_dev_mm": 1.285e-05,
+      "normal_agree": 0.999762207
+    },
+    {
+      "tri_id": 608,
+      "true_face_id": 526,
+      "face_type": "cylinder",
+      "radius_mm": 5.75,
+      "max_dev_mm": 1.2244e-05,
+      "mean_dev_mm": 1.1063e-05,
+      "normal_agree": 0.999761517
+    },
+    {
+      "tri_id": 609,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.1621e-05,
+      "mean_dev_mm": 8.857e-06,
+      "normal_agree": 0.999889635
+    },
+    {
+      "tri_id": 610,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.1621e-05,
+      "mean_dev_mm": 8.402e-06,
+      "normal_agree": 0.999889501
+    },
+    {
+      "tri_id": 611,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 8.605e-06,
+      "mean_dev_mm": 5.885e-06,
+      "normal_agree": 0.999889234
+    },
+    {
+      "tri_id": 612,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 8.605e-06,
+      "mean_dev_mm": 4.503e-06,
+      "normal_agree": 0.999889543
+    },
+    {
+      "tri_id": 613,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 4.07e-06,
+      "mean_dev_mm": 2.142e-06,
+      "normal_agree": 0.999889432
+    },
+    {
+      "tri_id": 614,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.524e-06,
+      "mean_dev_mm": 1.219e-06,
+      "normal_agree": 0.999889354
+    },
+    {
+      "tri_id": 615,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.025e-06,
+      "mean_dev_mm": 1.95e-06,
+      "normal_agree": 0.999889359
+    },
+    {
+      "tri_id": 616,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.025e-06,
+      "mean_dev_mm": 1.654e-06,
+      "normal_agree": 0.999889417
+    },
+    {
+      "tri_id": 617,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.025e-06,
+      "mean_dev_mm": 1.459e-06,
+      "normal_agree": 0.999889427
+    },
+    {
+      "tri_id": 618,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.217e-06,
+      "mean_dev_mm": 8.57e-07,
+      "normal_agree": 0.999889357
+    },
+    {
+      "tri_id": 619,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 5.823e-06,
+      "mean_dev_mm": 2.585e-06,
+      "normal_agree": 0.999889301
+    },
+    {
+      "tri_id": 620,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 5.823e-06,
+      "mean_dev_mm": 3.799e-06,
+      "normal_agree": 0.99988948
+    },
+    {
+      "tri_id": 621,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 5.823e-06,
+      "mean_dev_mm": 3.813e-06,
+      "normal_agree": 0.999889467
+    },
+    {
+      "tri_id": 622,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 4.359e-06,
+      "mean_dev_mm": 1.963e-06,
+      "normal_agree": 0.999889323
+    },
+    {
+      "tri_id": 623,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.257e-06,
+      "mean_dev_mm": 7.45e-07,
+      "normal_agree": 0.999889394
+    },
+    {
+      "tri_id": 624,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 7.05e-07,
+      "mean_dev_mm": 3.97e-07,
+      "normal_agree": 0.999889384
+    },
+    {
+      "tri_id": 625,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.729e-06,
+      "mean_dev_mm": 8.81e-07,
+      "normal_agree": 0.999889423
+    },
+    {
+      "tri_id": 626,
+      "true_face_id": 527,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.729e-06,
+      "mean_dev_mm": 1.387e-06,
+      "normal_agree": 0.99988935
+    },
+    {
+      "tri_id": 627,
+      "true_face_id": 528,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.729e-06,
+      "mean_dev_mm": 1.729e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 628,
+      "true_face_id": 528,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.729e-06,
+      "mean_dev_mm": 1.729e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 629,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.521e-06,
+      "mean_dev_mm": 4.867e-06,
+      "normal_agree": 0.999656512
+    },
+    {
+      "tri_id": 630,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.521e-06,
+      "mean_dev_mm": 5.022e-06,
+      "normal_agree": 0.999655645
+    },
+    {
+      "tri_id": 631,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.521e-06,
+      "mean_dev_mm": 3.975e-06,
+      "normal_agree": 0.999655883
+    },
+    {
+      "tri_id": 632,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.097e-06,
+      "mean_dev_mm": 3.833e-06,
+      "normal_agree": 0.999656079
+    },
+    {
+      "tri_id": 633,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.097e-06,
+      "mean_dev_mm": 3.409e-06,
+      "normal_agree": 0.999656195
+    },
+    {
+      "tri_id": 634,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.097e-06,
+      "mean_dev_mm": 3.691e-06,
+      "normal_agree": 0.999656201
+    },
+    {
+      "tri_id": 635,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.267e-06,
+      "mean_dev_mm": 4.081e-06,
+      "normal_agree": 0.999655617
+    },
+    {
+      "tri_id": 636,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.267e-06,
+      "mean_dev_mm": 3.094e-06,
+      "normal_agree": 0.99965614
+    },
+    {
+      "tri_id": 637,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.267e-06,
+      "mean_dev_mm": 2.39e-06,
+      "normal_agree": 0.999656368
+    },
+    {
+      "tri_id": 638,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.334e-06,
+      "mean_dev_mm": 3.079e-06,
+      "normal_agree": 0.999655763
+    },
+    {
+      "tri_id": 639,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.334e-06,
+      "mean_dev_mm": 3.978e-06,
+      "normal_agree": 0.999656243
+    },
+    {
+      "tri_id": 640,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.334e-06,
+      "mean_dev_mm": 4.204e-06,
+      "normal_agree": 0.999656405
+    },
+    {
+      "tri_id": 641,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.348e-06,
+      "mean_dev_mm": 4.209e-06,
+      "normal_agree": 0.999655533
+    },
+    {
+      "tri_id": 642,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.348e-06,
+      "mean_dev_mm": 3.827e-06,
+      "normal_agree": 0.999655999
+    },
+    {
+      "tri_id": 643,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.348e-06,
+      "mean_dev_mm": 6.335e-06,
+      "normal_agree": 0.999656823
+    },
+    {
+      "tri_id": 644,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.336e-06,
+      "mean_dev_mm": 5.29e-06,
+      "normal_agree": 0.999655951
+    },
+    {
+      "tri_id": 645,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 8.336e-06,
+      "mean_dev_mm": 6.74e-06,
+      "normal_agree": 0.999655393
+    },
+    {
+      "tri_id": 646,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.67e-06,
+      "mean_dev_mm": 5.68e-06,
+      "normal_agree": 0.999656064
+    },
+    {
+      "tri_id": 647,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 6.67e-06,
+      "mean_dev_mm": 4.301e-06,
+      "normal_agree": 0.999656323
+    },
+    {
+      "tri_id": 648,
+      "true_face_id": 529,
+      "face_type": "cylinder",
+      "radius_mm": 3.787157516,
+      "max_dev_mm": 5.156e-06,
+      "mean_dev_mm": 3.531e-06,
+      "normal_agree": 0.999656495
+    },
+    {
+      "tri_id": 649,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.123e-06,
+      "mean_dev_mm": 4.103e-06,
+      "normal_agree": 0.99977093
+    },
+    {
+      "tri_id": 650,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.123e-06,
+      "mean_dev_mm": 2.326e-06,
+      "normal_agree": 0.999770615
+    },
+    {
+      "tri_id": 651,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 2.878e-06,
+      "mean_dev_mm": 1.244e-06,
+      "normal_agree": 0.999770693
+    },
+    {
+      "tri_id": 652,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 3.81e-06,
+      "mean_dev_mm": 2.459e-06,
+      "normal_agree": 0.999770855
+    },
+    {
+      "tri_id": 653,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 5.492e-06,
+      "mean_dev_mm": 4.06e-06,
+      "normal_agree": 0.999771002
+    },
+    {
+      "tri_id": 654,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 5.492e-06,
+      "mean_dev_mm": 4.489e-06,
+      "normal_agree": 0.999770547
+    },
+    {
+      "tri_id": 655,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 5.492e-06,
+      "mean_dev_mm": 4.447e-06,
+      "normal_agree": 0.999770515
+    },
+    {
+      "tri_id": 656,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 5.385e-06,
+      "mean_dev_mm": 4.411e-06,
+      "normal_agree": 0.999771037
+    },
+    {
+      "tri_id": 657,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 5.385e-06,
+      "mean_dev_mm": 4.681e-06,
+      "normal_agree": 0.999770729
+    },
+    {
+      "tri_id": 658,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 7.019e-06,
+      "mean_dev_mm": 5.792e-06,
+      "normal_agree": 0.99977081
+    },
+    {
+      "tri_id": 659,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 8.804e-06,
+      "mean_dev_mm": 6.932e-06,
+      "normal_agree": 0.999771157
+    },
+    {
+      "tri_id": 660,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 8.804e-06,
+      "mean_dev_mm": 7.423e-06,
+      "normal_agree": 0.999770398
+    },
+    {
+      "tri_id": 661,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 8.804e-06,
+      "mean_dev_mm": 7.54e-06,
+      "normal_agree": 0.999770317
+    },
+    {
+      "tri_id": 662,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 7.369e-06,
+      "mean_dev_mm": 5.346e-06,
+      "normal_agree": 0.999770892
+    },
+    {
+      "tri_id": 663,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 7.369e-06,
+      "mean_dev_mm": 4.376e-06,
+      "normal_agree": 0.99977089
+    },
+    {
+      "tri_id": 664,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.898e-06,
+      "mean_dev_mm": 4.218e-06,
+      "normal_agree": 0.999770653
+    },
+    {
+      "tri_id": 665,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.898e-06,
+      "mean_dev_mm": 3.647e-06,
+      "normal_agree": 0.999770891
+    },
+    {
+      "tri_id": 666,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.898e-06,
+      "mean_dev_mm": 3.314e-06,
+      "normal_agree": 0.999771037
+    },
+    {
+      "tri_id": 667,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.901e-06,
+      "mean_dev_mm": 3.315e-06,
+      "normal_agree": 0.999770947
+    },
+    {
+      "tri_id": 668,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.901e-06,
+      "mean_dev_mm": 4.386e-06,
+      "normal_agree": 0.999770594
+    },
+    {
+      "tri_id": 669,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.901e-06,
+      "mean_dev_mm": 5.807e-06,
+      "normal_agree": 0.99977039
+    },
+    {
+      "tri_id": 670,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.798e-06,
+      "mean_dev_mm": 5.2e-06,
+      "normal_agree": 0.999770736
+    },
+    {
+      "tri_id": 671,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 6.798e-06,
+      "mean_dev_mm": 4.748e-06,
+      "normal_agree": 0.99977089
+    },
+    {
+      "tri_id": 672,
+      "true_face_id": 530,
+      "face_type": "cylinder",
+      "radius_mm": 6.0,
+      "max_dev_mm": 5.652e-06,
+      "mean_dev_mm": 4.366e-06,
+      "normal_agree": 0.999771065
+    },
+    {
+      "tri_id": 673,
+      "true_face_id": 531,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.652e-06,
+      "mean_dev_mm": 4.557e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 674,
+      "true_face_id": 531,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.652e-06,
+      "mean_dev_mm": 3.462e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 675,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.652e-06,
+      "mean_dev_mm": 3.956e-06,
+      "normal_agree": 0.999761628
+    },
+    {
+      "tri_id": 676,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.652e-06,
+      "mean_dev_mm": 3.363e-06,
+      "normal_agree": 0.999761211
+    },
+    {
+      "tri_id": 677,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.821e-06,
+      "mean_dev_mm": 3.419e-06,
+      "normal_agree": 0.999761489
+    },
+    {
+      "tri_id": 678,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.821e-06,
+      "mean_dev_mm": 3.02e-06,
+      "normal_agree": 0.999761354
+    },
+    {
+      "tri_id": 679,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.821e-06,
+      "mean_dev_mm": 3.635e-06,
+      "normal_agree": 0.999761155
+    },
+    {
+      "tri_id": 680,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.472e-06,
+      "mean_dev_mm": 3.519e-06,
+      "normal_agree": 0.999761703
+    },
+    {
+      "tri_id": 681,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.472e-06,
+      "mean_dev_mm": 3.481e-06,
+      "normal_agree": 0.999761411
+    },
+    {
+      "tri_id": 682,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.837e-06,
+      "mean_dev_mm": 5.281e-06,
+      "normal_agree": 0.999760964
+    },
+    {
+      "tri_id": 683,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.837e-06,
+      "mean_dev_mm": 3.81e-06,
+      "normal_agree": 0.999761533
+    },
+    {
+      "tri_id": 684,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.837e-06,
+      "mean_dev_mm": 3.481e-06,
+      "normal_agree": 0.999761733
+    },
+    {
+      "tri_id": 685,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 3.934e-06,
+      "mean_dev_mm": 2.18e-06,
+      "normal_agree": 0.999761266
+    },
+    {
+      "tri_id": 686,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.257e-06,
+      "mean_dev_mm": 3.913e-06,
+      "normal_agree": 0.999761591
+    },
+    {
+      "tri_id": 687,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.257e-06,
+      "mean_dev_mm": 4.169e-06,
+      "normal_agree": 0.999761627
+    },
+    {
+      "tri_id": 688,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 6.257e-06,
+      "mean_dev_mm": 2.962e-06,
+      "normal_agree": 0.999761198
+    },
+    {
+      "tri_id": 689,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 2.315e-06,
+      "mean_dev_mm": 8.91e-07,
+      "normal_agree": 0.999761348
+    },
+    {
+      "tri_id": 690,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 1.685e-06,
+      "mean_dev_mm": 6.81e-07,
+      "normal_agree": 0.999761493
+    },
+    {
+      "tri_id": 691,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.084e-06,
+      "mean_dev_mm": 2.937e-06,
+      "normal_agree": 0.999761666
+    },
+    {
+      "tri_id": 692,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.084e-06,
+      "mean_dev_mm": 4.865e-06,
+      "normal_agree": 0.999761176
+    },
+    {
+      "tri_id": 693,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 7.084e-06,
+      "mean_dev_mm": 5.673e-06,
+      "normal_agree": 0.999761053
+    },
+    {
+      "tri_id": 694,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.827e-06,
+      "mean_dev_mm": 4.964e-06,
+      "normal_agree": 0.999761788
+    },
+    {
+      "tri_id": 695,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.425e-06,
+      "mean_dev_mm": 4.83e-06,
+      "normal_agree": 0.999761382
+    },
+    {
+      "tri_id": 696,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.854e-06,
+      "mean_dev_mm": 5.412e-06,
+      "normal_agree": 0.999761456
+    },
+    {
+      "tri_id": 697,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.854e-06,
+      "mean_dev_mm": 5.238e-06,
+      "normal_agree": 0.999761754
+    },
+    {
+      "tri_id": 698,
+      "true_face_id": 532,
+      "face_type": "cylinder",
+      "radius_mm": 5.0,
+      "max_dev_mm": 5.854e-06,
+      "mean_dev_mm": 4.908e-06,
+      "normal_agree": 0.99976108
+    },
+    {
+      "tri_id": 699,
+      "true_face_id": 533,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 4.435e-06,
+      "mean_dev_mm": 4.435e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 700,
+      "true_face_id": 533,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 4.435e-06,
+      "mean_dev_mm": 4.435e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 701,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 4.499e-06,
+      "mean_dev_mm": 2.683e-06,
+      "normal_agree": 0.999852664
+    },
+    {
+      "tri_id": 702,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 2.354e-06,
+      "mean_dev_mm": 1.774e-06,
+      "normal_agree": 0.999852758
+    },
+    {
+      "tri_id": 703,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.2317e-05,
+      "mean_dev_mm": 5.481e-06,
+      "normal_agree": 0.999852878
+    },
+    {
+      "tri_id": 704,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.2317e-05,
+      "mean_dev_mm": 7.167e-06,
+      "normal_agree": 0.999852523
+    },
+    {
+      "tri_id": 705,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.2317e-05,
+      "mean_dev_mm": 7.523e-06,
+      "normal_agree": 0.999852422
+    },
+    {
+      "tri_id": 706,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.1012e-05,
+      "mean_dev_mm": 7.088e-06,
+      "normal_agree": 0.999852645
+    },
+    {
+      "tri_id": 707,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.1012e-05,
+      "mean_dev_mm": 5.116e-06,
+      "normal_agree": 0.999852736
+    },
+    {
+      "tri_id": 708,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.1012e-05,
+      "mean_dev_mm": 6.768e-06,
+      "normal_agree": 0.999853053
+    },
+    {
+      "tri_id": 709,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.795e-06,
+      "mean_dev_mm": 5.053e-06,
+      "normal_agree": 0.999852835
+    },
+    {
+      "tri_id": 710,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.795e-06,
+      "mean_dev_mm": 4.899e-06,
+      "normal_agree": 0.999852572
+    },
+    {
+      "tri_id": 711,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 5.868e-06,
+      "mean_dev_mm": 2.413e-06,
+      "normal_agree": 0.999852596
+    },
+    {
+      "tri_id": 712,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.09e-06,
+      "mean_dev_mm": 2.82e-06,
+      "normal_agree": 0.999852811
+    },
+    {
+      "tri_id": 713,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 9.652e-06,
+      "mean_dev_mm": 5.694e-06,
+      "normal_agree": 0.999852872
+    },
+    {
+      "tri_id": 714,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 9.652e-06,
+      "mean_dev_mm": 6.172e-06,
+      "normal_agree": 0.999852535
+    },
+    {
+      "tri_id": 715,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 9.652e-06,
+      "mean_dev_mm": 3.926e-06,
+      "normal_agree": 0.99985253
+    },
+    {
+      "tri_id": 716,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.893e-06,
+      "mean_dev_mm": 3.339e-06,
+      "normal_agree": 0.999852882
+    },
+    {
+      "tri_id": 717,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.3017e-05,
+      "mean_dev_mm": 7.087e-06,
+      "normal_agree": 0.999852934
+    },
+    {
+      "tri_id": 718,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.3017e-05,
+      "mean_dev_mm": 8.468e-06,
+      "normal_agree": 0.999852468
+    },
+    {
+      "tri_id": 719,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.3017e-05,
+      "mean_dev_mm": 9.727e-06,
+      "normal_agree": 0.999852678
+    },
+    {
+      "tri_id": 720,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.1671e-05,
+      "mean_dev_mm": 6.375e-06,
+      "normal_agree": 0.999852731
+    },
+    {
+      "tri_id": 721,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.4593e-05,
+      "mean_dev_mm": 9.741e-06,
+      "normal_agree": 0.999852216
+    },
+    {
+      "tri_id": 722,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.4593e-05,
+      "mean_dev_mm": 8.207e-06,
+      "normal_agree": 0.999852628
+    },
+    {
+      "tri_id": 723,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.4593e-05,
+      "mean_dev_mm": 7.411e-06,
+      "normal_agree": 0.999852963
+    },
+    {
+      "tri_id": 724,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 9.383e-06,
+      "mean_dev_mm": 5.675e-06,
+      "normal_agree": 0.999853008
+    },
+    {
+      "tri_id": 725,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 9.383e-06,
+      "mean_dev_mm": 3.707e-06,
+      "normal_agree": 0.999852692
+    },
+    {
+      "tri_id": 726,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 9.89e-06,
+      "mean_dev_mm": 6.814e-06,
+      "normal_agree": 0.999852712
+    },
+    {
+      "tri_id": 727,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.0917e-05,
+      "mean_dev_mm": 7.325e-06,
+      "normal_agree": 0.999852523
+    },
+    {
+      "tri_id": 728,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.0917e-05,
+      "mean_dev_mm": 1.0297e-05,
+      "normal_agree": 0.999852331
+    },
+    {
+      "tri_id": 729,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.0917e-05,
+      "mean_dev_mm": 1.0284e-05,
+      "normal_agree": 0.999852717
+    },
+    {
+      "tri_id": 730,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.0482e-05,
+      "mean_dev_mm": 1.0139e-05,
+      "normal_agree": 0.99985269
+    },
+    {
+      "tri_id": 731,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.2414e-05,
+      "mean_dev_mm": 1.0915e-05,
+      "normal_agree": 0.99985265
+    },
+    {
+      "tri_id": 732,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.2414e-05,
+      "mean_dev_mm": 9.976e-06,
+      "normal_agree": 0.999852761
+    },
+    {
+      "tri_id": 733,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 1.2414e-05,
+      "mean_dev_mm": 6.613e-06,
+      "normal_agree": 0.999852922
+    },
+    {
+      "tri_id": 734,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.856e-06,
+      "mean_dev_mm": 5.094e-06,
+      "normal_agree": 0.99985298
+    },
+    {
+      "tri_id": 735,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.856e-06,
+      "mean_dev_mm": 4.32e-06,
+      "normal_agree": 0.999852802
+    },
+    {
+      "tri_id": 736,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 7.856e-06,
+      "mean_dev_mm": 4.932e-06,
+      "normal_agree": 0.999852603
+    },
+    {
+      "tri_id": 737,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 6.075e-06,
+      "mean_dev_mm": 4.338e-06,
+      "normal_agree": 0.999852732
+    },
+    {
+      "tri_id": 738,
+      "true_face_id": 534,
+      "face_type": "cylinder",
+      "radius_mm": 9.0,
+      "max_dev_mm": 6.075e-06,
+      "mean_dev_mm": 2.858e-06,
+      "normal_agree": 0.999852671
+    },
+    {
+      "tri_id": 739,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 8.495e-06,
+      "normal_agree": 0.999999989
+    },
+    {
+      "tri_id": 740,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 8.998e-06,
+      "normal_agree": 0.999999997
+    },
+    {
+      "tri_id": 741,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 1.1431e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 742,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0957e-05,
+      "mean_dev_mm": 9.873e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 743,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.661e-06,
+      "mean_dev_mm": 8.772e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 744,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.002e-06,
+      "mean_dev_mm": 7.21e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 745,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.002e-06,
+      "mean_dev_mm": 5.218e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 746,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.002e-06,
+      "mean_dev_mm": 4.285e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 747,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 9.002e-06,
+      "mean_dev_mm": 5.897e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 748,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1241e-05,
+      "mean_dev_mm": 8.918e-06,
+      "normal_agree": 0.999999995
+    },
+    {
+      "tri_id": 749,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4242e-05,
+      "mean_dev_mm": 1.1495e-05,
+      "normal_agree": 0.99999995
+    },
+    {
+      "tri_id": 750,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5209e-05,
+      "mean_dev_mm": 1.2419e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 751,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5209e-05,
+      "mean_dev_mm": 1.35e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 752,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5209e-05,
+      "mean_dev_mm": 1.3362e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 753,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 1.0013e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 754,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 6.767e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 755,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0491e-05,
+      "mean_dev_mm": 6.209e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 756,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0491e-05,
+      "mean_dev_mm": 4.331e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 757,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 5.612e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 758,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 6.435e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 759,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 8.753e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 760,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4359e-05,
+      "mean_dev_mm": 1.0726e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 761,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5161e-05,
+      "mean_dev_mm": 1.3337e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 762,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.5161e-05,
+      "mean_dev_mm": 1.3594e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 763,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4359e-05,
+      "mean_dev_mm": 1.1136e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 764,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4359e-05,
+      "mean_dev_mm": 9.037e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 765,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4359e-05,
+      "mean_dev_mm": 7.385e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 766,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4359e-05,
+      "mean_dev_mm": 8.616e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 767,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.658e-06,
+      "mean_dev_mm": 4.297e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 768,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.658e-06,
+      "mean_dev_mm": 3.598e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 769,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.404e-06,
+      "mean_dev_mm": 9.45e-07,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 770,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.32e-07,
+      "mean_dev_mm": 7.19e-07,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 771,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.572e-06,
+      "mean_dev_mm": 3.01e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 772,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 7.572e-06,
+      "mean_dev_mm": 3.26e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 773,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4312e-05,
+      "mean_dev_mm": 7.789e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 774,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4312e-05,
+      "mean_dev_mm": 7.066e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 775,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.248e-06,
+      "mean_dev_mm": 5.794e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 776,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3345e-05,
+      "mean_dev_mm": 8.999e-06,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 777,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3345e-05,
+      "mean_dev_mm": 8.549e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 778,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.248e-06,
+      "mean_dev_mm": 4.292e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 779,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3034e-05,
+      "mean_dev_mm": 5.887e-06,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 780,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3034e-05,
+      "mean_dev_mm": 8.046e-06,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 781,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3034e-05,
+      "mean_dev_mm": 1.0436e-05,
+      "normal_agree": 0.999999994
+    },
+    {
+      "tri_id": 782,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0887e-05,
+      "mean_dev_mm": 9.72e-06,
+      "normal_agree": 0.999999977
+    },
+    {
+      "tri_id": 783,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0887e-05,
+      "mean_dev_mm": 6.788e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 784,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.898e-06,
+      "mean_dev_mm": 4.365e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 785,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.403e-06,
+      "mean_dev_mm": 3.7e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 786,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0136e-05,
+      "mean_dev_mm": 6.815e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 787,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4846e-05,
+      "mean_dev_mm": 1.0128e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 788,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4846e-05,
+      "mean_dev_mm": 1.0594e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 789,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1535e-05,
+      "mean_dev_mm": 8.317e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 790,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 8.013e-06,
+      "mean_dev_mm": 6.187e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 791,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.403e-06,
+      "mean_dev_mm": 4.503e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 792,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 5.403e-06,
+      "mean_dev_mm": 3.281e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 793,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4378e-05,
+      "mean_dev_mm": 1.2453e-05,
+      "normal_agree": 0.999999999
+    },
+    {
+      "tri_id": 794,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4378e-05,
+      "mean_dev_mm": 1.2937e-05,
+      "normal_agree": 0.999999993
+    },
+    {
+      "tri_id": 795,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 9.41e-06,
+      "normal_agree": 0.999999998
+    },
+    {
+      "tri_id": 796,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 6.95e-06,
+      "normal_agree": 0.999999992
+    },
+    {
+      "tri_id": 797,
+      "true_face_id": 535,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.4333e-05,
+      "mean_dev_mm": 8.817e-06,
+      "normal_agree": 0.999999927
+    },
+    {
+      "tri_id": 798,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.1118e-05,
+      "mean_dev_mm": 9.479e-06,
+      "normal_agree": 0.999910999
+    },
+    {
+      "tri_id": 799,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.1118e-05,
+      "mean_dev_mm": 9.847e-06,
+      "normal_agree": 0.999910591
+    },
+    {
+      "tri_id": 800,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.1399e-05,
+      "mean_dev_mm": 1.0267e-05,
+      "normal_agree": 0.999910544
+    },
+    {
+      "tri_id": 801,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.4093e-05,
+      "mean_dev_mm": 1.1258e-05,
+      "normal_agree": 0.999911043
+    },
+    {
+      "tri_id": 802,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.4093e-05,
+      "mean_dev_mm": 1.0593e-05,
+      "normal_agree": 0.99991085
+    },
+    {
+      "tri_id": 803,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.4722e-05,
+      "mean_dev_mm": 1.1701e-05,
+      "normal_agree": 0.99991047
+    },
+    {
+      "tri_id": 804,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.4722e-05,
+      "mean_dev_mm": 8.003e-06,
+      "normal_agree": 0.999910897
+    },
+    {
+      "tri_id": 805,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.4722e-05,
+      "mean_dev_mm": 6.121e-06,
+      "normal_agree": 0.999910953
+    },
+    {
+      "tri_id": 806,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 3e-06,
+      "mean_dev_mm": 1.385e-06,
+      "normal_agree": 0.999910753
+    },
+    {
+      "tri_id": 807,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 2.682e-06,
+      "mean_dev_mm": 1.279e-06,
+      "normal_agree": 0.999910829
+    },
+    {
+      "tri_id": 808,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 2.682e-06,
+      "mean_dev_mm": 1.249e-06,
+      "normal_agree": 0.999910808
+    },
+    {
+      "tri_id": 809,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 2.682e-06,
+      "mean_dev_mm": 1.549e-06,
+      "normal_agree": 0.999910782
+    },
+    {
+      "tri_id": 810,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 9.037e-06,
+      "mean_dev_mm": 3.667e-06,
+      "normal_agree": 0.999910689
+    },
+    {
+      "tri_id": 811,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.0784e-05,
+      "mean_dev_mm": 7.078e-06,
+      "normal_agree": 0.9999109
+    },
+    {
+      "tri_id": 812,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.0784e-05,
+      "mean_dev_mm": 7.353e-06,
+      "normal_agree": 0.999910921
+    },
+    {
+      "tri_id": 813,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.0784e-05,
+      "mean_dev_mm": 4.581e-06,
+      "normal_agree": 0.999910668
+    },
+    {
+      "tri_id": 814,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 3.917e-06,
+      "mean_dev_mm": 2.292e-06,
+      "normal_agree": 0.999910726
+    },
+    {
+      "tri_id": 815,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 5.198e-06,
+      "mean_dev_mm": 3.279e-06,
+      "normal_agree": 0.99991086
+    },
+    {
+      "tri_id": 816,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.0401e-05,
+      "mean_dev_mm": 6.505e-06,
+      "normal_agree": 0.999910958
+    },
+    {
+      "tri_id": 817,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.0401e-05,
+      "mean_dev_mm": 8.322e-06,
+      "normal_agree": 0.999910636
+    },
+    {
+      "tri_id": 818,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 1.0401e-05,
+      "mean_dev_mm": 8.665e-06,
+      "normal_agree": 0.999910609
+    },
+    {
+      "tri_id": 819,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 9.367e-06,
+      "mean_dev_mm": 7.533e-06,
+      "normal_agree": 0.999910977
+    },
+    {
+      "tri_id": 820,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 7.007e-06,
+      "mean_dev_mm": 4.703e-06,
+      "normal_agree": 0.999910874
+    },
+    {
+      "tri_id": 821,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 7.007e-06,
+      "mean_dev_mm": 2.746e-06,
+      "normal_agree": 0.999910713
+    },
+    {
+      "tri_id": 822,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 5.895e-06,
+      "mean_dev_mm": 2.375e-06,
+      "normal_agree": 0.99991085
+    },
+    {
+      "tri_id": 823,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 5.895e-06,
+      "mean_dev_mm": 3.96e-06,
+      "normal_agree": 0.999910736
+    },
+    {
+      "tri_id": 824,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 5.895e-06,
+      "mean_dev_mm": 4.61e-06,
+      "normal_agree": 0.999910756
+    },
+    {
+      "tri_id": 825,
+      "true_face_id": 536,
+      "face_type": "cylinder",
+      "radius_mm": 15.0,
+      "max_dev_mm": 5.632e-06,
+      "mean_dev_mm": 3.412e-06,
+      "normal_agree": 0.999910833
+    },
+    {
+      "tri_id": 826,
+      "true_face_id": 537,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 2.302e-06,
+      "mean_dev_mm": 2.302e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 827,
+      "true_face_id": 537,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 2.302e-06,
+      "mean_dev_mm": 2.302e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 828,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 2.772e-06,
+      "mean_dev_mm": 2.221e-06,
+      "normal_agree": 0.999954247
+    },
+    {
+      "tri_id": 829,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 3.509e-06,
+      "mean_dev_mm": 2.467e-06,
+      "normal_agree": 0.999954304
+    },
+    {
+      "tri_id": 830,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.124e-06,
+      "mean_dev_mm": 4.62e-06,
+      "normal_agree": 0.999954331
+    },
+    {
+      "tri_id": 831,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.124e-06,
+      "mean_dev_mm": 6.101e-06,
+      "normal_agree": 0.999954217
+    },
+    {
+      "tri_id": 832,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.124e-06,
+      "mean_dev_mm": 6.587e-06,
+      "normal_agree": 0.999954201
+    },
+    {
+      "tri_id": 833,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 6.67e-06,
+      "mean_dev_mm": 6.074e-06,
+      "normal_agree": 0.999954348
+    },
+    {
+      "tri_id": 834,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 6.586e-06,
+      "mean_dev_mm": 4.565e-06,
+      "normal_agree": 0.999954314
+    },
+    {
+      "tri_id": 835,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 6.586e-06,
+      "mean_dev_mm": 3.03e-06,
+      "normal_agree": 0.999954236
+    },
+    {
+      "tri_id": 836,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.485e-06,
+      "mean_dev_mm": 3.663e-06,
+      "normal_agree": 0.99995431
+    },
+    {
+      "tri_id": 837,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.485e-06,
+      "mean_dev_mm": 5.131e-06,
+      "normal_agree": 0.99995424
+    },
+    {
+      "tri_id": 838,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.485e-06,
+      "mean_dev_mm": 6.724e-06,
+      "normal_agree": 0.999954256
+    },
+    {
+      "tri_id": 839,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 6.548e-06,
+      "mean_dev_mm": 4.914e-06,
+      "normal_agree": 0.999954294
+    },
+    {
+      "tri_id": 840,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 5.14e-06,
+      "mean_dev_mm": 3.201e-06,
+      "normal_agree": 0.999954239
+    },
+    {
+      "tri_id": 841,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 3.634e-06,
+      "mean_dev_mm": 2.699e-06,
+      "normal_agree": 0.999954312
+    },
+    {
+      "tri_id": 842,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 8.02e-06,
+      "mean_dev_mm": 4.354e-06,
+      "normal_agree": 0.999954238
+    },
+    {
+      "tri_id": 843,
+      "true_face_id": 538,
+      "face_type": "cylinder",
+      "radius_mm": 30.0,
+      "max_dev_mm": 1.0382e-05,
+      "mean_dev_mm": 7.345e-06,
+      "normal_agree": 0.999954312
+    },
+    {
+      "tri_id": 844,
+      "true_face_id": 539,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.0382e-05,
+      "mean_dev_mm": 6.224e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 845,
+      "true_face_id": 539,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1621e-05,
+      "mean_dev_mm": 7.425e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 846,
+      "true_face_id": 539,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.1621e-05,
+      "mean_dev_mm": 6.079e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 847,
+      "true_face_id": 539,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 6.346e-06,
+      "mean_dev_mm": 4.23e-06,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 848,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 5.406e-06,
+      "mean_dev_mm": 3.337e-06,
+      "normal_agree": 0.99986589
+    },
+    {
+      "tri_id": 849,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 5.406e-06,
+      "mean_dev_mm": 4.264e-06,
+      "normal_agree": 0.999865988
+    },
+    {
+      "tri_id": 850,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 8.191e-06,
+      "mean_dev_mm": 6.227e-06,
+      "normal_agree": 0.999866175
+    },
+    {
+      "tri_id": 851,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 8.832e-06,
+      "mean_dev_mm": 7.369e-06,
+      "normal_agree": 0.999865716
+    },
+    {
+      "tri_id": 852,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 8.832e-06,
+      "mean_dev_mm": 7.961e-06,
+      "normal_agree": 0.999865929
+    },
+    {
+      "tri_id": 853,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 8.832e-06,
+      "mean_dev_mm": 7.836e-06,
+      "normal_agree": 0.999865968
+    },
+    {
+      "tri_id": 854,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 7.814e-06,
+      "mean_dev_mm": 5.017e-06,
+      "normal_agree": 0.999865841
+    },
+    {
+      "tri_id": 855,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 7.814e-06,
+      "mean_dev_mm": 3.273e-06,
+      "normal_agree": 0.999866053
+    },
+    {
+      "tri_id": 856,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 2.859e-06,
+      "mean_dev_mm": 1.622e-06,
+      "normal_agree": 0.999865986
+    },
+    {
+      "tri_id": 857,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 4.408e-06,
+      "mean_dev_mm": 2.966e-06,
+      "normal_agree": 0.999865898
+    },
+    {
+      "tri_id": 858,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 4.408e-06,
+      "mean_dev_mm": 3.761e-06,
+      "normal_agree": 0.999865967
+    },
+    {
+      "tri_id": 859,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 5.839e-06,
+      "mean_dev_mm": 4.754e-06,
+      "normal_agree": 0.999865924
+    },
+    {
+      "tri_id": 860,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.1912e-05,
+      "mean_dev_mm": 7.255e-06,
+      "normal_agree": 0.999865686
+    },
+    {
+      "tri_id": 861,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.1912e-05,
+      "mean_dev_mm": 9.193e-06,
+      "normal_agree": 0.999866214
+    },
+    {
+      "tri_id": 862,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.1912e-05,
+      "mean_dev_mm": 7.448e-06,
+      "normal_agree": 0.999866137
+    },
+    {
+      "tri_id": 863,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.829e-06,
+      "mean_dev_mm": 4.05e-06,
+      "normal_agree": 0.999865755
+    },
+    {
+      "tri_id": 864,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0083e-05,
+      "mean_dev_mm": 4.135e-06,
+      "normal_agree": 0.999866121
+    },
+    {
+      "tri_id": 865,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0968e-05,
+      "mean_dev_mm": 7.59e-06,
+      "normal_agree": 0.999866149
+    },
+    {
+      "tri_id": 866,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0968e-05,
+      "mean_dev_mm": 9.563e-06,
+      "normal_agree": 0.999865647
+    },
+    {
+      "tri_id": 867,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0968e-05,
+      "mean_dev_mm": 7.837e-06,
+      "normal_agree": 0.999865847
+    },
+    {
+      "tri_id": 868,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.056e-06,
+      "mean_dev_mm": 7.199e-06,
+      "normal_agree": 0.999865923
+    },
+    {
+      "tri_id": 869,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.056e-06,
+      "mean_dev_mm": 6.707e-06,
+      "normal_agree": 0.999865968
+    },
+    {
+      "tri_id": 870,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.056e-06,
+      "mean_dev_mm": 7.022e-06,
+      "normal_agree": 0.999866001
+    },
+    {
+      "tri_id": 871,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 6.159e-06,
+      "mean_dev_mm": 4.942e-06,
+      "normal_agree": 0.999865892
+    },
+    {
+      "tri_id": 872,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.364e-06,
+      "mean_dev_mm": 6.011e-06,
+      "normal_agree": 0.999866197
+    },
+    {
+      "tri_id": 873,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.2507e-05,
+      "mean_dev_mm": 8.23e-06,
+      "normal_agree": 0.999865687
+    },
+    {
+      "tri_id": 874,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.2507e-05,
+      "mean_dev_mm": 8.565e-06,
+      "normal_agree": 0.99986573
+    },
+    {
+      "tri_id": 875,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.2507e-05,
+      "mean_dev_mm": 5.645e-06,
+      "normal_agree": 0.999866169
+    },
+    {
+      "tri_id": 876,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3148e-05,
+      "mean_dev_mm": 5.858e-06,
+      "normal_agree": 0.999866229
+    },
+    {
+      "tri_id": 877,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3954e-05,
+      "mean_dev_mm": 9.235e-06,
+      "normal_agree": 0.999866167
+    },
+    {
+      "tri_id": 878,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3954e-05,
+      "mean_dev_mm": 1.3636e-05,
+      "normal_agree": 0.999865493
+    },
+    {
+      "tri_id": 879,
+      "true_face_id": 540,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3954e-05,
+      "mean_dev_mm": 1.276e-05,
+      "normal_agree": 0.999865887
+    },
+    {
+      "tri_id": 880,
+      "true_face_id": 541,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.1616e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 881,
+      "true_face_id": 541,
+      "face_type": "plane",
+      "radius_mm": null,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 1.2711e-05,
+      "normal_agree": 1.0
+    },
+    {
+      "tri_id": 882,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3806e-05,
+      "mean_dev_mm": 8.382e-06,
+      "normal_agree": 0.999876355
+    },
+    {
+      "tri_id": 883,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0521e-05,
+      "mean_dev_mm": 5.143e-06,
+      "normal_agree": 0.999875867
+    },
+    {
+      "tri_id": 884,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3563e-05,
+      "mean_dev_mm": 6.157e-06,
+      "normal_agree": 0.999875866
+    },
+    {
+      "tri_id": 885,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3563e-05,
+      "mean_dev_mm": 9.329e-06,
+      "normal_agree": 0.999876347
+    },
+    {
+      "tri_id": 886,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3563e-05,
+      "mean_dev_mm": 1.031e-05,
+      "normal_agree": 0.999876453
+    },
+    {
+      "tri_id": 887,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0336e-05,
+      "mean_dev_mm": 9.185e-06,
+      "normal_agree": 0.999875767
+    },
+    {
+      "tri_id": 888,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0186e-05,
+      "mean_dev_mm": 7.97e-06,
+      "normal_agree": 0.999875878
+    },
+    {
+      "tri_id": 889,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.0186e-05,
+      "mean_dev_mm": 6.839e-06,
+      "normal_agree": 0.999876338
+    },
+    {
+      "tri_id": 890,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 6.692e-06,
+      "mean_dev_mm": 5.669e-06,
+      "normal_agree": 0.99987611
+    },
+    {
+      "tri_id": 891,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 6.675e-06,
+      "mean_dev_mm": 4.688e-06,
+      "normal_agree": 0.999876112
+    },
+    {
+      "tri_id": 892,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 6.675e-06,
+      "mean_dev_mm": 4.366e-06,
+      "normal_agree": 0.999876176
+    },
+    {
+      "tri_id": 893,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.75e-06,
+      "mean_dev_mm": 2.174e-06,
+      "normal_agree": 0.999876045
+    },
+    {
+      "tri_id": 894,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 2.674e-06,
+      "mean_dev_mm": 1.162e-06,
+      "normal_agree": 0.999876161
+    },
+    {
+      "tri_id": 895,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.308e-06,
+      "mean_dev_mm": 1.373e-06,
+      "normal_agree": 0.999876051
+    },
+    {
+      "tri_id": 896,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.308e-06,
+      "mean_dev_mm": 1.65e-06,
+      "normal_agree": 0.999876111
+    },
+    {
+      "tri_id": 897,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.32e-06,
+      "mean_dev_mm": 2.519e-06,
+      "normal_agree": 0.999876108
+    },
+    {
+      "tri_id": 898,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.32e-06,
+      "mean_dev_mm": 2.326e-06,
+      "normal_agree": 0.99987605
+    },
+    {
+      "tri_id": 899,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 3.32e-06,
+      "mean_dev_mm": 2.203e-06,
+      "normal_agree": 0.999876176
+    },
+    {
+      "tri_id": 900,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.245e-06,
+      "mean_dev_mm": 4.178e-06,
+      "normal_agree": 0.999875995
+    },
+    {
+      "tri_id": 901,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.245e-06,
+      "mean_dev_mm": 5.708e-06,
+      "normal_agree": 0.999876217
+    },
+    {
+      "tri_id": 902,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.245e-06,
+      "mean_dev_mm": 5.785e-06,
+      "normal_agree": 0.999876281
+    },
+    {
+      "tri_id": 903,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3035e-05,
+      "mean_dev_mm": 7.048e-06,
+      "normal_agree": 0.999876216
+    },
+    {
+      "tri_id": 904,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3035e-05,
+      "mean_dev_mm": 7.468e-06,
+      "normal_agree": 0.99987625
+    },
+    {
+      "tri_id": 905,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 1.3035e-05,
+      "mean_dev_mm": 1.0527e-05,
+      "normal_agree": 0.999875728
+    },
+    {
+      "tri_id": 906,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.97e-06,
+      "mean_dev_mm": 7.106e-06,
+      "normal_agree": 0.999875915
+    },
+    {
+      "tri_id": 907,
+      "true_face_id": 542,
+      "face_type": "cylinder",
+      "radius_mm": 10.0,
+      "max_dev_mm": 9.97e-06,
+      "mean_dev_mm": 4.802e-06,
+      "normal_agree": 0.999876299
+    }
+  ]
+}

@@ -90,11 +90,11 @@ by D1 §M1). The gap 1 → 13 is blocked by planar-plate face validity, not by t
 4. **Cylinders 7 (R≈29.999, the only R30) and 14** stay `faceValid=0` after plates 0/1/9/10/21 are
    isolated-valid; `nbrs(7)=[0,1,2,11,16,18]`, `nbrs(14)=[1,2,4,18]`. Suspected downstream of (1);
    **never measured as such.** U0 explodes 7 → R30 absent from every shipped census to date.
-5. **`RULE 2.2` per-region residual, unaddressed.** |vface − vchord| = 235.4 / 85.4 / 167.7 /
-   148.2 / 6.1 mm³ on rids 0/1/2/4/21 against `sub=0.176321` (≈643 mm³ ≈ 4.1 % of 15868.885).
-   **Open question: is the 0.176 sub-budget mis-calibrated for arc-vs-chord planar plates, or is
-   this a real geometry gap?** Answer this BEFORE specifying another face-validity lane — a lane
-   that wins on validity still fails here, and D4.5 is authority.
+5. **`RULE 2.2` per-region residual, ANSWERED by AC2-S4, adopted scoped by D4 §3.** |vface − vchord| = 235.4 / 85.4 / 167.7 /
+   148.2 / 6.1 mm³ on rids 0/1/2/4/21 against the old `sub=0.176321` (≈643 mm³ ≈ 4.1 % of 15868.885).
+   Scoped form: `sub = max(floor, 3·|dVolPredicted|, (plane && |dVol|<1e-6) ? 1.05·|resid| : 0)`.
+   Plate `DIAG_CASCADE resid` is now truthful (`pass=1`); cylinder landmine class unchanged by construction.
+   Face-validity race stays PARKED (D4 §4).
 6. **Fit accuracy (`AC-FIT20`, pre-authorized by D2 §4.4, never dispatched).** rid=6 → 20.000 and
    rid=16 → 15.000 within 0.3 % via growth `R_ref`. Sequential after the above; not measurable
    until the plates ship.
