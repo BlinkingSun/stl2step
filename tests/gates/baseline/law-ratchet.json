@@ -1,0 +1,10 @@
+{
+  "id": "law-ratchet",
+  "authority": "law-ratchet.json",
+  "fixtureId": "handle-lock",
+  "bandRecallNum": 10,
+  "bandRecallDen": 15,
+  "minPurity": 0.857,
+  "maxRadiusRelErr": 0.349785,
+  "notes": "Measured on ship binary @34ae192 via regiondump + tri-labels. Ratchet floors only tighten on --ratchet-up after green."
+}
