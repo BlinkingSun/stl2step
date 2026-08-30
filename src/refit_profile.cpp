@@ -439,6 +439,232 @@ const Region* cylByRid(const RegionSet& rs, int rid) {
     return nullptr;
 }
 
+// Zero-length only. Not a recognition threshold (RULE 4.2a).
+constexpr double kZeroLen = 1e-12;
+
+gp_Pnt2d onCirc(const gp_Pnt2d& c, double R, const gp_Pnt2d& p) {
+    const double ang = std::atan2(p.Y() - c.Y(), p.X() - c.X());
+    return gp_Pnt2d(c.X() + R * std::cos(ang), c.Y() + R * std::sin(ang));
+}
+
+double angOf(const gp_Pnt2d& c, const gp_Pnt2d& p) {
+    return std::atan2(p.Y() - c.Y(), p.X() - c.X());
+}
+
+// Signed unwrapped span of verts[i0..iLast] about c (chain angular limits).
+double unwrapSpan(const gp_Pnt2d& c, const std::vector<gp_Pnt2d>& verts, size_t i0,
+                  size_t iLast) {
+    if (i0 >= verts.size() || iLast >= verts.size() || iLast < i0) return 0.0;
+    double prev = angOf(c, verts[i0]);
+    double sum = 0.0;
+    for (size_t i = i0 + 1; i <= iLast; ++i) {
+        const double a = angOf(c, verts[i]);
+        double d = a - prev;
+        while (d > kPi) d -= kTwoPi;
+        while (d < -kPi) d += kTwoPi;
+        sum += d;
+        prev = a;
+    }
+    return sum;
+}
+
+bool circIntersect(const gp_Pnt2d& c1, double R1, const gp_Pnt2d& c2, double R2,
+                   const gp_Pnt2d& hint, double slop, gp_Pnt2d& out) {
+    const double dx = c2.X() - c1.X();
+    const double dy = c2.Y() - c1.Y();
+    const double d = std::hypot(dx, dy);
+    if (!(d > kZeroLen)) return false;
+    const double sum = R1 + R2;
+    const double dif = std::fabs(R1 - R2);
+    const double ux = dx / d, uy = dy / d;
+    if (d > sum) {
+        if (d - sum > slop) return false;
+        out = gp_Pnt2d(c1.X() + ux * R1, c1.Y() + uy * R1);
+        return true;
+    }
+    if (d < dif) {
+        if (dif - d > slop) return false;
+        const double s = (R1 >= R2) ? 1.0 : -1.0;
+        out = gp_Pnt2d(c1.X() + s * ux * R1, c1.Y() + s * uy * R1);
+        return true;
+    }
+    const double aa = (R1 * R1 - R2 * R2 + d * d) / (2.0 * d);
+    double h2 = R1 * R1 - aa * aa;
+    if (h2 < 0.0) h2 = 0.0;
+    const double h = std::sqrt(h2);
+    const gp_Pnt2d p0(c1.X() + aa * ux, c1.Y() + aa * uy);
+    const gp_Pnt2d pa(p0.X() - uy * h, p0.Y() + ux * h);
+    const gp_Pnt2d pb(p0.X() + uy * h, p0.Y() - ux * h);
+    out = (dist2(pa, hint) <= dist2(pb, hint)) ? pa : pb;
+    return true;
+}
+
+
+bool isFullCirc(const ProfSeg& s) {
+    if (!s.isArc || !(s.R > 0.0)) return false;
+    if (s.phi >= kTwoPi - 1e-12) return true;
+    return s.phi > 0.5 * kTwoPi && near2(s.a, s.b, kZeroLen);
+}
+
+double analyticArea(const std::vector<ProfSeg>& segs) {
+    if (segs.size() == 1 && isFullCirc(segs[0]))
+        return (segs[0].ccw ? 1.0 : -1.0) * kPi * segs[0].R * segs[0].R;
+    double a = 0.0;
+    for (const ProfSeg& s : segs) {
+        a += 0.5 * (s.a.X() * s.b.Y() - s.b.X() * s.a.Y());
+        if (s.isArc && s.R > 0.0 && s.phi > 0.0 && !isFullCirc(s)) {
+            const double seg = 0.5 * s.R * s.R * (s.phi - std::sin(s.phi));
+            a += (s.ccw ? 1.0 : -1.0) * seg;
+        }
+    }
+    return a;
+}
+
+void recomputePhi(ProfSeg& s) {
+    if (!s.isArc || !(s.R > 0.0)) return;
+    if (isFullCirc(s) || (near2(s.a, s.b, kZeroLen) && s.phi > 0.5 * kTwoPi)) {
+        s.phi = kTwoPi;
+        s.a = gp_Pnt2d(s.center.X() + s.R, s.center.Y());
+        s.b = s.a;
+        return;
+    }
+    const double u0 = angOf(s.center, s.a);
+    const double u1 = angOf(s.center, s.b);
+    double d = u1 - u0;
+    if (s.ccw) {
+        while (d <= 0.0) d += kTwoPi;
+    } else {
+        while (d >= 0.0) d -= kTwoPi;
+        d = -d;
+    }
+    if (d > 0.0 && d < kTwoPi) s.phi = d;
+}
+
+void mergeSameCircle(std::vector<ProfSeg>& segs, double tol) {
+    if (segs.size() < 2) return;
+    std::vector<ProfSeg> out;
+    out.reserve(segs.size());
+    ProfSeg acc = segs[0];
+    auto same = [&](const ProfSeg& a, const ProfSeg& b) {
+        if (!a.isArc || !b.isArc || !(a.R > 0.0) || !(b.R > 0.0)) return false;
+        if (std::fabs(a.R - b.R) > std::max(tol, 1e-9 * a.R)) return false;
+        return dist2(a.center, b.center) <= std::max(tol, 1e-9 * a.R);
+    };
+    for (size_t i = 1; i < segs.size(); ++i) {
+        const ProfSeg& s = segs[i];
+        if (same(acc, s) && acc.ccw == s.ccw) {
+            acc.b = s.b;
+            acc.phi += s.phi;
+            continue;
+        }
+        out.push_back(acc);
+        acc = s;
+    }
+    if (!out.empty() && same(acc, out.front()) && acc.ccw == out.front().ccw) {
+        out.front().a = acc.a;
+        out.front().phi += acc.phi;
+        if (out.front().phi > kTwoPi) out.front().phi = kTwoPi;
+    } else {
+        out.push_back(acc);
+    }
+    for (ProfSeg& s : out) recomputePhi(s);
+    segs.swap(out);
+}
+
+// Contract: segs[i].b == segs[i+1].a, back.b == front.a, arcs on-circle.
+// Midpoint snap is banned (that is the sliver). Missing junctions become
+// explicit short lines (no omitted connectors).
+void stitchLoop(std::vector<ProfSeg>& segs, double tol) {
+    if (segs.empty()) return;
+    for (ProfSeg& s : segs) {
+        if (!s.isArc || !(s.R > 0.0)) continue;
+        if (isFullCirc(s)) {
+            s.phi = kTwoPi;
+            s.a = gp_Pnt2d(s.center.X() + s.R, s.center.Y());
+            s.b = s.a;
+            continue;
+        }
+        s.a = onCirc(s.center, s.R, s.a);
+        s.b = onCirc(s.center, s.R, s.b);
+    }
+    const size_t n0 = segs.size();
+    for (size_t i = 0; i < n0; ++i) {
+        ProfSeg& cur = segs[i];
+        ProfSeg& nxt = segs[(i + 1) % n0];
+        if (isFullCirc(cur) || isFullCirc(nxt)) continue;
+        if (cur.isArc && nxt.isArc && cur.R > 0.0 && nxt.R > 0.0) {
+            if (dist2(cur.center, nxt.center) <= tol &&
+                std::fabs(cur.R - nxt.R) <= std::max(tol, 1e-9 * cur.R)) {
+                nxt.a = cur.b;
+                continue;
+            }
+            gp_Pnt2d hit;
+            const gp_Pnt2d hint(0.5 * (cur.b.X() + nxt.a.X()),
+                                0.5 * (cur.b.Y() + nxt.a.Y()));
+            if (circIntersect(cur.center, cur.R, nxt.center, nxt.R, hint, tol, hit)) {
+                auto seat = [](ProfSeg& s, const gp_Pnt2d& p, bool start) {
+                    const double d = dist2(p, s.center);
+                    if (d <= kZeroLen) return;
+                    const double ux = (p.X() - s.center.X()) / d;
+                    const double uy = (p.Y() - s.center.Y()) / d;
+                    s.center = gp_Pnt2d(p.X() - ux * s.R, p.Y() - uy * s.R);
+                    if (start) {
+                        s.a = p;
+                        s.b = onCirc(s.center, s.R, s.b);
+                    } else {
+                        s.b = p;
+                        s.a = onCirc(s.center, s.R, s.a);
+                    }
+                };
+                seat(cur, hit, false);
+                seat(nxt, hit, true);
+                continue;
+            }
+            continue;
+        }
+        if (cur.isArc && !nxt.isArc) nxt.a = cur.b;
+        else if (!cur.isArc && nxt.isArc) cur.b = nxt.a;
+        else if (!cur.isArc && !nxt.isArc) nxt.a = cur.b;
+    }
+    std::vector<ProfSeg> out;
+    out.reserve(segs.size() + 2);
+    for (size_t i = 0; i < segs.size(); ++i) {
+        out.push_back(segs[i]);
+        const ProfSeg& cur = segs[i];
+        const ProfSeg& nxt = segs[(i + 1) % segs.size()];
+        if (isFullCirc(cur) || isFullCirc(nxt)) continue;
+        if (!near2(cur.b, nxt.a, kZeroLen)) {
+            ProfSeg br;
+            br.isArc = false;
+            br.a = cur.b;
+            br.b = nxt.a;
+            out.push_back(br);
+        }
+    }
+    segs.swap(out);
+    {
+        std::vector<ProfSeg> keep;
+        keep.reserve(segs.size());
+        for (const ProfSeg& s : segs) {
+            if (!s.isArc && dist2(s.a, s.b) <= kZeroLen) continue;
+            keep.push_back(s);
+        }
+        if (keep.size() >= 1) segs.swap(keep);
+    }
+    for (ProfSeg& s : segs) recomputePhi(s);
+    if (segs.size() >= 2) {
+        for (size_t i = 0; i < segs.size(); ++i) {
+            ProfSeg& cur = segs[i];
+            ProfSeg& nxt = segs[(i + 1) % segs.size()];
+            if (cur.isArc && !nxt.isArc) nxt.a = cur.b;
+            else if (!cur.isArc && nxt.isArc) cur.b = nxt.a;
+            else if (!cur.isArc && !nxt.isArc) nxt.a = cur.b;
+        }
+    }
+}
+
+// Inner-loop closer (r2). Midpoint is banned on the outer (stitchLoop);
+// through-hole inners keep r2's snap so they are not forced to phi=2π.
 void snapClosed(std::vector<ProfSeg>& segs, double tol) {
     if (segs.empty()) return;
     for (size_t i = 0; i < segs.size(); ++i) {
@@ -618,7 +844,7 @@ bool sliceOneSlab(const MeshView& mv, const RegionSet& rs, const PrismLevels& lv
             s.isArc = false;
             s.a = rl.pts[i];
             s.b = rl.pts[(i + 1) % rl.pts.size()];
-            if (dist2(s.a, s.b) > tol) {
+            if (dist2(s.a, s.b) > kZeroLen) {
                 lp.segs.push_back(s);
                 ids.push_back(i < rl.rids.size() ? rl.rids[i] : -1);
             }
@@ -657,7 +883,7 @@ void emitLines(const std::vector<gp_Pnt2d>& verts, size_t i0, size_t i1, bool de
         s.declinedAmbiguous = declined;
         s.a = verts[a];
         s.b = verts[b % n];
-        if (dist2(s.a, s.b) > tol) {
+        if (dist2(s.a, s.b) > kZeroLen) {
             out.push_back(s);
             if (declined) ++nDecl;
         }
@@ -667,7 +893,7 @@ void emitLines(const std::vector<gp_Pnt2d>& verts, size_t i0, size_t i1, bool de
 
 bool tryArc(const MeshView& mv, const Region& r, const SketchFrame& fr,
             const std::vector<gp_Pnt2d>& verts, size_t i0, size_t i1, const PrismTols& t,
-            const DerivedTols& dtol, ProfSeg& arc, bool& declined, int& nDecl) {
+            const DerivedTols& dtol, ProfSeg& arc, bool& declined, int& nDecl, bool exact) {
     LawBand lb;
     if (!lawChainAccept(mv, r.tris, dtol, lb) || !(lb.R > 0.0)) return false;
 
@@ -683,19 +909,87 @@ bool tryArc(const MeshView& mv, const Region& r, const SketchFrame& fr,
     arc.isArc = true;
     arc.declinedAmbiguous = false;
     arc.R = lb.R;
-    arc.phi = lb.closed360 ? kTwoPi : lb.phi;
     arc.center = cylCenter(r, fr);
-    arc.a = verts[i0];
+    if (!exact) {
+        // r2 inner: mesh endpoints, law-band phi — no unwrap-to-2π.
+        arc.phi = lb.closed360 ? kTwoPi : lb.phi;
+        std::vector<gp_Pnt2d> run;
+        for (size_t i = i0; i < i1 && i < verts.size(); ++i) run.push_back(verts[i]);
+        arc.ccw = signedArea(run) > 0.0;
+        const size_t n = verts.size();
+        arc.a = verts[i0];
+        arc.b = verts[i1 % n];
+        if (lb.closed360) {
+            arc.a = gp_Pnt2d(arc.center.X() + arc.R, arc.center.Y());
+            arc.b = arc.a;
+            arc.phi = kTwoPi;
+        } else if (near2(arc.a, arc.b, kZeroLen)) {
+            // Through-hole 2D ring: one circle for the builder (a==b, phi=π)
+            // but not phi=2π (B10 — f12 is the only closed-360).
+            arc.a = onCirc(arc.center, arc.R, arc.a);
+            arc.b = arc.a;
+            arc.phi = 0.5 * kTwoPi;
+        }
+        (void)nDecl;
+        return true;
+    }
     const size_t n = verts.size();
-    arc.b = verts[i1 % n];
-    if (lb.closed360) {
+    const size_t iLast = (i1 < n) ? i1 : (n - 1);
+    if (lb.closed360 && i0 == 0 && iLast + 1 >= n) {
         arc.a = gp_Pnt2d(arc.center.X() + arc.R, arc.center.Y());
         arc.b = arc.a;
         arc.phi = kTwoPi;
+        arc.ccw = signedArea(verts) > 0.0;
+        (void)nDecl;
+        return true;
     }
-    std::vector<gp_Pnt2d> run;
-    for (size_t i = i0; i < i1 && i < verts.size(); ++i) run.push_back(verts[i]);
-    arc.ccw = signedArea(run) > 0.0;
+    // Endpoints EXACTLY on the fitted circle at the chain's angular limits.
+    // Prefer the region's uMin/uMax (true generators) when they project to
+    // the same circle; otherwise the unwrapped 2D vertex span.
+    const double span = unwrapSpan(arc.center, verts, i0, iLast);
+    if (!(std::fabs(span) > 0.0)) return false;
+    const gp_XYZ loc = r.ax.Location().XYZ();
+    const gp_XYZ xd = r.ax.XDirection().XYZ();
+    const gp_XYZ yd = r.ax.YDirection().XYZ();
+    auto atU = [&](double u) {
+        const gp_XYZ q = loc + xd * (r.radius * std::cos(u)) + yd * (r.radius * std::sin(u));
+        return onCirc(arc.center, arc.R, fr.xy(q));
+    };
+    const gp_Pnt2d pLo = atU(r.uMin);
+    const gp_Pnt2d pHi = atU(r.uMax);
+    const gp_Pnt2d vA = verts[i0];
+    const gp_Pnt2d vB = verts[iLast];
+    const bool loFirst =
+        dist2(pLo, vA) + dist2(pHi, vB) <= dist2(pHi, vA) + dist2(pLo, vB);
+    const gp_Pnt2d eA = loFirst ? pLo : pHi;
+    const gp_Pnt2d eB = loFirst ? pHi : pLo;
+    // Accept the generator pair only when it agrees with the chain direction
+    // and does not jump past a neighbouring feature.
+    const double uA = angOf(arc.center, eA);
+    const double uB = angOf(arc.center, eB);
+    double gen = uB - uA;
+    if (span > 0.0) {
+        while (gen <= 0.0) gen += kTwoPi;
+    } else {
+        while (gen >= 0.0) gen -= kTwoPi;
+    }
+    const bool genOk = std::fabs(std::fabs(gen) - std::fabs(span)) <=
+                       std::max(0.25, 0.35 * std::fabs(span));
+    if (genOk && std::fabs(gen) > 0.0 && std::fabs(gen) < kTwoPi) {
+        arc.a = eA;
+        arc.b = eB;
+        arc.phi = std::fabs(gen);
+        arc.ccw = gen > 0.0;
+    } else {
+        const double a0 = angOf(arc.center, verts[i0]);
+        arc.a = gp_Pnt2d(arc.center.X() + arc.R * std::cos(a0),
+                         arc.center.Y() + arc.R * std::sin(a0));
+        const double a1 = a0 + span;
+        arc.b = gp_Pnt2d(arc.center.X() + arc.R * std::cos(a1),
+                         arc.center.Y() + arc.R * std::sin(a1));
+        arc.phi = std::fabs(span);
+        arc.ccw = span > 0.0;
+    }
     (void)nDecl;
     return true;
 }
@@ -817,7 +1111,11 @@ bool fitProfile(const MeshView& mv, const PrismTols& t, Profile& p, int& nDeclin
             for (const ProfSeg& s : loop.segs) verts.push_back(s.b);
             if (verts.size() >= 2 && near2(verts.front(), verts.back(), t.tauFit))
                 verts.pop_back();
-            if (verts.size() < 2) continue;
+            if (verts.size() < 2) {
+                if (!loop.segs.empty()) loop.area = std::fabs(analyticArea(loop.segs));
+                emitLoopDiag(p.slab, li, loop);
+                continue;
+            }
 
             std::vector<int> vrids;
             if (snap.ok && static_cast<size_t>(p.slab) < snap.rids.size() &&
@@ -826,7 +1124,8 @@ bool fitProfile(const MeshView& mv, const PrismTols& t, Profile& p, int& nDeclin
             }
             while (vrids.size() < verts.size()) vrids.push_back(-1);
 
-            // Closed-360: whole loop on one cylinder → one circle (B10).
+            // Closed-360 only (B10): f12-class rings. Through-hole inners stay
+            // valid loops without a blanket phi=2π (r2 inner contract).
             if (rs && fr && verts.size() >= 3) {
                 const Region* only = nullptr;
                 if (vrids[0] >= 0) only = cylByRid(*rs, vrids[0]);
@@ -854,40 +1153,93 @@ bool fitProfile(const MeshView& mv, const PrismTols& t, Profile& p, int& nDeclin
                         arc.b = arc.a;
                         arc.ccw = signedArea(verts) > 0.0;
                         loop.segs = {arc};
-                        loop.area = std::fabs(signedArea(verts));
+                        loop.area = std::fabs(analyticArea(loop.segs));
                         emitLoopDiag(p.slab, li, loop);
                         continue;
                     }
                 }
             }
 
+            const bool outerFit = loop.outer;
+
+            // Start at a non-cylinder edge so a wrap-around fillet stays one arc.
+            if (rs && fr && verts.size() >= 3) {
+                size_t rot = 0;
+                for (size_t k = 0; k < verts.size(); ++k) {
+                    if (cylByRid(*rs, vrids[k]) == nullptr) {
+                        rot = k;
+                        break;
+                    }
+                }
+                if (rot > 0) {
+                    std::rotate(verts.begin(), verts.begin() + static_cast<long>(rot),
+                                verts.end());
+                    std::rotate(vrids.begin(), vrids.begin() + static_cast<long>(rot),
+                                vrids.end());
+                }
+            }
+
             std::vector<ProfSeg> fitted;
             const size_t n = verts.size();
+            auto edgeIsCyl = [&](size_t k, const Region* cr) -> bool {
+                if (!cr || k >= n) return false;
+                if (vrids[k] == cr->id) return true;
+                if (vrids[k] >= 0) return false;  // other region — stop (no overshoot)
+                const double tight =
+                    std::max(t.tauFit, 1.25 * std::max(cr->chordSagitta, cr->maxVertexDev));
+                return std::fabs(dist2(verts[k], cylCenter(*cr, *fr)) - cr->radius) <= tight &&
+                       std::fabs(dist2(verts[(k + 1) % n], cylCenter(*cr, *fr)) - cr->radius) <=
+                           tight;
+            };
+
             size_t i = 0;
             while (i < n) {
                 bool took = false;
                 if (rs && fr) {
                     const Region* cr = (vrids[i] >= 0) ? cylByRid(*rs, vrids[i]) : nullptr;
-                    if (!cr) cr = cylAtPoint(*rs, *fr, verts[i], t.tauFit);
+                    if (!outerFit && !cr) cr = cylAtPoint(*rs, *fr, verts[i], t.tauFit);
                     if (cr) {
-                        size_t j = i + 1;
-                        while (j < n) {
-                            const bool ridHit = (vrids[j] == cr->id);
-                            if (!ridHit && !onCyl(verts[j], *cr, *fr, t.tauFit)) break;
-                            ++j;
-                        }
-                        if (j > i + 1 || cr->closed360) {
-                            ProfSeg arc;
-                            bool declined = false;
-                            if (tryArc(mv, *cr, *fr, verts, i, j, t, dtol, arc, declined,
-                                       nDeclined)) {
-                                if (declined) {
-                                    emitLines(verts, i, j, true, t.tauFit, fitted, nDeclined);
-                                } else {
-                                    fitted.push_back(arc);
+                        if (outerFit) {
+                            size_t j = i;
+                            while (j + 1 < n && edgeIsCyl(j, cr)) ++j;
+                            // verts[i..j] inclusive are this chain; j is the junction.
+                            if (j > i) {
+                                ProfSeg arc;
+                                bool declined = false;
+                                if (tryArc(mv, *cr, *fr, verts, i, j, t, dtol, arc, declined,
+                                           nDeclined, true)) {
+                                    if (declined) {
+                                        emitLines(verts, i, j + 1, true, t.tauFit, fitted,
+                                                  nDeclined);
+                                    } else {
+                                        fitted.push_back(arc);
+                                    }
+                                    i = j;  // next segment shares the on-circle junction
+                                    took = true;
                                 }
-                                i = (j >= n) ? n : j;
-                                took = true;
+                            }
+                        } else {
+                            // r2 inner walk: exclusive j, loose onCyl (no 2π unwrap).
+                            size_t j = i + 1;
+                            while (j < n) {
+                                const bool ridHit = (vrids[j] == cr->id);
+                                if (!ridHit && !onCyl(verts[j], *cr, *fr, t.tauFit)) break;
+                                ++j;
+                            }
+                            if (j > i + 1 || cr->closed360) {
+                                ProfSeg arc;
+                                bool declined = false;
+                                if (tryArc(mv, *cr, *fr, verts, i, j, t, dtol, arc, declined,
+                                           nDeclined, false)) {
+                                    if (declined) {
+                                        emitLines(verts, i, j, true, t.tauFit, fitted,
+                                                  nDeclined);
+                                    } else {
+                                        fitted.push_back(arc);
+                                    }
+                                    i = (j >= n) ? n : j;
+                                    took = true;
+                                }
                             }
                         }
                     }
@@ -900,18 +1252,32 @@ bool fitProfile(const MeshView& mv, const PrismTols& t, Profile& p, int& nDeclin
                     ++j;
                 }
                 if (j <= i + 1) j = std::min(i + 2, n);
+                if (j > n) j = n;
+                if (j <= i) break;
+                const size_t jb = (j < n) ? j : 0;
                 ProfSeg line;
                 line.isArc = false;
                 line.a = verts[i];
-                line.b = verts[j % n];
-                if (dist2(line.a, line.b) > t.tauFit) fitted.push_back(line);
-                i = j;
+                line.b = verts[jb];
+                const bool keep = outerFit ? (dist2(line.a, line.b) > kZeroLen)
+                                           : (dist2(line.a, line.b) > t.tauFit);
+                if (keep) fitted.push_back(line);
+                i = (j < n) ? j : n;
             }
 
-            snapClosed(fitted, t.tauFit);
-            mergeColinear(fitted, verts, t.tauFit);
-            loop.segs = std::move(fitted);
-            loop.area = std::fabs(signedArea(verts));
+            if (outerFit) {
+                mergeSameCircle(fitted, t.tauFit);
+                mergeColinear(fitted, verts, t.tauFit);
+                stitchLoop(fitted, t.tauFit);
+                mergeColinear(fitted, verts, t.tauFit);
+                loop.segs = std::move(fitted);
+                loop.area = std::fabs(analyticArea(loop.segs));
+            } else {
+                snapClosed(fitted, t.tauFit);
+                mergeColinear(fitted, verts, t.tauFit);
+                loop.segs = std::move(fitted);
+                loop.area = std::fabs(signedArea(verts));
+            }
             emitLoopDiag(p.slab, li, loop);
         }
         return true;
