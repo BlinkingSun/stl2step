@@ -29,6 +29,8 @@ endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/profile_dump/CMakeLists.txt")
     add_subdirectory(tools/profile_dump)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dxf_check/CMakeLists.txt")
     add_subdirectory(tools/dxf_check)
 endif()
