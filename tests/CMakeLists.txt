@@ -23,6 +23,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/lawband_dump/CMakeLists.txt")
     add_subdirectory(tools/lawband_dump)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/profile_dump/CMakeLists.txt")
+    add_subdirectory(tools/profile_dump)
+endif()
+
 # SPEC AC-J6HEAL API probe — calls stl2step::convert() directly. Not a ctest
 # (lane AC pins 27/27). Built whenever the core library is.
 if(TARGET stl2step::core)
