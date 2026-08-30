@@ -95,6 +95,8 @@ namespace stl2step {
 
 namespace refit {
 void fitAnalyticTolerances(const TopoDS_Shape& shape);
+void prismBindDxfDir(const std::string& d);
+void prismBindDxfStem(const std::string& s);
 }
 
 namespace {
@@ -292,6 +294,11 @@ Result Converter::run() {
                                                : opt.productName;
     r.input = inPath;
     r.output = outPath;
+
+    if (!opt.dxfDir.empty()) {
+        std::error_code ec;
+        fs::create_directories(opt.dxfDir, ec);
+    }
 
     unsigned hw = opt.threads > 0 ? (unsigned)opt.threads
                                   : std::thread::hardware_concurrency();
@@ -584,6 +591,8 @@ Result Converter::run() {
         std::atomic<size_t> nextComp{ 0 };
 
         auto buildComponent = [&](int root, CompOut& out, unsigned subThreads) {
+            refit::prismBindDxfDir(opt.dxfDir);
+            refit::prismBindDxfStem(fs::path(opt.input).stem().string());
             const CompStat& cs = comps.at(root);
             size_t nV = cs.vtx.size(), nE = cs.edges.size(), nT = cs.tris.size();
 

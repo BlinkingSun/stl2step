@@ -33,6 +33,7 @@
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
+#include <BRepTools_ReShape.hxx>
 #include <Precision.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
@@ -44,6 +45,8 @@
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
@@ -72,6 +75,7 @@ thread_local gp_XYZ tOrigin(0.0, 0.0, 0.0);
 thread_local bool tHaveOrigin = false;
 thread_local const char* tFail = "";
 thread_local std::string tDxfDir;
+thread_local std::string tDxfStem;
 thread_local double tUnifyV0 = 0.0, tUnifyV1 = 0.0;
 thread_local int tUnifyP0 = 0, tUnifyC0 = 0, tUnifyP1 = 0, tUnifyC1 = 0;
 thread_local int tUnifyG2 = 1, tUnifyG4 = 1;
@@ -597,7 +601,152 @@ void profileArcDefects(const std::vector<Profile>& profs, const PrismLevels& lv,
     }
 }
 
+// D9 §2 G1: same-orientation exact-coplanar at Confusion() (rad and mm).
+bool exactCoplanarSameOri(const gp_Dir& n1, double d1, const gp_Dir& n2, double d2) {
+    const double dn = n1.XYZ().Dot(n2.XYZ());
+    if (!(dn > 0.0)) return false;
+    const double ang = (dn >= 1.0) ? 0.0 : std::acos(std::min(1.0, dn));
+    if (ang > Precision::Confusion()) return false;
+    return std::fabs(d1 - d2) <= Precision::Confusion();
+}
+
+bool planeParams(const TopoDS_Face& f, gp_Dir& n, double& d) {
+    try {
+        BRepAdaptor_Surface sa(f, Standard_False);
+        if (sa.GetType() != GeomAbs_Plane) return false;
+        const gp_Pln pl = sa.Plane();
+        n = pl.Axis().Direction();
+        if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+        d = n.XYZ().Dot(pl.Location().XYZ());
+        return true;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// Adjacent plane pairs only. Non-adjacent same-plane fragments are not neighbours
+// (D9 §2 G5: count falls by merging coplanar neighbours). No Size/area drop.
+int mergeExactCoplanarPlanes(TopoDS_Shape& s) {
+    if (s.IsNull()) return 0;
+    std::vector<TopoDS_Face> planes;
+    for (TopExp_Explorer fx(s, TopAbs_FACE); fx.More(); fx.Next()) {
+        const TopoDS_Face f = TopoDS::Face(fx.Current());
+        gp_Dir n;
+        double d = 0.0;
+        if (planeParams(f, n, d)) planes.push_back(f);
+    }
+    const int n = static_cast<int>(planes.size());
+    if (n < 2) return 0;
+    std::vector<int> parent(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) parent[static_cast<size_t>(i)] = i;
+    auto find = [&](int i) -> int {
+        int r = i;
+        while (parent[static_cast<size_t>(r)] != r) r = parent[static_cast<size_t>(r)];
+        int k = i;
+        while (k != r) {
+            const int nxt = parent[static_cast<size_t>(k)];
+            parent[static_cast<size_t>(k)] = r;
+            k = nxt;
+        }
+        return r;
+    };
+    auto unite = [&](int a, int b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) parent[static_cast<size_t>(b)] = a;
+    };
+
+    TopTools_IndexedDataMapOfShapeListOfShape ef;
+    TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, ef);
+    int nAdj = 0, nExact = 0;
+    for (int ei = 1; ei <= ef.Extent(); ++ei) {
+        const TopTools_ListOfShape& lf = ef.FindFromIndex(ei);
+        if (lf.Extent() != 2) continue;
+        const TopoDS_Face f1 = TopoDS::Face(lf.First());
+        const TopoDS_Face f2 = TopoDS::Face(lf.Last());
+        int i1 = -1, i2 = -1;
+        for (int i = 0; i < n; ++i) {
+            if (planes[static_cast<size_t>(i)].IsSame(f1)) i1 = i;
+            if (planes[static_cast<size_t>(i)].IsSame(f2)) i2 = i;
+        }
+        if (i1 < 0 || i2 < 0 || i1 == i2) continue;
+        gp_Dir n1, n2;
+        double d1 = 0.0, d2 = 0.0;
+        if (!planeParams(f1, n1, d1) || !planeParams(f2, n2, d2)) continue;
+        ++nAdj;
+        if (exactCoplanarSameOri(n1, d1, n2, d2)) {
+            ++nExact;
+            unite(i1, i2);
+        }
+    }
+    if (prismDiagOn())
+        std::fprintf(stderr, "DIAG_PRISMBUILD plane-adj nAdj=%d nExact=%d nPlanes=%d\n",
+                     nAdj, nExact, n);
+    if (nExact < 1) return 0;
+
+    std::vector<std::vector<int>> groups(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i)
+        groups[static_cast<size_t>(find(i))].push_back(i);
+
+    const TopoDS_Shape before = s;
+    const double v0 = shapeVolOf(s);
+    int nC0 = 0, nP0 = 0;
+    countSurf(s, nP0, nC0);
+    int merged = 0;
+    try {
+        BRepTools_ReShape rs;
+        for (int g = 0; g < n; ++g) {
+            const std::vector<int>& mem = groups[static_cast<size_t>(g)];
+            if (mem.size() < 2) continue;
+            TopoDS_Compound c;
+            BRep_Builder B;
+            B.MakeCompound(c);
+            for (int i : mem) B.Add(c, planes[static_cast<size_t>(i)]);
+            ShapeUpgrade_UnifySameDomain usd(c, Standard_True, Standard_True, Standard_False);
+            usd.SetLinearTolerance(Precision::Confusion());
+            usd.SetAngularTolerance(Precision::Confusion());
+            usd.SetSafeInputMode(Standard_True);
+            usd.Build();
+            const TopoDS_Shape u = usd.Shape();
+            if (u.IsNull()) continue;
+            int nF = 0;
+            TopoDS_Face kept;
+            for (TopExp_Explorer fx(u, TopAbs_FACE); fx.More(); fx.Next()) {
+                ++nF;
+                kept = TopoDS::Face(fx.Current());
+            }
+            if (nF != 1 || kept.IsNull()) continue;
+            rs.Replace(planes[static_cast<size_t>(mem[0])], kept);
+            for (size_t k = 1; k < mem.size(); ++k)
+                rs.Remove(planes[static_cast<size_t>(mem[k])]);
+            merged += static_cast<int>(mem.size()) - 1;
+        }
+        if (merged < 1) return 0;
+        const TopoDS_Shape out = rs.Apply(s);
+        if (out.IsNull()) return 0;
+        const double v1 = shapeVolOf(out);
+        int nP = 0, nC = 0;
+        countSurf(out, nP, nC);
+        const double vFloor = 1e-6 * std::fabs(v0);
+        if (std::fabs(v1 - v0) > vFloor) {
+            tUnifyG2 = 0;
+            return 0;
+        }
+        if (nC != nC0) {
+            tUnifyG4 = 0;
+            return 0;
+        }
+        s = out;
+        return merged;
+    } catch (const Standard_Failure&) {
+        s = before;
+        return 0;
+    }
+}
+
 // D9 §2: UnifySameDomain once, G1 ceiling = Precision::Confusion(). No ShapeFix.
+// Plane-only exact-coplanar neighbour merge follows so a G4 USD discard cannot
+// also suppress legal plane merges.
 bool unifySameOnce(TopoDS_Shape& s) {
     tUnifyV0 = 0.0;
     tUnifyV1 = 0.0;
@@ -620,27 +769,38 @@ bool unifySameOnce(TopoDS_Shape& s) {
         usd.SetSafeInputMode(Standard_True);
         usd.Build();
         const TopoDS_Shape u = usd.Shape();
-        if (u.IsNull()) return true;
-        const double v1 = shapeVolOf(u);
-        int nP = 0, nC = 0;
-        countSurf(u, nP, nC);
-        const double vFloor = 1e-6 * std::fabs(tUnifyV0);
-        if (std::fabs(v1 - tUnifyV0) > vFloor) {
-            tUnifyG2 = 0;
-            return true;
+        if (!u.IsNull()) {
+            const double v1 = shapeVolOf(u);
+            int nP = 0, nC = 0;
+            countSurf(u, nP, nC);
+            if (prismDiagOn())
+                std::fprintf(stderr,
+                             "DIAG_PRISMBUILD usd-try faces P=%d->%d C=%d->%d "
+                             "V=%.6f->%.6f\n",
+                             tUnifyP0, nP, tUnifyC0, nC, tUnifyV0, v1);
+            const double vFloor = 1e-6 * std::fabs(tUnifyV0);
+            if (std::fabs(v1 - tUnifyV0) > vFloor) {
+                tUnifyG2 = 0;
+            } else if (nC != tUnifyC0) {
+                tUnifyG4 = 0;
+            } else {
+                s = u;
+                tUnifyV1 = v1;
+                tUnifyP1 = nP;
+                tUnifyC1 = nC;
+            }
         }
-        if (nC != tUnifyC0) {
-            tUnifyG4 = 0;
-            return true;
-        }
-        s = u;
-        tUnifyV1 = v1;
-        tUnifyP1 = nP;
-        tUnifyC1 = nC;
-        return true;
     } catch (const Standard_Failure&) {
-        return true;
     }
+    const int nMerged = mergeExactCoplanarPlanes(s);
+    if (nMerged > 0) {
+        tUnifyV1 = shapeVolOf(s);
+        countSurf(s, tUnifyP1, tUnifyC1);
+        if (prismDiagOn())
+            std::fprintf(stderr, "DIAG_PRISMBUILD exact-plane-merge n=%d P=%d C=%d\n",
+                         nMerged, tUnifyP1, tUnifyC1);
+    }
+    return true;
 }
 
 }  // namespace
@@ -670,6 +830,7 @@ void prismNoteStageP(bool used, bool reverted, bool plate) {
 }
 
 void prismBindDxfDir(const std::string& d) { tDxfDir = d; }
+void prismBindDxfStem(const std::string& s) { tDxfStem = s; }
 
 bool buildPrismSolid(const std::vector<Profile>& profs, const PrismLevels& lv,
                      TopoDS_Shape& out) {
@@ -875,7 +1036,8 @@ bool tryStageP(const MeshView& mv, RegionSet& rs, std::vector<TopoDS_Face>& out)
         if (!opt.dxfDir.empty()) {
             const int comp = rs.compRoot >= 0 ? rs.compRoot : 0;
             for (const Profile& prof : profs) {
-                const std::string path = opt.dxfDir + "/profile-comp" +
+                const std::string stem = tDxfStem.empty() ? std::string("profile") : tDxfStem;
+                const std::string path = opt.dxfDir + "/" + stem + "-comp" +
                                          std::to_string(comp) + "-slab" +
                                          std::to_string(prof.slab) + ".dxf";
                 (void)writeProfileDxf(prof, lv, path);

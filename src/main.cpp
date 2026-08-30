@@ -37,6 +37,7 @@ static void usage() {
         "  --smooth-tol <mm>    surface-fit tolerance in mm (default: auto)\n"
         "  --smooth-angle <deg> near-flat normal gate for segmentation (default 2.0)\n"
         "  --no-smooth-fillets  skip recovery of fillet strips as cylinders\n"
+        "  --dxf <dir>          write one DXF per slab to <dir> (prismatic parts only; off by default)\n"
         "  --threads <n>        worker threads for parallel stages (default: auto)\n"
         "  --quiet              suppress progress output (RESULT line + errors only)\n"
         "  -v, --version        print version and exit\n"
@@ -109,6 +110,7 @@ int main(int argc, char** argv) {
         else if (a == "--smooth-tol")    opt.smoothTolMM = posDouble("--smooth-tol");
         else if (a == "--smooth-angle")  opt.smoothAngleDeg = angleDeg("--smooth-angle");
         else if (a == "--no-smooth-fillets") opt.smoothFillets = false;
+        else if (a == "--dxf")           opt.dxfDir = val("--dxf");
         else if (a == "--threads")       opt.threads = atoi(val("--threads").c_str());
         else if (a == "--quiet")         quiet = true;
         else if (a.size() && a[0] == '-') { fprintf(stderr, "error: unknown option %s\n", a.c_str()); return 1; }

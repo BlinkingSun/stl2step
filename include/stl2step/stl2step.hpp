@@ -126,6 +126,10 @@ struct Options {
     // Recover plane-to-plane fillet strips as cylinders. Ignored when smooth
     // is false.
     bool smoothFillets = true;
+
+    // Directory for one DXF per prismatic slab (`--dxf <dir>`). Empty (default)
+    // leaves emission off: no directory is created and STEP is unchanged.
+    std::string dxfDir;
 };
 
 // -------------------------------------------------------------------- logging
