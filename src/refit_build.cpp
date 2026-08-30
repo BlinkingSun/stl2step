@@ -33,8 +33,9 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
-// BRepCheck_ListIteratorOfListOfStatus.hxx is a typedef header removed from
-// newer OCCT distributions (vcpkg); the list type's own Iterator is portable.
+// BRepCheck_ListIteratorOfListOfStatus.hxx and
+// TopTools_ListIteratorOfListOfShape.hxx are typedef-only headers removed in
+// OCCT 8.0; iterate via ListOfStatus::Iterator / ListOfShape::Iterator.
 #include <BRepCheck_ListOfStatus.hxx>
 #include <BRepCheck_Result.hxx>
 #include <BRepCheck_Status.hxx>
@@ -68,7 +69,7 @@
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
-#include <TopTools_ListIteratorOfListOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopAbs.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -3182,12 +3183,12 @@ void collectShellCulprits(const TopoDS_Shape& sh, const std::vector<TopoDS_Face>
         TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, eanc);
         for (int i = 1; i <= wanc.Extent(); i++) {
             if (!brepStatusBad(an.Result(wanc.FindKey(i)))) continue;
-            for (TopTools_ListIteratorOfListOfShape it(wanc(i)); it.More(); it.Next())
+            for (TopTools_ListOfShape::Iterator it(wanc(i)); it.More(); it.Next())
                 markFace(it.Value());
         }
         for (int i = 1; i <= eanc.Extent(); i++) {
             if (!brepStatusBad(an.Result(eanc.FindKey(i)))) continue;
-            for (TopTools_ListIteratorOfListOfShape it(eanc(i)); it.More(); it.Next())
+            for (TopTools_ListOfShape::Iterator it(eanc(i)); it.More(); it.Next())
                 markFace(it.Value());
         }
         (void)rs;
