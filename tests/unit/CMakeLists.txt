@@ -123,6 +123,29 @@ set_tests_properties(profile_unit PROPERTIES
     LABELS "unit;profile"
     TIMEOUT 180)
 
+add_executable(stl2step_prism_build_test prism_build_test.cpp)
+target_compile_features(stl2step_prism_build_test PRIVATE cxx_std_17)
+set_target_properties(stl2step_prism_build_test PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(stl2step_prism_build_test PRIVATE stl2step::harness stl2step::core)
+target_include_directories(stl2step_prism_build_test PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/harness")
+if(MSVC)
+    target_compile_definitions(stl2step_prism_build_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(stl2step_prism_build_test)
+endif()
+
+add_test(NAME prism_build_unit
+    COMMAND stl2step_prism_build_test "${_stl}")
+set_tests_properties(prism_build_unit PROPERTIES
+    LABELS "unit;prism-build"
+    TIMEOUT 180)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

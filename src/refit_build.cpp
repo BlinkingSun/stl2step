@@ -9,6 +9,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit.hpp"
+#include "refit_prism.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -3627,6 +3628,9 @@ void fitAnalyticTolerances(const TopoDS_Shape& shape) {
     }
 }
 
+void prismBindSketchOrigin(const gp_XYZ& o);
+void prismNoteStageP(bool used, bool reverted, bool plate);
+
 bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vertex>& verts,
                 std::vector<TopoDS_Face>& out, WarnFn warn) {
     out.clear();
@@ -3643,6 +3647,192 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         const double sewTol = (mv.sewTol > 0.0) ? mv.sewTol : Precision::Confusion();
         const bool wasClosed = meshComponentClosed(mv);
+
+        // Stage P routing — prismatic => profiles -> prisms -> union; else legacy.
+        {
+            PrismTols pt;
+            const PrismLevels lv = detectPrismatic(mv, rs, pt);
+            int reverted = 1;
+            int nFaces = 0, nPlanes = 0, nCyls = 0, nSlabs = 0;
+            double vol = 0.0;
+            int wt = 0, valid = 0;
+            auto emitBuild = [&]() {
+                const char* e = std::getenv("STL2STEP_PRISM_DIAG");
+                if (!(e && e[0] && e[0] != '0')) return;
+                std::fprintf(stderr,
+                             "DIAG_PRISMBUILD comp=%d slabs=%d faces=%d planes=%d cyls=%d "
+                             "vol=%.6f watertight=%d valid=%d reverted=%d\n",
+                             rs.compRoot >= 0 ? rs.compRoot : 0, nSlabs, nFaces, nPlanes, nCyls,
+                             vol, wt, valid, reverted);
+            };
+            if (lv.ok && lv.y.size() >= 2) {
+                nSlabs = static_cast<int>(lv.y.size() - 1);
+                gp_XYZ origin(0.0, 0.0, 0.0);
+                if (!lv.capRegion.empty()) {
+                    for (const Region& r : rs.regions) {
+                        if (r.id == lv.capRegion[0]) {
+                            origin = r.ax.Location().XYZ();
+                            break;
+                        }
+                    }
+                } else {
+                    for (const Region& r : rs.regions) {
+                        if (r.type == SurfType::Cylinder) {
+                            origin = r.ax.Location().XYZ();
+                            break;
+                        }
+                    }
+                }
+                prismBindSketchOrigin(origin);
+
+                std::vector<Profile> profs;
+                bool ready = sliceProfiles(mv, rs, lv, pt, profs);
+                int nDecl = 0;
+                if (ready) {
+                    for (Profile& p : profs) {
+                        int d = 0;
+                        if (!fitProfile(mv, pt, p, d)) {
+                            ready = false;
+                            break;
+                        }
+                        nDecl += d;
+                    }
+                }
+                (void)nDecl;
+                const char* inj = std::getenv("STL2STEP_PRISM_INJECT_BAD");
+                if (ready && inj && inj[0] && inj[0] != '0') {
+                    if (!profs.empty() && profs[0].loops.size() > 1)
+                        profs[0].loops.resize(1);
+                }
+                auto snapLvl = [&](double yv) -> int {
+                    int best = -1;
+                    double bestD = 0.0;
+                    for (size_t k = 0; k < lv.y.size(); ++k) {
+                        const double d = std::fabs(yv - lv.y[k]);
+                        if (d <= pt.tauLvl && (best < 0 || d < bestD)) {
+                            best = static_cast<int>(k);
+                            bestD = d;
+                        }
+                    }
+                    return best;
+                };
+                auto cylEnds = [&](const Region& r, double& lo, double& hi) {
+                    const gp_XYZ a = r.ax.Direction().XYZ();
+                    const gp_XYZ loc = r.ax.Location().XYZ();
+                    const gp_XYZ p0 = loc + a * r.vMin;
+                    const gp_XYZ p1 = loc + a * r.vMax;
+                    const gp_XYZ ah = lv.axis.XYZ();
+                    const double y0 = ah.Dot(p0);
+                    const double y1 = ah.Dot(p1);
+                    lo = std::min(y0, y1);
+                    hi = std::max(y0, y1);
+                };
+                if (ready) {
+                    for (const Region& r : rs.regions) {
+                        if (r.type != SurfType::Cylinder || !(r.radius > 0.0)) continue;
+                        double lo = 0.0, hi = 0.0;
+                        cylEnds(r, lo, hi);
+                        const int i0 = snapLvl(lo);
+                        const int i1 = snapLvl(hi);
+                        if (i0 < 0 || i1 < 0 || (i1 - i0) < 2) continue;
+                        for (int k = i0; k < i1; ++k) {
+                            bool found = false;
+                            if (k < 0 || static_cast<size_t>(k) >= profs.size()) {
+                                ready = false;
+                                break;
+                            }
+                            const Profile& p = profs[static_cast<size_t>(k)];
+                            const double assoc = std::max(
+                                {pt.tauFit, 4.0 * r.maxVertexDev, 4.0 * r.chordSagitta});
+                            for (const ProfLoop& lp : p.loops) {
+                                if (lp.outer) continue;
+                                for (const ProfSeg& s : lp.segs) {
+                                    if (s.isArc && s.R > 0.0 &&
+                                        std::fabs(s.R - r.radius) <= assoc) {
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (found) break;
+                                if (lp.segs.size() >= 3) {
+                                    double cx = 0.0, cy = 0.0;
+                                    for (const ProfSeg& s : lp.segs) {
+                                        cx += s.a.X();
+                                        cy += s.a.Y();
+                                    }
+                                    cx /= static_cast<double>(lp.segs.size());
+                                    cy /= static_cast<double>(lp.segs.size());
+                                    double rmin = 1e300, rmax = 0.0;
+                                    for (const ProfSeg& s : lp.segs) {
+                                        const double d =
+                                            std::hypot(s.a.X() - cx, s.a.Y() - cy);
+                                        rmin = std::min(rmin, d);
+                                        rmax = std::max(rmax, d);
+                                    }
+                                    if (rmax - rmin <= 8.0 * assoc &&
+                                        std::fabs(0.5 * (rmin + rmax) - r.radius) <=
+                                            assoc)
+                                        found = true;
+                                }
+                            }
+                            if (!found) {
+                                ready = false;
+                                break;
+                            }
+                        }
+                        if (!ready) break;
+                    }
+                }
+                TopoDS_Shape solid;
+                if (ready && buildPrismSolid(profs, lv, solid) && !solid.IsNull()) {
+                    std::vector<TopoDS_Face> faces;
+                    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next())
+                        faces.push_back(TopoDS::Face(ex.Current()));
+                    TopoDS_Shell shP;
+                    for (TopExp_Explorer sx(solid, TopAbs_SHELL); sx.More(); sx.Next()) {
+                        shP = TopoDS::Shell(sx.Current());
+                        break;
+                    }
+                    if (shP.IsNull()) {
+                        BRep_Builder Bsh;
+                        Bsh.MakeShell(shP);
+                        for (auto& f : faces) Bsh.Add(shP, f);
+                    }
+                    wt = BRep_Tool::IsClosed(shP) ? 1 : 0;
+                    if (!wt) wt = BRep_Tool::IsClosed(solid) ? 1 : 0;
+                    valid = shellIsValid(shP) || shellIsValid(solid) ? 1 : 0;
+                    vol = shapeVolSafe(solid);
+                    nFaces = static_cast<int>(faces.size());
+                    for (const auto& f : faces) {
+                        try {
+                            BRepAdaptor_Surface sa(f, Standard_False);
+                            if (sa.GetType() == GeomAbs_Plane) ++nPlanes;
+                            else if (sa.GetType() == GeomAbs_Cylinder) ++nCyls;
+                        } catch (const Standard_Failure&) {
+                        }
+                    }
+                    double dVolAbs = 0.0;
+                    for (const Region& r : rs.regions)
+                        dVolAbs += std::fabs(r.dVolPredicted);
+                    const double meshVol = std::fabs(meshViewVolume(mv));
+                    const double budget = std::max(1e-4 * meshVol, 3.0 * dVolAbs);
+                    const bool volOk = std::fabs(vol - meshVol) <= budget;
+                    if (wt && valid && volOk && !faces.empty()) {
+                        reverted = 0;
+                        rs.stats.planes = nPlanes;
+                        rs.stats.cylinders = nCyls;
+                        rs.stats.facetIslands = 0;
+                        rs.stats.facetTriangles = 0;
+                        prismNoteStageP(true, false, false);
+                        emitBuild();
+                        out = std::move(faces);
+                        return true;
+                    }
+                }
+                prismNoteStageP(false, true, false);
+                emitBuild();
+            }
+        }
 
         struct VSnap {
             gp_Pnt p;
