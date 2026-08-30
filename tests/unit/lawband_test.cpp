@@ -21,15 +21,11 @@ using stl2step::harness::toMeshView;
 using stl2step::refit::DerivedTols;
 using stl2step::refit::LawBand;
 using stl2step::refit::MeshView;
-using stl2step::refit::RegionSet;
-using stl2step::refit::SegmentParams;
-using stl2step::refit::SurfType;
 using stl2step::refit::TessLawInterval;
 using stl2step::refit::lawBandsMergeable;
 using stl2step::refit::lawCalibrate;
 using stl2step::refit::lawChainAccept;
 using stl2step::refit::lawNConsistent;
-using stl2step::refit::segment;
 
 static int gFail = 0;
 
@@ -289,83 +285,99 @@ int main(int argc, char** argv) {
         check(!threw && empty.empty, "A13 mixed-preset empty==true no throw");
     }
 
-    // --- A9 / A10 via segment() region sets + labels ---
-    RegionSet rs;
-    SegmentParams sp;
-    const bool segOk = segment(mv, sp, rs, nullptr);
-    check(segOk, "segment() for chimera/merge");
-    const stl2step::refit::Region* r5 = nullptr;
-    const stl2step::refit::Region* r6 = nullptr;
-    const stl2step::refit::Region* r7 = nullptr;
-    const stl2step::refit::Region* r16 = nullptr;
-    const stl2step::refit::Region* r17 = nullptr;
-    for (const auto& r : rs.regions) {
-        if (r.id == 5) r5 = &r;
-        if (r.id == 6) r6 = &r;
-        if (r.id == 7) r7 = &r;
-        if (r.id == 16) r16 = &r;
-        if (r.id == 17) r17 = &r;
-    }
-    if (r16 && r5) {
-        LawBand chim16, chim5;
-        const bool a16 = lawChainAccept(mv, r16->tris, tol, chim16);
-        const bool a5 = lawChainAccept(mv, r5->tris, tol, chim5);
-        std::fprintf(stderr, "A9 rid16 accept=%d cvR=%.3g N=%d R=%.4f\n", a16 ? 1 : 0, chim16.cvR,
-                     chim16.N, chim16.R);
-        std::fprintf(stderr, "A9 rid5  accept=%d cvR=%.3g resid=%.3g N=%d\n", a5 ? 1 : 0, chim5.cvR,
-                     chim5.maxVertResid, chim5.N);
-        check(!a16, "A9 rid=16 chimera rejected");
-        check(!a5, "A9 rid=5 chimera rejected");
-    } else {
-        std::fprintf(stderr, "A9 regions missing r16=%p r5=%p (nReg=%zu)\n", (void*)r16, (void*)r5,
-                     rs.regions.size());
-        check(false, "A9 region ids present");
-    }
+    // --- A9 / A10 synthetic fixtures (live rid=5/16/7/17/6 no longer form) ---
+    // Stage L claims those bands upstream; reconstruct the chimera / mergeable
+    // strip chains from anatomy (w,θ) and documented leftover tri ranges.
+    {
+        const double kDeg = 3.141592653589793 / 180.0;
+        auto synth = [&](LawBand& b, double R, int N, double phiDeg, std::vector<int> tris) {
+            b = LawBand{};
+            b.R = R;
+            b.N = N;
+            b.phi = phiDeg * kDeg;
+            const double th = (N > 0) ? b.phi / static_cast<double>(N) : 0.0;
+            b.theta.assign(static_cast<size_t>(std::max(N, 0)), th);
+            b.w.assign(static_cast<size_t>(std::max(N, 0)), 2.0 * R * std::sin(0.5 * th));
+            b.tris = std::move(tris);
+            b.axis = gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0));
+        };
 
-    if (r16 && r7 && r17 && r5 && r6 && !labs.empty()) {
-        const std::vector<int> r16r30 = byFace(labs, 538, r16->tris);
-        const std::vector<int> r16r10 = byFace(labs, 542, r16->tris);
-        const std::vector<int> r5f21 = byFace(labs, 536, r5->tris);
-        LawBand a, b, c, d, e, f, g;
-        (void)lawChainAccept(mv, r16r30, tol, a);
-        (void)lawChainAccept(mv, r7->tris, tol, b);
-        (void)lawChainAccept(mv, r16r10, tol, c);
-        (void)lawChainAccept(mv, r17->tris, tol, d);
-        (void)lawChainAccept(mv, r5f21, tol, e);
-        (void)lawChainAccept(mv, r6->tris, tol, f);
-        (void)lawChainAccept(mv, r7->tris, tol, g);
+        const AnatomyBand* f538 = findFace(bands, 538); // R=30, Φ=26.294°, N=8
+        const AnatomyBand* f542 = findFace(bands, 542); // R=10, Φ=70.302°, N=13
+        const AnatomyBand* f536 = findFace(bands, 536); // R=15, Φ=64.255°, N=14
+
+        // A9 rid=16: 12×R10 (F542 leftover) + 2×R30 (F538 leftover) — mixed R.
+        LawBand chim16;
+        bool a16 = false;
+        if (f538 && f542 && f538->triIds.size() >= 2 && f542->triIds.size() >= 12) {
+            std::vector<int> mix(f542->triIds.begin(), f542->triIds.begin() + 12);
+            mix.insert(mix.end(), f538->triIds.begin(), f538->triIds.begin() + 2);
+            a16 = lawChainAccept(mv, toLocal(mv, mix), tol, chim16);
+            std::vector<double> wMix, thMix;
+            for (size_t i = 0; i < 12 && i < f542->wMm.size() && i < f542->thetaDeg.size(); ++i) {
+                wMix.push_back(f542->wMm[i]);
+                thMix.push_back(f542->thetaDeg[i] * kDeg);
+            }
+            for (size_t i = 0; i < 2 && i < f538->wMm.size() && i < f538->thetaDeg.size(); ++i) {
+                wMix.push_back(f538->wMm[i]);
+                thMix.push_back(f538->thetaDeg[i] * kDeg);
+            }
+            const double Rblend = inverseR(wMix, thMix);
+            const bool shippedBlend =
+                a16 && std::abs(chim16.R - 10.0) > 0.5 && std::abs(chim16.R - 30.0) > 0.5;
+            std::fprintf(stderr, "A9 synth16 accept=%d cvR=%.3g N=%d R=%.4f Rinv=%.4f\n",
+                         a16 ? 1 : 0, chim16.cvR, chim16.N, chim16.R, Rblend);
+            check(!a16 && !shippedBlend, "A9 rid=16 chimera rejected");
+        } else {
+            check(false, "A9 rid=16 chimera rejected");
+        }
+
+        // A9 rid=5: 2×F533 plane + 2×F536 (documented 4-tri junk, R≈16.01 if fitted).
+        LawBand chim5;
+        std::vector<int> junk;
+        if (!labs.empty()) {
+            std::vector<int> pool;
+            pool.reserve(labs.size());
+            for (const auto& L : labs) pool.push_back(L.tri);
+            const auto pl = byFace(labs, 533, pool);
+            const auto cy = byFace(labs, 536, pool);
+            for (size_t i = 0; i < 2 && i < pl.size(); ++i) junk.push_back(pl[i]);
+            for (size_t i = 0; i < 2 && i < cy.size(); ++i) junk.push_back(cy[i]);
+        } else if (f536 && f536->triIds.size() >= 2) {
+            junk = {699, 700, f536->triIds[0], f536->triIds[1]};
+        }
+        if (junk.size() == 4) {
+            const bool a5 = lawChainAccept(mv, toLocal(mv, junk), tol, chim5);
+            std::fprintf(stderr, "A9 synth5  accept=%d cvR=%.3g resid=%.3g N=%d nTri=%zu\n",
+                         a5 ? 1 : 0, chim5.cvR, chim5.maxVertResid, chim5.N, chim5.tris.size());
+            check(!a5, "A9 rid=5 chimera rejected");
+        } else {
+            check(false, "A9 rid=5 chimera rejected");
+        }
+
+        // A10: hardcoded equal-θ strips (F538 / F542 / F536 documented w,θ), A8-style.
+        LawBand a, b, c, d, e, f;
+        synth(a, 30.0, 1, 3.28675, {828, 829});
+        synth(b, 30.0, 8, 26.294,
+              {830, 831, 832, 833, 834, 835, 836, 837, 838, 839, 840, 841, 842, 843});
+        synth(c, 10.0, 6, 6.0 * 5.4079,
+              {882, 883, 884, 885, 886, 887, 888, 889, 890, 891, 892, 893});
+        synth(d, 10.0, 7, 7.0 * 5.4079,
+              {894, 895, 896, 897, 898, 899, 900, 901, 902, 903, 904, 905, 906, 907});
+        synth(e, 15.0, 1, 4.5897, {798, 799});
+        synth(f, 15.0, 14, 64.255,
+              {800, 801, 802, 803, 804, 805, 806, 807, 808, 809, 810, 811, 812, 813, 814, 815,
+               816, 817, 818, 819, 820, 821, 822, 823, 824, 825});
         const bool m1 = lawBandsMergeable(a, b, tol);
         const bool m2 = lawBandsMergeable(c, d, tol);
         const bool m3 = lawBandsMergeable(e, f, tol);
         const bool m4 = lawBandsMergeable(b, d, tol);
-        auto rng = [](const LawBand& x) {
-            int lo = 0, hi = -1;
-            if (!x.tris.empty()) {
-                lo = hi = x.tris[0];
-                for (int t : x.tris) {
-                    lo = std::min(lo, t);
-                    hi = std::max(hi, t);
-                }
-            }
-            std::fprintf(stderr, "    N=%d R=%.6f nTri=%zu ids=[%d,%d] theta=%zu\n", x.N, x.R,
-                         x.tris.size(), lo, hi, x.theta.size());
-        };
-        std::fprintf(stderr, "A10 16R30:\n");
-        rng(a);
-        std::fprintf(stderr, "A10 rid7:\n");
-        rng(b);
-        std::fprintf(stderr, "A10 5F21:\n");
-        rng(e);
-        std::fprintf(stderr, "A10 rid6:\n");
-        rng(f);
         std::fprintf(stderr, "A10 merge (16R30,7)=%d (16R10,17)=%d (5F21,6)=%d (7,17)=%d\n",
                      m1 ? 1 : 0, m2 ? 1 : 0, m3 ? 1 : 0, m4 ? 1 : 0);
         check(m1, "A10 merge rid16-R30 + rid7");
         check(m2, "A10 merge rid16-R10 + rid17");
         check(m3, "A10 merge rid5-F21 + rid6");
         check(!m4, "A10 no-merge rid7 + rid17");
-    } else {
-        check(false, "A10 inputs available");
     }
 
     if (gFail) {
