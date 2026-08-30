@@ -1,0 +1,36 @@
+{
+  "id": "nonprismatic-control",
+  "description": "A9 negative control — hex tube (2 cylinders) + sloped top (oblique plane). Declines at RULE 5.1 condition 3. Not a CAD export.",
+  "realExport": false,
+  "provenance": {
+    "sourcePath": "tests/unit/gen_nonprismatic.py",
+    "statement": "Synthetic A9 fixture for AC3-P1; see nonprismatic-control.PROVENANCE.md."
+  },
+  "deflection": 0,
+  "triangleCount": 96,
+  "meshVolume": 2016.000132,
+  "expectFillet": false,
+  "watertight": true,
+  "openEdges": 0,
+  "nonManifoldEdges": 0,
+  "expectedExit": 0,
+  "expectedSolids": 1,
+  "expectedOpenShells": 0,
+  "recoverable": [],
+  "mustRemainFaceted": [],
+  "expectedRejects": [],
+  "components": [
+    {"index": 0, "triangleCount": 96, "degenerateTriangles": 0, "openEdges": 0, "nonManifoldEdges": 0, "meshVolume": 2016.000132, "clean": true}
+  ],
+  "live": [
+    {
+      "component": 0,
+      "disposition": "PASS",
+      "partialReason": "A9 control: predicate declines at condition 3; shipped path stays Verbatim.",
+      "builtCylindersFloor": 0,
+      "builtPlanesFloor": 0,
+      "faceCount": 26,
+      "surfaceCensus": {"plane": 2, "cylinder": 2, "planar_facets": 0}
+    }
+  ]
+}

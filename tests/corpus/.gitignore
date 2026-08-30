@@ -12,3 +12,7 @@ corpus.stamp
 # S09 loft: OCCT BRepMesh tessellation is not byte-stable across platforms.
 !S09.stl
 !S09.expected.json
+# A9 negative control (oblique chamfer + two holes) — not generator output.
+!nonprismatic-control.stl
+!nonprismatic-control.expected.json
+!nonprismatic-control.PROVENANCE.md

@@ -66,8 +66,42 @@ set_tests_properties(lawband_rule42a_grep PROPERTIES
     LABELS "unit;lawband"
     TIMEOUT 30)
 
+add_executable(stl2step_prism_test prism_test.cpp)
+target_compile_features(stl2step_prism_test PRIVATE cxx_std_17)
+set_target_properties(stl2step_prism_test PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(stl2step_prism_test PRIVATE stl2step::harness)
+target_include_directories(stl2step_prism_test PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/harness")
+if(MSVC)
+    target_compile_definitions(stl2step_prism_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(stl2step_prism_test)
+endif()
+
+set(_body11 "${_stl2step_root}/tests/corpus/Body11.stl")
+set(_neg "${_stl2step_root}/tests/corpus/nonprismatic-control.stl")
+add_test(NAME prism_unit
+    COMMAND stl2step_prism_test "${_stl}" "${_body11}" "${_neg}")
+set_tests_properties(prism_unit PROPERTIES
+    LABELS "unit;prism"
+    TIMEOUT 180)
+
+add_test(NAME prism_literal_ban
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check_prism_literals.cmake")
+set_tests_properties(prism_literal_ban PROPERTIES
+    LABELS "unit;prism"
+    TIMEOUT 30)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)
 unset(_mis)
 unset(_lab)
+unset(_body11)
+unset(_neg)
