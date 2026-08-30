@@ -29,6 +29,8 @@ endif()
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/profile_dump/CMakeLists.txt")
     add_subdirectory(tools/profile_dump)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dxf_check/CMakeLists.txt")
+    add_subdirectory(tools/dxf_check)
 endif()
 
 # SPEC AC-J6HEAL API probe — calls stl2step::convert() directly. Not a ctest

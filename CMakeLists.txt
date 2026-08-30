@@ -50,7 +50,8 @@ add_library(stl2step_core
     src/refit_lawband.cpp
     src/refit_prism.cpp
     src/refit_profile.cpp
-    src/refit_prism_build.cpp)
+    src/refit_prism_build.cpp
+    src/dxf_export.cpp)
 add_library(stl2step::core ALIAS stl2step_core)
 
 target_compile_features(stl2step_core PUBLIC cxx_std_17)
