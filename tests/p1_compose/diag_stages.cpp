@@ -1,6 +1,7 @@
 // Stage-by-stage diagnostic for composed P1 pipeline (lane p1-compose-fix).
 #include "mesh_harness.hpp"
 #include "mesh_harness_refit.hpp"
+#include "posix_compat.hpp"
 #include "refit_internal.hpp"
 
 #include <algorithm>
@@ -36,11 +37,7 @@ static void printWork(const char* tag, const refit::SegmentWork& w) {
 
 int main(int argc, char** argv) {
     if (argc < 2) return 1;
-#if defined(_WIN32)
-    _putenv("STL2STEP_P1_DIAG=1");
-#else
     setenv("STL2STEP_P1_DIAG", "1", 1);
-#endif
     harness::HarnessMesh mesh;
     std::string err;
     if (!harness::loadMesh(argv[1], 1.0, 0.0, 0.0, mesh, err)) {

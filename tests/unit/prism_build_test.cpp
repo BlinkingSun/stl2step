@@ -5,6 +5,7 @@
 
 #include "mesh_harness.hpp"
 #include "mesh_harness_refit.hpp"
+#include "posix_compat.hpp"
 #include "refit.hpp"
 #include "refit_prism.hpp"
 

@@ -35,7 +35,8 @@ set_target_properties(stl2step_harness PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF)
 target_include_directories(stl2step_harness PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../support")
 target_link_libraries(stl2step_harness PUBLIC stl2step::core)
 
 add_executable(stl2step_meshharness mesh_dump.cpp)
