@@ -340,3 +340,26 @@ line appends the `smooth*` keys after `warnings`. Those keys are present
 **only when `smooth == true`**; they are omitted (never zero-valued) on the
 off path so the RESULT string stays character-identical to 1.0.0. The C++
 `Result` members are always present and default to zero (the dual contract).
+
+---
+
+## 10. CI discipline for agents
+
+Private-repo Actions minutes are metered (macOS 10×, Windows 2×). After the
+2026-08-30 `posix_compat.hpp` miss (`git add -u` never stages **new** files),
+this is binding:
+
+- **Never push build-affecting changes** (`src/`, `include/`, `tests/`,
+  CMake, `cmake/`) without three-platform green markers:
+  `.ci-local/<HEAD>.macos.green` + `.linux.green` + `.windows.green`.
+  Produce them with `scripts/ci-local-gate.sh --fresh-clone`,
+  `scripts/ci-linux-preflight.sh`, and `scripts/ci-windows-preflight.sh`.
+  The pre-push hook (`scripts/install-git-hooks.sh`) refuses otherwise.
+- **Batch fix iterations.** One push after local green — not a push per
+  compile error. Each intermediate push bills a full matrix and emails
+  the owner.
+- **New files need an explicit `git add`.** `git add -u` is a trap: it
+  stages tracked-file edits only. `git status --porcelain | grep '^??'`
+  and disposition every untracked path. Working-tree / tar-synced tests
+  cannot see a file that is not in git; the gate's `file://` fresh-clone
+  can.

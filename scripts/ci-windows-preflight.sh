@@ -18,6 +18,11 @@
 # Windows); the build tree D:\stl2step-ci\build persists for incremental
 # rebuilds. Mirrors ci.yml (windows job): vcpkg toolchain, VS multi-config
 # generator, Release, ctest -C Release.
+#
+# On FULL SUCCESS, writes .ci-local/<sync-sha>.windows.green (suite summary
+# + timestamp) for scripts/ci-local-gate.sh. The SHA is the local HEAD
+# recorded at sync time. A dirty working tree vs that HEAD refuses the
+# marker — the remote run tested uncommitted / untracked files, not git.
 set -uo pipefail
 
 HOST="${1:-${STL2STEP_WIN_HOST:-}}"
@@ -28,7 +33,11 @@ if [ -z "$HOST" ]; then
 fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo"
+# Record the exact local HEAD the tree is synced from.
+SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
+
+echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo (HEAD $SYNC_SHA)"
 ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\\repo) & mkdir D:\\stl2step-ci\\repo"
 # tar on both ends. NO --exclude patterns: bsdtar matches them against
 # nested path components, which silently drops tests/gates/build_fixtures
@@ -36,7 +45,7 @@ ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\
 # top-level entries and skip build*/_team/.stl2step-* by name.
 entries=()
 while IFS= read -r e; do
-  case "$e" in build*|_team|.stl2step-*) continue ;; esac
+  case "$e" in build*|_team|.stl2step-*|.ci-local) continue ;; esac
   entries+=("$e")
 done < <(ls -A "$REPO_ROOT")
 # COPYFILE_DISABLE: stop macOS bsdtar emitting AppleDouble ._* companions —
@@ -64,4 +73,31 @@ cd /d D:\stl2step-ci
 "%CTEST%" --test-dir build -C Release --output-on-failure
 EOF
 scp -q /tmp/stl2step-win-preflight.cmd "$HOST:D:/stl2step-ci/preflight.cmd"
-ssh "$HOST" "cmd /c D:\\stl2step-ci\\preflight.cmd"
+
+LOG="$(mktemp)"
+if ! ssh "$HOST" "cmd /c D:\\stl2step-ci\\preflight.cmd" 2>&1 | tee "$LOG"; then
+  rm -f "$LOG"
+  exit 1
+fi
+
+SUMMARY="$(tr -d '\r' < "$LOG" | grep -E '[0-9]+% tests passed' | tail -1 || true)"
+rm -f "$LOG"
+if [ -z "$SUMMARY" ]; then
+  echo "REFUSE marker: no ctest suite summary in windows preflight output" >&2
+  exit 1
+fi
+if [ -n "$SYNC_DIRTY" ]; then
+  echo "REFUSE marker: working tree dirty vs HEAD ${SYNC_SHA} at sync time; not writing .ci-local/${SYNC_SHA}.windows.green" >&2
+  echo "Dirtiness (git status --porcelain at sync):" >&2
+  echo "$SYNC_DIRTY" >&2
+  echo "The remote run tested a dirty working tree, not git HEAD. Commit or stash (and disposition untracked files), then re-run." >&2
+  exit 1
+fi
+
+mkdir -p "$REPO_ROOT/.ci-local"
+{
+  echo "$SUMMARY"
+  date +%Y-%m-%dT%H:%M:%S%z
+} > "$REPO_ROOT/.ci-local/${SYNC_SHA}.windows.green"
+echo "== preflight: wrote .ci-local/${SYNC_SHA}.windows.green"
+echo "$SUMMARY"

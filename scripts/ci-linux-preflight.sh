@@ -11,13 +11,22 @@
 # Remote workspace: ~/stl2step-ci (repo copy, micromamba, build tree).
 # Everything runs nice -n 10 with two cores held back so the machine's
 # real workload (cnc-node) keeps priority.
+#
+# On FULL SUCCESS, writes .ci-local/<sync-sha>.linux.green (suite summary
+# + timestamp) for scripts/ci-local-gate.sh. The SHA is the local HEAD
+# recorded at sync time. A dirty working tree vs that HEAD refuses the
+# marker — the remote run tested uncommitted / untracked files, not git.
 set -euo pipefail
 
 HOST="${1:-cnc}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WS="stl2step-ci"
 
-echo "== preflight: sync repo -> $HOST:~/$WS/repo"
+# Record the exact local HEAD the tree is synced from.
+SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
+
+echo "== preflight: sync repo -> $HOST:~/$WS/repo (HEAD $SYNC_SHA)"
 ssh "$HOST" mkdir -p "$WS/repo"
 # .git rides along: the gate suite's baseline build checks out a pinned
 # ancestor commit and needs full history.
@@ -26,9 +35,14 @@ ssh "$HOST" mkdir -p "$WS/repo"
 # historical trap the fixtures dir was renamed to dodge.
 rsync -a --delete \
   --exclude '/build*/' --exclude '/_team/' --exclude '/.stl2step-*' \
+  --exclude '/.ci-local/' \
   "$REPO_ROOT/" "$HOST:$WS/repo/"
 
-ssh "$HOST" bash -s <<'REMOTE'
+LOG="$(mktemp)"
+# shellcheck disable=SC2064
+trap "rm -f '$LOG'" EXIT
+
+ssh "$HOST" bash -s <<'REMOTE' 2>&1 | tee "$LOG"
 set -euo pipefail
 cd ~/stl2step-ci
 
@@ -56,3 +70,24 @@ echo "== preflight: ctest"
 LD_LIBRARY_PATH="$MAMBA_ROOT_PREFIX/envs/occt/lib" \
   nice -n 10 ctest --test-dir build --output-on-failure
 REMOTE
+
+SUMMARY="$(grep -E '[0-9]+% tests passed' "$LOG" | tail -1 || true)"
+if [ -z "$SUMMARY" ]; then
+  echo "REFUSE marker: no ctest suite summary in linux preflight output" >&2
+  exit 1
+fi
+if [ -n "$SYNC_DIRTY" ]; then
+  echo "REFUSE marker: working tree dirty vs HEAD ${SYNC_SHA} at sync time; not writing .ci-local/${SYNC_SHA}.linux.green" >&2
+  echo "Dirtiness (git status --porcelain at sync):" >&2
+  echo "$SYNC_DIRTY" >&2
+  echo "The remote run tested a dirty working tree, not git HEAD. Commit or stash (and disposition untracked files), then re-run." >&2
+  exit 1
+fi
+
+mkdir -p "$REPO_ROOT/.ci-local"
+{
+  echo "$SUMMARY"
+  date +%Y-%m-%dT%H:%M:%S%z
+} > "$REPO_ROOT/.ci-local/${SYNC_SHA}.linux.green"
+echo "== preflight: wrote .ci-local/${SYNC_SHA}.linux.green"
+echo "$SUMMARY"

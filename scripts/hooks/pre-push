@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# pre-push — block a push that has not passed scripts/ci-local-gate.sh.
+# Installed into .git/hooks/pre-push by scripts/install-git-hooks.sh.
+# Committed copy: scripts/hooks/pre-push (this file).
+set -euo pipefail
+
+zero40="0000000000000000000000000000000000000000"
+zero64="0000000000000000000000000000000000000000000000000000000000000000"
+
+run=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$local_sha" != "$zero40" ] && [ "$local_sha" != "$zero64" ]; then
+    run=1
+  fi
+done
+
+if [ "$run" -eq 0 ]; then
+  exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+exec "$root/scripts/ci-local-gate.sh"
