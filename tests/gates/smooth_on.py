@@ -52,6 +52,7 @@ ICHECKER_REAL_CAD_PARK_REASON = (
 PARKED_GATE_FIXTURES: Dict[Tuple[str, str], str] = {
     ("I-checker", "Body11"): ICHECKER_REAL_CAD_PARK_REASON,
     ("I-checker", "Body28"): ICHECKER_REAL_CAD_PARK_REASON,
+    ("I-checker", "handle-pickup"): ICHECKER_REAL_CAD_PARK_REASON,
 }
 
 

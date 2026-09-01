@@ -62,10 +62,10 @@ PICKUP_CORPUS = REPO / "tests" / "corpus" / "handle-pickup.stl"
 PICKUP_DIAG = REPO / "tests" / "diag" / "handle-pickup" / "handle-pickup.stl"
 PICKUP_GT = REPO / "tests" / "diag" / "handle-pickup" / "ground-truth.json"
 PICKUP_SIDECAR = REPO / "tests" / "corpus" / "handle-pickup.expected.json"
-MAIN_PICKUP_STL = Path(
-    "/Users/jroberts/Desktop/Internal Development/Tools/stl2step"
-    "/_team/inputs/Handle pickup.stl"
-)
+# Soft last fallbacks — skipped silently when the worktree has no _team/.
+# Never hard-require repo-external _team/inputs (fresh-clone CI has none).
+TEAM_PICKUP_STL = REPO / "_team" / "inputs" / "Handle pickup.stl"
+TEAM_PICKUP_GT = REPO / "_team" / "inputs" / "ground-truth.json"
 
 ENV_STRICT = "PARTIAL_RECOVERY_STRICT"
 ENV_PRIVATE = "STL2STEP_PRIVATE_CORPUS"
@@ -214,27 +214,62 @@ def parse_j6_free_edges(
     return vals[-1] if vals else 0
 
 
-def resolve_pickup_stl(extra: Optional[Path] = None) -> Path:
-    candidates: List[Path] = []
+def pickup_stl_candidate_paths(extra: Optional[Path] = None) -> List[Path]:
+    """In-repo copies first; worktree _team/inputs last (skipped if absent)."""
+    out: List[Path] = []
     if extra is not None:
-        candidates.append(Path(extra))
-    candidates.extend([PICKUP_CORPUS, PICKUP_DIAG, MAIN_PICKUP_STL])
-    for p in candidates:
+        out.append(Path(extra))
+    out.extend([PICKUP_CORPUS, PICKUP_DIAG, TEAM_PICKUP_STL])
+    return out
+
+
+def resolve_pickup_stl(
+    extra: Optional[Path] = None,
+    *,
+    candidates: Optional[Sequence[Path]] = None,
+) -> Path:
+    search = (
+        [Path(p) for p in candidates]
+        if candidates is not None
+        else pickup_stl_candidate_paths(extra)
+    )
+    for p in search:
         if p.is_file():
             return p
     raise GateError(
         "handle-pickup STL missing; looked for "
-        + ", ".join(str(p) for p in candidates)
+        + ", ".join(str(p) for p in search)
     )
 
 
-def load_pickup_gt_radii(gt_path: Optional[Path] = None) -> Tuple[List[float], str]:
-    """Read GT radii from diag ground-truth.json; else GROUND-TRUTH.md inline."""
-    candidates: List[Path] = []
+def pickup_gt_candidate_paths(gt_path: Optional[Path] = None) -> List[Path]:
+    """Explicit path, in-repo diag GT, then _team/inputs (soft last fallback)."""
+    out: List[Path] = []
     if gt_path is not None:
-        candidates.append(Path(gt_path))
-    candidates.append(PICKUP_GT)
-    for p in candidates:
+        out.append(Path(gt_path))
+    out.append(PICKUP_GT)
+    out.append(TEAM_PICKUP_GT)
+    return out
+
+
+def load_pickup_gt_radii(
+    gt_path: Optional[Path] = None,
+    *,
+    candidates: Optional[Sequence[Path]] = None,
+) -> Tuple[List[float], str]:
+    """Read GT radii from diag ground-truth.json; else GROUND-TRUTH.md inline.
+
+    Runtime search: explicit path, in-repo diag GT, then _team/inputs as a
+    soft last fallback (skipped silently when absent). Pass `candidates` to
+    isolate the search — required for the missing-GT self-test, which must
+    not depend on repo or repo-external _team state.
+    """
+    search = (
+        [Path(p) for p in candidates]
+        if candidates is not None
+        else pickup_gt_candidate_paths(gt_path)
+    )
+    for p in search:
         if not p.is_file():
             continue
         try:
@@ -250,16 +285,23 @@ def load_pickup_gt_radii(gt_path: Optional[Path] = None) -> Tuple[List[float], s
 
 def load_must_remain_faceted(
     sidecar_path: Optional[Path] = None,
+    *,
+    candidates: Optional[Sequence[Path]] = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Sidecar mustRemainFaceted, or GROUND-TRUTH.md 9 spheres + 6 tori.
 
     Empty list is unpopulated (FINDINGS-0 GAP4), not "nothing stays faceted".
+    Pass `candidates` to isolate the search from the in-repo sidecar.
     """
-    candidates: List[Path] = []
-    if sidecar_path is not None:
-        candidates.append(Path(sidecar_path))
-    candidates.append(PICKUP_SIDECAR)
-    for p in candidates:
+    search = (
+        [Path(p) for p in candidates]
+        if candidates is not None
+        else (
+            ([Path(sidecar_path)] if sidecar_path is not None else [])
+            + [PICKUP_SIDECAR]
+        )
+    )
+    for p in search:
         if not p.is_file():
             continue
         try:
@@ -1074,9 +1116,34 @@ def _self_test() -> int:
         "GROUND-TRUTH.md fallback radii bookends",
     )
 
-    gt_fb, src_fb = load_pickup_gt_radii(Path("/no/such/handle-pickup-gt.json"))
-    check("inline" in src_fb, f"missing GT file uses inline fallback (src={src_fb})")
-    check(gt_fb == list(FALLBACK_GT_RADII), "fallback radii match GROUND-TRUTH.md")
+    runtime_gt = pickup_gt_candidate_paths()
+    check(runtime_gt[-1] == TEAM_PICKUP_GT, "_team/inputs GT is last runtime candidate")
+    runtime_stl = pickup_stl_candidate_paths()
+    check(runtime_stl[-1] == TEAM_PICKUP_STL, "_team/inputs STL is last runtime candidate")
+
+    # Isolated missing-GT scenario: tempdir with no GT candidates reachable.
+    # Must not consult in-repo diag GT or repo-external _team/ state.
+    with tempfile.TemporaryDirectory() as td:
+        isolated = Path(td)
+        missing_gt = isolated / "no-such-gt.json"
+        isolated_team_gt = isolated / "_team" / "inputs" / "ground-truth.json"
+        gt_fb, src_fb = load_pickup_gt_radii(
+            missing_gt,
+            candidates=[missing_gt, isolated_team_gt],
+        )
+        check("inline" in src_fb, f"missing GT file uses inline fallback (src={src_fb})")
+        check(gt_fb == list(FALLBACK_GT_RADII), "fallback radii match GROUND-TRUTH.md")
+        check(not missing_gt.exists() and not isolated_team_gt.exists(),
+              "isolated GT scenario created no GT files")
+        missing_sc = isolated / "no-such-sidecar.json"
+        faceted_iso, src_iso = load_must_remain_faceted(
+            missing_sc,
+            candidates=[missing_sc],
+        )
+        check("inline" in src_iso, f"isolated missing sidecar uses GT fallback (src={src_iso})")
+        iso_types = {str(e.get("type")): int(e.get("count") or 0) for e in faceted_iso}
+        check(iso_types.get("sphere") == 9 and iso_types.get("torus") == 6,
+              "isolated missing sidecar yields 9 spheres + 6 tori")
 
     check(match_gt_radius(5.0, FALLBACK_GT_RADII) == 5.0, "GT R5 exact")
     # 0.3% of 100 = 0.3; 100.3 ok, 100.4 not
@@ -1084,16 +1151,12 @@ def _self_test() -> int:
     check(match_gt_radius(100.4, FALLBACK_GT_RADII) is None, "R100 at +0.4% is phantom")
     check(match_gt_radius(7.0, FALLBACK_GT_RADII) is None, "R7 is not a pickup GT radius")
 
-    faceted_fb, src_faceted = load_must_remain_faceted(Path("/no/such-sidecar.json"))
-    check("inline" in src_faceted, f"missing sidecar uses GT fallback (src={src_faceted})")
-    by_type = {str(e.get("type")): int(e.get("count") or 0) for e in faceted_fb}
-    check(by_type.get("sphere") == 9, f"GT fallback 9 spheres (got {by_type})")
-    check(by_type.get("torus") == 6, f"GT fallback 6 tori (got {by_type})")
-
     with tempfile.TemporaryDirectory() as td:
         empty_sc = Path(td) / "empty.expected.json"
         empty_sc.write_text('{"mustRemainFaceted": []}\n', encoding="utf-8")
-        empty_ents, empty_src = load_must_remain_faceted(empty_sc)
+        empty_ents, empty_src = load_must_remain_faceted(
+            empty_sc, candidates=[empty_sc]
+        )
         check("inline" in empty_src, "empty mustRemainFaceted uses GT fallback")
         empty_types = {str(e.get("type")): int(e.get("count") or 0) for e in empty_ents}
         check(empty_types.get("sphere") == 9 and empty_types.get("torus") == 6,
@@ -1110,7 +1173,9 @@ def _self_test() -> int:
             ),
             encoding="utf-8",
         )
-        pop_ents, pop_src = load_must_remain_faceted(pop_sc)
+        pop_ents, pop_src = load_must_remain_faceted(
+            pop_sc, candidates=[pop_sc]
+        )
         check(str(pop_sc) == pop_src, "populated sidecar is used when present")
         check(pop_ents[0].get("note") == "from sidecar", "populated sidecar entries win")
 
