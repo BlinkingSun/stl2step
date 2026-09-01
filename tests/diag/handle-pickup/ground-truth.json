@@ -109,5 +109,63 @@
   "triangleCount": 3338,
   "vertices": 1665,
   "edges": 233,
-  "notes": "Census from tests/tools/step_census.py on the original CAD STEP (GROUND-TRUTH.md). Recoverable by TrueForm: 18 planes + 54 cylinders. 9 spheres + 6 tori stay faceted. ORIGINAL STEP stays out of the repo."
+  "notes": "Census from tests/tools/step_census.py on the original CAD STEP (GROUND-TRUTH.md). Recoverable by TrueForm: 18 planes + 54 cylinders. 9 spheres + 6 tori stay faceted. ORIGINAL STEP stays out of the repo.",
+  "d3_9_exclusion": {
+    "schema": "d3-9-exclusion-v1",
+    "description": "D3-9 geometric fillet-detector exclusion set E for Handle pickup (equal-theta is struck). 21 GT faces: 6 tori + 9 spheres + six non-axis rounds. Gate fillet_exclusion_e0 must read this object rather than hard-coding face ids or thresholds.",
+    "gt_face_count": 21,
+    "classes": {
+      "torus": 6,
+      "sphere": 9,
+      "round": 6
+    },
+    "faces": [
+      {"id": 1474, "class": "torus"},
+      {"id": 1476, "class": "torus"},
+      {"id": 1483, "class": "torus"},
+      {"id": 1485, "class": "torus"},
+      {"id": 1499, "class": "torus"},
+      {"id": 1500, "class": "torus"},
+      {"id": 1470, "class": "sphere"},
+      {"id": 1472, "class": "sphere"},
+      {"id": 1480, "class": "sphere"},
+      {"id": 1482, "class": "sphere"},
+      {"id": 1491, "class": "sphere"},
+      {"id": 1493, "class": "sphere"},
+      {"id": 1496, "class": "sphere"},
+      {"id": 1498, "class": "sphere"},
+      {"id": 1528, "class": "sphere"},
+      {"id": 1469, "class": "round", "radius_mm": 3.0},
+      {"id": 1479, "class": "round", "radius_mm": 3.0},
+      {"id": 1490, "class": "round", "radius_mm": 3.0},
+      {"id": 1495, "class": "round", "radius_mm": 3.0},
+      {"id": 1527, "class": "round", "radius_mm": 3.0},
+      {"id": 1536, "class": "round", "radius_mm": 2.55}
+    ],
+    "predicate": {
+      "grow_radius_max_mm": 3.5,
+      "grow_radius_op": "<=",
+      "eps": {
+        "formula": "max(tauSurf, epsPlane, 0.05)",
+        "floor_mm": 0.05,
+        "terms": ["tauSurf", "epsPlane", 0.05]
+      }
+    },
+    "live_divergence": {
+      "source": "_team/reports/spike-s1-prismp.md",
+      "binary": "dc49e45",
+      "verdict": "RED",
+      "live_E_count": 66,
+      "live_E_kind": "region ids",
+      "gt_E_count": 21,
+      "gt_E_kind": "GT faces",
+      "live_segmentation": {
+        "regions": 203,
+        "cylinders": 133,
+        "facet_islands": 41,
+        "DIAG_PRISM": {"comp": 0, "ok": 0, "failedCond": 2}
+      },
+      "why": "Both numbers are true about different objects. The 21 are GT CAD faces (6 torus + 9 sphere + 6 non-axis rounds). Live |E|=66 because the engine types no region as torus/sphere; blends arrive as over-segmented cylGrow patches. The gate marks the 21-face target expected-red against the live 66-region set."
+    }
+  }
 }
