@@ -181,11 +181,18 @@ MeshResult meshFromStep(const MeshOptions& opt, const LogCallback& log) {
     r.input = opt.input;
     r.output = opt.output;
     if (r.input.empty()) return fail("no input STEP path given");
-    if (r.output.empty()) {
+    const bool outputExplicit = !opt.output.empty();
+    if (!outputExplicit) {
+        // Default beside the input: <stem>.mesh.stl — never <stem>.stl, which
+        // is the user's source mesh after a convert in the same folder.
         fs::path p(r.input);
-        p.replace_extension(".stl");
+        p.replace_extension(".mesh.stl");
         r.output = p.string();
+        std::error_code ec;
+        if (fs::exists(r.output, ec))
+            return fail("output exists: " + r.output + " — pass -o");
     }
+    // --edges is explicit-only: never invent a default edges path.
 
     unsigned hw = opt.threads > 0 ? (unsigned)opt.threads
                                   : std::thread::hardware_concurrency();

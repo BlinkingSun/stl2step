@@ -229,10 +229,14 @@ struct MeshOptions {
     // Input STEP path (.step / .stp). Required.
     std::string input;
 
-    // Output binary STL path. Empty = input with its extension replaced by ".stl".
+    // Output binary STL path. Empty = <input-stem>.mesh.stl beside the input.
+    // A derived default never overwrites an existing file (fail closed:
+    // error "output exists: <path> — pass -o"). An explicit path may overwrite.
     std::string output;
 
     // Optional Format A edges path. Empty = do not write an edges file.
+    // Never derived: --edges is explicit-only (same never-clobber rule would
+    // apply if a default were ever added).
     std::string edgesFile;
 
     // Worker threads for BRepMesh_IncrementalMesh. 0 (default) = all cores.

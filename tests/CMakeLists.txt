@@ -35,6 +35,29 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/dxf_check/CMakeLists.txt")
     add_subdirectory(tools/dxf_check)
 endif()
 
+# U3a rework: --mesh without -o writes <stem>.mesh.stl and never clobbers
+# a sibling <stem>.stl; a second run fail-closes if the default exists.
+if(TARGET stl2step)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_mesh_nc_py "${CMAKE_CURRENT_SOURCE_DIR}/mesh_never_clobber.py")
+    set(_mesh_nc_step "${CMAKE_CURRENT_SOURCE_DIR}/corpus/handle-lock.step")
+    set(_mesh_nc_stl "${CMAKE_CURRENT_SOURCE_DIR}/corpus/handle-lock.stl")
+    if(EXISTS "${_mesh_nc_py}")
+        add_test(NAME mesh_never_clobber
+            COMMAND ${Python3_EXECUTABLE} "${_mesh_nc_py}"
+                --binary "$<TARGET_FILE:stl2step>"
+                --step "${_mesh_nc_step}"
+                --make-step-from "${_mesh_nc_stl}")
+        set_tests_properties(mesh_never_clobber PROPERTIES
+            LABELS "mesh"
+            TIMEOUT 180
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_mesh_nc_py};${_mesh_nc_stl}")
+    endif()
+    unset(_mesh_nc_py)
+    unset(_mesh_nc_step)
+    unset(_mesh_nc_stl)
+endif()
+
 # SPEC AC-J6HEAL API probe — calls stl2step::convert() directly. Not a ctest
 # (lane AC pins 27/27). Built whenever the core library is.
 if(TARGET stl2step::core)

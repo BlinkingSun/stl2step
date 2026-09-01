@@ -14,7 +14,8 @@ using namespace stl2step;
 static void usage() {
     printf(
         "stl2step %s -- convert an STL mesh into a STEP (B-Rep) solid\n\n"
-        "usage: stl2step <input.stl> [output.step] [options]\n\n"
+        "usage: stl2step <input.stl> [output.step] [options]\n"
+        "       stl2step --mesh <in.step> [-o out.stl]  default <stem>.mesh.stl; never clobbers (pass -o)\n\n"
         "  -o <file>            output path (default: input with .step extension)\n"
         "  --schema <s>         AP203 | AP214 | AP242            (default AP214)\n"
         "  --units <mm|in>      units the STL was modelled in; in -> scaled x25.4 to mm\n"
