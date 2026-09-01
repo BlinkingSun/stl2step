@@ -177,8 +177,124 @@ gp_Cylinder cylForIntersect(const Region& r) {
     return cylSurfaceForRegion(r)->Cylinder();
 }
 
+// H1b / D3S-3: build-scope E′ demotion side table. Consulted by isAnalytic so
+// all five call sites see one truth. Never mutates Region::type. thread_local
+// because convert() fans out components.
+thread_local std::vector<char> gEPrimeDemoted;
+
 bool isAnalytic(const Region* r) {
-    return r && (r->type == SurfType::Plane || r->type == SurfType::Cylinder);
+    if (!r) return false;
+    if (r->type != SurfType::Plane && r->type != SurfType::Cylinder) return false;
+    if (r->id >= 0 && (size_t)r->id < gEPrimeDemoted.size() && gEPrimeDemoted[(size_t)r->id])
+        return false;
+    return true;
+}
+
+void installEPrimeDemotion(const MeshView& mv, const RegionSet& rs) {
+    gEPrimeDemoted.clear();
+    int maxId = -1;
+    std::vector<int> cylIdx;
+    cylIdx.reserve(rs.regions.size());
+    for (size_t i = 0; i < rs.regions.size(); ++i) {
+        const Region& r = rs.regions[i];
+        maxId = std::max(maxId, r.id);
+        if (r.type == SurfType::Cylinder) cylIdx.push_back((int)i);
+    }
+    if (maxId >= 0) gEPrimeDemoted.assign((size_t)maxId + 1, 0);
+    if (cylIdx.empty()) return;
+
+    // RULE 4.2a, recomputed locally (Stage-P TUs stay frozen).
+    const double weld = mv.weldTol > 0.0 ? mv.weldTol : 0.0;
+    const double diag = std::isfinite(mv.diag) && mv.diag > 0.0 ? mv.diag : 0.0;
+    const double tauSurf = std::max(5e-5, std::max(4.0 * weld, 1e-6 * diag));
+    double hMin = 0.0;
+    for (int i : cylIdx) {
+        const Region& r = rs.regions[(size_t)i];
+        const double h = std::abs(r.vMax - r.vMin);
+        if (!(h > 0.0) || !std::isfinite(h)) continue;
+        if (hMin <= 0.0 || h < hMin) hMin = h;
+    }
+    double tauAx = 1e-6;
+    if (hMin > 0.0) tauAx = std::max(1e-6, 2.0 * tauSurf / hMin);
+
+    auto axisSin = [](const gp_Dir& a, const gp_Dir& b) {
+        return gp_Vec(a).Crossed(gp_Vec(b)).Magnitude();
+    };
+
+    const int n = (int)cylIdx.size();
+    std::vector<int> parent((size_t)n);
+    for (int i = 0; i < n; ++i) parent[(size_t)i] = i;
+    auto find = [&](int x) {
+        int r = x;
+        while (parent[(size_t)r] != r) r = parent[(size_t)r];
+        while (parent[(size_t)x] != r) {
+            const int nxt = parent[(size_t)x];
+            parent[(size_t)x] = r;
+            x = nxt;
+        }
+        return r;
+    };
+    auto unite = [&](int a, int b) {
+        a = find(a);
+        b = find(b);
+        if (a == b) return;
+        if (a < b) parent[(size_t)b] = a;
+        else parent[(size_t)a] = b;
+    };
+    for (int i = 0; i < n; ++i) {
+        const gp_Dir di = rs.regions[(size_t)cylIdx[i]].ax.Direction();
+        for (int j = i + 1; j < n; ++j) {
+            const gp_Dir dj = rs.regions[(size_t)cylIdx[j]].ax.Direction();
+            if (axisSin(di, dj) <= tauAx) unite(i, j);
+        }
+    }
+
+    struct Cl {
+        int tris = 0;
+        int minRid = INT_MAX;
+        int minIdx = -1;
+    };
+    std::vector<Cl> stats((size_t)n);
+    for (int i = 0; i < n; ++i) {
+        const Region& r = rs.regions[(size_t)cylIdx[i]];
+        const int p = find(i);
+        stats[(size_t)p].tris += (int)r.tris.size();
+        if (r.id < stats[(size_t)p].minRid) {
+            stats[(size_t)p].minRid = r.id;
+            stats[(size_t)p].minIdx = i;
+        }
+    }
+    int best = -1;
+    for (int i = 0; i < n; ++i) {
+        if (find(i) != i) continue;
+        if (best < 0) {
+            best = i;
+            continue;
+        }
+        if (stats[(size_t)i].tris > stats[(size_t)best].tris ||
+            (stats[(size_t)i].tris == stats[(size_t)best].tris &&
+             stats[(size_t)i].minRid < stats[(size_t)best].minRid))
+            best = i;
+    }
+    if (best < 0 || stats[(size_t)best].minIdx < 0) return;
+    const gp_Dir ahat =
+        rs.regions[(size_t)cylIdx[stats[(size_t)best].minIdx]].ax.Direction();
+
+    const char* ev = std::getenv("STL2STEP_EPRIME_DIAG");
+    const bool diagOn = ev && ev[0] && ev[0] != '0';
+    for (int i = 0; i < n; ++i) {
+        const Region& r = rs.regions[(size_t)cylIdx[i]];
+        const double sinVs = axisSin(r.ax.Direction(), ahat);
+        const bool demote = r.radius <= 3.5 && !r.closed360 && sinVs > tauAx;
+        if (demote && r.id >= 0 && (size_t)r.id < gEPrimeDemoted.size())
+            gEPrimeDemoted[(size_t)r.id] = 1;
+        if (diagOn)
+            std::fprintf(stderr,
+                         "DIAG_EPRIME rid=%d R=%.6f nTri=%zu closed360=%d "
+                         "sinVsDom=%.6e demoted=%d\n",
+                         r.id, r.radius, r.tris.size(), r.closed360 ? 1 : 0, sinVs,
+                         demote ? 1 : 0);
+    }
 }
 
 const Region* regionById(const RegionSet& rs, int id) {
@@ -4011,6 +4127,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             return false;
         }
+
+        installEPrimeDemotion(mv, rs);
 
         // Stage P routing (RULE 5.1a): prismatic -> profiles/prisms/union;
         // decline or build failure falls through byte-identically.
