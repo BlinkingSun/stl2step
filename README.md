@@ -129,6 +129,7 @@ stl2step part.stl --units in              # STL modelled in inches -> scaled to 
 stl2step part.stl --no-verify             # fastest: skip the re-read self-check
 stl2step part.stl --smooth                # alias for --engine trueform
 stl2step part.stl --schema AP242 --threads 4
+stl2step --mesh part.step                 # writes part.mesh.stl; never clobbers an existing file (pass -o)
 ```
 
 Progress prints to stdout (silence with `--quiet`); warnings and errors go to

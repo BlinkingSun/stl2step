@@ -219,6 +219,56 @@ struct Result {
 // busy machine, or several at once on an idle one).
 Result convert(const Options& opt, const LogCallback& log = nullptr);
 
+// --------------------------------------------------------------- mesh-from-STEP
+
+// Sibling of convert(): tessellate a STEP/B-Rep into a binary STL and an
+// optional B-Rep edge polyline buffer (Format A). Does not call convert() and
+// does not touch Result / Result::toJson().
+
+struct MeshOptions {
+    // Input STEP path (.step / .stp). Required.
+    std::string input;
+
+    // Output binary STL path. Empty = <input-stem>.mesh.stl beside the input.
+    // A derived default never overwrites an existing file (fail closed:
+    // error "output exists: <path> — pass -o"). An explicit path may overwrite.
+    std::string output;
+
+    // Optional Format A edges path. Empty = do not write an edges file.
+    // Never derived: --edges is explicit-only (same never-clobber rule would
+    // apply if a default were ever added).
+    std::string edgesFile;
+
+    // Worker threads for BRepMesh_IncrementalMesh. 0 (default) = all cores.
+    // InParallel is true when the resolved thread count is greater than 1.
+    int threads = 0;
+};
+
+struct MeshResult {
+    bool ok = false;       // true when the binary STL was written
+    int  exitCode = 1;     // 0 ok, 1 failed (no warnings tier)
+
+    int faces = 0;         // TopExp::MapShapes(shape, TopAbs_FACE) extent
+    int edges = 0;         // drawable (non-degenerate, polygon-bearing) edges
+    int triangles = 0;     // triangles written into the binary STL
+
+    double seconds = 0.0;  // wall-clock time of the whole mesh run
+
+    std::string input;     // resolved input path
+    std::string output;    // resolved STL path
+    std::string edgesFile; // resolved edges path; empty if --edges was not passed
+    std::string error;     // human-readable reason when ok == false
+
+    // Machine-readable payload the CLI prints after "MESH_RESULT ".
+    // Own writer: never shares Result::toJson().
+    std::string toJson() const;
+};
+
+// Read a STEP file, tessellate it, write a binary STL, and optionally write a
+// Format A edges buffer. Never throws: OCCT Standard_Failure and std::exception
+// are caught and reported through MeshResult::error / MeshResult::ok.
+MeshResult meshFromStep(const MeshOptions& opt, const LogCallback& log = nullptr);
+
 }  // namespace stl2step
 
 #endif  // STL2STEP_STL2STEP_HPP

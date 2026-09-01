@@ -41,6 +41,7 @@ find_package(OpenCASCADE REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(stl2step_core
     src/stl2step.cpp
+    src/mesh.cpp
     src/refit_math.cpp
     src/refit_grow.cpp
     src/refit_fillet.cpp
@@ -76,6 +77,25 @@ target_include_directories(stl2step_core PUBLIC
 target_link_libraries(stl2step_core
     PUBLIC  OpenCASCADE::OpenCASCADE
     PRIVATE Threads::Threads)
+
+# BRepMesh_IncrementalMesh (--mesh mode). Homebrew's TKDESTL pulls TKMesh
+# transitively; Ubuntu libocct does not. Name it on the core target.
+if(TARGET TKMesh)
+    target_link_libraries(stl2step_core PUBLIC TKMesh)
+else()
+    find_library(STL2STEP_TKMESH NAMES TKMesh
+        HINTS
+            "${OpenCASCADE_LIBRARY_DIR}"
+            "${OpenCASCADE_BINARY_DIR}"
+            ${OpenCASCADE_ROOT} $ENV{OpenCASCADE_ROOT} $ENV{CASROOT} ${CASROOT}
+        PATH_SUFFIXES lib lib64 win64/vc14/lib
+        PATHS
+            /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
+            /opt/homebrew/lib /opt/local/lib)
+    if(STL2STEP_TKMESH)
+        target_link_libraries(stl2step_core PUBLIC "${STL2STEP_TKMESH}")
+    endif()
+endif()
 
 if(MSVC)
     target_compile_definitions(stl2step_core PRIVATE _USE_MATH_DEFINES NOMINMAX)
