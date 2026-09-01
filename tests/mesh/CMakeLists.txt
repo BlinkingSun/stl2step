@@ -50,6 +50,25 @@ set_tests_properties(mesh_fail_closed PROPERTIES
     TIMEOUT 60
     REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_mesh_py};${_mesh_stl}")
 
+# U3a rework: --mesh without -o writes <stem>.mesh.stl and never clobbers
+# a sibling <stem>.stl; a second run fail-closes if the default exists.
+# Script lives at tests/mesh_never_clobber.py (not moved). Registration
+# belongs here with the other LABELS mesh ctests (phase-3 layout: root
+# tests/CMakeLists.txt only add_subdirectory's).
+set(_mesh_nc_py "${CMAKE_CURRENT_SOURCE_DIR}/../mesh_never_clobber.py")
+if(EXISTS "${_mesh_nc_py}")
+    add_test(NAME mesh_never_clobber
+        COMMAND ${Python3_EXECUTABLE} "${_mesh_nc_py}"
+            --binary "$<TARGET_FILE:stl2step>"
+            --step "${_mesh_step}"
+            --make-step-from "${_mesh_stl}")
+    set_tests_properties(mesh_never_clobber PROPERTIES
+        LABELS "mesh"
+        TIMEOUT 180
+        REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_mesh_nc_py};${_mesh_stl}")
+endif()
+unset(_mesh_nc_py)
+
 unset(_mesh_py)
 unset(_mesh_cyl)
 unset(_mesh_step)
