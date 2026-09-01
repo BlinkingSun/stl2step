@@ -1,0 +1,76 @@
+{
+  "id": "handle-pickup",
+  "description": "Josh live stress case \u2014 Handle pickup Fusion export (3338 tris). TrueForm ideal: 87 faces (18 plane + 54 cyl + 9 sphere + 6 torus) per ground-truth.json; DECISION-boundary floors (pending_lane=phase-2, CLOSURES LANDS-gate 2026-09-01: B2/contain did not land; floors deferred, values unchanged): smoothBuiltPlanes>=18, smoothBuiltCylinders>=50, combined>=100, reverted=0. EXPECTED-RED at HEAD 7cf77a2.",
+  "realExport": true,
+  "provenance": {
+    "sourcePath": "Handle pickup.stl",
+    "statement": "Customer Fusion STLB ATF 15.8 export; copied verbatim from _team/inputs/Handle pickup.stl to tests/diag/handle-pickup/ and tests/corpus/."
+  },
+  "deflection": 0,
+  "triangleCount": 3338,
+  "meshVolume": 57980.679574191,
+  "expectFillet": false,
+  "watertight": true,
+  "openEdges": 0,
+  "nonManifoldEdges": 0,
+  "expectedExit": 0,
+  "expectedSolids": 1,
+  "expectedOpenShells": 0,
+  "smoothExpectedExit": -1,
+  "smoothWarningCountMax": 5,
+  "smoothVolumeDeltaPctMax": -1,
+  "smoothRecognisedCylinders": 133,
+  "pending_lane": "phase-2",
+  "recoverable": [],
+  "mustRemainFaceted": [],
+  "expectedRejects": [],
+  "components": [
+    {
+      "index": 0,
+      "triangleCount": 3338,
+      "degenerateTriangles": 0,
+      "openEdges": 0,
+      "nonManifoldEdges": 0,
+      "meshVolume": 57980.679574191,
+      "clean": true
+    }
+  ],
+  "live": [
+    {
+      "component": 0,
+      "disposition": "PARTIAL",
+      "partialReason": "DECISION-boundary A1/A2 floors (pending_lane=phase-2; CLOSURES LANDS-gate: harness-only phase-1, B2 deferred, no contain win that ships faces): smoothRevertedComponents=0, smoothBuiltPlanes>=18, smoothBuiltCylinders>=50, combined>=100, openShells=0, exit 0|2, census plane>=18 / cylinder>=50, radii within 0.3% of GT. Floors unchanged; EXPECTED-RED at HEAD (component revert). 9 spheres + 6 tori remain faceted by design. smoothExpectedExit=-1 is the sidecar skip-sentinel (corpus_util.hpp: do not check smooth path) so the existing corpus glob cannot expected-red ctest; gates-partial owns the red-at-HEAD partial_recovery_gate. ",
+      "builtCylindersFloor": 50,
+      "builtPlanesFloor": 18,
+      "faceCount": 87,
+      "surfaceCensus": {
+        "plane": 18,
+        "cylinder": 54,
+        "planar_facets": 0
+      },
+      "volumeBudgetMM3": 5.798067957,
+      "cylinder_radii": [
+        0.5,
+        2,
+        2.55,
+        2.825018,
+        3,
+        4,
+        5,
+        6,
+        9,
+        10,
+        11.544154,
+        25,
+        72.5,
+        87.5,
+        92.5,
+        100
+      ],
+      "cylinder_radii_tol_mm": 0.3,
+      "cylinder_radii_rel_tol": 0.003,
+      "combinedBuiltFloor": 100,
+      "smoothRevertedComponents": 0
+    }
+  ]
+}

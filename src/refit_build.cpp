@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -657,6 +658,53 @@ bool diagJ6Enabled() {
     return cached != 0;
 }
 
+bool diagCoverEnabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_COVER_DIAG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+// Default-off B0/B0.1 provenance. Thread-local so concurrent convert() calls
+// do not share stamps. Written only when STL2STEP_COVER_DIAG is set.
+thread_local int gDiagMeshEGen = 0;
+thread_local std::unordered_map<const void*, const char*> gDiagEdgeSite;
+thread_local std::unordered_map<const void*, int> gDiagEdgeGen;
+
+const void* diagTShapePtr(const TopoDS_Shape& s) {
+    if (s.IsNull()) return nullptr;
+    return (const void*)s.TShape().get();
+}
+
+void diagNoteEdge(const TopoDS_Edge& e, const char* site) {
+    if (!diagCoverEnabled() || e.IsNull() || !site) return;
+    const void* p = diagTShapePtr(e);
+    if (!p) return;
+    gDiagEdgeSite[p] = site;
+    auto it = gDiagEdgeGen.find(p);
+    if (it == gDiagEdgeGen.end()) gDiagEdgeGen[p] = gDiagMeshEGen;
+}
+
+void diagMaybeDegenEmit(const TopoDS_Edge& e, const char* site, int ci, int ridA, int ridB,
+                        int extra) {
+    if (!diagCoverEnabled() || e.IsNull()) return;
+    diagNoteEdge(e, site);
+    TopoDS_Vertex va, vb;
+    TopExp::Vertices(e, va, vb, Standard_True);
+    gp_Pnt pa = BRep_Tool::Pnt(va), pb = BRep_Tool::Pnt(vb);
+    const double len = pa.Distance(pb);
+    const int flagged = BRep_Tool::Degenerated(e) ? 1 : 0;
+    if (len > 1e-4 && !flagged) return;
+    std::fprintf(stderr,
+                 "DIAG_DEGEN_EMIT site=%s ci=%d ridA=%d ridB=%d extra=%d "
+                 "len=%.6f degen=%d sameV=%d tshape=%p "
+                 "pa=(%.6f,%.6f,%.6f) pb=(%.6f,%.6f,%.6f)\n",
+                 site, ci, ridA, ridB, extra, len, flagged, va.IsSame(vb) ? 1 : 0,
+                 diagTShapePtr(e), pa.X(), pa.Y(), pa.Z(), pb.X(), pb.Y(), pb.Z());
+}
+
 void diagJ6FreeEdges(const MeshView& mv, const TopoDS_Shell& sh,
                      const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
                      const RegionSet& rs, const std::vector<char>& collapsed) {
@@ -714,6 +762,318 @@ void diagJ6FreeEdges(const MeshView& mv, const TopoDS_Shell& sh,
                              "analyticPolyline=%d\n",
                      nFree, analyticCol, analyticPoly);
     } catch (const Standard_Failure&) {
+    }
+}
+
+// B0/B0.1: default-off coverage / free-edge attribution. STL2STEP_COVER_DIAG=1.
+// H1: twin predicate requires len > tol (no zero-length self-match); fourth
+//     class degenerate-zero-length.
+// H2: coverage keyed on builtRid membership, not Region::builtAs.
+// H3: emit TShape identity, meshE generation, construction site per row.
+void diagCoverDump(const MeshView& mv, const RegionSet& rs, const std::vector<char>& exploded,
+                   const std::vector<int>& builtRid, const std::vector<TopoDS_Face>& built,
+                   const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& collapsed,
+                   const std::vector<ChainGeom>& geom, const TopoDS_Shell& sh, int j6Pass) {
+    if (!diagCoverEnabled()) return;
+    try {
+        const size_t nTri = mv.nTri;
+        int maxRid = -1;
+        for (int id : builtRid) maxRid = std::max(maxRid, id);
+        for (const Region& r : rs.regions) maxRid = std::max(maxRid, r.id);
+        std::vector<char> shipped((size_t)std::max(0, maxRid) + 1, 0);
+        int nShippedRids = 0;
+        for (int id : builtRid) {
+            if (id >= 0 && (size_t)id < shipped.size() && !shipped[(size_t)id]) {
+                shipped[(size_t)id] = 1;
+                nShippedRids++;
+            }
+        }
+
+        auto triClass = [&](size_t k) -> int {
+            // 0 analytic, 1 island, 2 exploded, 3 uncovered
+            int rid = (k < rs.triRegion.size()) ? rs.triRegion[k] : -1;
+            int iid = (k < rs.triIsland.size()) ? rs.triIsland[k] : -1;
+            bool exp = rid >= 0 && (size_t)rid < exploded.size() && exploded[(size_t)rid];
+            if (exp) return 2;
+            if (rid >= 0 && (size_t)rid < shipped.size() && shipped[(size_t)rid]) return 0;
+            if (iid >= 0) return 1;
+            return 3;
+        };
+
+        int nA = 0, nI = 0, nE = 0, nU = 0, nFillSkip = 0, nCvWouldAdd = 0, nI1Hole = 0;
+        std::vector<int> uByRid, eByRid;
+        const int ridCap = 4096;
+        uByRid.assign(ridCap, 0);
+        eByRid.assign(ridCap, 0);
+        int uNoRid = 0;
+        for (size_t k = 0; k < nTri; k++) {
+            int rid = (k < rs.triRegion.size()) ? rs.triRegion[k] : -1;
+            int iid = (k < rs.triIsland.size()) ? rs.triIsland[k] : -1;
+            bool exp = rid >= 0 && (size_t)rid < exploded.size() && exploded[(size_t)rid];
+            int cls = triClass(k);
+            if (cls == 0) nA++;
+            else if (cls == 1) nI++;
+            else if (cls == 2) {
+                nE++;
+                if (rid >= 0 && rid < ridCap) eByRid[(size_t)rid]++;
+            } else {
+                nU++;
+                if (rid >= 0 && rid < ridCap) uByRid[(size_t)rid]++;
+                else uNoRid++;
+            }
+            if (iid < 0 && !exp) nFillSkip++;
+            const bool cvFacet = !(rid >= 0 && (size_t)rid < shipped.size() && shipped[(size_t)rid]);
+            if (cvFacet && iid < 0 && !exp) nCvWouldAdd++;
+            if (rid < 0 && iid < 0) nI1Hole++;
+        }
+        int nRejTris = 0, nRejIsland = 0, nRejRegion = 0;
+        for (const Region& rr : rs.rejected) {
+            for (int t : rr.tris) {
+                nRejTris++;
+                if (t >= 0 && (size_t)t < rs.triIsland.size() && rs.triIsland[(size_t)t] >= 0)
+                    nRejIsland++;
+                if (t >= 0 && (size_t)t < rs.triRegion.size() && rs.triRegion[(size_t)t] >= 0)
+                    nRejRegion++;
+            }
+        }
+        std::fprintf(stderr,
+                     "DIAG_COVER_SUM pass=%d analytic=%d island=%d exploded=%d uncovered=%d "
+                     "total=%zu fillSkip=%d cvWouldAdd=%d i1Holes=%d rejectedList=%d "
+                     "rejectedAlsoIsland=%d rejectedAlsoRegion=%d builtRidKeys=%d meshEGen=%d\n",
+                     j6Pass, nA, nI, nE, nU, nTri, nFillSkip, nCvWouldAdd, nI1Hole, nRejTris,
+                     nRejIsland, nRejRegion, nShippedRids, gDiagMeshEGen);
+        if (nA) std::fprintf(stderr, "DIAG_COVER class=analytic n=%d\n", nA);
+        if (nI) std::fprintf(stderr, "DIAG_COVER class=island n=%d\n", nI);
+        for (int rid = 0; rid < ridCap; rid++) {
+            if (eByRid[(size_t)rid] > 0)
+                std::fprintf(stderr, "DIAG_COVER class=exploded rid=%d n=%d\n", rid,
+                             eByRid[(size_t)rid]);
+        }
+        if (nE) std::fprintf(stderr, "DIAG_COVER class=exploded n=%d\n", nE);
+        for (int rid = 0; rid < ridCap; rid++) {
+            if (uByRid[(size_t)rid] > 0)
+                std::fprintf(stderr, "DIAG_COVER class=uncovered rid=%d n=%d\n", rid,
+                             uByRid[(size_t)rid]);
+        }
+        if (uNoRid)
+            std::fprintf(stderr, "DIAG_COVER class=uncovered rid=-1 n=%d\n", uNoRid);
+        if (nU) std::fprintf(stderr, "DIAG_COVER class=uncovered n=%d\n", nU);
+
+        TopTools_IndexedDataMapOfShapeListOfShape anc;
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(sh, TopAbs_FACE, faceMap);
+        std::vector<int> faceRid((size_t)faceMap.Extent() + 1, -1);
+        for (size_t i = 0; i < built.size(); i++) {
+            int idx = faceMap.FindIndex(built[i]);
+            if (idx > 0 && i < builtRid.size()) faceRid[(size_t)idx] = builtRid[i];
+        }
+
+        std::vector<int> edgeT0(mv.nEdge, -1), edgeT1(mv.nEdge, -1);
+        if (mv.triEdges) {
+            for (size_t k = 0; k < nTri; k++) {
+                for (int s = 0; s < 3; s++) {
+                    int eid = mv.triEdges[k][s];
+                    if (eid < 0 || (size_t)eid >= mv.nEdge) continue;
+                    if (edgeT0[(size_t)eid] < 0) edgeT0[(size_t)eid] = (int)k;
+                    else edgeT1[(size_t)eid] = (int)k;
+                }
+            }
+        }
+
+        auto matchMeshEid = [&](const TopoDS_Edge& e, const gp_Pnt& pa, const gp_Pnt& pb) -> int {
+            for (size_t eid = 0; eid < meshE.size(); eid++) {
+                if (!meshE[eid].IsNull() && e.IsSame(meshE[eid])) return (int)eid;
+            }
+            int best = -1;
+            double bestD = 1e300;
+            const double tol = 0.05;
+            if (!mv.compEdges) return -1;
+            for (size_t eid = 0; eid < mv.nEdge; eid++) {
+                const auto& ev = mv.compEdges[eid];
+                gp_Pnt p0 = pntOf(mv, ev.first), p1 = pntOf(mv, ev.second);
+                const double d =
+                    std::min(pa.Distance(p0) + pb.Distance(p1), pa.Distance(p1) + pb.Distance(p0));
+                if (d < bestD) {
+                    bestD = d;
+                    best = (int)eid;
+                }
+            }
+            return (best >= 0 && bestD <= 2.0 * tol) ? best : -1;
+        };
+
+        auto matchGeomCi = [&](const TopoDS_Edge& e) -> int {
+            for (size_t ci = 0; ci < geom.size(); ci++) {
+                for (const TopoDS_Edge& ge : geom[ci].edges) {
+                    if (!ge.IsNull() && e.IsSame(ge)) return (int)ci;
+                }
+            }
+            return -1;
+        };
+
+        int nUnc = 0, nTwin = 0, nNoCol = 0, nDegen = 0, nFree = 0;
+        const double twinTol = 0.05;
+        // %.4f printed 0.0000 in contain-r1; Precision::Confusion is 1e-7 and
+        // would miss slightly-longer collapsed chords that still round to 0.
+        const double degenTol = 5e-5;
+        for (int i = 1; i <= anc.Extent(); i++) {
+            if (anc(i).Extent() >= 2) continue;
+            const TopoDS_Edge& e = TopoDS::Edge(anc.FindKey(i));
+            TopoDS_Vertex va, vb;
+            TopExp::Vertices(e, va, vb, Standard_True);
+            gp_Pnt pa = BRep_Tool::Pnt(va), pb = BRep_Tool::Pnt(vb);
+            const double len = pa.Distance(pb);
+            int frid = -1;
+            if (anc(i).Extent() == 1) {
+                const TopoDS_Face& f = TopoDS::Face(anc(i).First());
+                int fi = faceMap.FindIndex(f);
+                if (fi > 0) frid = faceRid[(size_t)fi];
+            }
+            int meshEid = matchMeshEid(e, pa, pb);
+            int otherTri = -1, otherCls = -1;
+            if (meshEid >= 0 && (size_t)meshEid < edgeT0.size()) {
+                int t0 = edgeT0[(size_t)meshEid], t1 = edgeT1[(size_t)meshEid];
+                auto hostish = [&](int t) {
+                    if (t < 0) return false;
+                    int rid = ((size_t)t < rs.triRegion.size()) ? rs.triRegion[(size_t)t] : -1;
+                    if (frid >= 0 && rid == frid) return true;
+                    int cls = triClass((size_t)t);
+                    if (frid < 0 && (cls == 1 || cls == 2)) return true;
+                    return false;
+                };
+                if (hostish(t0) && !hostish(t1)) otherTri = t1;
+                else if (hostish(t1) && !hostish(t0)) otherTri = t0;
+                else if (t0 >= 0 && t1 >= 0) {
+                    int c0 = triClass((size_t)t0), c1 = triClass((size_t)t1);
+                    if (c0 == 3 && c1 != 3) otherTri = t0;
+                    else if (c1 == 3 && c0 != 3) otherTri = t1;
+                    else otherTri = t1;
+                } else {
+                    otherTri = (t0 >= 0 && !hostish(t0)) ? t0 : t1;
+                }
+                if (otherTri >= 0) otherCls = triClass((size_t)otherTri);
+            }
+            int ciMatch = -1;
+            for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+                if (ci >= collapsed.size() || !collapsed[ci]) continue;
+                const BoundaryChain& ch = rs.chains[ci];
+                if (ch.meshVerts.size() < 2) continue;
+                gp_Pnt p0 = pntOf(mv, ch.meshVerts.front());
+                gp_Pnt p1 = pntOf(mv, ch.meshVerts.back());
+                if ((pa.Distance(p0) < 0.05 && pb.Distance(p1) < 0.05) ||
+                    (pa.Distance(p1) < 0.05 && pb.Distance(p0) < 0.05))
+                    ciMatch = (int)ci;
+            }
+            const int geomCi = matchGeomCi(e);
+            bool twin = false;
+            if (len > twinTol) {
+                for (int j = 1; j <= anc.Extent(); j++) {
+                    if (j == i) continue;
+                    const TopoDS_Edge& e2 = TopoDS::Edge(anc.FindKey(j));
+                    if (e.IsSame(e2)) continue;
+                    TopoDS_Vertex va2, vb2;
+                    TopExp::Vertices(e2, va2, vb2, Standard_True);
+                    gp_Pnt pa2 = BRep_Tool::Pnt(va2), pb2 = BRep_Tool::Pnt(vb2);
+                    const double d2 = pa2.Distance(pb2);
+                    if (d2 <= twinTol) continue;
+                    const double d = std::min(pa.Distance(pa2) + pb.Distance(pb2),
+                                              pa.Distance(pb2) + pb.Distance(pa2));
+                    if (d <= 2.0 * twinTol) {
+                        twin = true;
+                        break;
+                    }
+                }
+            }
+            const int flagged = BRep_Tool::Degenerated(e) ? 1 : 0;
+            const char* miss = "no-collapsed-partner";
+            if (len <= degenTol || flagged) {
+                miss = "degenerate-zero-length";
+                nDegen++;
+            } else if (otherCls == 3) {
+                miss = "uncovered-tri";
+                nUnc++;
+            } else if (twin || ciMatch >= 0) {
+                miss = "tshape-mismatch";
+                nTwin++;
+            } else {
+                nNoCol++;
+            }
+            const void* tsp = diagTShapePtr(e);
+            const void* meshTp = nullptr;
+            int sameMeshE = 0;
+            if (meshEid >= 0 && (size_t)meshEid < meshE.size() && !meshE[(size_t)meshEid].IsNull()) {
+                meshTp = diagTShapePtr(meshE[(size_t)meshEid]);
+                sameMeshE = e.IsSame(meshE[(size_t)meshEid]) ? 1 : 0;
+            }
+            const char* site = "?";
+            int gen = -1;
+            if (tsp) {
+                auto sit = gDiagEdgeSite.find(tsp);
+                if (sit != gDiagEdgeSite.end()) site = sit->second;
+                auto git = gDiagEdgeGen.find(tsp);
+                if (git != gDiagEdgeGen.end()) gen = git->second;
+            }
+            if (geomCi >= 0 && site[0] == '?') site = "appendCollapsed";
+            else if (sameMeshE && site[0] == '?') site = "meshE-slot";
+            const char* cty = "unk";
+            double cFirst = 0, cLast = 0;
+            try {
+                BRepAdaptor_Curve ac(e);
+                cFirst = ac.FirstParameter();
+                cLast = ac.LastParameter();
+                switch (ac.GetType()) {
+                    case GeomAbs_Line:
+                        cty = "line";
+                        break;
+                    case GeomAbs_Circle:
+                        cty = "circle";
+                        break;
+                    case GeomAbs_Ellipse:
+                        cty = "ellipse";
+                        break;
+                    case GeomAbs_BSplineCurve:
+                        cty = "bspline";
+                        break;
+                    case GeomAbs_BezierCurve:
+                        cty = "bezier";
+                        break;
+                    default:
+                        cty = "other";
+                        break;
+                }
+            } catch (const Standard_Failure&) {
+            }
+            if (std::strcmp(miss, "no-collapsed-partner") == 0)
+                std::fprintf(stderr,
+                             "DIAG_B02 #%d hostRid=%d edgeSite=%s nbrRid=%d otherCls=%d "
+                             "copyKind=%s meshEid=%d sameMeshE=%d geomCi=%d\n",
+                             nFree, frid, site, (otherTri >= 0 && (size_t)otherTri < rs.triRegion.size())
+                                                      ? rs.triRegion[(size_t)otherTri]
+                                                      : -1,
+                             otherCls,
+                             (sameMeshE ? "live-meshE"
+                                        : (geomCi >= 0 ? "independent-geom" : "meshE-copy")),
+                             meshEid, sameMeshE, geomCi);
+            std::fprintf(stderr,
+                         "DIAG_FREEEDGE #%d faceRid=%d miss=%s meshEid=%d otherTri=%d "
+                         "otherCls=%d ci=%d geomCi=%d twin=%d pa=(%.4f,%.4f,%.4f) "
+                         "pb=(%.4f,%.4f,%.4f) len=%.4f degen=%d sameV=%d tshape=%p "
+                         "meshETshape=%p sameMeshE=%d gen=%d site=%s cty=%s "
+                         "range=%.6f..%.6f\n",
+                         nFree, frid, miss, meshEid, otherTri, otherCls, ciMatch, geomCi,
+                         twin ? 1 : 0, pa.X(), pa.Y(), pa.Z(), pb.X(), pb.Y(), pb.Z(), len,
+                         flagged, va.IsSame(vb) ? 1 : 0, tsp, meshTp, sameMeshE, gen, site, cty,
+                         cFirst, cLast);
+            nFree++;
+        }
+        std::fprintf(stderr,
+                     "DIAG_FREEEDGE_SUM pass=%d freeEdges=%d uncovered-tri=%d "
+                     "tshape-mismatch=%d no-collapsed-partner=%d degenerate-zero-length=%d "
+                     "sum=%d\n",
+                     j6Pass, nFree, nUnc, nTwin, nNoCol, nDegen,
+                     nUnc + nTwin + nNoCol + nDegen);
+    } catch (const Standard_Failure&) {
+        std::fprintf(stderr, "DIAG_COVER exception\n");
     }
 }
 
@@ -1249,6 +1609,7 @@ TopoDS_Face makeFacet(const MeshView& mv, const std::vector<TopoDS_Vertex>& vert
         int id = mv.triEdges[k][s];
         if (id < 0 || (size_t)id >= meshE.size() || !edgeOk[(size_t)id]) return TopoDS_Face();
         bool fwd = (mv.triDirs[k] >> s) & 1;
+        diagNoteEdge(meshE[(size_t)id], "makeFacet");
         bb.Add(w, fwd ? meshE[(size_t)id] : TopoDS::Edge(meshE[(size_t)id].Reversed()));
     }
     w.Closed(Standard_True);
@@ -1288,6 +1649,7 @@ bool appendPolyline(BRep_Builder& B, TopoDS_Wire& w, const MeshView& mv, const B
         if (eid < 0 || (size_t)eid >= meshE.size() || !edgeOk[(size_t)eid]) return false;
         const auto& ev = mv.compEdges[eid];
         bool fwd = (ev.first == va);
+        diagNoteEdge(meshE[(size_t)eid], "appendPolyline");
         B.Add(w, fwd ? meshE[(size_t)eid] : TopoDS::Edge(meshE[(size_t)eid].Reversed()));
     }
     return true;
@@ -1296,10 +1658,16 @@ bool appendPolyline(BRep_Builder& B, TopoDS_Wire& w, const MeshView& mv, const B
 bool appendCollapsed(BRep_Builder& B, TopoDS_Wire& w, const ChainGeom& g, bool reversed) {
     if (g.edges.empty()) return false;
     if (!reversed) {
-        for (const auto& e : g.edges) B.Add(w, e);
+        for (const auto& e : g.edges) {
+            diagNoteEdge(e, "appendCollapsed");
+            B.Add(w, e);
+        }
     } else {
-        for (int i = (int)g.edges.size() - 1; i >= 0; i--)
-            B.Add(w, TopoDS::Edge(g.edges[(size_t)i].Reversed()));
+        for (int i = (int)g.edges.size() - 1; i >= 0; i--) {
+            TopoDS_Edge rev = TopoDS::Edge(g.edges[(size_t)i].Reversed());
+            diagNoteEdge(rev, "appendCollapsed");
+            B.Add(w, rev);
+        }
     }
     return true;
 }
@@ -3671,6 +4039,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         auto rebuildMeshEdges = [&]() {
             meshE.assign(mv.nEdge, TopoDS_Edge());
             edgeOk.assign(mv.nEdge, 0);
+            if (diagCoverEnabled()) gDiagMeshEGen++;
             for (size_t i = 0; i < mv.nEdge; i++) {
                 int a = mv.compEdges[i].first, b = mv.compEdges[i].second;
                 if (a < 0 || b < 0 || (size_t)a >= verts.size() || (size_t)b >= verts.size())
@@ -3680,6 +4049,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (me.IsDone()) {
                         meshE[i] = me.Edge();
                         edgeOk[i] = 1;
+                        if (diagCoverEnabled()) {
+                            diagNoteEdge(meshE[i], "rebuildMeshEdges");
+                            gDiagEdgeGen[diagTShapePtr(meshE[i])] = gDiagMeshEGen;
+                            gp_Pnt pa = BRep_Tool::Pnt(verts[(size_t)a]);
+                            gp_Pnt pb = BRep_Tool::Pnt(verts[(size_t)b]);
+                            if (pa.Distance(pb) <= 1e-4 || a == b)
+                                diagMaybeDegenEmit(meshE[i], "rebuildMeshEdges", -1, a, b,
+                                                   (int)i);
+                        }
                     }
                 } catch (const Standard_Failure&) {
                 }
@@ -3693,6 +4071,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // in-place MakeVertex leaves snapped TShapes alive when leftover
             // faces still reference them, which dropped R2 triangles (Body9
             // volΔ 0.030937 → 0.030954).
+            if (diagCoverEnabled())
+                std::fprintf(stderr, "DIAG_RESTORE meshEGen-before=%d\n", gDiagMeshEGen);
             BRep_Builder Bb;
             for (size_t i = 0; i < verts.size(); i++) {
                 if (verts[i].IsNull() && vsnap[i].t <= 0) continue;
@@ -3971,6 +4351,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 geom[ci].edges = {e};
                 collapsed[ci] = 1;
                 nOk++;
+                if (diagCoverEnabled()) {
+                    const char* esite = "rebuildCollapsed";
+                    if (curve.kind == AnalyticCurve::Circ) esite = "rebuildCollapsed:circ";
+                    else if (curve.kind == AnalyticCurve::Lin) esite = "rebuildCollapsed:lin";
+                    else if (curve.kind == AnalyticCurve::Elips) esite = "rebuildCollapsed:elips";
+                    diagMaybeDegenEmit(e, esite, (int)ci, A ? A->id : -1, B ? B->id : -1, ia);
+                }
             }
             if (diagCollapse)
                 std::fprintf(stderr,
@@ -4386,6 +4773,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
             for (int i = 1; i <= anc.Extent(); i++)
                 if (anc(i).Extent() < 2) freeE++;
+            if (diagCoverEnabled())
+                diagCoverDump(mv, rs, exploded, builtRid, built, meshE, collapsed, geom, sh,
+                              j6UncollapsePass);
             if (diagJ6Enabled())
                 diagJ6FreeEdges(mv, sh, built, builtRid, rs, collapsed);
             emit(warn, "J6: shell not closed freeEdges=" + std::to_string(freeE) +

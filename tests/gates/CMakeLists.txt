@@ -255,3 +255,53 @@ if(TARGET stl2step)
     unset(_stl2step_sweep_py)
     unset(_stl2step_sweep_root)
 endif()
+
+# --- gates-partial ---
+# DECISION-boundary pickup floors + non-regression.
+# STRICT=1: Python fails honestly while 18/50/100 are unmet (named floors).
+#
+# EXPECTED-RED (FINDINGS-0 GAP2): grep of ci-local-gate.sh + tests/gates
+# found no WILL_FAIL property. Closest CTest invert in-tree is
+# harness_dump_cube PASS_REGULAR_EXPRESSION; closest "expect fail"
+# wrapper is census/check_error.cmake. WILL_FAIL TRUE alone inverts
+# unexpected fails (census.sphere leak, handle-lock) into greens —
+# measured, so not used. PASS_REGULAR_EXPRESSION requires the
+# PARTIAL_RECOVERY_EXPECTED_RED marker: unmet 18/50/100 → ctest PASS
+# (ci-local-gate.sh can write a green marker); floors met unmarked or
+# unexpected fail → ctest FAIL (required regex not found).
+#
+# FLIP PROTOCOL (the day 18/50/100 are met — FAIL LOUDLY if unmarked):
+#   1. Live Python prints PARTIAL_RECOVERY_FLOORS_MET and exits 0.
+#   2. This test FAILS: Required regular expression not found
+#      Regex=[PARTIAL_RECOVERY_EXPECTED_RED].
+#   3. Remove PASS_REGULAR_EXPRESSION below.
+#   4. Keep ENVIRONMENT PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.
+#
+# TODO(PHASE-CLOSE): tighten FLOOR_PLANES / FLOOR_CYLINDERS / FLOOR_COMBINED
+# in tests/gates/partial_recovery_gate.py from the landed contain-race winner.
+set(_prg_script "${CMAKE_CURRENT_SOURCE_DIR}/partial_recovery_gate.py")
+if(EXISTS "${_prg_script}")
+    add_test(NAME partial_recovery_gate_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_prg_script}" --self-test)
+    set_tests_properties(partial_recovery_gate_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    add_test(NAME partial_recovery_gate_synthetic
+        COMMAND "${Python3_EXECUTABLE}" "${_prg_script}" --synthetic-pass)
+    set_tests_properties(partial_recovery_gate_synthetic PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step)
+        add_test(NAME partial_recovery_gate
+            COMMAND "${Python3_EXECUTABLE}" "${_prg_script}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --jobs 4)
+        set_tests_properties(partial_recovery_gate PROPERTIES
+            LABELS "gates;expected-red"
+            TIMEOUT 300
+            ENVIRONMENT "PARTIAL_RECOVERY_STRICT=1"
+            PASS_REGULAR_EXPRESSION "PARTIAL_RECOVERY_EXPECTED_RED"
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>")
+    endif()
+endif()
+unset(_prg_script)

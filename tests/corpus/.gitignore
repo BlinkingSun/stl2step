@@ -9,6 +9,9 @@ corpus.stamp
 !Body28.expected.json
 !handle-lock.stl
 !handle-lock.expected.json
+# Handle pickup live stress case (Fusion export) — not generator output.
+!handle-pickup.stl
+!handle-pickup.expected.json
 # S09 loft: OCCT BRepMesh tessellation is not byte-stable across platforms.
 !S09.stl
 !S09.expected.json
