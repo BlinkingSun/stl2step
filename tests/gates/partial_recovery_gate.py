@@ -19,10 +19,10 @@ CMake EXPECTED-RED (FINDINGS-0 GAP2 / ci-local-gate.sh):
   WILL_FAIL TRUE alone would let `ctest` pass while Python still exits 1, but
   it also inverts unexpected fails (handle-lock, census.sphere leak) into
   greens — measured. PASS_REGULAR_EXPRESSION "PARTIAL_RECOVERY_EXPECTED_RED"
-  is the CTest invert that keeps ci-local-gate.sh green on unmet 18/50/100
+  is the CTest invert that keeps ci-local-gate.sh green on unmet 18/30/48
   without swallowing GAP4 / non-regression.
 
-FLIP PROTOCOL (the day 18/50/100 are met — FAIL LOUDLY if unmarked):
+FLIP PROTOCOL (the day 18/30/48 are met — FAIL LOUDLY if unmarked):
   1. Live Python prints PARTIAL_RECOVERY_FLOORS_MET and exits 0.
   2. ctest FAILS: Required regular expression not found
      Regex=[PARTIAL_RECOVERY_EXPECTED_RED].
@@ -30,9 +30,9 @@ FLIP PROTOCOL (the day 18/50/100 are met — FAIL LOUDLY if unmarked):
      (partial_recovery_gate PROPERTIES).
   4. Keep ENVIRONMENT PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.
 
-# TODO(PHASE-CLOSE): tighten FLOOR_PLANES / FLOOR_CYLINDERS / FLOOR_COMBINED
-# from the landed contain-race winner. Knob: the three constants below in this
-# file. Do not raise them in the gates-partial lane.
+# D3F-4/6 (DECISION-floors-p3): FLOOR_CYLINDERS 50→30, FLOOR_COMBINED 100→48
+# (charter combined>=100 STRUCK). D3F-7 multiset-containment is a hard
+# anti-inflation gate, not an expected-red floor. Do not raise these here.
 
 Usage:
   partial_recovery_gate.py --self-test
@@ -49,6 +49,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -70,10 +71,10 @@ TEAM_PICKUP_GT = REPO / "_team" / "inputs" / "ground-truth.json"
 ENV_STRICT = "PARTIAL_RECOVERY_STRICT"
 ENV_PRIVATE = "STL2STEP_PRIVATE_CORPUS"
 
-# DECISION-boundary A2 — provisional floors. PHASE-CLOSE knob is these three.
+# D3F-4/5/6 — Handle-pickup floors. combined = 18+30; charter >=100 STRUCK.
 FLOOR_PLANES = 18
-FLOOR_CYLINDERS = 50
-FLOOR_COMBINED = 100
+FLOOR_CYLINDERS = 30
+FLOOR_COMBINED = 48
 FLOOR_REVERTED = 0
 FLOOR_BUILT_COMPONENTS = 1
 FLOOR_OPEN_SHELLS = 0
@@ -133,6 +134,44 @@ FALLBACK_GT_RADII: Tuple[float, ...] = (
     87.5,
     92.5,
     100.0,
+)
+
+# tests/diag/handle-pickup/ground-truth.json cylinder_radii_all (54, multiplicity).
+FALLBACK_GT_RADII_ALL: Tuple[float, ...] = (
+    0.5,
+    2.0,
+    2.55,
+    2.825018,
+    2.825018,
+    *([3.0] * 21),
+    4.0,
+    *([5.0] * 11),
+    6.0,
+    9.0,
+    10.0,
+    11.544154,
+    11.544154,
+    25.0,
+    25.0,
+    72.5,
+    72.5,
+    87.5,
+    92.5,
+    92.5,
+    92.5,
+    100.0,
+    100.0,
+    100.0,
+)
+
+# D3F-8 named gap — reported, not a floor. 12 deferred incl. three R=92.5
+# perimeter walls, 2 over-budget, 5 no-bound, 6 rounds.
+NAMED_GAP = (
+    "D3F-8 named gap: 12 deferred (1468,1471,1473,1478,1481,1486,1489,1492,"
+    "1494,1497,1501,1526 incl. three R=92.5 perimeter walls) / "
+    "2 over-budget (1469,1477) / 5 no-bound (1532,1533,1534,1535,1539) / "
+    "6 rounds (1469/1479/1490/1495/1527 R=3 + 1536 R=2.55). "
+    "Charter combined>=100 STRUCK (GT max 72)."
 )
 
 HL_CENSUS_CYL_FLOOR = 15
@@ -283,6 +322,31 @@ def load_pickup_gt_radii(
     return list(FALLBACK_GT_RADII), "GROUND-TRUTH.md inline fallback"
 
 
+def load_pickup_gt_radii_all(
+    gt_path: Optional[Path] = None,
+    *,
+    candidates: Optional[Sequence[Path]] = None,
+) -> Tuple[List[float], str]:
+    """54-entry cylinder_radii_all multiset for D3F-7 (multiplicity-aware)."""
+    search = (
+        [Path(p) for p in candidates]
+        if candidates is not None
+        else pickup_gt_candidate_paths(gt_path)
+    )
+    for p in search:
+        if not p.is_file():
+            continue
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw = doc.get("cylinder_radii_all")
+        if not isinstance(raw, list) or not raw:
+            continue
+        return [float(x) for x in raw], str(p)
+    return list(FALLBACK_GT_RADII_ALL), "GROUND-TRUTH.md inline fallback (radii_all)"
+
+
 def load_must_remain_faceted(
     sidecar_path: Optional[Path] = None,
     *,
@@ -361,6 +425,52 @@ def census_radii(cen: Dict[str, Any]) -> List[float]:
     return out
 
 
+def radii_multiset_containment(
+    built: Sequence[float],
+    gt_all: Sequence[float],
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """D3F-7: per-GT-radius multiset-containment (multiplicity-aware, 0.3%).
+
+    count(built matching g @ 0.3%) <= multiplicity(g) for every GT class g.
+    Over-segmentation of any class is a FAIL. Phantoms stay on census.radii.
+    """
+    gt_counts: Counter = Counter(float(x) for x in gt_all)
+    keys = list(gt_counts.keys())
+    built_counts: Counter = Counter()
+    for r in built:
+        g = match_gt_radius(float(r), keys)
+        if g is None:
+            continue
+        built_counts[g] += 1
+    over: List[Dict[str, Any]] = []
+    for g, n_gt in sorted(gt_counts.items()):
+        n_b = int(built_counts.get(g, 0))
+        if n_b > n_gt:
+            over.append({"gt": g, "built": n_b, "gtMultiplicity": n_gt})
+    details = {
+        "nBuilt": len(built),
+        "nGtAll": len(gt_all),
+        "over": over[:12],
+    }
+    if over:
+        bits = ", ".join(
+            f"R={row['gt']} built={row['built']}>gt={row['gtMultiplicity']}"
+            for row in over[:6]
+        )
+        return (
+            False,
+            f"d3f7.radiiMultiset: over-segmentation (multiplicity-aware "
+            f"multiset-containment failed @ 0.3%): {bits}",
+            details,
+        )
+    return (
+        True,
+        f"d3f7.radiiMultiset: {len(built)} built ⊆ GT multiset "
+        f"({len(gt_all)} entries, multiplicity-aware, 0.3%)",
+        details,
+    )
+
+
 def import_step_census():
     tools = str(CENSUS_PY.parent)
     if tools not in sys.path:
@@ -419,6 +529,7 @@ def evaluate_pickup(
     exit_code: int,
     *,
     strict: bool = True,
+    gt_radii_all: Optional[Sequence[float]] = None,
 ) -> List[Check]:
     """DECISION-boundary pickup floors. Each FAIL message names the floor."""
     checks: List[Check] = []
@@ -585,6 +696,22 @@ def evaluate_pickup(
         ),
         phantoms=phantoms[:12],
         nRadii=len(radii),
+    )
+
+    gt_all = (
+        list(gt_radii_all) if gt_radii_all is not None else list(FALLBACK_GT_RADII_ALL)
+    )
+    ms_ok, ms_msg, ms_det = radii_multiset_containment(radii, gt_all)
+    # D3F-7 is a hard anti-inflation gate, never expected-red / never inverted.
+    checks.append(
+        Check(
+            name="d3f7.radiiMultiset",
+            ok=ms_ok,
+            message=ms_msg,
+            group="pickup",
+            hard=True,
+            details=ms_det,
+        )
     )
     return checks
 
@@ -754,10 +881,8 @@ def synthetic_pass_result() -> Dict[str, Any]:
 
 
 def synthetic_pass_census() -> Dict[str, Any]:
-    radii: List[float] = []
-    gt = list(FALLBACK_GT_RADII)
-    while len(radii) < FLOOR_CYLINDERS:
-        radii.append(gt[len(radii) % len(gt)])
+    # First FLOOR_CYLINDERS entries of cylinder_radii_all — within multiplicity.
+    radii = list(FALLBACK_GT_RADII_ALL[:FLOOR_CYLINDERS])
     return {
         "ok": True,
         "surfaces": {
@@ -924,6 +1049,7 @@ def run_live(
         raise GateError(f"stl2step binary missing: {binary}")
     pickup = resolve_pickup_stl(pickup_stl)
     gt_radii, gt_src = load_pickup_gt_radii(gt_path)
+    gt_radii_all, gt_all_src = load_pickup_gt_radii_all(gt_path)
     faceted, faceted_src = load_must_remain_faceted()
     is_strict = strict_enabled() if strict is None else bool(strict)
 
@@ -1002,6 +1128,7 @@ def run_live(
                 gt_radii,
                 pk.exit_code,
                 strict=is_strict,
+                gt_radii_all=gt_radii_all,
             )
         )
         hl = arts["handle-lock"]
@@ -1023,10 +1150,12 @@ def run_live(
         n_tor = sum(int(e.get("count") or 0) for e in faceted if e.get("type") == "torus")
         print(
             f"partial_recovery_gate  pickup={pickup}  gt={gt_src}  "
+            f"gtAll={gt_all_src} n={len(gt_radii_all)}  "
             f"faceted={faceted_src} (sphere={n_sph} torus={n_tor})  "
             f"strict={is_strict}  jobs={workers} threads/file={per_file}",
             flush=True,
         )
+        print(f"  {NAMED_GAP}", flush=True)
         print(format_checks(checks), flush=True)
         if body18_skip:
             print(f"  [Body18/SKIP] {body18_skip}", flush=True)
@@ -1107,8 +1236,17 @@ def _self_test() -> int:
             print(f"SELFTEST PASS: {msg}")
 
     check(FLOOR_PLANES == 18, f"FLOOR_PLANES is DECISION 18 (got {FLOOR_PLANES})")
-    check(FLOOR_CYLINDERS == 50, f"FLOOR_CYLINDERS is DECISION 50 (got {FLOOR_CYLINDERS})")
-    check(FLOOR_COMBINED == 100, f"FLOOR_COMBINED is DECISION 100 (got {FLOOR_COMBINED})")
+    check(FLOOR_CYLINDERS == 30, f"FLOOR_CYLINDERS is DECISION 30 (got {FLOOR_CYLINDERS})")
+    check(FLOOR_COMBINED == 48, f"FLOOR_COMBINED is DECISION 48 (got {FLOOR_COMBINED})")
+    check(
+        FLOOR_COMBINED == FLOOR_PLANES + FLOOR_CYLINDERS,
+        "combined floor is 18+30=48 (charter combined>=100 STRUCK)",
+    )
+    check(len(FALLBACK_GT_RADII_ALL) == 54, f"GT radii_all multiplicity 54 (got {len(FALLBACK_GT_RADII_ALL)})")
+    check("12 deferred" in NAMED_GAP and "R=92.5" in NAMED_GAP, "named gap cites 12 deferred + R=92.5")
+    check("2 over-budget" in NAMED_GAP, "named gap cites 2 over-budget")
+    check("5 no-bound" in NAMED_GAP, "named gap cites 5 no-bound")
+    check("6 rounds" in NAMED_GAP, "named gap cites 6 rounds")
     check(BODY11_BUILT_FLOOR == 0, "Body11 built floor is 0 (not 127)")
     check(BODY11_STALE_127 == 127, "stale 127 constant exists only as a non-pin")
     check(
@@ -1214,7 +1352,9 @@ def _self_test() -> int:
     check("census.torus" not in named, "HEAD-red does not fail census.torus (0 at HEAD)")
     msgs = " ".join(c.message for c in head_checks if not c.ok)
     check("smoothBuiltPlanes=0 < floor 18" in msgs, "HEAD-red message cites plane floor 18")
-    check("smoothBuiltCylinders=0 < floor 50" in msgs, "HEAD-red message cites cylinder floor 50")
+    check("smoothBuiltCylinders=0 < floor 30" in msgs, "HEAD-red message cites cylinder floor 30")
+    check(any(c.name == "d3f7.radiiMultiset" and c.ok for c in head_checks),
+          "HEAD-red D3F-7 vacuously PASSES (0 built <= multiplicity)")
 
     head_soft = evaluate_pickup(
         synthetic_head_fail_result(),
@@ -1230,11 +1370,12 @@ def _self_test() -> int:
     check(failing_names(head_soft, hard_only=True) == [], "STRICT=0 has no hard pickup fails")
 
     combo_low = synthetic_pass_result()
-    combo_low["smoothBuiltCylinders"] = FLOOR_COMBINED - FLOOR_PLANES - 1
+    combo_low["smoothBuiltPlanes"] = FLOOR_PLANES - 1
     combo_checks = evaluate_pickup(
         combo_low, synthetic_pass_census(), gt_radii, 0, strict=True
     )
-    check("combined" in failing_names(combo_checks), "combined floor is independent of 18/50")
+    check("combined" in failing_names(combo_checks), "combined=47 fails when planes=17 (18+30=48)")
+    check("smoothBuiltPlanes" in failing_names(combo_checks), "planes=17 also fails plane floor 18")
 
     phantom_cen = synthetic_pass_census()
     phantom_cen["cylinder_radii"] = list(phantom_cen["cylinder_radii"]) + [7.0]
@@ -1242,6 +1383,24 @@ def _self_test() -> int:
         synthetic_pass_result(), phantom_cen, gt_radii, 0, strict=True
     )
     check("census.radii" in failing_names(ph), "phantom radius fails census.radii")
+
+    over_cen = synthetic_pass_census()
+    over_cen["cylinder_radii"] = list(over_cen["cylinder_radii"]) + [0.5]
+    # GT multiplicity of R=0.5 is 1; synthetic-pass already includes one 0.5.
+    over = evaluate_pickup(
+        synthetic_pass_result(), over_cen, gt_radii, 0, strict=True
+    )
+    check("d3f7.radiiMultiset" in failing_names(over), "D3F-7 over-segmentation FAILS")
+    check(
+        any("over-segmentation" in c.message and "multiset" in c.message for c in over if not c.ok),
+        "D3F-7 message names multiplicity-aware multiset-containment / over-segmentation",
+    )
+    over_exp, over_unexp = split_hard_fails(over)
+    check(
+        any(c.name == "d3f7.radiiMultiset" for c in over_unexp)
+        and not any(c.name == "d3f7.radiiMultiset" for c in over_exp),
+        "D3F-7 over-segmentation is UNEXPECTED (not PASS_REGEX inverted)",
+    )
 
     sphere_cen = synthetic_pass_census()
     sphere_cen["surfaces"] = dict(sphere_cen["surfaces"])
@@ -1268,7 +1427,7 @@ def _self_test() -> int:
     head_exp, head_unexp = split_hard_fails(head_checks)
     check(
         EXPECTED_RED_FLOOR_NAMES <= {c.name for c in head_exp},
-        "HEAD-like fail classifies 18/50/100 family as expected-red",
+        "HEAD-like fail classifies 18/30/48 family as expected-red",
     )
     check(
         {c.name for c in head_unexp} <= {"census.plane"},

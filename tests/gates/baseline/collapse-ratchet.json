@@ -1,0 +1,13 @@
+{
+  "id": "collapse-ratchet",
+  "authority": "collapse-ratchet.json",
+  "fixtureId": "handle-pickup",
+  "failCeiling": 56,
+  "handleLockFail": 0,
+  "handleLockCollapseLines": 0,
+  "chainEdgeFailClasses": [
+    "makeEdgeFail"
+  ],
+  "measuredOn": "gates-g01 worktree full Release build",
+  "notes": "Seeded on THIS tree (G-3). handle-pickup first DIAG_COLLAPSE recover=0 rounds=0 fail=56 (matches the brief). handle-lock takes Stage-P and emits zero DIAG_COLLAPSE lines; fail class 0. Only makeEdgeFail was observed as a chainEdgeFail class (56 MakeEdge warnings; no IntAna plane|plane / plane|cyl warnings)."
+}

@@ -2,27 +2,6 @@
   "source_stl": "tests/corpus/handle-pickup.stl",
   "source_step": "_team/inputs/Handle pickup original.step",
   "strip_method": "angular_generators",
-  "d3_8_plane_side_chords": {
-    "schema": "d3-8-plane-side-chord-v1",
-    "description": "D3-8.4 plane-side chord budget for hybrid_validity_pre_j4. Plane-side polyline is admissible iff max |chord − plane| ≤ budget_max_chord_plane_mm. Measured at the two cap-1475 torus contact chains (~40% headroom).",
-    "budget_max_chord_plane_mm": 0.05,
-    "admissible_iff": "max |chord-plane| <= 0.05 mm",
-    "cap_face_id": 1475,
-    "chains": [
-      {
-        "id": "cap-1475-torus-contact-a",
-        "n_edges": 41,
-        "length_mm": 184.665,
-        "max_sagitta_mm": 0.0313
-      },
-      {
-        "id": "cap-1475-torus-contact-b",
-        "n_edges": 26,
-        "length_mm": 30.878,
-        "max_sagitta_mm": 0.0303
-      }
-    ]
-  },
   "bands": [
     {
       "true_face_id": 1466,

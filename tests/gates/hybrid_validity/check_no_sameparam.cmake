@@ -1,0 +1,18 @@
+# N2/N4: hybrid_validity_pre_j4 must not call SameParameter or ShapeFix_*.
+get_filename_component(_src "${CMAKE_CURRENT_LIST_DIR}/hybrid_validity_pre_j4.cpp" ABSOLUTE)
+if(NOT EXISTS "${_src}")
+    message(FATAL_ERROR "missing ${_src}")
+endif()
+file(READ "${_src}" _txt)
+# Strip // comments so the prohibition in the header is not a hit.
+string(REGEX REPLACE "//[^\n]*" "" _code "${_txt}")
+if(_code MATCHES "BRepLib::SameParameter\\(")
+    message(FATAL_ERROR "hybrid_validity_pre_j4.cpp calls BRepLib::SameParameter (N2/N4)")
+endif()
+if(_code MATCHES "#include <ShapeFix")
+    message(FATAL_ERROR "hybrid_validity_pre_j4.cpp includes ShapeFix (N2/N4)")
+endif()
+if(_code MATCHES "ShapeFix_Edge" OR _code MATCHES "ShapeFix_Face" OR _code MATCHES "ShapeFix_Wire" OR _code MATCHES "ShapeFix_Shape")
+    message(FATAL_ERROR "hybrid_validity_pre_j4.cpp references ShapeFix_* (N2/N4)")
+endif()
+message(STATUS "hybrid_validity_pre_j4: no J4 heal APIs")

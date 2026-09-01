@@ -1,0 +1,11 @@
+{
+  "id": "fillet-e0-ratchet",
+  "authority": "fillet-e0-ratchet.json",
+  "fixtureId": "handle-pickup",
+  "liveECeiling": 29,
+  "gtTargetFaces": 21,
+  "s13Sha256": "4e76da8366955a459e517c83bb5d70e6f9e1305edff1fa6827f1b79b6135ded5",
+  "s14Sha256": "a6b3ee526b55766c47f77a8f0f18ef5631faffd98650eec17f335017dd136ecc",
+  "measuredOn": "gates-g01 worktree full Release build",
+  "notes": "Seeded on THIS tree (G-3). handle-lock |E|=0 structurally (no torus/sphere seed, 15/15 cylinders, DIAG_PRISM ok=1 failedCond=0). Handle pickup live |E|=29 region ids overlapping labeled GT faces (1490/1536 plus SPEC non-axis six); spike S-1 measured 66 because it counted over-segmented unlabeled torus/sphere islands. GT target stays 21 faces (expected-red). S13/S14 fillet census sha from regiondump on generated corpus STLs."
+}

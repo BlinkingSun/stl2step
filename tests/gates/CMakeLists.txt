@@ -24,7 +24,7 @@ if(NOT TARGET stl2step::core)
     unset(_stl2step_root)
 endif()
 
-foreach(_stl2step_gate_dir census regiondump buildtest p2buildtest)
+foreach(_stl2step_gate_dir census regiondump buildtest p2buildtest hybrid_validity)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_stl2step_gate_dir}/CMakeLists.txt")
         add_subdirectory(${_stl2step_gate_dir})
     endif()
@@ -258,7 +258,7 @@ endif()
 
 # --- gates-partial ---
 # DECISION-boundary pickup floors + non-regression.
-# STRICT=1: Python fails honestly while 18/50/100 are unmet (named floors).
+# STRICT=1: Python fails honestly while 18/30/48 are unmet (named floors).
 #
 # EXPECTED-RED (FINDINGS-0 GAP2): grep of ci-local-gate.sh + tests/gates
 # found no WILL_FAIL property. Closest CTest invert in-tree is
@@ -266,19 +266,19 @@ endif()
 # wrapper is census/check_error.cmake. WILL_FAIL TRUE alone inverts
 # unexpected fails (census.sphere leak, handle-lock) into greens —
 # measured, so not used. PASS_REGULAR_EXPRESSION requires the
-# PARTIAL_RECOVERY_EXPECTED_RED marker: unmet 18/50/100 → ctest PASS
+# PARTIAL_RECOVERY_EXPECTED_RED marker: unmet 18/30/48 → ctest PASS
 # (ci-local-gate.sh can write a green marker); floors met unmarked or
 # unexpected fail → ctest FAIL (required regex not found).
 #
-# FLIP PROTOCOL (the day 18/50/100 are met — FAIL LOUDLY if unmarked):
+# FLIP PROTOCOL (the day 18/30/48 are met — FAIL LOUDLY if unmarked):
 #   1. Live Python prints PARTIAL_RECOVERY_FLOORS_MET and exits 0.
 #   2. This test FAILS: Required regular expression not found
 #      Regex=[PARTIAL_RECOVERY_EXPECTED_RED].
 #   3. Remove PASS_REGULAR_EXPRESSION below.
 #   4. Keep ENVIRONMENT PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.
 #
-# TODO(PHASE-CLOSE): tighten FLOOR_PLANES / FLOOR_CYLINDERS / FLOOR_COMBINED
-# in tests/gates/partial_recovery_gate.py from the landed contain-race winner.
+# D3F-4/6: floors 18/30/48 (charter combined>=100 STRUCK). D3F-7
+# multiset-containment lives in partial_recovery_gate.py.
 set(_prg_script "${CMAKE_CURRENT_SOURCE_DIR}/partial_recovery_gate.py")
 if(EXISTS "${_prg_script}")
     add_test(NAME partial_recovery_gate_selftest
@@ -305,3 +305,97 @@ if(EXISTS "${_prg_script}")
     endif()
 endif()
 unset(_prg_script)
+
+# --- gates-g01 (wave 6 / p3) ---
+# Four D3-2 / D3-8 / D3-9 instruments. Append-only. Do not edit run_gates.py.
+# seam_stored_both_sides + fillet_exclusion_e0 follow the expected-red protocol
+# of partial_recovery_gate (STRICT default ON, PASS_REGULAR_EXPRESSION invert,
+# UNEXPECTED stays loud). collapse_fail_ratchet and hybrid_validity_pre_j4 are
+# green at dc49e45.
+
+set(_g01_seam "${CMAKE_CURRENT_SOURCE_DIR}/seam_stored_both_sides.py")
+if(EXISTS "${_g01_seam}")
+    add_test(NAME seam_stored_both_sides_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_seam}" --self-test)
+    set_tests_properties(seam_stored_both_sides_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    add_test(NAME seam_stored_both_sides_synthetic
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_seam}" --synthetic-pass)
+    set_tests_properties(seam_stored_both_sides_synthetic PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step)
+        add_test(NAME seam_stored_both_sides
+            COMMAND "${Python3_EXECUTABLE}" "${_g01_seam}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --jobs 2)
+        set_tests_properties(seam_stored_both_sides PROPERTIES
+            LABELS "gates;expected-red"
+            TIMEOUT 180
+            ENVIRONMENT "SEAM_STORED_BOTH_SIDES_STRICT=1"
+            PASS_REGULAR_EXPRESSION "SEAM_STORED_BOTH_SIDES_EXPECTED_RED"
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>")
+    endif()
+endif()
+unset(_g01_seam)
+
+set(_g01_coll "${CMAKE_CURRENT_SOURCE_DIR}/collapse_fail_ratchet.py")
+set(_g01_coll_ratchet "${CMAKE_CURRENT_SOURCE_DIR}/baseline/collapse-ratchet.json")
+if(EXISTS "${_g01_coll}")
+    add_test(NAME collapse_fail_ratchet_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_coll}" --self-test)
+    set_tests_properties(collapse_fail_ratchet_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    add_test(NAME collapse_fail_ratchet_synthetic
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_coll}" --synthetic-pass)
+    set_tests_properties(collapse_fail_ratchet_synthetic PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step AND EXISTS "${_g01_coll_ratchet}")
+        add_test(NAME collapse_fail_ratchet
+            COMMAND "${Python3_EXECUTABLE}" "${_g01_coll}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --ratchet "${_g01_coll_ratchet}"
+                    --jobs 2)
+        set_tests_properties(collapse_fail_ratchet PROPERTIES
+            LABELS "gates"
+            TIMEOUT 180
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_g01_coll_ratchet}")
+    endif()
+endif()
+unset(_g01_coll)
+unset(_g01_coll_ratchet)
+
+set(_g01_e0 "${CMAKE_CURRENT_SOURCE_DIR}/fillet_exclusion_e0.py")
+set(_g01_e0_ratchet "${CMAKE_CURRENT_SOURCE_DIR}/baseline/fillet-e0-ratchet.json")
+if(EXISTS "${_g01_e0}")
+    add_test(NAME fillet_exclusion_e0_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_e0}" --self-test)
+    set_tests_properties(fillet_exclusion_e0_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    add_test(NAME fillet_exclusion_e0_synthetic
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_e0}" --synthetic-pass)
+    set_tests_properties(fillet_exclusion_e0_synthetic PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step AND TARGET stl2step_regiondump AND EXISTS "${_g01_e0_ratchet}")
+        add_test(NAME fillet_exclusion_e0
+            COMMAND "${Python3_EXECUTABLE}" "${_g01_e0}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --dump "$<TARGET_FILE:stl2step_regiondump>"
+                    --ratchet "${_g01_e0_ratchet}"
+                    --jobs 4)
+        set_tests_properties(fillet_exclusion_e0 PROPERTIES
+            LABELS "gates;expected-red"
+            TIMEOUT 180
+            ENVIRONMENT "FILLET_EXCLUSION_E0_STRICT=1"
+            PASS_REGULAR_EXPRESSION "FILLET_EXCLUSION_E0_EXPECTED_RED"
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;$<TARGET_FILE:stl2step_regiondump>;${_g01_e0_ratchet}"
+            DEPENDS corpus_generate)
+    endif()
+endif()
+unset(_g01_e0)
+unset(_g01_e0_ratchet)
