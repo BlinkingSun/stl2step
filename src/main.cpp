@@ -49,7 +49,74 @@ static void usage() {
         version());
 }
 
+static bool isMeshRejectedFlag(const std::string& a) {
+    return a == "--engine" || a == "--schema" || a == "--units"
+        || a == "--scale" || a == "--weld" || a == "--sew-tol"
+        || a == "--unify-angle" || a == "--no-unify" || a == "--no-solid"
+        || a == "--force-sew" || a == "--no-verify" || a == "--smooth"
+        || a == "--refit" || a == "--no-smooth" || a == "--smooth-tol"
+        || a == "--smooth-angle" || a == "--no-smooth-fillets" || a == "--dxf";
+}
+
+// Mesh mode is selected by the presence of --mesh and is dispatched before
+// convert() is ever called. Rejected convert-only flags fail closed with no
+// MESH_RESULT / RESULT line (plan-audit R4).
+static int runMeshMode(int argc, char** argv) {
+    MeshOptions opt;
+    bool quiet = false;
+
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        auto val = [&](const char* flag) -> std::string {
+            if (i + 1 >= argc) { fprintf(stderr, "error: %s needs a value\n", flag); exit(1); }
+            return argv[++i];
+        };
+        if (a == "-h" || a == "--help") { usage(); return 0; }
+        else if (a == "-v" || a == "--version") { printf("stl2step %s\n", version()); return 0; }
+        else if (a == "--mesh")           opt.input = val("--mesh");
+        else if (a == "-o")               opt.output = val("-o");
+        else if (a == "--edges")          opt.edgesFile = val("--edges");
+        else if (a == "--threads")        opt.threads = atoi(val("--threads").c_str());
+        else if (a == "--quiet")          quiet = true;
+        else if (isMeshRejectedFlag(a)) {
+            fprintf(stderr, "error: %s is not valid with --mesh\n", a.c_str());
+            return 1;
+        }
+        else if (a.size() && a[0] == '-') {
+            fprintf(stderr, "error: unknown option %s\n", a.c_str());
+            return 1;
+        }
+        else {
+            fprintf(stderr, "error: unexpected argument %s\n", a.c_str());
+            return 1;
+        }
+    }
+    if (opt.input.empty()) {
+        fprintf(stderr, "error: --mesh needs a value\n");
+        return 1;
+    }
+
+    auto logcb = [&](Severity sev, const std::string& msg) {
+        if (sev == Severity::Info) {
+            if (!quiet) { fputs(msg.c_str(), stdout); fputc('\n', stdout); fflush(stdout); }
+        } else if (sev == Severity::Warning) {
+            fprintf(stderr, "warning: %s\n", msg.c_str());
+        } else {
+            fprintf(stderr, "error: %s\n", msg.c_str());
+        }
+    };
+
+    MeshResult r = meshFromStep(opt, logcb);
+    printf("MESH_RESULT %s\n", r.toJson().c_str());
+    return r.exitCode;
+}
+
 int main(int argc, char** argv) {
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--mesh")
+            return runMeshMode(argc, argv);
+    }
+
     Options opt;
     bool quiet = false;
 

@@ -22,6 +22,7 @@ set(_occt_required
     TKDESTEP       # STEP read/write (was TKSTEP)
     TKXSBase       # data-exchange base
     TKShHealing    # ShapeFix / sewing repair
+    TKMesh         # BRepMesh_IncrementalMesh (--mesh mode)
     TKTopAlgo TKGeomAlgo TKBRep TKG3d TKG2d TKGeomBase TKMath TKernel)
 
 set(_occt_fallback_TKDESTL  TKSTL)
