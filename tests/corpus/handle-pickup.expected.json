@@ -1,6 +1,6 @@
 {
   "id": "handle-pickup",
-  "description": "Josh live stress case \u2014 Handle pickup Fusion export (3338 tris). TrueForm ideal: 87 faces (18 plane + 54 cyl + 9 sphere + 6 torus) per ground-truth.json; DECISION-boundary floors (pending_lane=phase-2, CLOSURES LANDS-gate 2026-09-01: B2/contain did not land; floors deferred, values unchanged): smoothBuiltPlanes>=18, smoothBuiltCylinders>=50, combined>=100, reverted=0. EXPECTED-RED at HEAD 7cf77a2.",
+  "description": "Josh live stress case \u2014 Handle pickup Fusion export (3338 tris). TrueForm ideal: 87 faces (18 plane + 54 cyl + 9 sphere + 6 torus) per ground-truth.json; DECISION-seamowner-p3 floors (pending_lane=r4-integration; ladder R0 \u2192 H1 \u2192 R2 \u2192 H2 \u2192 charter-R3 \u2192 R4; values unchanged): smoothBuiltPlanes>=18, smoothBuiltCylinders>=50, combined>=100, reverted=0. EXPECTED-RED until R4/Integration.",
   "realExport": true,
   "provenance": {
     "sourcePath": "Handle pickup.stl",
@@ -20,7 +20,7 @@
   "smoothWarningCountMax": 5,
   "smoothVolumeDeltaPctMax": -1,
   "smoothRecognisedCylinders": 133,
-  "pending_lane": "phase-2",
+  "pending_lane": "r4-integration",
   "recoverable": [],
   "mustRemainFaceted": [],
   "expectedRejects": [],
@@ -39,7 +39,7 @@
     {
       "component": 0,
       "disposition": "PARTIAL",
-      "partialReason": "DECISION-boundary A1/A2 floors (pending_lane=phase-2; CLOSURES LANDS-gate: harness-only phase-1, B2 deferred, no contain win that ships faces): smoothRevertedComponents=0, smoothBuiltPlanes>=18, smoothBuiltCylinders>=50, combined>=100, openShells=0, exit 0|2, census plane>=18 / cylinder>=50, radii within 0.3% of GT. Floors unchanged; EXPECTED-RED at HEAD (component revert). 9 spheres + 6 tori remain faceted by design. smoothExpectedExit=-1 is the sidecar skip-sentinel (corpus_util.hpp: do not check smooth path) so the existing corpus glob cannot expected-red ctest; gates-partial owns the red-at-HEAD partial_recovery_gate. ",
+      "partialReason": "DECISION-seamowner-p3 A1/A2 floors (pending_lane=r4-integration; ladder R0 \u2192 H1 \u2192 R2 \u2192 H2 \u2192 charter-R3 \u2192 R4): smoothRevertedComponents=0, smoothBuiltPlanes>=18, smoothBuiltCylinders>=50, combined>=100, openShells=0, exit 0|2, census plane>=18 / cylinder>=50, radii within 0.3% of GT. Floors unchanged; EXPECTED-RED until R4/Integration (component revert at HEAD). 9 spheres + 6 tori remain faceted by design. smoothExpectedExit=-1 is the sidecar skip-sentinel (corpus_util.hpp: do not check smooth path) so the existing corpus glob cannot expected-red ctest; gates-partial owns the red-at-HEAD partial_recovery_gate. ",
       "builtCylindersFloor": 50,
       "builtPlanesFloor": 18,
       "faceCount": 87,
