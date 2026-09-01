@@ -35,7 +35,7 @@ Use it when your software consumes STEP/B-Rep but a user hands you an STL.
 | Your host software is… | Use | Section |
 |---|---|---|
 | C++ | Link the library, call `stl2step::convert()` | [4](#4-c-in-process-integration) |
-| Any other language (Python, Node, Go, Rust, C#, shell) | Spawn the CLI, parse the `RESULT` line | [5](#5-subprocess-integration-any-language) |
+| Any other language (Python, Node, Go, Rust, C#, shell) | Spawn the CLI, parse the `RESULT` or `MESH_RESULT` line | [5](#5-subprocess-integration-any-language) |
 | A build that already uses CMake | `FetchContent` / `find_package` + link | [4](#4-c-in-process-integration) |
 
 Both modes run the identical engine and expose the identical result data. Prefer
@@ -186,22 +186,32 @@ calls for you.
 
 ## 5. Subprocess integration (any language)
 
-Spawn the CLI and read the **last stdout line**, which is always
-`RESULT {json}`. Use `--quiet` so it is the *only* stdout line. Errors/warnings
-go to stderr; the RESULT line and exit code are the contract.
+Spawn the CLI and read the **last stdout line**:
+
+- **Convert mode** (default): `RESULT {json}` — exit `0` clean, `2` written-with-warnings, `1` failed.
+- **Mesh mode** (`--mesh`): `MESH_RESULT {json}` — exit `0` ok, `1` failed (no exit 2).
+
+Use `--quiet` so the contract line is the *only* stdout line. Errors/warnings
+go to stderr; the last line prefix and exit code are the contract.
 
 ### Rules
 
-- **Parse only the `RESULT` line.** Everything before it is human progress text —
-  do not scrape it. With `--quiet`, stdout is exactly one line.
-- **Strip the `RESULT ` prefix** (7 chars) before JSON-parsing, or match the
-  first `{` onward.
-- **Trust the exit code**: `0`/`2` → a file exists at `output`; `1` → it does not.
+- **Parse only the contract line** (`RESULT ` or `MESH_RESULT `). Everything before
+  it is human progress text — do not scrape it. With `--quiet`, stdout is exactly
+  one line.
+- **Strip the prefix** (`RESULT ` = 7 chars, `MESH_RESULT ` = 13 chars) before
+  JSON-parsing, or match the first `{` onward and branch on the prefix.
+- **Trust the exit code**: convert `0`/`2` → a STEP exists at `output`; mesh `0` →
+  an STL exists at `output`; `1` → no output file.
 - **Set `--no-verify`** when you will load the STEP immediately after — your load
   is the verification and it is meaningfully faster on large meshes.
 - **Set units.** STL is unitless. If unsure, mm is assumed.
 - **`--smooth` is opt-in** (default off). `smooth*` keys appear on the RESULT
   object only when you pass it; use `result.get("smoothPlanes")` / `'smoothPlanes' in r`.
+- **Mesh mode rejects convert-only flags** (`--engine`, `--schema`, `--units`, …)
+  with exit `1` and **no** stdout contract line — do not reuse convert arg builders.
+- **`MESH_RESULT.edges`** is always the drawable B-Rep edge count; `edgesFile` is
+  present only when `--edges <path>` was passed.
 
 ### Python
 
@@ -290,8 +300,9 @@ Because each invocation is independent, batch with `xargs -P` /
 7. **Large meshes are memory-heavy.** >500k triangles emits a warning and a big
    STEP. If you control upstream tessellation, coarser meshes convert faster and
    smaller. There is no built-in decimation.
-8. **The RESULT line is the only stable stdout contract.** Progress text is for
-   humans and may change; never parse it.
+8. **The `RESULT` / `MESH_RESULT` line is the only stable stdout contract.** Progress
+   text is for humans and may change; never parse it. Convert mode ends with
+   `RESULT {json}`; mesh mode (`--mesh`) ends with `MESH_RESULT {json}`.
 
 ---
 

@@ -1,0 +1,2 @@
+# Root .gitignore ignores *.step; un-ignore the committed seam fixture.
+!seamed_cylinder.step

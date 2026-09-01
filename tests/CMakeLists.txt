@@ -12,7 +12,7 @@
 #   * C++17, no new third-party dependencies
 #   * EXCLUDE_FROM_ALL is NOT used: a tool that does not build is a red build
 
-foreach(_stl2step_test_dir harness corpus gates unit)
+foreach(_stl2step_test_dir harness corpus gates unit mesh)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_stl2step_test_dir}/CMakeLists.txt")
         add_subdirectory(${_stl2step_test_dir})
     endif()

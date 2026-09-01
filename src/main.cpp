@@ -15,8 +15,10 @@ static void usage() {
     printf(
         "stl2step %s -- convert an STL mesh into a STEP (B-Rep) solid\n\n"
         "usage: stl2step <input.stl> [output.step] [options]\n"
-        "       stl2step --mesh <in.step> [-o out.stl]  default <stem>.mesh.stl; never clobbers (pass -o)\n\n"
-        "  -o <file>            output path (default: input with .step extension)\n"
+        "       stl2step --mesh <in.step> [-o out.stl] [--edges <out.edges>]  default <stem>.mesh.stl\n\n"
+        "  -o <file>            output path (convert: default .step; mesh: default <stem>.mesh.stl)\n"
+        "  --mesh <file>        mesh mode: tessellate a STEP to binary STL (+ optional drawable edges)\n"
+        "  --edges <file>       mesh mode only: write Format A edge segments (24-byte LE xyz pairs)\n"
         "  --schema <s>         AP203 | AP214 | AP242            (default AP214)\n"
         "  --units <mm|in>      units the STL was modelled in; in -> scaled x25.4 to mm\n"
         "  --scale <f>          extra scale factor applied to all coordinates\n"
@@ -46,7 +48,9 @@ static void usage() {
         "STEP files are written in millimetres. Default mode is Verbatim (faceted\n"
         "surfaces at STL resolution). TrueForm (--engine trueform) recovers analytic\n"
         "planes, cylinders, and fillets where the refit ladder succeeds.\n"
-        "Exit codes: 0 ok, 2 ok-with-warnings, 1 failed. Last stdout line: RESULT {json}\n",
+        "Mesh mode tessellates STEP to binary STL; --engine/--schema/--units are rejected.\n"
+        "Exit codes: convert 0 ok, 2 ok-with-warnings, 1 failed (last line RESULT {json});\n"
+        "             mesh 0 ok, 1 failed (last line MESH_RESULT {json}; no exit 2).\n",
         version());
 }
 

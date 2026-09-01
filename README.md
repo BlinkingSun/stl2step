@@ -129,11 +129,12 @@ stl2step part.stl --units in              # STL modelled in inches -> scaled to 
 stl2step part.stl --no-verify             # fastest: skip the re-read self-check
 stl2step part.stl --smooth                # alias for --engine trueform
 stl2step part.stl --schema AP242 --threads 4
-stl2step --mesh part.step                 # writes part.mesh.stl; never clobbers an existing file (pass -o)
+stl2step --mesh part.step -o part.stl --edges part.edges   # mesh mode (STEP → STL)
 ```
 
 Progress prints to stdout (silence with `--quiet`); warnings and errors go to
-stderr; the **last stdout line is always** `RESULT {json}`.
+stderr. In **convert** mode the last stdout line is `RESULT {json}`; in **mesh**
+mode it is `MESH_RESULT {json}`.
 
 ```
 $ stl2step part.stl
@@ -146,7 +147,49 @@ RESULT {"ok":true,"input":"part.stl","output":"part.step","triangles":12,"solids
 
 Run `stl2step --help` for the full option list.
 
-### Options
+### Mesh mode (`--mesh`)
+
+Tessellate an existing **STEP** solid to a **binary STL**, optionally emitting
+**drawable B-Rep edges** (not facet boundaries) for overlay in a viewer.
+
+```sh
+stl2step --mesh part.step -o part.stl --edges part.edges --quiet
+```
+
+| Flag | Meaning |
+|---|---|
+| `--mesh <file>` | Input STEP (`.step` / `.stp`). Selects mesh mode. |
+| `-o <file>` | Output binary STL (default: input stem + `.mesh.stl`; never clobbers an existing default — pass `-o`) |
+| `--edges <file>` | Optional Format A edge buffer (see below) |
+| `--quiet` | Suppress progress (`MESH_RESULT` + errors only) |
+| `--threads <n>` | Tessellation worker threads (default: all cores) |
+
+**Rejected in mesh mode** (stderr + exit 1, **no** `MESH_RESULT` / `RESULT` line):
+`--engine`, `--schema`, `--units`, and all other convert-only flags.
+
+#### `MESH_RESULT` contract
+
+Last stdout line: `MESH_RESULT {json}`. Exit **0** on success, **1** on failure
+(no exit 2 tier).
+
+| key | type | meaning |
+|---|---|---|
+| `ok` | bool | STL was written |
+| `faces` | int | B-Rep face count |
+| `edges` | int | drawable B-Rep edge count (always present; not zero when `--edges` is omitted) |
+| `triangles` | int | triangles in the STL |
+| `seconds` | double | wall-clock time |
+| `input`, `output` | string | resolved paths |
+| `edgesFile` | string | present only when `--edges` was passed |
+| `error` | string | present only when `ok` is false |
+
+#### Format A edge buffer
+
+Little-endian **float32** **xyz pairs**: one segment = `x0 y0 z0 x1 y1 z1` =
+**24 bytes**. No header, no sentinel, no count prefix. File size must be a
+multiple of 24; **0 bytes** means no drawable edges.
+
+### Options (convert mode)
 
 | Flag | Meaning |
 |---|---|
