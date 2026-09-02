@@ -257,29 +257,20 @@ if(TARGET stl2step)
 endif()
 
 # --- gates-partial ---
-# DECISION-boundary pickup floors + non-regression.
-# STRICT=1: Python fails honestly while 18/30/48 are unmet (named floors).
+# DECISION-boundary pickup floors + measured PRG ratchet (D-S3-62).
+# STRICT=1: floors (18/30/48, rev=0) are hard. The three PRG cells
+# (tightBudget, census.radii, d3f7 R=3) are never-get-worse ceilings
+# in tests/gates/baseline/prg-ratchet.json — FAIL if any cell gets
+# worse; print current values. Not a pass of the R4 formula budget.
 #
-# EXPECTED-RED (FINDINGS-0 GAP2): grep of ci-local-gate.sh + tests/gates
-# found no WILL_FAIL property. Closest CTest invert in-tree is
-# harness_dump_cube PASS_REGULAR_EXPRESSION; closest "expect fail"
-# wrapper is census/check_error.cmake. WILL_FAIL TRUE alone inverts
-# unexpected fails (census.sphere leak, handle-lock) into greens —
-# measured, so not used. PASS_REGULAR_EXPRESSION requires the
-# PARTIAL_RECOVERY_EXPECTED_RED marker: unmet 18/30/48 → ctest PASS
-# (ci-local-gate.sh can write a green marker); floors met unmarked or
-# unexpected fail → ctest FAIL (required regex not found).
-#
-# FLIP PROTOCOL (the day 18/30/48 are met — FAIL LOUDLY if unmarked):
-#   1. Live Python prints PARTIAL_RECOVERY_FLOORS_MET and exits 0.
-#   2. This test FAILS: Required regular expression not found
-#      Regex=[PARTIAL_RECOVERY_EXPECTED_RED].
-#   3. Remove PASS_REGULAR_EXPRESSION below.
-#   4. Keep ENVIRONMENT PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.
+# FLIPPED 2026-09-02 at 2971d31: HP ships analytic; EXPECTED-RED
+# invert retired. PASS_REGULAR_EXPRESSION removed. Keep
+# ENVIRONMENT PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.
 #
 # D3F-4/6: floors 18/30/48 (charter combined>=100 STRUCK). D3F-7
-# multiset-containment lives in partial_recovery_gate.py.
+# R=3 is ratcheted; other-class over-segmentation stays hard.
 set(_prg_script "${CMAKE_CURRENT_SOURCE_DIR}/partial_recovery_gate.py")
+set(_prg_ratchet "${CMAKE_CURRENT_SOURCE_DIR}/baseline/prg-ratchet.json")
 if(EXISTS "${_prg_script}")
     add_test(NAME partial_recovery_gate_selftest
         COMMAND "${Python3_EXECUTABLE}" "${_prg_script}" --self-test)
@@ -291,20 +282,21 @@ if(EXISTS "${_prg_script}")
     set_tests_properties(partial_recovery_gate_synthetic PROPERTIES
         LABELS "gates"
         TIMEOUT 30)
-    if(TARGET stl2step)
+    if(TARGET stl2step AND EXISTS "${_prg_ratchet}")
         add_test(NAME partial_recovery_gate
             COMMAND "${Python3_EXECUTABLE}" "${_prg_script}"
                     --binary "$<TARGET_FILE:stl2step>"
+                    --ratchet "${_prg_ratchet}"
                     --jobs 4)
         set_tests_properties(partial_recovery_gate PROPERTIES
-            LABELS "gates;expected-red"
+            LABELS "gates"
             TIMEOUT 300
             ENVIRONMENT "PARTIAL_RECOVERY_STRICT=1"
-            PASS_REGULAR_EXPRESSION "PARTIAL_RECOVERY_EXPECTED_RED"
-            REQUIRED_FILES "$<TARGET_FILE:stl2step>")
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_prg_ratchet}")
     endif()
 endif()
 unset(_prg_script)
+unset(_prg_ratchet)
 
 # --- gates-g01 (wave 6 / p3) ---
 # Four D3-2 / D3-8 / D3-9 instruments. Append-only. Do not edit run_gates.py.

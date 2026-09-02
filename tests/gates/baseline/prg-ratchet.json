@@ -1,0 +1,15 @@
+{
+  "id": "prg-ratchet",
+  "authority": "prg-ratchet.json",
+  "fixtureId": "handle-pickup",
+  "engineRef": "2971d31",
+  "tightBudgetAbsDeltaMM3Ceiling": 10.81525,
+  "censusRadiiPhantomCeiling": 17,
+  "d3f7R3BuiltCeiling": 75,
+  "d3f7R3GtMultiplicity": 21,
+  "d3f7ExtraClassCeilings": {
+    "2.55": 2
+  },
+  "reason": "flipped 2026-09-02 at 2971d31: HP ships analytic; PRG cells ratcheted from the first landing, R4 owes their reduction",
+  "notes": "D-S3-62: EXPECTED_RED scaffold retired. Floors (builtCyl>=30, rev=0, planes>=18, combined>=48) stay floors. The three PRG cells are never-get-worse ceilings, not a pass of the R4 formula budget / phantom-free / multiset-containment targets. tightBudget ceiling is the 2971d31 measured |dV|=10.81525 mm3 (brief 10.815). d3f7 R=3 ceiling 75 as specified; R=2.55 built=2 was the only other over-seg class on the same landing and is ratcheted with it so the cell is measured, not a silent pass."
+}

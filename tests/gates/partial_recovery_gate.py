@@ -1,38 +1,31 @@
 #!/usr/bin/env python3
-"""partial_recovery_gate — Handle-pickup DECISION-boundary floors + non-regression.
+"""partial_recovery_gate — Handle-pickup DECISION-boundary floors + measured PRG ratchet.
 
 ctest name: partial_recovery_gate (owns the G0.1 *lane*; G0.1 itself stays in
 run_gates.py and is not rewritten here).
 
-Pickup floors are DECISION-boundary A1/A2 verbatim. At current HEAD they FAIL
-(EXPECTED-RED until a later phase ships analytic faces). PARTIAL_RECOVERY_STRICT
-defaults ON so the Python process is red-at-HEAD with a message that names the
-failing floor. PARTIAL_RECOVERY_STRICT=0 keeps pickup floors documented but
-non-fatal (CLI / debug only).
+Pickup floors are DECISION-boundary A1/A2 verbatim and stay floors:
+smoothRevertedComponents==0, smoothBuiltComponents==1, planes>=18,
+cylinders>=30, combined>=48, openShells==0, census.plane/cylinder same
+floors, census.sphere/torus==0. At 2971d31 those floors PASS (analytic HP).
 
-CMake EXPECTED-RED (FINDINGS-0 GAP2 / ci-local-gate.sh):
-  grep of scripts/ci-local-gate.sh + tests/gates found no WILL_FAIL property
-  (run_gates.py XFAIL is "phase not landed" inside gates_full; j6 / stress_sweep
-  use SKIP_RETURN_CODE 77; census/check_error.cmake expects exit 1 via a
-  wrapper; harness_dump_cube uses PASS_REGULAR_EXPRESSION).
+The three PRG cells are a MEASURED never-get-worse ratchet
+(tests/gates/baseline/prg-ratchet.json), never a pass of the R4 targets:
+  tightBudget       |V_step-V_mesh| <= ceiling (R4 formula budget still owed)
+  census.radii      phantom count <= ceiling (R4 owes 0 phantoms)
+  d3f7 R=3 built    <= ceiling (GT multiplicity 21 still owed; other
+                    classes stay hard multiset-containment)
 
-  WILL_FAIL TRUE alone would let `ctest` pass while Python still exits 1, but
-  it also inverts unexpected fails (handle-lock, census.sphere leak) into
-  greens — measured. PASS_REGULAR_EXPRESSION "PARTIAL_RECOVERY_EXPECTED_RED"
-  is the CTest invert that keeps ci-local-gate.sh green on unmet 18/30/48
-  without swallowing GAP4 / non-regression.
+PARTIAL_RECOVERY_STRICT defaults ON. A cell that gets worse FAILS and
+prints the current values. EXPECTED-RED invert is retired (D-S3-62).
 
-FLIP PROTOCOL (the day 18/30/48 are met — FAIL LOUDLY if unmarked):
-  1. Live Python prints PARTIAL_RECOVERY_FLOORS_MET and exits 0.
-  2. ctest FAILS: Required regular expression not found
-     Regex=[PARTIAL_RECOVERY_EXPECTED_RED].
-  3. Remove PASS_REGULAR_EXPRESSION from tests/gates/CMakeLists.txt
-     (partial_recovery_gate PROPERTIES).
-  4. Keep ENVIRONMENT PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.
+FLIPPED 2026-09-02 at 2971d31: HP ships analytic; PRG cells ratcheted
+from the first landing, R4 owes their reduction. CMake no longer uses
+PASS_REGULAR_EXPRESSION. Keep ENVIRONMENT PARTIAL_RECOVERY_STRICT=1.
+Do not lower FLOOR_*.
 
 # D3F-4/6 (DECISION-floors-p3): FLOOR_CYLINDERS 50→30, FLOOR_COMBINED 100→48
-# (charter combined>=100 STRUCK). D3F-7 multiset-containment is a hard
-# anti-inflation gate, not an expected-red floor. Do not raise these here.
+# (charter combined>=100 STRUCK). Do not raise these here.
 
 Usage:
   partial_recovery_gate.py --self-test
@@ -80,12 +73,19 @@ FLOOR_BUILT_COMPONENTS = 1
 FLOOR_OPEN_SHELLS = 0
 ALLOWED_EXITS = (0, 2)
 GT_REL_TOL = 0.003  # 0.3%
+D3F7_R3 = 3.0
 
-# Pickup floors honestly unmet at HEAD 7cf77a2 (FINDINGS-0 GAP2). CTest
-# PASS_REGULAR_EXPRESSION inverts only these (see module docstring).
-# census.sphere / census.torus are NOT in this set — they pass at HEAD
-# (analytic count 0) and must stay hard so a sphere/torus leak is not
-# inverted into a green.
+# Measured PRG ratchet (D-S3-62 flip at 2971d31). Authority is the JSON.
+DEFAULT_RATCHET = REPO / "tests" / "gates" / "baseline" / "prg-ratchet.json"
+RATCHET_NAME = "prg-ratchet.json"
+RATCHET_ID = "prg-ratchet"
+FLIP_REASON = (
+    "flipped 2026-09-02 at 2971d31: HP ships analytic; "
+    "PRG cells ratcheted from the first landing, R4 owes their reduction"
+)
+
+# Historical 18/30/48 family: still named on a revert (no CMake invert).
+# census.sphere / census.torus are NOT in this set.
 EXPECTED_RED_FLOOR_NAMES = frozenset(
     {
         "smoothRevertedComponents",
@@ -99,6 +99,7 @@ EXPECTED_RED_FLOOR_NAMES = frozenset(
 MARKER_EXPECTED_RED = "PARTIAL_RECOVERY_EXPECTED_RED"
 MARKER_UNEXPECTED = "PARTIAL_RECOVERY_UNEXPECTED"
 MARKER_FLOORS_MET = "PARTIAL_RECOVERY_FLOORS_MET"
+MARKER_RATCHET = "PRG_RATCHET"
 
 # GROUND-TRUTH.md 9 spheres + 6 tori — mustRemainFaceted sidecar fallback
 # (S02/S04 shape). Empty sidecar [] is treated as unpopulated (FINDINGS-0
@@ -239,6 +240,29 @@ def strict_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
     if raw is None or str(raw).strip() == "":
         return True
     return str(raw).strip().lower() not in ("0", "false", "off", "no")
+
+
+def load_prg_ratchet(path: Path = DEFAULT_RATCHET) -> Dict[str, Any]:
+    """Floor authority for the three PRG cells. Missing/wrong file is a hard fail."""
+    if path.name != RATCHET_NAME:
+        raise GateError(f"floor authority must be {RATCHET_NAME}, opened {path}")
+    if not path.is_file():
+        raise GateError(f"required file missing: {path}")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if doc.get("id") != RATCHET_ID:
+        raise GateError(f"{path} is not the prg-ratchet (id={doc.get('id')!r})")
+    if str(doc.get("authority") or "") != RATCHET_NAME:
+        raise GateError(f"{path}: authority must be {RATCHET_NAME!r}")
+    required = (
+        "tightBudgetAbsDeltaMM3Ceiling",
+        "censusRadiiPhantomCeiling",
+        "d3f7R3BuiltCeiling",
+        "reason",
+    )
+    missing = [k for k in required if k not in doc]
+    if missing:
+        raise GateError(f"{path}: missing {missing}")
+    return doc
 
 
 def parse_result_line(stdout: str) -> Dict[str, Any]:
@@ -475,15 +499,41 @@ def split_cylinder_radii_all(
     return recoverable, non_recoverable, all_radii
 
 
+def _d3f7_class_ceiling(
+    g: float,
+    n_gt: int,
+    *,
+    r3_built_ceiling: int,
+    extra: Mapping[Any, Any],
+) -> int:
+    if match_gt_radius(float(g), (D3F7_R3,)) is not None:
+        return int(r3_built_ceiling)
+    for key, cap in (extra or {}).items():
+        try:
+            ek = float(key)
+            ev = int(cap)
+        except (TypeError, ValueError):
+            continue
+        if match_gt_radius(float(g), (ek,)) is not None:
+            return ev
+    return int(n_gt)
+
+
 def radii_multiset_containment(
     built: Sequence[float],
     gt_all: Sequence[float],
+    *,
+    r3_built_ceiling: int,
+    extra_class_ceilings: Optional[Mapping[Any, Any]] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """D3F-7: per-GT-radius multiset-containment (multiplicity-aware, 0.3%).
 
-    count(built matching g @ 0.3%) <= multiplicity(g) for every GT class g.
-    Over-segmentation of any class is a FAIL. Phantoms stay on census.radii.
+    R=3 is a never-get-worse ratchet (built <= r3_built_ceiling). Other
+    classes that over-segmented at the first landing may carry a measured
+    extra ceiling; unlisted classes stay hard at GT multiplicity.
+    Phantoms stay on census.radii.
     """
+    extra = extra_class_ceilings or {}
     gt_counts: Counter = Counter(float(x) for x in gt_all)
     keys = list(gt_counts.keys())
     built_counts: Counter = Counter()
@@ -492,31 +542,50 @@ def radii_multiset_containment(
         if g is None:
             continue
         built_counts[g] += 1
+    r3_key = match_gt_radius(D3F7_R3, keys)
+    r3_built = int(built_counts.get(r3_key, 0)) if r3_key is not None else 0
+    r3_gt_n = int(gt_counts.get(r3_key, 0)) if r3_key is not None else 0
     over: List[Dict[str, Any]] = []
     for g, n_gt in sorted(gt_counts.items()):
         n_b = int(built_counts.get(g, 0))
-        if n_b > n_gt:
-            over.append({"gt": g, "built": n_b, "gtMultiplicity": n_gt})
+        cap = _d3f7_class_ceiling(
+            g, n_gt, r3_built_ceiling=r3_built_ceiling, extra=extra
+        )
+        if n_b > cap:
+            over.append(
+                {
+                    "gt": g,
+                    "built": n_b,
+                    "gtMultiplicity": n_gt,
+                    "ceiling": cap,
+                }
+            )
     details = {
         "nBuilt": len(built),
         "nGtAll": len(gt_all),
         "over": over[:12],
+        "r3Built": r3_built,
+        "r3Ceiling": int(r3_built_ceiling),
+        "r3GtMultiplicity": r3_gt_n,
     }
     if over:
         bits = ", ".join(
-            f"R={row['gt']} built={row['built']}>gt={row['gtMultiplicity']}"
+            f"R={row['gt']} built={row['built']}>ceil={row['ceiling']}"
+            f"(gt={row['gtMultiplicity']})"
             for row in over[:6]
         )
         return (
             False,
-            f"d3f7.radiiMultiset: over-segmentation (multiplicity-aware "
-            f"multiset-containment failed @ 0.3%): {bits}",
+            f"d3f7.radiiMultiset: over-segmentation (R=3 ratchet "
+            f"{r3_built_ceiling}; other classes hard or landing-ratchet "
+            f"@ 0.3%): {bits}  current R=3 built={r3_built}",
             details,
         )
     return (
         True,
-        f"d3f7.radiiMultiset: {len(built)} built ⊆ GT multiset "
-        f"({len(gt_all)} entries, multiplicity-aware, 0.3%)",
+        f"d3f7.radiiMultiset: {len(built)} built; R=3 built={r3_built} "
+        f"<= ratchet {r3_built_ceiling} (gt multiplicity {r3_gt_n}; "
+        f"R4 owes reduction)",
         details,
     )
 
@@ -543,8 +612,10 @@ def run_step_census(step: Path) -> Dict[str, Any]:
 
 def tight_budget(
     result: Mapping[str, Any],
+    *,
+    abs_ceiling: float,
 ) -> Tuple[bool, str, Dict[str, Any]]:
-    """S5 / host D4.5 proxy: |V_step-V_mesh| vs max(1e-4*|V_mesh|, 3*|dVol|)."""
+    """PRG ratchet: |V_step-V_mesh| vs landed ceiling (R4 formula still owed)."""
     vd = float(result.get("volumeDeltaPct", -1))
     mesh = float(result.get("meshVolumeMM3") or 0.0)
     step = float(result.get("stepVolumeMM3") or 0.0)
@@ -554,6 +625,7 @@ def tight_budget(
         "meshVolumeMM3": mesh,
         "stepVolumeMM3": step,
         "smoothVolPredictedMM3": pred,
+        "absCeilingMM3": float(abs_ceiling),
     }
     if vd < 0:
         return False, "tightBudget: volume not measured (need verify on)", details
@@ -562,14 +634,20 @@ def tight_budget(
     abs_delta = abs(step - mesh)
     details["absDeltaMM3"] = abs_delta
     details["budgetMM3"] = budget
-    if abs_delta > budget + 1e-9:
+    ceil = float(abs_ceiling)
+    if abs_delta > ceil + 1e-9:
         return (
             False,
-            f"tightBudget: |V_step-V_mesh|={abs_delta:.6g} mm^3 > budget {budget:.6g} "
-            f"(max({TIGHT_MESH_K}*|V_mesh|, {TIGHT_DVOL_K}*|dVolPredicted|))",
+            f"tightBudget: |V_step-V_mesh|={abs_delta:.6g} mm^3 > ratchet "
+            f"{ceil:.6g} (formula {budget:.6g}; R4 owes reduction)",
             details,
         )
-    return True, f"tightBudget: |V_step-V_mesh|={abs_delta:.6g} <= {budget:.6g}", details
+    return (
+        True,
+        f"tightBudget: |V_step-V_mesh|={abs_delta:.6g} <= ratchet {ceil:.6g} "
+        f"(formula {budget:.6g}; R4 owes reduction)",
+        details,
+    )
 
 
 def evaluate_pickup(
@@ -580,8 +658,14 @@ def evaluate_pickup(
     *,
     strict: bool = True,
     gt_radii_all: Optional[Sequence[float]] = None,
+    ratchet: Optional[Mapping[str, Any]] = None,
 ) -> List[Check]:
-    """DECISION-boundary pickup floors. Each FAIL message names the floor."""
+    """DECISION-boundary pickup floors + measured PRG ratchet. Each FAIL names the cell."""
+    rch = dict(ratchet) if ratchet is not None else load_prg_ratchet()
+    tb_ceil = float(rch["tightBudgetAbsDeltaMM3Ceiling"])
+    ph_ceil = int(rch["censusRadiiPhantomCeiling"])
+    r3_ceil = int(rch["d3f7R3BuiltCeiling"])
+    extra_ceil = rch.get("d3f7ExtraClassCeilings") or {}
     checks: List[Check] = []
 
     def add(name: str, ok: bool, message: str, **details: Any) -> None:
@@ -683,7 +767,7 @@ def evaluate_pickup(
         floor=FLOOR_OPEN_SHELLS,
     )
 
-    tb_ok, tb_msg, tb_det = tight_budget(result)
+    tb_ok, tb_msg, tb_det = tight_budget(result, abs_ceiling=tb_ceil)
     add("tightBudget", tb_ok, tb_msg, **tb_det)
 
     cen_plane = census_surface_count(dict(census), "plane")
@@ -736,16 +820,23 @@ def evaluate_pickup(
 
     radii = census_radii(dict(census))
     phantoms = [r for r in radii if match_gt_radius(r, gt_radii) is None]
+    n_ph = len(phantoms)
+    ph_ok = n_ph <= ph_ceil
     add(
         "census.radii",
-        not phantoms,
+        ph_ok,
         (
-            f"census.radii: {len(phantoms)} radius(es) outside GT 0.3%: {phantoms[:8]}"
-            if phantoms
-            else f"census.radii: {len(radii)} all within 0.3% of GT"
+            f"census.radii: {n_ph} phantom(s) > ratchet {ph_ceil}: {phantoms[:8]}"
+            if not ph_ok
+            else (
+                f"census.radii: {n_ph} phantom(s) <= ratchet {ph_ceil} "
+                f"(nRadii={len(radii)}; R4 owes 0)"
+            )
         ),
         phantoms=phantoms[:12],
         nRadii=len(radii),
+        nPhantoms=n_ph,
+        ceiling=ph_ceil,
     )
 
     gt_raw = (
@@ -760,8 +851,13 @@ def evaluate_pickup(
             n=len(nonrec),
             radii=[float(e.get("radius")) for e in nonrec],
         )
-    ms_ok, ms_msg, ms_det = radii_multiset_containment(radii, recoverable)
-    # D3F-7 is a hard anti-inflation gate, never expected-red / never inverted.
+    ms_ok, ms_msg, ms_det = radii_multiset_containment(
+        radii,
+        recoverable,
+        r3_built_ceiling=r3_ceil,
+        extra_class_ceilings=extra_ceil,
+    )
+    # D3F-7 R=3 is the measured ratchet; other-class over-seg stays hard.
     checks.append(
         Check(
             name="d3f7.radiiMultiset",
@@ -1020,6 +1116,29 @@ def format_checks(checks: Sequence[Check]) -> str:
     return "\n".join(lines)
 
 
+def prg_ratchet_line(checks: Sequence[Check], ratchet: Mapping[str, Any]) -> str:
+    """Always print current PRG cell values (PASS and FAIL)."""
+    by_name = {c.name: c for c in checks if c.group == "pickup"}
+    tb = by_name.get("tightBudget")
+    cr = by_name.get("census.radii")
+    d3 = by_name.get("d3f7.radiiMultiset")
+    tb_d = tb.details if tb else {}
+    cr_d = cr.details if cr else {}
+    d3_d = d3.details if d3 else {}
+    reason = str(ratchet.get("reason") or FLIP_REASON)
+    return (
+        f"{MARKER_RATCHET}  {reason}  "
+        f"tightBudget |dV|={tb_d.get('absDeltaMM3', 'n/a')} "
+        f"(ceil {ratchet.get('tightBudgetAbsDeltaMM3Ceiling')}, "
+        f"formula {tb_d.get('budgetMM3', 'n/a')}); "
+        f"census.radii phantoms={cr_d.get('nPhantoms', 'n/a')} "
+        f"(ceil {ratchet.get('censusRadiiPhantomCeiling')}); "
+        f"d3f7 R=3 built={d3_d.get('r3Built', 'n/a')} "
+        f"(ceil {ratchet.get('d3f7R3BuiltCeiling')}, "
+        f"gt {d3_d.get('r3GtMultiplicity', 'n/a')})"
+    )
+
+
 def resolve_body18_stl(
     private_corpus: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
@@ -1104,6 +1223,7 @@ def run_live(
     jobs: int = 4,
     gt_path: Optional[Path] = None,
     strict: Optional[bool] = None,
+    ratchet_path: Optional[Path] = None,
 ) -> int:
     if not binary.is_file():
         raise GateError(f"stl2step binary missing: {binary}")
@@ -1112,6 +1232,7 @@ def run_live(
     gt_radii_all, gt_all_src = load_pickup_gt_radii_all(gt_path)
     faceted, faceted_src = load_must_remain_faceted()
     is_strict = strict_enabled() if strict is None else bool(strict)
+    rch = load_prg_ratchet(Path(ratchet_path) if ratchet_path else DEFAULT_RATCHET)
 
     tasks: List[Dict[str, Any]] = [
         {
@@ -1192,6 +1313,7 @@ def run_live(
                 pk.exit_code,
                 strict=is_strict,
                 gt_radii_all=gt_radii_all,
+                ratchet=rch,
             )
         )
         hl = arts["handle-lock"]
@@ -1220,6 +1342,7 @@ def run_live(
         )
         print(f"  {NAMED_GAP}", flush=True)
         print(format_checks(checks), flush=True)
+        print(prg_ratchet_line(checks, rch), flush=True)
         if body18_skip:
             print(f"  [Body18/SKIP] {body18_skip}", flush=True)
         if unexpected:
@@ -1254,12 +1377,6 @@ def run_live(
             )
             return 0
         print(f"{MARKER_FLOORS_MET}  pickup floors MET", flush=True)
-        print(
-            "FLIP PROTOCOL: remove PASS_REGULAR_EXPRESSION from "
-            "tests/gates/CMakeLists.txt (partial_recovery_gate). "
-            "Keep PARTIAL_RECOVERY_STRICT=1. Do not lower FLOOR_*.",
-            flush=True,
-        )
         print("partial_recovery_gate PASS", flush=True)
         return 0
 
@@ -1326,6 +1443,24 @@ def _self_test() -> int:
         FALLBACK_GT_RADII[-1] == 100.0 and FALLBACK_GT_RADII[0] == 0.5,
         "GROUND-TRUTH.md fallback radii bookends",
     )
+
+    rch = load_prg_ratchet()
+    check(rch["authority"] == RATCHET_NAME, "prg-ratchet authority is the JSON filename")
+    check(str(rch.get("engineRef") or "") == "2971d31", "prg-ratchet engineRef is 2971d31")
+    check(
+        abs(float(rch["tightBudgetAbsDeltaMM3Ceiling"]) - 10.81525) < 1e-9,
+        "tightBudget ceiling is 2971d31 measured 10.81525 mm3",
+    )
+    check(int(rch["censusRadiiPhantomCeiling"]) == 17, "census.radii phantom ceiling 17")
+    check(int(rch["d3f7R3BuiltCeiling"]) == 75, "d3f7 R=3 built ceiling 75")
+    extra = rch.get("d3f7ExtraClassCeilings") or {}
+    check(int(extra.get("2.55", 0)) == 2, "d3f7 R=2.55 landing extra ceiling 2")
+    check(FLIP_REASON in str(rch.get("reason") or ""), "ratchet reason string is the D-S3-62 flip")
+    try:
+        load_prg_ratchet(Path("/tmp/not-prg-ratchet.json"))
+        check(False, "wrong ratchet name must FAIL")
+    except GateError:
+        check(True, "wrong ratchet name FAIL")
 
     runtime_gt = pickup_gt_candidate_paths()
     check(runtime_gt[-1] == TEAM_PICKUP_GT, "_team/inputs GT is last runtime candidate")
@@ -1455,7 +1590,25 @@ def _self_test() -> int:
     ph = evaluate_pickup(
         synthetic_pass_result(), phantom_cen, gt_radii, 0, strict=True
     )
-    check("census.radii" in failing_names(ph), "phantom radius fails census.radii")
+    check("census.radii" not in failing_names(ph), "1 phantom within ratchet 17 PASSES")
+
+    ph17_cen = synthetic_pass_census()
+    ph17_cen["cylinder_radii"] = list(ph17_cen["cylinder_radii"]) + [7.0 + 0.01 * i for i in range(17)]
+    ph17 = evaluate_pickup(
+        synthetic_pass_result(), ph17_cen, gt_radii, 0, strict=True
+    )
+    check("census.radii" not in failing_names(ph17), "17 phantoms == ratchet PASSES")
+
+    ph18_cen = synthetic_pass_census()
+    ph18_cen["cylinder_radii"] = list(ph18_cen["cylinder_radii"]) + [7.0 + 0.01 * i for i in range(18)]
+    ph18 = evaluate_pickup(
+        synthetic_pass_result(), ph18_cen, gt_radii, 0, strict=True
+    )
+    check("census.radii" in failing_names(ph18), "18 phantoms > ratchet 17 FAILS")
+    check(
+        any("18 phantom" in c.message and "17" in c.message for c in ph18 if not c.ok),
+        "census.radii FAIL prints current phantom count vs ceiling",
+    )
 
     file_raw, file_src = load_pickup_gt_radii_all()
     file_rec, file_non, file_all = split_cylinder_radii_all(file_raw)
@@ -1491,8 +1644,53 @@ def _self_test() -> int:
     )
     check("d3f7.radiiMultiset" in failing_names(over), "D3F-7 over-segmentation FAILS")
     check(
-        any("over-segmentation" in c.message and "multiset" in c.message for c in over if not c.ok),
-        "D3F-7 message names multiplicity-aware multiset-containment / over-segmentation",
+        any("over-segmentation" in c.message and "R=3 ratchet" in c.message for c in over if not c.ok),
+        "D3F-7 message names over-segmentation / R=3 ratchet",
+    )
+
+    r3_ok_cen = synthetic_pass_census()
+    r3_ok_cen["cylinder_radii"] = [3.0] * 75
+    r3_ok_cen["surfaces"] = dict(r3_ok_cen["surfaces"])
+    r3_ok_cen["surfaces"]["cylinder"] = 75
+    r3_ok = evaluate_pickup(
+        synthetic_pass_result(), r3_ok_cen, gt_radii, 0, strict=True
+    )
+    check("d3f7.radiiMultiset" not in failing_names(r3_ok), "R=3 built=75 == ratchet PASSES")
+
+    r3_bad_cen = synthetic_pass_census()
+    r3_bad_cen["cylinder_radii"] = [3.0] * 76
+    r3_bad_cen["surfaces"] = dict(r3_bad_cen["surfaces"])
+    r3_bad_cen["surfaces"]["cylinder"] = 76
+    r3_bad = evaluate_pickup(
+        synthetic_pass_result(), r3_bad_cen, gt_radii, 0, strict=True
+    )
+    check("d3f7.radiiMultiset" in failing_names(r3_bad), "R=3 built=76 > ratchet 75 FAILS")
+    check(
+        any("built=76" in c.message and "75" in c.message for c in r3_bad if not c.ok),
+        "d3f7 FAIL prints current R=3 built vs ceiling",
+    )
+
+    r255_ok_cen = synthetic_pass_census()
+    r255_ok_cen["cylinder_radii"] = [2.55] * 2 + [3.0] * 28
+    r255_ok_cen["surfaces"] = dict(r255_ok_cen["surfaces"])
+    r255_ok_cen["surfaces"]["cylinder"] = 30
+    r255_ok = evaluate_pickup(
+        synthetic_pass_result(), r255_ok_cen, gt_radii, 0, strict=True
+    )
+    check(
+        "d3f7.radiiMultiset" not in failing_names(r255_ok),
+        "R=2.55 built=2 == landing extra ceiling PASSES",
+    )
+    r255_bad_cen = synthetic_pass_census()
+    r255_bad_cen["cylinder_radii"] = [2.55] * 3 + [3.0] * 27
+    r255_bad_cen["surfaces"] = dict(r255_bad_cen["surfaces"])
+    r255_bad_cen["surfaces"]["cylinder"] = 30
+    r255_bad = evaluate_pickup(
+        synthetic_pass_result(), r255_bad_cen, gt_radii, 0, strict=True
+    )
+    check(
+        "d3f7.radiiMultiset" in failing_names(r255_bad),
+        "R=2.55 built=3 > landing extra ceiling 2 FAILS",
     )
     over_exp, over_unexp = split_hard_fails(over)
     check(
@@ -1542,6 +1740,24 @@ def _self_test() -> int:
     tb_bad["volumeDeltaPct"] = 50.0
     tb = evaluate_pickup(tb_bad, synthetic_pass_census(), gt_radii, 0, strict=True)
     check("tightBudget" in failing_names(tb), "tightBudget floor is named on volume miss")
+
+    tb_at = synthetic_pass_result()
+    tb_at["meshVolumeMM3"] = 100000.0
+    tb_at["stepVolumeMM3"] = 100000.0 + 10.81525
+    tb_at["volumeDeltaPct"] = 0.01
+    tb_at_ch = evaluate_pickup(tb_at, synthetic_pass_census(), gt_radii, 0, strict=True)
+    check("tightBudget" not in failing_names(tb_at_ch), "tightBudget |dV|=10.81525 == ratchet PASSES")
+
+    tb_over = synthetic_pass_result()
+    tb_over["meshVolumeMM3"] = 100000.0
+    tb_over["stepVolumeMM3"] = 100000.0 + 10.816
+    tb_over["volumeDeltaPct"] = 0.01
+    tb_over_ch = evaluate_pickup(tb_over, synthetic_pass_census(), gt_radii, 0, strict=True)
+    check("tightBudget" in failing_names(tb_over_ch), "tightBudget |dV|=10.816 > ratchet FAILS")
+    check(
+        any("10.816" in c.message and "ratchet" in c.message for c in tb_over_ch if not c.ok),
+        "tightBudget FAIL prints current |dV| vs ceiling",
+    )
 
     tb_unmeasured = synthetic_pass_result()
     tb_unmeasured["volumeDeltaPct"] = -1
@@ -1683,6 +1899,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help=f"Private STL dir for Body18 (else ${ENV_PRIVATE}; missing SKIPs Body18 only)",
     )
     p.add_argument("--jobs", type=int, default=4, help="Parallel conversions (default 4)")
+    p.add_argument(
+        "--ratchet",
+        type=Path,
+        default=DEFAULT_RATCHET,
+        help="PRG ratchet JSON (tests/gates/baseline/prg-ratchet.json)",
+    )
     p.add_argument("--self-test", action="store_true", help="Exercise gate API (no engine)")
     p.add_argument(
         "--synthetic-pass",
@@ -1725,6 +1947,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             jobs=args.jobs,
             gt_path=args.ground_truth,
             strict=args.strict,
+            ratchet_path=Path(args.ratchet) if args.ratchet else DEFAULT_RATCHET,
         )
     except GateError as exc:
         print(f"partial_recovery_gate FAIL: {exc}", file=sys.stderr)
