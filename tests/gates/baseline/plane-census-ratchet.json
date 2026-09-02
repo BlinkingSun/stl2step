@@ -1,0 +1,29 @@
+{
+  "id": "plane-census-ratchet",
+  "authority": "plane-census-ratchet.json",
+  "fixtureId": "handle-pickup",
+  "notes": "D-FL-6. Per-GT-plane nFaces ceilings ratcheted from ab6a7ee Handle pickup TrueForm. Zero-today walls get ceiling 1 (ideal, so first recovery is not a fail). sumNFacesCeiling counts unique STEP faces matching any hasLiveRegion GT equation. phantomPlaneCeiling counts unmatched PLANE faces with bound-polygon area > phantomAreaFloorMM2 (192.6, GT#1505). Orchestrator may lower ceilings; they never rise.",
+  "perPlaneNFacesCeiling": {
+    "1466": 1,
+    "1467": 32,
+    "1475": 42,
+    "1484": 42,
+    "1487": 1,
+    "1488": 1,
+    "1502": 1,
+    "1503": 1,
+    "1505": 1,
+    "1507": 1,
+    "1509": 1,
+    "1511": 1,
+    "1521": 1,
+    "1525": 1,
+    "1530": 1,
+    "1531": 1,
+    "1537": 1,
+    "1538": 1
+  },
+  "sumNFacesCeiling": 77,
+  "sumMode": "uniqueFacesMatchingLiveRegionGtEquations",
+  "phantomPlaneCeiling": 1
+}

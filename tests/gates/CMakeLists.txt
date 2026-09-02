@@ -412,3 +412,26 @@ if(EXISTS "${_g01_allow}")
         TIMEOUT 30)
 endif()
 unset(_g01_allow)
+
+# --- gates-g01 plane census (D-FL-6) ---
+# Per-GT-plane face-count ratchet. Never expected-red.
+set(_g01_plane "${CMAKE_CURRENT_SOURCE_DIR}/plane_census_gate.py")
+set(_g01_plane_ratchet "${CMAKE_CURRENT_SOURCE_DIR}/baseline/plane-census-ratchet.json")
+if(EXISTS "${_g01_plane}")
+    add_test(NAME plane_census_gate_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_plane}" --self-test)
+    set_tests_properties(plane_census_gate_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step AND EXISTS "${_g01_plane_ratchet}")
+        add_test(NAME plane_census_gate
+            COMMAND "${Python3_EXECUTABLE}" "${_g01_plane}"
+                    --binary "$<TARGET_FILE:stl2step>")
+        set_tests_properties(plane_census_gate PROPERTIES
+            LABELS "gates"
+            TIMEOUT 180
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_g01_plane_ratchet}")
+    endif()
+endif()
+unset(_g01_plane)
+unset(_g01_plane_ratchet)

@@ -120,27 +120,96 @@
       "round": 6
     },
     "faces": [
-      {"id": 1474, "class": "torus"},
-      {"id": 1476, "class": "torus"},
-      {"id": 1483, "class": "torus"},
-      {"id": 1485, "class": "torus"},
-      {"id": 1499, "class": "torus"},
-      {"id": 1500, "class": "torus"},
-      {"id": 1470, "class": "sphere"},
-      {"id": 1472, "class": "sphere"},
-      {"id": 1480, "class": "sphere"},
-      {"id": 1482, "class": "sphere"},
-      {"id": 1491, "class": "sphere"},
-      {"id": 1493, "class": "sphere"},
-      {"id": 1496, "class": "sphere"},
-      {"id": 1498, "class": "sphere"},
-      {"id": 1528, "class": "sphere"},
-      {"id": 1469, "class": "round", "radius_mm": 3.0},
-      {"id": 1479, "class": "round", "radius_mm": 3.0},
-      {"id": 1490, "class": "round", "radius_mm": 3.0},
-      {"id": 1495, "class": "round", "radius_mm": 3.0},
-      {"id": 1527, "class": "round", "radius_mm": 3.0},
-      {"id": 1536, "class": "round", "radius_mm": 2.55}
+      {
+        "id": 1474,
+        "class": "torus"
+      },
+      {
+        "id": 1476,
+        "class": "torus"
+      },
+      {
+        "id": 1483,
+        "class": "torus"
+      },
+      {
+        "id": 1485,
+        "class": "torus"
+      },
+      {
+        "id": 1499,
+        "class": "torus"
+      },
+      {
+        "id": 1500,
+        "class": "torus"
+      },
+      {
+        "id": 1470,
+        "class": "sphere"
+      },
+      {
+        "id": 1472,
+        "class": "sphere"
+      },
+      {
+        "id": 1480,
+        "class": "sphere"
+      },
+      {
+        "id": 1482,
+        "class": "sphere"
+      },
+      {
+        "id": 1491,
+        "class": "sphere"
+      },
+      {
+        "id": 1493,
+        "class": "sphere"
+      },
+      {
+        "id": 1496,
+        "class": "sphere"
+      },
+      {
+        "id": 1498,
+        "class": "sphere"
+      },
+      {
+        "id": 1528,
+        "class": "sphere"
+      },
+      {
+        "id": 1469,
+        "class": "round",
+        "radius_mm": 3.0
+      },
+      {
+        "id": 1479,
+        "class": "round",
+        "radius_mm": 3.0
+      },
+      {
+        "id": 1490,
+        "class": "round",
+        "radius_mm": 3.0
+      },
+      {
+        "id": 1495,
+        "class": "round",
+        "radius_mm": 3.0
+      },
+      {
+        "id": 1527,
+        "class": "round",
+        "radius_mm": 3.0
+      },
+      {
+        "id": 1536,
+        "class": "round",
+        "radius_mm": 2.55
+      }
     ],
     "predicate": {
       "grow_radius_max_mm": 3.5,
@@ -148,7 +217,11 @@
       "eps": {
         "formula": "max(tauSurf, epsPlane, 0.05)",
         "floor_mm": 0.05,
-        "terms": ["tauSurf", "epsPlane", 0.05]
+        "terms": [
+          "tauSurf",
+          "epsPlane",
+          0.05
+        ]
       }
     },
     "live_divergence": {
@@ -163,9 +236,339 @@
         "regions": 203,
         "cylinders": 133,
         "facet_islands": 41,
-        "DIAG_PRISM": {"comp": 0, "ok": 0, "failedCond": 2}
+        "DIAG_PRISM": {
+          "comp": 0,
+          "ok": 0,
+          "failedCond": 2
+        }
       },
       "why": "Both numbers are true about different objects. The 21 are GT CAD faces (6 torus + 9 sphere + 6 non-axis rounds). Live |E|=66 because the engine types no region as torus/sphere; blends arrive as over-segmented cylGrow patches. The gate marks the 21-face target expected-red against the live 66-region set."
     }
-  }
+  },
+  "planeMatch": {
+    "epsPlaneMM": 0.02057,
+    "epsPlaneFormula": "max(epsMesh, sewTol, 0.02)",
+    "epsPlaneSource": "DerivedTols::epsPlane in src/refit_segment.cpp / refit_math.cpp; Options::smoothTolMM=0 (auto). epsMesh=max(weldTol, 1e-4*diag, 1e-3); sewTol=min(max(1e-6, diag*1e-5), 0.5).",
+    "bboxDiagMM": 205.701921,
+    "epsMeshMM": 0.02057,
+    "sewTolMM": 0.002057,
+    "normalAgreeMin": 0.99,
+    "normalAgreeSource": "flats-census.md \u00a71 strict on-plane (normal agree >= 0.99); offset uses epsPlaneMM not the census 1.5 mm mesh-tri gate",
+    "phantomAreaFloorMM2": 192.6,
+    "phantomAreaFloorSource": "smallest GT plane area in flats-census.md \u00a71 (GT#1505, 192.6 mm^2)",
+    "cadStep": "_team/inputs/Handle pickup original.step (not in repo; same source as this file's cylinder_radii)",
+    "cadDerivation": "ADVANCED_FACE + PLANE + AXIS2_PLACEMENT_3D; unit AXIS2 Z-direction; offset = n\u00b7origin. Same method as flats-census.md \u00a71 /tmp/flats-census/analyze.py."
+  },
+  "planes": [
+    {
+      "id": 1466,
+      "normal": [
+        0.0,
+        0.0,
+        1.0
+      ],
+      "offset": 144.261430692,
+      "origin": [
+        385.961852406,
+        -290.827685742,
+        144.261430692
+      ],
+      "hasLiveRegion": true,
+      "liveRegionIds": [
+        121
+      ],
+      "note": "+Z small; census \u00a71 H1 STEP PLANE=1"
+    },
+    {
+      "id": 1467,
+      "normal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "offset": 290.824721555,
+      "origin": [
+        331.846960496,
+        -290.827270141,
+        249.944276094
+      ],
+      "hasLiveRegion": true,
+      "liveRegionIds": [
+        1
+      ],
+      "note": "-Y flange; U0 explode; census \u00a71 H1 STEP PLANE=33"
+    },
+    {
+      "id": 1475,
+      "normal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "offset": 284.824721555,
+      "origin": [
+        337.961898488,
+        -284.827317103,
+        208.798306447
+      ],
+      "hasLiveRegion": true,
+      "liveRegionIds": [
+        2,
+        3
+      ],
+      "note": "-Y large flat; coplanar CAD twin 1484; census \u00a71 H1 STEP PLANE=42"
+    },
+    {
+      "id": 1484,
+      "normal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "offset": 284.824721555,
+      "origin": [
+        337.961898488,
+        -284.827317103,
+        208.798306447
+      ],
+      "hasLiveRegion": true,
+      "liveRegionIds": [
+        2,
+        3
+      ],
+      "note": "identical AXIS2_PLACEMENT_3D to 1475; live never distinguished"
+    },
+    {
+      "id": 1487,
+      "normal": [
+        0.5,
+        -3.84e-06,
+        0.866025404
+      ],
+      "offset": 386.382689645,
+      "origin": [
+        367.663939516,
+        -284.827545214,
+        233.884162373
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1488,
+      "normal": [
+        -0.5,
+        3.84e-06,
+        -0.866025404
+      ],
+      "offset": -378.382689645,
+      "origin": [
+        296.030073636,
+        -284.826995068,
+        266.004389816
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1502,
+      "normal": [
+        0.64278761,
+        -4.937e-06,
+        -0.766044443
+      ],
+      "offset": 73.165056964,
+      "origin": [
+        309.540578741,
+        -284.827098828,
+        164.227022265
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1503,
+      "normal": [
+        -0.631190694,
+        4.848e-06,
+        0.775627687
+      ],
+      "offset": -59.313200708,
+      "origin": [
+        364.412489561,
+        -284.827520243,
+        220.08233454
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1505,
+      "normal": [
+        -0.64278761,
+        4.937e-06,
+        0.766044443
+      ],
+      "offset": -57.165056964,
+      "origin": [
+        312.976269489,
+        -284.827125214,
+        187.996425733
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": [],
+      "areaMM2Census": 192.6,
+      "note": "smallest GT plane area in flats-census.md \u00a71 (192.6 mm^2)"
+    },
+    {
+      "id": 1507,
+      "normal": [
+        0.64278761,
+        -4.937e-06,
+        -0.766044443
+      ],
+      "offset": 81.165056964,
+      "origin": [
+        366.374683544,
+        -284.827535313,
+        201.47324033
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1509,
+      "normal": [
+        -0.5,
+        3.84e-06,
+        -0.866025404
+      ],
+      "offset": -370.382689645,
+      "origin": [
+        350.468478574,
+        -284.827413154,
+        225.336757763
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1511,
+      "normal": [
+        0.5,
+        -3.84e-06,
+        0.866025404
+      ],
+      "offset": 394.382689645,
+      "origin": [
+        306.400673479,
+        -284.827074714,
+        278.492129819
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1521,
+      "normal": [
+        1.0,
+        -7.68e-06,
+        0.0
+      ],
+      "offset": 375.464085945,
+      "origin": [
+        375.461898486,
+        -284.827605102,
+        152.263206508
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1525,
+      "normal": [
+        -1.0,
+        7.68e-06,
+        0.0
+      ],
+      "offset": -385.964085945,
+      "origin": [
+        385.961852406,
+        -290.827685742,
+        132.861084661
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1530,
+      "normal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "offset": 281.149721555,
+      "origin": [
+        334.211926712,
+        -281.152288304,
+        206.955139626
+      ],
+      "hasLiveRegion": true,
+      "liveRegionIds": [
+        0
+      ],
+      "note": "+Y cap; 1 STEP face, DIAG_PLATE st=27"
+    },
+    {
+      "id": 1531,
+      "normal": [
+        1.0,
+        -7.68e-06,
+        0.0
+      ],
+      "offset": 392.964085945,
+      "origin": [
+        392.961926119,
+        -281.229739502,
+        126.306363171
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    },
+    {
+      "id": 1537,
+      "normal": [
+        -7.68e-06,
+        -1.0,
+        0.0
+      ],
+      "offset": 293.849721555,
+      "origin": [
+        334.211829176,
+        -293.852288303,
+        206.955139626
+      ],
+      "hasLiveRegion": true,
+      "liveRegionIds": [
+        17
+      ],
+      "note": "-Y; 1 STEP face"
+    },
+    {
+      "id": 1538,
+      "normal": [
+        0.5,
+        -3.84e-06,
+        0.866025404
+      ],
+      "offset": 399.882689645,
+      "origin": [
+        384.211926119,
+        -281.229672302,
+        239.918651075
+      ],
+      "hasLiveRegion": false,
+      "liveRegionIds": []
+    }
+  ]
 }
