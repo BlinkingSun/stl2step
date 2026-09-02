@@ -5,9 +5,14 @@ Shaped on hl_census_ratchet.py. Floor authority is
 tests/gates/baseline/plane-census-ratchet.json. Never expected-red.
 
 The gate converts tests/corpus/handle-pickup.stl with --engine trueform,
-lists every shipped STEP PLANE face (equation + bound-polygon area), and
-reports per GT plane: nFaces (equation match within epsPlane from
-ground-truth.json planeMatch), total area, hasLiveRegion.
+lists every shipped STEP PLANE face (equation + bound-polygon area +
+centroid + loop count), and reports per GT plane: nFaces (each shipped
+face maps to exactly one GT face — D-S3-143), total area, hasLiveRegion.
+
+Assignment (D-S3-142/146): equation match first; among co-equation GT
+faces, nearest-match by gtFaceIdentity (nLoops, then area/centroid). A
+tie is a named failure, never a coin flip. Co-equation ids are never
+double-counted.
 
 Cells:
   (a) per-plane nFaces <= ratcheted ceiling
@@ -254,16 +259,23 @@ def _edge_pts(entities: Dict[int, Tuple[str, str]], eref: int) -> List[Tuple[flo
     return out
 
 
-def _face_area(entities: Dict[int, Tuple[str, str]], bound_arg: str, n: Sequence[float]) -> float:
+def _face_geom(
+    entities: Dict[int, Tuple[str, str]], bound_arg: str, n: Sequence[float]
+) -> Tuple[float, Optional[Tuple[float, float, float]], int]:
+    """Bound-polygon area, area-weighted centroid, loop count (FACE_*BOUND)."""
     bound_list = all_refs(bound_arg)
     kinds = [entities.get(b, ("", ""))[0] for b in bound_list]
     has_outer = "FACE_OUTER_BOUND" in kinds
     area = 0.0
     outer_used = False
+    n_loops = 0
+    c_acc = [0.0, 0.0, 0.0]
+    w_acc = 0.0
     for bref in bound_list:
         bet, bargs = entities.get(bref, ("", ""))
         if bet not in ("FACE_OUTER_BOUND", "FACE_BOUND"):
             continue
+        n_loops += 1
         bparts = split_args(bargs)
         lref = first_ref(bparts[1] if len(bparts) > 1 else (bparts[0] if bparts else None))
         if lref is None:
@@ -273,14 +285,29 @@ def _face_area(entities: Dict[int, Tuple[str, str]], bound_arg: str, n: Sequence
             for p in _edge_pts(entities, eref):
                 if not pts or pts[-1] != p:
                     pts.append(p)
-        a = shoelace(pts, n)
+        a, c = _loop_area_centroid(pts, n)
         is_outer = bet == "FACE_OUTER_BOUND" or (not has_outer and not outer_used)
         if is_outer:
             area += a
             outer_used = True
+            w = a
         else:
             area -= a
-    return max(0.0, area)
+            w = a
+        if c is not None and w > 1e-18:
+            c_acc[0] += c[0] * w
+            c_acc[1] += c[1] * w
+            c_acc[2] += c[2] * w
+            w_acc += w
+    area = max(0.0, area)
+    centroid: Optional[Tuple[float, float, float]] = None
+    if w_acc > 1e-18:
+        centroid = (c_acc[0] / w_acc, c_acc[1] / w_acc, c_acc[2] / w_acc)
+    return area, centroid, n_loops
+
+
+def _face_area(entities: Dict[int, Tuple[str, str]], bound_arg: str, n: Sequence[float]) -> float:
+    return _face_geom(entities, bound_arg, n)[0]
 
 
 @dataclass
@@ -289,6 +316,65 @@ class PlaneFace:
     normal: Tuple[float, float, float]
     offset: float
     area: float
+    centroid: Optional[Tuple[float, float, float]] = None
+    nLoops: int = 1
+
+
+def _uv_basis(n: Sequence[float]) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    ax, ay, az = n
+    if abs(ax) < 0.9:
+        rx, ry, rz = 1.0, 0.0, 0.0
+    else:
+        rx, ry, rz = 0.0, 1.0, 0.0
+    ux, uy, uz = ay * rz - az * ry, az * rx - ax * rz, ax * ry - ay * rx
+    lu = math.sqrt(ux * ux + uy * uy + uz * uz) or 1.0
+    u = (ux / lu, uy / lu, uz / lu)
+    v = (
+        n[1] * u[2] - n[2] * u[1],
+        n[2] * u[0] - n[0] * u[2],
+        n[0] * u[1] - n[1] * u[0],
+    )
+    return u, v
+
+
+def _loop_area_centroid(
+    pts: Sequence[Sequence[float]], n: Sequence[float]
+) -> Tuple[float, Optional[Tuple[float, float, float]]]:
+    """Signed-magnitude polygon area and 3D centroid in the face plane (vertex shoelace)."""
+    area = shoelace(pts, n)
+    clean = [tuple(p) for p in pts if p is not None]
+    if len(clean) < 3 or area <= 1e-18:
+        if clean:
+            m = len(clean)
+            return area, (sum(p[0] for p in clean) / m, sum(p[1] for p in clean) / m, sum(p[2] for p in clean) / m)
+        return area, None
+    u, v = _uv_basis(n)
+    uv = [(p[0] * u[0] + p[1] * u[1] + p[2] * u[2], p[0] * v[0] + p[1] * v[1] + p[2] * v[2]) for p in clean]
+    cl: List[Tuple[float, float]] = []
+    for p in uv:
+        if not cl or abs(cl[-1][0] - p[0]) + abs(cl[-1][1] - p[1]) > 1e-12:
+            cl.append(p)
+    if len(cl) >= 2 and abs(cl[0][0] - cl[-1][0]) + abs(cl[0][1] - cl[-1][1]) < 1e-12:
+        cl = cl[:-1]
+    if len(cl) < 3:
+        m = len(clean)
+        return area, (sum(p[0] for p in clean) / m, sum(p[1] for p in clean) / m, sum(p[2] for p in clean) / m)
+    cl.append(cl[0])
+    a2 = cx = cy = 0.0
+    for i in range(len(cl) - 1):
+        cross = cl[i][0] * cl[i + 1][1] - cl[i + 1][0] * cl[i][1]
+        a2 += cross
+        cx += (cl[i][0] + cl[i + 1][0]) * cross
+        cy += (cl[i][1] + cl[i + 1][1]) * cross
+    if abs(a2) > 1e-18:
+        cx /= 3.0 * a2
+        cy /= 3.0 * a2
+    else:
+        body = cl[:-1]
+        cx = sum(p[0] for p in body) / len(body)
+        cy = sum(p[1] for p in body) / len(body)
+    c3 = (cx * u[0] + cy * v[0], cx * u[1] + cy * v[1], cx * u[2] + cy * v[2])
+    return area, c3
 
 
 def list_step_planes(step: Path) -> List[PlaneFace]:
@@ -314,8 +400,11 @@ def list_step_planes(step: Path) -> List[PlaneFace]:
             continue
         n = vnorm(direc)
         d = vdot(loc, n)
-        area = _face_area(entities, parts[1] if len(parts) > 1 else "", n)
-        out.append(PlaneFace(id=eid, normal=n, offset=d, area=area))
+        area, centroid, n_loops = _face_geom(entities, parts[1] if len(parts) > 1 else "", n)
+        if centroid is not None:
+            t = d - vdot(centroid, n)
+            centroid = (centroid[0] + t * n[0], centroid[1] + t * n[1], centroid[2] + t * n[2])
+        out.append(PlaneFace(id=eid, normal=n, offset=d, area=area, centroid=centroid, nLoops=max(1, n_loops)))
     return out
 
 
@@ -356,6 +445,31 @@ def assert_ratchet_authority(ratchet: Dict[str, Any], path: Path) -> None:
         raise GateError(f"{path}: missing perPlaneNFacesCeiling")
 
 
+IDENTITY_LOOP_WEIGHT = 1.0e6
+IDENTITY_TIE_EPS = 1e-12
+
+
+def _identity_score(face: PlaneFace, gid: int, identity: Dict[str, Any]) -> Optional[float]:
+    """Distance from a shipped face to one co-equation GT. None = identity missing."""
+    gi = identity.get(str(gid))
+    if not isinstance(gi, dict) or not gi:
+        return None
+    score = 0.0
+    used = False
+    if "nLoops" in gi:
+        used = True
+        score += abs(int(gi["nLoops"]) - int(face.nLoops)) * IDENTITY_LOOP_WEIGHT
+    if "areaMM2" in gi:
+        used = True
+        ga = float(gi["areaMM2"])
+        score += abs(face.area - ga) / max(abs(ga), 1.0)
+    if "centroid" in gi and face.centroid is not None:
+        used = True
+        c = gi["centroid"]
+        score += math.sqrt(sum((float(a) - float(b)) ** 2 for a, b in zip(face.centroid, c))) / 100.0
+    return score if used else None
+
+
 def evaluate(
     faces: Sequence[PlaneFace],
     gt_planes: Sequence[Dict[str, Any]],
@@ -370,18 +484,52 @@ def evaluate(
     ceilings = {int(k): int(v) for k, v in (ratchet.get("perPlaneNFacesCeiling") or {}).items()}
     sum_ceil = int(ratchet["sumNFacesCeiling"])
     ph_ceil = int(ratchet["phantomPlaneCeiling"])
+    identity = {str(k): v for k, v in (ratchet.get("gtFaceIdentity") or {}).items()}
+
+    failures: List[str] = []
+    assignment: Dict[int, int] = {}
+    for f in faces:
+        cands = [
+            int(gp["id"])
+            for gp in gt_planes
+            if match_gt_plane(f, gp["normal"], float(gp["offset"]), eps_plane=eps, normal_agree=nmin)
+        ]
+        if not cands:
+            continue
+        if len(cands) == 1:
+            assignment[f.id] = cands[0]
+            continue
+        scored: List[Tuple[float, int]] = []
+        missing = False
+        for gid in cands:
+            sc = _identity_score(f, gid, identity)
+            if sc is None:
+                missing = True
+                break
+            scored.append((sc, gid))
+        if missing or not scored:
+            failures.append(
+                f"STEP#{f.id} co-equation GTs {cands} have no gtFaceIdentity (D-S3-142)"
+            )
+            continue
+        scored.sort(key=lambda t: (t[0], t[1]))
+        if len(scored) >= 2 and abs(scored[0][0] - scored[1][0]) <= IDENTITY_TIE_EPS:
+            failures.append(
+                f"STEP#{f.id} identity tied between GT#{scored[0][1]} and GT#{scored[1][1]} "
+                f"(score={scored[0][0]:.6g}; D-S3-142 named failure, not a coin flip)"
+            )
+            continue
+        assignment[f.id] = scored[0][1]
 
     per: List[Dict[str, Any]] = []
-    assigned: set[int] = set()
+    assigned: set[int] = set(assignment.keys())
     live_unique: set[int] = set()
+    live_ids = {int(gp["id"]) for gp in gt_planes if gp.get("hasLiveRegion")}
     for gp in gt_planes:
         gid = int(gp["id"])
-        gn = gp["normal"]
-        gd = float(gp["offset"])
-        hits = [f for f in faces if match_gt_plane(f, gn, gd, eps_plane=eps, normal_agree=nmin)]
+        hits = [f for f in faces if assignment.get(f.id) == gid]
         for f in hits:
-            assigned.add(f.id)
-            if gp.get("hasLiveRegion"):
+            if gid in live_ids:
                 live_unique.add(f.id)
         row = {
             "id": gid,
@@ -390,13 +538,13 @@ def evaluate(
             "hasLiveRegionExpected": bool(gp.get("hasLiveRegion")),
             "hasLiveRegion": len(hits) > 0,
             "ceiling": int(ceilings.get(gid, 1)),
+            "nLoops": [f.nLoops for f in hits],
         }
         per.append(row)
 
     phantoms = [f for f in faces if f.id not in assigned and f.area > area_floor + 1e-12]
     sum_live = len(live_unique)
 
-    failures: List[str] = []
     for row in per:
         if row["nFaces"] > row["ceiling"]:
             failures.append(
@@ -425,6 +573,7 @@ def evaluate(
         "phantomPlaneCeiling": ph_ceil,
         "phantomAreas": [round(f.area, 3) for f in phantoms[:12]],
         "antiConfusion": ANTI_CONFUSION,
+        "assignment": {str(k): v for k, v in assignment.items()},
     }
     return failures, details
 
@@ -620,9 +769,13 @@ def _self_test() -> int:
     check(any(int(p["id"]) == 1475 and p.get("hasLiveRegion") for p in planes), "1475 hasLiveRegion")
 
     ceil = ratchet["perPlaneNFacesCeiling"]
-    check(int(ceil["1475"]) == 42, "1475 ceiling ratcheted at 42")
+    check(int(ceil["1475"]) == 28, "1475 ceiling ratcheted at 28 (hub-2 exploded facets; co-eq 1484 split off)")
+    check(int(ceil["1484"]) == 1, "1484 ceiling 1 (rid 3 two-loop face; D-S3-142 identity)")
     check(int(ceil["1467"]) == 32, "1467 ceiling ratcheted at 32 (epsPlane-measured; census §1 listed 33)")
     check(int(ceil["1530"]) == 1, "1530 ceiling 1")
+    ident = ratchet.get("gtFaceIdentity") or {}
+    check(int(ident["1475"]["nLoops"]) == 1, "gtFaceIdentity 1475 nLoops=1 (CAD no hole)")
+    check(int(ident["1484"]["nLoops"]) == 2, "gtFaceIdentity 1484 nLoops=2 (CAD has hole)")
     check(int(ratchet["phantomPlaneCeiling"]) == 1, "phantom ceiling 1 (today non-zero)")
     check(int(ratchet["sumNFacesCeiling"]) == 77, "sum unique live-region faces 77")
 
@@ -681,6 +834,44 @@ def _self_test() -> int:
         check(any("nFaces=2 > ceiling 1" in f for f in fails_syn), "synthetic STEP split trips ceiling")
         fails_syn_ok, _ = evaluate(parsed, gt_one, match_s, ok_r, smooth_built_planes=2)
         check(fails_syn_ok == [], "synthetic STEP with ceiling 2 PASSES")
+        if parsed:
+            check(all(f.nLoops == 1 for f in parsed), "synthetic squares have one loop each")
+
+    gt_pair = [
+        {"id": 10, "normal": list(z_n), "offset": 0.0, "hasLiveRegion": True},
+        {"id": 11, "normal": list(z_n), "offset": 0.0, "hasLiveRegion": True},
+    ]
+    pair_r = {
+        "authority": RATCHET_NAME,
+        "perPlaneNFacesCeiling": {10: 1, 11: 1},
+        "sumNFacesCeiling": 2,
+        "phantomPlaneCeiling": 0,
+        "gtFaceIdentity": {"10": {"nLoops": 1}, "11": {"nLoops": 2}},
+    }
+    two_id = [
+        PlaneFace(id=100, normal=z_n, offset=0.0, area=100.0, nLoops=1),
+        PlaneFace(id=101, normal=z_n, offset=0.0, area=200.0, nLoops=2),
+    ]
+    fails_id, det_id = evaluate(two_id, gt_pair, match_s, pair_r, smooth_built_planes=2)
+    by_id = {r["id"]: r["nFaces"] for r in det_id["perPlane"]}
+    check(fails_id == [], "co-equation unique nLoops assignment PASSES")
+    check(by_id.get(10) == 1 and by_id.get(11) == 1, "co-equation nFaces are 1 and 1 (never 2/2)")
+    check(det_id["assignment"].get("100") == 10 and det_id["assignment"].get("101") == 11,
+          "1-loop face → GT#10, 2-loop face → GT#11")
+
+    pair_no = {k: v for k, v in pair_r.items() if k != "gtFaceIdentity"}
+    fails_no, _ = evaluate(two_id, gt_pair, match_s, pair_no, smooth_built_planes=2)
+    check(any("gtFaceIdentity" in f or "tied" in f for f in fails_no),
+          "co-equation without identity is a named failure")
+
+    two_same = [
+        PlaneFace(id=100, normal=z_n, offset=0.0, area=100.0, nLoops=1),
+        PlaneFace(id=101, normal=z_n, offset=0.0, area=100.0, nLoops=1),
+    ]
+    pair_tie = dict(pair_r)
+    pair_tie["gtFaceIdentity"] = {"10": {"nLoops": 1}, "11": {"nLoops": 1}}
+    fails_tie, _ = evaluate(two_same, gt_pair, match_s, pair_tie, smooth_built_planes=2)
+    check(any("tied" in f for f in fails_tie), "equal identity scores are a named tie, not a coin flip")
 
     check(ANTI_CONFUSION in format_report(det_split), "report includes anti-confusion sentence")
     return 1 if fails else 0

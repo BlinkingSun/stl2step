@@ -2,12 +2,21 @@
   "id": "plane-census-ratchet",
   "authority": "plane-census-ratchet.json",
   "fixtureId": "handle-pickup",
-  "notes": "D-FL-6. Per-GT-plane nFaces ceilings ratcheted from ab6a7ee Handle pickup TrueForm. Zero-today walls get ceiling 1 (ideal, so first recovery is not a fail). sumNFacesCeiling counts unique STEP faces matching any hasLiveRegion GT equation. phantomPlaneCeiling counts unmatched PLANE faces with bound-polygon area > phantomAreaFloorMM2 (192.6, GT#1505). Orchestrator may lower ceilings; they never rise.",
+  "notes": "D-FL-6 + D-S3-143. Per-GT-plane nFaces ceilings. Each shipped PLANE maps to exactly one GT face (equation, then gtFaceIdentity nearest-match). Orchestrator may lower ceilings; they never rise. 2026-09-02 re-derived from main 7a262c0 Handle pickup TrueForm: co-equation pair 1475/1484 no longer double-counted. Unchanged: 1466/1467/1530/1537 and all other ids, sumNFacesCeiling, phantomPlaneCeiling.",
+  "gtFaceIdentity": {
+    "source": "CAD STEP ADVANCED_FACE #1475/#1484 (sidecar source Handle pickup original.step). Sidecar origin/equation are identical; unique identity is loop count (D-S3-142). 1475 = 1 outer loop (no hole). 1484 = FACE_OUTER_BOUND + FACE_BOUND (the hole). Maps uniquely to OP2 rid 2 (78-edge, 1 loop) and rid 3 (23+8, 2 loops).",
+    "1475": {
+      "nLoops": 1
+    },
+    "1484": {
+      "nLoops": 2
+    }
+  },
   "perPlaneNFacesCeiling": {
     "1466": 1,
     "1467": 32,
-    "1475": 42,
-    "1484": 42,
+    "1475": 28,
+    "1484": 1,
     "1487": 1,
     "1488": 1,
     "1502": 1,
@@ -22,6 +31,10 @@
     "1531": 1,
     "1537": 1,
     "1538": 1
+  },
+  "perPlaneCeilingAttribution": {
+    "1475": "was 42 (equation-keyed, double-counted 1484). Main 7a262c0: 28 one-loop facets = hub 2 exploded (rid 2); lowered 42→28, never widened.",
+    "1484": "was 42 (same equation dump as 1475). Main 7a262c0: 1 two-loop face = rid 3; lowered 42→1."
   },
   "sumNFacesCeiling": 77,
   "sumMode": "uniqueFacesMatchingLiveRegionGtEquations",
