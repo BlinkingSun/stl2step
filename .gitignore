@@ -32,3 +32,6 @@ compile_commands.json
 # Python bytecode
 __pycache__/
 *.pyc
+
+# CTest output (generated at repo root by ctest runs)
+Testing/
