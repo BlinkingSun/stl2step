@@ -179,6 +179,7 @@ BODY11_VOL_MAX = 0.023832
 BODY11_SOLIDS = 2
 BODY11_BUILT_FLOOR = 0  # never pin the stale 127 figure
 BODY11_STALE_127 = 127  # named only so self-test can prove it is NOT a pin
+BODY11_VERIFY = True  # D-S3-7: measure volumeDeltaPct; never --no-verify
 BODY18_FREEEDGES_MAX = 18
 BODY18_STL_NAME = "Body18.stl"
 
@@ -788,8 +789,8 @@ def evaluate_body11(
     vd = float(result.get("volumeDeltaPct", -1))
     built = int(result.get("smoothBuiltCylinders") or 0)
     if vd < 0 and built <= BODY11_BUILT_FLOOR:
-        # Faceted ship is volume-exact; skip the OCCT re-read so the gate
-        # stays inside the 2-minute add. Re-enable when built > 0.
+        # Faceted ship is volume-exact. Live Body11 now converts with
+        # verify=True (D-S3-7) so built>0 always has a measured vd.
         add(
             "volumeDeltaPct",
             True,
@@ -1069,7 +1070,10 @@ def run_live(
         {
             "job_id": "Body11",
             "stl": body11_stl,
-            "verify": False,
+            # D-S3-7: measure volumeDeltaPct (BODY11_VOL_MAX=0.023832).
+            # --no-verify left RESULT vd=-1, then the built>0 branch
+            # demanded a measured value — tests-only defect.
+            "verify": BODY11_VERIFY,
             "do_census": False,
         },
     ]
@@ -1248,6 +1252,8 @@ def _self_test() -> int:
     check("5 no-bound" in NAMED_GAP, "named gap cites 5 no-bound")
     check("6 rounds" in NAMED_GAP, "named gap cites 6 rounds")
     check(BODY11_BUILT_FLOOR == 0, "Body11 built floor is 0 (not 127)")
+    check(BODY11_VERIFY is True, "Body11 converts with verify so volumeDeltaPct is measured")
+    check(BODY11_VOL_MAX == 0.023832, "Body11 vol pin is 0.023832 (not widened)")
     check(BODY11_STALE_127 == 127, "stale 127 constant exists only as a non-pin")
     check(
         FALLBACK_GT_RADII[-1] == 100.0 and FALLBACK_GT_RADII[0] == 0.5,
