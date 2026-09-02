@@ -444,16 +444,20 @@ if(EXISTS "${_nwcyl_script}")
     set_tests_properties(nwcyl_gate_selftest PROPERTIES
         LABELS "gates"
         TIMEOUT 30)
-    if(TARGET stl2step AND EXISTS "${_nwcyl_baseline}")
+    if(TARGET stl2step AND TARGET stl2step_census AND TARGET stl2step_regiondump
+            AND EXISTS "${_nwcyl_baseline}")
         add_test(NAME nwcyl_gate
             COMMAND "${Python3_EXECUTABLE}" "${_nwcyl_script}"
                     --binary "$<TARGET_FILE:stl2step>"
+                    --census "$<TARGET_FILE:stl2step_census>"
+                    --dump "$<TARGET_FILE:stl2step_regiondump>"
                     --baseline "${_nwcyl_baseline}"
                     --jobs 4)
         set_tests_properties(nwcyl_gate PROPERTIES
             LABELS "gates"
             TIMEOUT 600
-            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_nwcyl_baseline}")
+            REQUIRED_FILES
+                "$<TARGET_FILE:stl2step>;$<TARGET_FILE:stl2step_census>;$<TARGET_FILE:stl2step_regiondump>;${_nwcyl_baseline}")
         if(TARGET stl2step_corpus_gen)
             set_tests_properties(nwcyl_gate PROPERTIES DEPENDS corpus_generate)
         endif()

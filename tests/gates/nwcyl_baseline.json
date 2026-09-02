@@ -1,42 +1,48 @@
 {
   "id": "nwcyl-baseline",
   "authority": "nwcyl_baseline.json",
-  "engineRef": "ab6a7ee667d78d95e62022fb474f6191741c3540",
-  "notes": "NW-CYL per-part baselines (D-S3-15). Ratchet up when landing improves nGTMatched or lowers nPhantom \u2014 see nwcyl_gate.py header.",
+  "engineRef": "b3522499ad838d7e19da8c8d5d8f12e1d55aa6eb",
+  "notes": "NW-CYL per-part baselines (D-S3-28 triangle coverage). Ratchet up when landing improves nTriUnderGTMatchedCylinders or lowers nPhantom \u2014 see nwcyl_gate.py header. faces = shipped GT-matched cylinder face count (informational). nGtTotal is mesh-recoverable GT only.",
   "parts": {
     "handle-pickup": {
-      "nGTMatched": 97,
+      "nTriUnderGTMatchedCylinders": 1297,
       "nPhantom": 27,
-      "nGtTotal": 54,
+      "faces": 97,
+      "nGtTotal": 52,
       "gtSource": "diag/handle-pickup/ground-truth.json"
     },
     "handle-lock": {
-      "nGTMatched": 15,
+      "nTriUnderGTMatchedCylinders": 442,
       "nPhantom": 0,
+      "faces": 15,
       "nGtTotal": 15,
       "gtSource": "sidecar.live.cylinder_radii"
     },
     "S02": {
-      "nGTMatched": 12,
+      "nTriUnderGTMatchedCylinders": 120,
       "nPhantom": 0,
+      "faces": 12,
       "nGtTotal": 12,
       "gtSource": "sidecar.recoverable"
     },
     "S04": {
-      "nGTMatched": 0,
+      "nTriUnderGTMatchedCylinders": 0,
       "nPhantom": 31,
+      "faces": 0,
       "nGtTotal": 1,
       "gtSource": "sidecar.recoverable"
     },
     "S05": {
-      "nGTMatched": 2,
+      "nTriUnderGTMatchedCylinders": 54,
       "nPhantom": 0,
+      "faces": 2,
       "nGtTotal": 2,
       "gtSource": "sidecar.recoverable"
     },
     "S11-b": {
-      "nGTMatched": 12,
+      "nTriUnderGTMatchedCylinders": 24,
       "nPhantom": 0,
+      "faces": 12,
       "nGtTotal": 12,
       "gtSource": "sidecar.recoverable"
     }

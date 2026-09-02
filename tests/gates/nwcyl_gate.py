@@ -1,23 +1,31 @@
 #!/usr/bin/env python3
-"""nwcyl_gate — NW-CYL never-worse (D-S3-15).
+"""nwcyl_gate — NW-CYL never-worse (D-S3-15, amended D-S3-28).
 
 Per part with a GT cylinder multiset in its sidecar, assert shipped analytic
 cylinders do not regress vs tests/gates/nwcyl_baseline.json:
 
-  nGTMatched(now) >= baseline.nGTMatched
+  nTriUnderGTMatchedCylinders(now) >= baseline.nTriUnderGTMatchedCylinders
   nPhantom(now) <= baseline.nPhantom
 
+Triangle coverage counts mesh triangles in regiondump cylinder regions whose
+radius matches a GT entry @ 0.3% and that shipped as STEP CYLINDRICAL_SURFACE
+faces (census face radius matches region radius @ 0.3%). Source: regiondump
+per-region ``tris`` (segmentation), linked to shipped faces via
+stl2step_census ``cylinders[]`` radii. Face count is informational only.
+
+Non-recoverable GT (meshRecoverable:false, e.g. HP hex-boss #1533/#1535) is
+excluded from gtTotal / the missing listing but still matches as real GT —
+never a phantom (D-S3-23 / hexnote).
+
 GT matching reuses partial_recovery_gate.py (match_gt_radius @ 0.3 %,
-census_radii / step_census — do not fork rules).
+split_cylinder_radii_all — do not fork rules).
 
 RATChet procedure (landing lane updates baseline when a part improves):
-  1. Run gate; note per-part nGTMatched / nPhantom in the PASS line.
-  2. If nGTMatched rose or nPhantom fell vs baseline, edit nwcyl_baseline.json:
-       - set parts[<id>].nGTMatched = measured nGTMatched
-       - set parts[<id>].nPhantom = measured nPhantom
-       - bump engineRef to the landing commit
-  3. Commit baseline + gate in the same lane; never lower nGTMatched or raise
-     nPhantom in baseline without a measured regression fix elsewhere.
+  1. Run gate; note per-part triangles / faces / phantoms in the PASS line.
+  2. If triangle coverage rose or nPhantom fell vs baseline, edit
+     nwcyl_baseline.json (bump engineRef to the landing commit).
+  3. Commit baseline + gate in the same lane; never lower triangle coverage or
+     raise nPhantom in baseline without a measured regression fix elsewhere.
 
 Usage:
   nwcyl_gate.py --self-test
@@ -30,6 +38,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import subprocess
 import sys
 import tempfile
 from collections import Counter
@@ -84,6 +93,10 @@ def write_json(path: Path, doc: Dict[str, Any]) -> None:
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
+def sibling_bin(binary: Path, name: str) -> Path:
+    return binary.parent / name
+
+
 def load_gt_radii_all(part_id: str, sidecar: Mapping[str, Any]) -> Tuple[List[Any], str]:
     """Raw GT cylinder multiset (floats and/or annotated objects)."""
     if part_id == "handle-pickup" and HP_GT.is_file():
@@ -125,24 +138,125 @@ def load_gt_radii_all(part_id: str, sidecar: Mapping[str, Any]) -> Tuple[List[An
 def discover_gated_parts(corpus: Path) -> List[str]:
     gated: List[str] = []
     for pid in CANDIDATE_PARTS:
-        sc_path = corpus / f"{pid}.expected.json"
-        if not sc_path.is_file():
+        sc_path = corpus / f"{pid}.stl"
+        sc_json = corpus / f"{pid}.expected.json"
+        if not sc_path.is_file() or not sc_json.is_file():
             continue
-        sidecar = load_json(sc_path)
+        sidecar = load_json(sc_json)
         gt_all, _ = load_gt_radii_all(pid, sidecar)
         if gt_all:
             gated.append(pid)
     return gated
 
 
+def radii_near(
+    a: float,
+    b: float,
+    *,
+    match_gt_radius,
+) -> bool:
+    """True when two radii match within the GT gate tolerance (0.3%)."""
+    return match_gt_radius(float(a), [float(b)]) is not None
+
+
+def region_shipped_as_cylinder(
+    region_radius: float,
+    census_face_radii: Sequence[float],
+    *,
+    match_gt_radius,
+) -> bool:
+    return any(
+        radii_near(region_radius, cr, match_gt_radius=match_gt_radius)
+        for cr in census_face_radii
+    )
+
+
+def occt_census_radii(cen: Dict[str, Any]) -> List[float]:
+    out: List[float] = []
+    for row in cen.get("cylinders") or []:
+        if isinstance(row, dict) and "radius" in row:
+            try:
+                out.append(float(row["radius"]))
+            except (TypeError, ValueError):
+                continue
+    if out:
+        return out
+    for r in cen.get("cylinder_radii") or []:
+        try:
+            out.append(float(r))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def run_occt_census(census_bin: Path, step: Path) -> Dict[str, Any]:
+    proc = subprocess.run(
+        [str(census_bin), str(step)], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise GateError(
+            f"stl2step_census failed rc={proc.returncode}: {proc.stderr or proc.stdout}"
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise GateError(f"stl2step_census output is not JSON: {exc}") from exc
+
+
+def collect_cylinder_regions_from_dump(doc: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Flatten regiondump envelope or bare RegionSet into cylinder rows."""
+    rows: List[Dict[str, Any]] = []
+
+    def add_region(reg: Mapping[str, Any]) -> None:
+        if str(reg.get("type") or "") != "cylinder":
+            return
+        tris = reg.get("tris") or []
+        try:
+            radius = float(reg["radius"])
+        except (KeyError, TypeError, ValueError):
+            return
+        rows.append({"radius": radius, "nTri": len(tris), "id": reg.get("id")})
+
+    if isinstance(doc.get("regions"), list):
+        for reg in doc["regions"]:
+            if isinstance(reg, dict):
+                add_region(reg)
+        return rows
+
+    for comp in doc.get("comps") or []:
+        if not isinstance(comp, dict):
+            continue
+        rs = comp.get("regionSet")
+        if not isinstance(rs, dict):
+            continue
+        for reg in rs.get("regions") or []:
+            if isinstance(reg, dict):
+                add_region(reg)
+    return rows
+
+
+def run_regiondump(dump_bin: Path, stl: Path, out_path: Path) -> Dict[str, Any]:
+    proc = subprocess.run(
+        [str(dump_bin), str(stl), "--out", str(out_path)],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not out_path.is_file():
+        raise GateError(
+            f"regiondump failed rc={proc.returncode}: {proc.stderr or proc.stdout}"
+        )
+    return load_json(out_path)
+
+
 def compute_nwcyl(
-    built: Sequence[float],
+    census_face_radii: Sequence[float],
+    cylinder_regions: Sequence[Mapping[str, Any]],
     gt_all: Sequence[float],
     *,
     match_gt_radius,
     extra_match_radii: Sequence[float] = (),
-) -> Tuple[int, int, List[Dict[str, Any]]]:
-    """Return (nGTMatched, nPhantom, per-radius rows).
+) -> Tuple[int, int, int, List[Dict[str, Any]]]:
+    """Return (nTriUnderGTMatched, nPhantom, nGTMatchedFaces, per-radius rows).
 
     gt_all is the mesh-recoverable denominator (gtTotal / missing listing).
     extra_match_radii (non-recoverable GT) still match as real — never phantoms.
@@ -151,30 +265,51 @@ def compute_nwcyl(
     match_keys = list(gt_counts.keys()) + [
         float(x) for x in extra_match_radii if float(x) not in gt_counts
     ]
-    built_match: Counter = Counter()
+
     n_phantom = 0
-    for r in built:
+    built_match_faces: Counter = Counter()
+    for r in census_face_radii:
         g = match_gt_radius(float(r), match_keys)
         if g is None:
             n_phantom += 1
         else:
-            built_match[g] += 1
-    n_matched = sum(built_match.values())
+            built_match_faces[g] += 1
+
+    n_faces_matched = sum(built_match_faces.values())
+    n_tri_matched = 0
+    tri_by_gt: Counter = Counter()
+    for reg in cylinder_regions:
+        try:
+            r_rad = float(reg["radius"])
+            n_tri = int(reg.get("nTri") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        g = match_gt_radius(r_rad, match_keys)
+        if g is None:
+            continue
+        if not region_shipped_as_cylinder(
+            r_rad, census_face_radii, match_gt_radius=match_gt_radius
+        ):
+            continue
+        n_tri_matched += n_tri
+        tri_by_gt[g] += n_tri
+
     per_radius: List[Dict[str, Any]] = []
     for g, mult in sorted(gt_counts.items()):
         per_radius.append(
             {
                 "radius": g,
-                "built": int(built_match.get(g, 0)),
+                "built": int(built_match_faces.get(g, 0)),
+                "triangles": int(tri_by_gt.get(g, 0)),
                 "gtMultiplicity": int(mult),
             }
         )
-    return n_matched, n_phantom, per_radius
+    return n_tri_matched, n_phantom, n_faces_matched, per_radius
 
 
 def format_radius_table(per_radius: Sequence[Mapping[str, Any]]) -> str:
     bits = [
-        f"R={row['radius']} {row['built']}/{row['gtMultiplicity']}"
+        f"R={row['radius']} tri={row['triangles']} face={row['built']}/{row['gtMultiplicity']}"
         for row in per_radius
     ]
     return " ".join(bits)
@@ -195,11 +330,8 @@ def convert_part(
         raise GateError(
             f"{stl.stem}: TrueForm wrote no STEP: {art.result.get('error') or art.result}"
         )
-    census = prg.run_step_census(art.step)
-    built = prg.census_radii(census)
     return {
-        "built": built,
-        "census": census,
+        "step": art.step,
         "result": art.result,
         "exit_code": art.exit_code,
     }
@@ -211,6 +343,8 @@ def measure_part(
     part_id: str,
     corpus: Path,
     binary: Path,
+    census_bin: Path,
+    dump_bin: Path,
     work: Path,
 ) -> Dict[str, Any]:
     stl = corpus / f"{part_id}.stl"
@@ -227,20 +361,27 @@ def measure_part(
     extra = [float(e.get("radius")) for e in nonrec]
     verify = part_id not in ("handle-lock", "Body11")
     conv = convert_part(prg, binary=binary, stl=stl, work=work, verify=verify)
-    n_matched, n_phantom, per_radius = compute_nwcyl(
-        conv["built"],
+    cen = run_occt_census(census_bin, conv["step"])
+    dump_path = work / f"{part_id}.regions.json"
+    dump_doc = run_regiondump(dump_bin, stl, dump_path)
+    census_rs = occt_census_radii(cen)
+    cyl_regions = collect_cylinder_regions_from_dump(dump_doc)
+    n_tri, n_phantom, n_faces, per_radius = compute_nwcyl(
+        census_rs,
+        cyl_regions,
         recoverable,
         match_gt_radius=prg.match_gt_radius,
         extra_match_radii=extra,
     )
     return {
-        "nGTMatched": n_matched,
+        "nTriUnderGTMatchedCylinders": n_tri,
         "nPhantom": n_phantom,
+        "faces": n_faces,
         "nGtTotal": len(recoverable),
         "nNotMeshRecoverable": len(nonrec),
         "gtSource": gt_src,
         "perRadius": per_radius,
-        "nBuilt": len(conv["built"]),
+        "nBuilt": len(census_rs),
     }
 
 
@@ -255,11 +396,24 @@ def load_baseline(path: Path) -> Dict[str, Any]:
     return doc
 
 
+def baseline_tri_floor(row: Mapping[str, Any]) -> int:
+    if "nTriUnderGTMatchedCylinders" in row:
+        return int(row["nTriUnderGTMatchedCylinders"])
+    # Legacy face-count baselines before D-S3-28 amendment.
+    return int(row.get("nGTMatched") or 0)
+
+
 def run_measure(args: argparse.Namespace) -> int:
     prg = _load_prg()
     binary = args.binary.resolve()
     if not binary.is_file():
         raise GateError(f"stl2step binary missing: {binary}")
+    census_bin = args.census.resolve()
+    dump_bin = args.dump.resolve()
+    if not census_bin.is_file():
+        raise GateError(f"stl2step_census missing: {census_bin}")
+    if not dump_bin.is_file():
+        raise GateError(f"stl2step_regiondump missing: {dump_bin}")
     corpus = args.corpus.resolve()
     parts = discover_gated_parts(corpus)
     if not parts:
@@ -269,8 +423,10 @@ def run_measure(args: argparse.Namespace) -> int:
         "authority": BASELINE_NAME,
         "engineRef": args.engine_ref,
         "notes": (
-            "NW-CYL per-part baselines (D-S3-15). Ratchet up when landing improves "
-            "nGTMatched or lowers nPhantom — see nwcyl_gate.py header."
+            "NW-CYL per-part baselines (D-S3-28 triangle coverage). Ratchet up when "
+            "landing improves nTriUnderGTMatchedCylinders or lowers nPhantom — see "
+            "nwcyl_gate.py header. faces = shipped GT-matched cylinder face count "
+            "(informational). nGtTotal is mesh-recoverable GT only."
         ),
         "parts": {},
     }
@@ -278,17 +434,24 @@ def run_measure(args: argparse.Namespace) -> int:
         work = Path(td)
         for pid in parts:
             row = measure_part(
-                prg, part_id=pid, corpus=corpus, binary=binary, work=work
+                prg,
+                part_id=pid,
+                corpus=corpus,
+                binary=binary,
+                census_bin=census_bin,
+                dump_bin=dump_bin,
+                work=work / pid,
             )
             doc["parts"][pid] = {
-                "nGTMatched": row["nGTMatched"],
+                "nTriUnderGTMatchedCylinders": row["nTriUnderGTMatchedCylinders"],
                 "nPhantom": row["nPhantom"],
+                "faces": row["faces"],
                 "nGtTotal": row["nGtTotal"],
                 "gtSource": row["gtSource"],
             }
-            row["_pid"] = pid
             print(
-                f"  {pid}: nGTMatched={row['nGTMatched']} nPhantom={row['nPhantom']} "
+                f"  {pid}: tri={row['nTriUnderGTMatchedCylinders']} "
+                f"face={row['faces']} phantom={row['nPhantom']} "
                 f"gtTotal={row['nGtTotal']}  {format_radius_table(row['perRadius'])}"
             )
             if int(row.get("nNotMeshRecoverable") or 0):
@@ -304,11 +467,16 @@ def run_gate(args: argparse.Namespace) -> int:
     binary = args.binary.resolve()
     if not binary.is_file():
         raise GateError(f"stl2step binary missing: {binary}")
+    census_bin = args.census.resolve()
+    dump_bin = args.dump.resolve()
+    if not census_bin.is_file():
+        raise GateError(f"stl2step_census missing: {census_bin}")
+    if not dump_bin.is_file():
+        raise GateError(f"stl2step_regiondump missing: {dump_bin}")
     baseline = load_baseline(args.baseline.resolve())
     corpus = args.corpus.resolve()
     part_ids = sorted(baseline["parts"].keys())
     failures: List[str] = []
-    lines: List[str] = []
 
     with tempfile.TemporaryDirectory(prefix="nwcyl_gate_") as td:
         work = Path(td)
@@ -322,6 +490,8 @@ def run_gate(args: argparse.Namespace) -> int:
                     part_id=pid,
                     corpus=corpus,
                     binary=binary,
+                    census_bin=census_bin,
+                    dump_bin=dump_bin,
                     work=work / pid,
                 ): pid
                 for pid in part_ids
@@ -333,27 +503,27 @@ def run_gate(args: argparse.Namespace) -> int:
     for pid in part_ids:
         base = baseline["parts"][pid]
         now = measured[pid]
-        b_match = int(base["nGTMatched"])
+        b_tri = baseline_tri_floor(base)
         b_phantom = int(base["nPhantom"])
-        n_match = int(now["nGTMatched"])
+        n_tri = int(now["nTriUnderGTMatchedCylinders"])
         n_phantom = int(now["nPhantom"])
+        n_faces = int(now["faces"])
         gt_total = int(now["nGtTotal"])
-        ok_match = n_match >= b_match
+        ok_tri = n_tri >= b_tri
         ok_phantom = n_phantom <= b_phantom
-        status = "PASS" if ok_match and ok_phantom else "FAIL"
+        status = "PASS" if ok_tri and ok_phantom else "FAIL"
         line = (
-            f"  {pid}: nGTMatched={n_match}/{b_match} nPhantom={n_phantom}/{b_phantom} "
+            f"  {pid}: tri={n_tri}/{b_tri} face={n_faces} phantom={n_phantom}/{b_phantom} "
             f"gtTotal={gt_total} [{status}]"
         )
-        lines.append(line)
         print(line)
         print(f"    radii: {format_radius_table(now['perRadius'])}")
         n_non = int(now.get("nNotMeshRecoverable") or 0)
         if n_non:
             print(f"    GT not mesh-recoverable (n={n_non})")
-        if not ok_match:
+        if not ok_tri:
             failures.append(
-                f"{pid}: nGTMatched {n_match} < baseline {b_match}"
+                f"{pid}: nTriUnderGTMatchedCylinders {n_tri} < baseline {b_tri}"
             )
         if not ok_phantom:
             failures.append(
@@ -384,41 +554,86 @@ def _self_test() -> int:
             print(f"SELFTEST PASS: {msg}")
 
     gt_all = [2.0] * 12 + [5.0, 5.0]
-    built_good = [2.0] * 10 + [7.0, 7.0, 7.0]
-    n_match, n_phantom, per = compute_nwcyl(
-        built_good, gt_all, match_gt_radius=prg.match_gt_radius
+    regions_good = [{"radius": 2.0, "nTri": 80}]
+    census_good = [2.0] * 10 + [7.0, 7.0, 7.0]
+    n_tri, n_phantom, n_faces, per = compute_nwcyl(
+        census_good,
+        regions_good,
+        gt_all,
+        match_gt_radius=prg.match_gt_radius,
     )
-    check(n_match == 10, f"synthetic: nGTMatched=10 (got {n_match})")
+    check(n_tri == 80, f"synthetic: triUnderGT=80 (got {n_tri})")
     check(n_phantom == 3, f"synthetic: nPhantom=3 (got {n_phantom})")
-    check(per[0]["built"] == 10 and per[0]["gtMultiplicity"] == 12, "R=2 built 10/12")
+    check(n_faces == 10, f"synthetic: faces=10 (got {n_faces})")
+    check(per[0]["triangles"] == 80 and per[0]["built"] == 10, "R=2 tri 80 face 10/12")
 
-    # GT-matched decrease must trip RED vs baseline 10/3.
-    baseline_row = {"nGTMatched": 10, "nPhantom": 3}
-    built_regress = [2.0] * 8 + [7.0]
-    n_reg, p_reg, _ = compute_nwcyl(
-        built_regress, gt_all, match_gt_radius=prg.match_gt_radius
+    # Merge two GT-matched faces of the same radius: coverage unchanged, faces down.
+    regions_merged = [{"radius": 2.0, "nTri": 80}]
+    census_merged = [2.0] * 8 + [7.0]
+    tri_m, ph_m, face_m, _ = compute_nwcyl(
+        census_merged,
+        regions_merged,
+        gt_all,
+        match_gt_radius=prg.match_gt_radius,
     )
-    check(n_reg < baseline_row["nGTMatched"], "matched decrease is a regression")
-    check(n_phantom <= baseline_row["nPhantom"], "phantom decrease is allowed")
-
-    built_phantom_down = [2.0] * 10
-    n2, p2, _ = compute_nwcyl(
-        built_phantom_down, gt_all, match_gt_radius=prg.match_gt_radius
-    )
-    check(n2 == 10 and p2 == 0, "phantom drop 3→0 with same matched passes NW-CYL")
+    baseline_row = {"nTriUnderGTMatchedCylinders": 80, "nPhantom": 3, "faces": 10}
+    check(tri_m == 80 and face_m == 8, "merge same-GT faces: tri unchanged, faces down")
     check(
-        n2 >= baseline_row["nGTMatched"] and p2 <= baseline_row["nPhantom"],
+        tri_m >= baseline_row["nTriUnderGTMatchedCylinders"]
+        and ph_m <= baseline_row["nPhantom"],
+        "merge satisfies NW-CYL (coverage unchanged)",
+    )
+
+    # Demote a GT round to facets: region still in dump but no shipped cylinder face.
+    regions_demote = [{"radius": 2.0, "nTri": 80}]
+    census_demote = [7.0]
+    tri_d, ph_d, face_d, _ = compute_nwcyl(
+        census_demote,
+        regions_demote,
+        gt_all,
+        match_gt_radius=prg.match_gt_radius,
+    )
+    check(tri_d == 0, f"demote GT round: triUnderGT=0 (got {tri_d})")
+    check(
+        not (
+            tri_d >= baseline_row["nTriUnderGTMatchedCylinders"]
+            and ph_d <= baseline_row["nPhantom"]
+        ),
+        "demote fails NW-CYL inequality",
+    )
+
+    # Phantom-only improvement.
+    regions_ph = [{"radius": 2.0, "nTri": 80}]
+    census_ph = [2.0] * 10
+    tri_p, ph_p, face_p, _ = compute_nwcyl(
+        census_ph,
+        regions_ph,
+        gt_all,
+        match_gt_radius=prg.match_gt_radius,
+    )
+    check(tri_p == 80 and ph_p == 0, "phantom drop 3→0 with same coverage passes")
+    check(
+        tri_p >= baseline_row["nTriUnderGTMatchedCylinders"]
+        and ph_p <= baseline_row["nPhantom"],
         "phantom-only improvement satisfies NW-CYL",
     )
 
-    built_regress2 = [2.0] * 8 + [7.0]
-    n3, p3, _ = compute_nwcyl(
-        built_regress2, gt_all, match_gt_radius=prg.match_gt_radius
+    # Matched-face decrease without merge (lost GT face, region not shipped).
+    regions_regress = [{"radius": 2.0, "nTri": 50}]
+    census_regress = [2.0] * 8 + [7.0]
+    tri_r, ph_r, _, _ = compute_nwcyl(
+        census_regress,
+        regions_regress,
+        gt_all,
+        match_gt_radius=prg.match_gt_radius,
     )
-    check(n3 == 8, "matched regression 10→8")
+    check(tri_r == 50, "coverage regression 80→50")
     check(
-        not (n3 >= baseline_row["nGTMatched"] and p3 <= baseline_row["nPhantom"]),
-        "matched decrease fails NW-CYL inequality",
+        not (
+            tri_r >= baseline_row["nTriUnderGTMatchedCylinders"]
+            and ph_r <= baseline_row["nPhantom"]
+        ),
+        "coverage decrease fails NW-CYL inequality",
     )
 
     sc = load_json(CORPUS / "handle-lock.expected.json")
@@ -435,8 +650,9 @@ def _self_test() -> int:
     check("ground-truth" in src_hp, "HP multiplicity from diag ground-truth")
 
     extra = [float(e["radius"]) for e in non_hp]
-    n_hex, p_hex, per_hex = compute_nwcyl(
+    n_hex, p_hex, face_hex, per_hex = compute_nwcyl(
         [3.0] * 10 + [11.544154],
+        [],
         rec_hp,
         match_gt_radius=prg.match_gt_radius,
         extra_match_radii=extra,
@@ -446,7 +662,7 @@ def _self_test() -> int:
         not any(abs(float(row["radius"]) - 11.544154) < 1e-6 for row in per_hex),
         "hex radius excluded from missing listing",
     )
-    check(n_hex == 11, "hex face counts as a real GT match")
+    check(face_hex == 11, "hex face counts as a real GT match")
 
     try:
         load_baseline(Path("/tmp/not-nwcyl.json"))
@@ -464,8 +680,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     p.add_argument("--corpus", type=Path, default=CORPUS)
     p.add_argument("--jobs", type=int, default=4)
     p.add_argument(
+        "--census",
+        type=Path,
+        help="stl2step_census witness (default: beside --binary)",
+    )
+    p.add_argument(
+        "--dump",
+        type=Path,
+        help="stl2step_regiondump (default: beside --binary)",
+    )
+    p.add_argument(
         "--engine-ref",
-        default="ab6a7ee667d78d95e62022fb474f6191741c3540",
+        default="b3522499ad838d7e19da8c8d5d8f12e1d55aa6eb",
         help="commit recorded in baseline (measure mode)",
     )
     p.add_argument(
@@ -474,7 +700,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="write baseline JSON from a fresh build (orchestrator only)",
     )
     p.add_argument("--self-test", action="store_true", help="API tests (no engine)")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+    if args.binary is not None:
+        binary = args.binary.resolve()
+        if args.census is None:
+            args.census = sibling_bin(binary, "stl2step_census")
+        if args.dump is None:
+            args.dump = sibling_bin(binary, "stl2step_regiondump")
+    return args
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
