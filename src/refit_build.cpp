@@ -925,6 +925,8 @@ double analyticSnapCap(const MeshView& mv, const Region* A, const Region* B) {
 
 extern thread_local int gTolRewriteFire;
 void stampTolWriter(const TopoDS_Edge& e, const char* site);
+void fireTolRewriteEdge(BRep_Builder& B, const TopoDS_Edge& e, double after, const char* site,
+                        double meshCap = -1.0);
 
 // F4: absorb sagitta in edge/vertex tolerance, but NEVER inflate a shared
 // TShape past the mesh budget (adjudication F5). Beyond that the fit is
@@ -963,9 +965,9 @@ bool ensureFaceValid(TopoDS_Face& f, double cap) {
             if (!c.IsNull()) d = std::max(d, devPnt(c->Value(0.5 * (fp + lp))));
             if (d > cap) return false;
             if (d > BRep_Tool::Tolerance(e)) {
-                B.UpdateEdge(e, std::min(d * 1.001 + Precision::Confusion(), cap));
-                stampTolWriter(e, "other");
-                gTolRewriteFire++;
+                fireTolRewriteEdge(B, e,
+                                   std::min(d * 1.001 + Precision::Confusion(), cap), "other",
+                                   cap);
             }
         }
     } catch (const Standard_Failure&) {
@@ -1416,6 +1418,12 @@ void dumpDiagPlateLine(int rid, const TopoDS_Face& f) {
             }
         }
         std::fprintf(stderr, "\n");
+        try {
+            GProp_GProps sp;
+            BRepGProp::SurfaceProperties(f, sp);
+            std::fprintf(stderr, "DIAG_GPROP_FACE rid=%d area=%.6f\n", rid, sp.Mass());
+        } catch (const Standard_Failure&) {
+        }
     } catch (const Standard_Failure&) {
     }
 }
@@ -1447,6 +1455,18 @@ thread_local bool gHubWireRowB = false;
 thread_local std::unordered_set<int> gChainSewFallbackCi;
 thread_local std::unordered_map<const void*, int> gWirePopCi;
 thread_local std::unordered_map<const void*, const char*> gWirePopSite;
+thread_local int gReconnectFires = 0;
+thread_local int gOriNotDetermined = 0;
+struct WireOriTally {
+    int reversedByRule = 0;
+    int notDetermined = 0;
+    int seedReversed = 0;
+    int flipped = 0;
+    int ci0 = -1;
+    const char* seedOrientedBy = "none";
+    const char* loopLabel = "?";
+};
+thread_local std::vector<WireOriTally> gPlateWireOri;
 
 void setHubWireRowB() { gHubWireRowB = true; }
 const char* hubWireRowLabel() { return gHubWireRowB ? "B" : "A"; }
@@ -2419,9 +2439,649 @@ void bindEdgePcurveOnInternedPlane(const TopoDS_Edge& e, const Region& plnR, con
                                    const char* kind, int ci);
 extern thread_local std::unordered_set<const void*> gSeamTShapes;
 
+struct WireAppendOri {
+    bool havePrev = false;
+    TopoDS_Edge prev;
+    bool seedPreset = false;
+    TopoDS_Edge seedPresetEdge;
+    bool wholeLoopAsBuilt = false;
+    bool useSlotOri = false;
+    std::vector<TopoDS_Edge> slotOri;
+    size_t slotConsume = 0;
+    const char* seedOrientedBy = "none";
+    int reversedByRule = 0;
+    int notDetermined = 0;
+    int seedReversed = 0;
+};
+
+bool sameVtxTShape(const TopoDS_Vertex& a, const TopoDS_Vertex& b) {
+    if (a.IsNull() || b.IsNull()) return false;
+    return diagTShapePtr(a) == diagTShapePtr(b);
+}
+
+// OP2b hypothesis print (D-S3-129): bind/pin after Reversed() local handle?
+// bindAfter=1 only if UpdateEdge/pin ran on the handed (possibly reversed) handle.
+void dumpOp2bBind(const TopoDS_Edge& eHanded, const TopoDS_Edge& eNative, int ci, const char* site,
+                  int reversedThis, int bindAfter, const char* bindKind, const Region* plateR,
+                  const TopoDS_Vertex& contVtx) {
+    if (!diagP2Enabled() || !plateR || plateR->id > 5) return;
+    const TopoDS_Vertex nF = TopExp::FirstVertex(eNative, Standard_False);
+    const TopoDS_Vertex nL = TopExp::LastVertex(eNative, Standard_False);
+    const TopoDS_Vertex oF = TopExp::FirstVertex(eHanded, Standard_True);
+    const TopoDS_Vertex oL = TopExp::LastVertex(eHanded, Standard_True);
+    const int nativeMatch = (sameVtxTShape(contVtx, nF) || sameVtxTShape(contVtx, nL)) ? 1 : 0;
+    const int oriMatch = (sameVtxTShape(contVtx, oF) || sameVtxTShape(contVtx, oL)) ? 1 : 0;
+    int pcAgree = -1;
+    try {
+        const gp_Pln pln(plateR->ax);
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(eHanded, f, l);
+        if (!c3.IsNull() && l - f > Precision::PConfusion() && !oF.IsNull() && !oL.IsNull()) {
+            Standard_Real u0 = 0, v0 = 0, u1 = 0, v1 = 0, uf = 0, vf = 0, ul = 0, vl = 0;
+            ElSLib::Parameters(pln, BRep_Tool::Pnt(oF), u0, v0);
+            ElSLib::Parameters(pln, BRep_Tool::Pnt(oL), u1, v1);
+            ElSLib::Parameters(pln, c3->Value(f), uf, vf);
+            ElSLib::Parameters(pln, c3->Value(l), ul, vl);
+            const double dot = (u1 - u0) * (ul - uf) + (v1 - v0) * (vl - vf);
+            pcAgree = (dot >= 0.0) ? 1 : 0;
+        }
+    } catch (const Standard_Failure&) {
+        pcAgree = -1;
+    }
+    const char* handedOri = (eHanded.Orientation() == TopAbs_REVERSED) ? "R" : "F";
+    std::fprintf(stderr,
+                 "DIAG_OP2B_BIND rid=%d ci=%d site=%s handedOri=%s reversedThis=%d bindAfter=%d "
+                 "bindKind=%s pcAgree=%d nativeFirstT=%p nativeLastT=%p oriFirstT=%p oriLastT=%p "
+                 "contVtxT=%p nativeMatch=%d oriMatch=%d\n",
+                 plateR->id, ci, site ? site : "?", handedOri, reversedThis, bindAfter,
+                 bindKind ? bindKind : "none", pcAgree, diagTShapePtr(nF), diagTShapePtr(nL),
+                 diagTShapePtr(oF), diagTShapePtr(oL), diagTShapePtr(contVtx), nativeMatch,
+                 oriMatch);
+}
+
+int loopStartMeshVert(const Loop& loop, const RegionSet& rs) {
+    if (loop.chainIdx.empty() || loop.reversed.empty()) return -1;
+    const int ci = loop.chainIdx[0];
+    if (ci < 0 || (size_t)ci >= rs.chains.size()) return -1;
+    const BoundaryChain& ch = rs.chains[(size_t)ci];
+    if (ch.meshVerts.empty()) return -1;
+    const bool rev = loop.reversed[0] != 0;
+    if (ch.closedLoop) return ch.meshVerts.front();
+    return rev ? ch.meshVerts.back() : ch.meshVerts.front();
+}
+
+// D-S3-130 (b'): signed area in the plate UV frame (ElSLib on r.ax). No pcurves.
+double loopSignedAreaUV(const Loop& loop, const RegionSet& rs, const MeshView& mv,
+                        const Region& plate) {
+    const gp_Pln pln(plate.ax);
+    std::vector<gp_Pnt2d> uv;
+    uv.reserve(16);
+    for (size_t i = 0; i < loop.chainIdx.size() && i < loop.reversed.size(); i++) {
+        const int ci = loop.chainIdx[i];
+        if (ci < 0 || (size_t)ci >= rs.chains.size()) continue;
+        std::vector<int> vs = walkVerts(rs.chains[(size_t)ci], loop.reversed[i] != 0);
+        for (int lv : vs) {
+            if (lv < 0 || (size_t)lv >= mv.nVtx) continue;
+            const int gv = mv.compVtx[lv];
+            const gp_XYZ p = mv.pts[gv];
+            Standard_Real u = 0, v = 0;
+            ElSLib::Parameters(pln, gp_Pnt(p), u, v);
+            const gp_Pnt2d q(u, v);
+            if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
+            uv.push_back(q);
+        }
+    }
+    if (uv.size() >= 2 && uv.front().Distance(uv.back()) <= Precision::PConfusion()) uv.pop_back();
+    if (uv.size() < 3) return 0.0;
+    double a = 0.0;
+    for (size_t i = 0; i < uv.size(); i++) {
+        const gp_Pnt2d& p0 = uv[i];
+        const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
+        a += p0.X() * p1.Y() - p1.X() * p0.Y();
+    }
+    return 0.5 * a;
+}
+
+double wireSignedAreaUV(const TopoDS_Wire& w, const Region& plate) {
+    if (w.IsNull()) return 0.0;
+    const gp_Pln pln(plate.ax);
+    std::vector<gp_Pnt2d> uv;
+    uv.reserve(16);
+    try {
+        for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
+            const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+            const TopoDS_Vertex v = TopExp::FirstVertex(e, Standard_True);
+            if (v.IsNull()) continue;
+            Standard_Real u = 0, vv = 0;
+            ElSLib::Parameters(pln, BRep_Tool::Pnt(v), u, vv);
+            const gp_Pnt2d q(u, vv);
+            if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
+            uv.push_back(q);
+        }
+    } catch (const Standard_Failure&) {
+        return 0.0;
+    }
+    if (uv.size() >= 2 && uv.front().Distance(uv.back()) <= Precision::PConfusion()) uv.pop_back();
+    if (uv.size() < 3) return 0.0;
+    double a = 0.0;
+    for (size_t i = 0; i < uv.size(); i++) {
+        const gp_Pnt2d& p0 = uv[i];
+        const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
+        a += p0.X() * p1.Y() - p1.X() * p0.Y();
+    }
+    return 0.5 * a;
+}
+
+// Minimum UV edge length along the loop polygon (geometric resolution of its vertices).
+double loopUvMinEdgeLen(const Loop& loop, const RegionSet& rs, const MeshView& mv,
+                        const Region& plate) {
+    const gp_Pln pln(plate.ax);
+    std::vector<gp_Pnt2d> uv;
+    uv.reserve(16);
+    for (size_t i = 0; i < loop.chainIdx.size() && i < loop.reversed.size(); i++) {
+        const int ci = loop.chainIdx[i];
+        if (ci < 0 || (size_t)ci >= rs.chains.size()) continue;
+        std::vector<int> vs = walkVerts(rs.chains[(size_t)ci], loop.reversed[i] != 0);
+        for (int lv : vs) {
+            if (lv < 0 || (size_t)lv >= mv.nVtx) continue;
+            const int gv = mv.compVtx[lv];
+            const gp_XYZ p = mv.pts[gv];
+            Standard_Real u = 0, v = 0;
+            ElSLib::Parameters(pln, gp_Pnt(p), u, v);
+            const gp_Pnt2d q(u, v);
+            if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
+            uv.push_back(q);
+        }
+    }
+    if (uv.size() >= 2 && uv.front().Distance(uv.back()) <= Precision::PConfusion()) uv.pop_back();
+    if (uv.size() < 2) return 0.0;
+    double minE = std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < uv.size(); i++) {
+        const double d = uv[i].Distance(uv[(i + 1) % uv.size()]);
+        if (d < minE) minE = d;
+    }
+    return minE;
+}
+
+void reverseLoopWalk(Loop& loop) {
+    std::reverse(loop.chainIdx.begin(), loop.chainIdx.end());
+    std::reverse(loop.reversed.begin(), loop.reversed.end());
+    for (uint8_t& r : loop.reversed) r = r ? 0 : 1;
+}
+
+size_t chainWireEdgeCount(int ci, const RegionSet& rs, const std::vector<ChainGeom>& geom,
+                          const std::vector<char>& collapsed) {
+    if (ci < 0 || (size_t)ci >= rs.chains.size()) return 0;
+    if ((size_t)ci < collapsed.size() && collapsed[(size_t)ci] && (size_t)ci < geom.size() &&
+        geom[(size_t)ci].collapsed)
+        return geom[(size_t)ci].edges.size();
+    return rs.chains[(size_t)ci].meshEdges.size();
+}
+
+size_t loopWireEdgeCount(const Loop& loop, const RegionSet& rs, const std::vector<ChainGeom>& geom,
+                         const std::vector<char>& collapsed) {
+    size_t n = 0;
+    for (size_t i = 0; i < loop.chainIdx.size(); i++) {
+        int ci = loop.chainIdx[i];
+        n += chainWireEdgeCount(ci, rs, geom, collapsed);
+    }
+    return n;
+}
+
+bool loopPolylineSegmentEdge(const BoundaryChain& ch, bool reversed, size_t segIx,
+                             const MeshView& mv, const std::vector<TopoDS_Edge>& meshE,
+                             const std::vector<char>& edgeOk, TopoDS_Edge& out) {
+    std::vector<int> vs = walkVerts(ch, reversed);
+    if (vs.empty() || ch.meshEdges.empty()) return false;
+    const size_t nSeg = ch.meshEdges.size();
+    if (segIx >= nSeg) return false;
+    const int va = vs[segIx % vs.size()];
+    const int vb = vs[(segIx + 1) % vs.size()];
+    if (!ch.closedLoop && segIx + 1 >= vs.size()) return false;
+    int eid = edgeConnecting(mv, ch, va, vb);
+    if (eid < 0) {
+        const size_t idx = reversed ? (nSeg - 1 - segIx) : segIx;
+        if (idx >= ch.meshEdges.size()) return false;
+        eid = ch.meshEdges[idx];
+    }
+    if (eid < 0 || (size_t)eid >= meshE.size() || !edgeOk[(size_t)eid]) return false;
+    const auto& ev = mv.compEdges[eid];
+    const bool fwd = (ev.first == va);
+    out = fwd ? meshE[(size_t)eid] : TopoDS::Edge(meshE[(size_t)eid].Reversed());
+    return true;
+}
+
+bool loopChainHandedEdge(size_t chainPos, size_t edgeIx, const Loop& loop, const RegionSet& rs,
+                         const MeshView& mv, const std::vector<ChainGeom>& geom,
+                         const std::vector<char>& collapsed, const std::vector<TopoDS_Edge>& meshE,
+                         const std::vector<char>& edgeOk, TopoDS_Edge& out) {
+    if (chainPos >= loop.chainIdx.size()) return false;
+    const int ci = loop.chainIdx[chainPos];
+    const bool rev = loop.reversed[chainPos] != 0;
+    if (ci < 0 || (size_t)ci >= rs.chains.size()) return false;
+    if ((size_t)ci < collapsed.size() && collapsed[(size_t)ci] && (size_t)ci < geom.size() &&
+        geom[(size_t)ci].collapsed && !geom[(size_t)ci].edges.empty()) {
+        const auto& g = geom[(size_t)ci];
+        if (edgeIx >= g.edges.size()) return false;
+        if (!rev)
+            out = g.edges[edgeIx];
+        else
+            out = TopoDS::Edge(g.edges[g.edges.size() - 1 - edgeIx].Reversed());
+        return !out.IsNull();
+    }
+    return loopPolylineSegmentEdge(rs.chains[(size_t)ci], rev, edgeIx, mv, meshE, edgeOk, out);
+}
+
+bool loopWireEdgeAt(size_t wireIx, const Loop& loop, const RegionSet& rs, const MeshView& mv,
+                    const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
+                    const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
+                    TopoDS_Edge& out, int* outCi) {
+    size_t pos = 0;
+    for (size_t chainPos = 0; chainPos < loop.chainIdx.size(); chainPos++) {
+        const int ci = loop.chainIdx[chainPos];
+        const size_t nE = chainWireEdgeCount(ci, rs, geom, collapsed);
+        if (wireIx < pos + nE) {
+            if (outCi) *outCi = ci;
+            return loopChainHandedEdge(chainPos, wireIx - pos, loop, rs, mv, geom, collapsed, meshE,
+                                       edgeOk, out);
+        }
+        pos += nE;
+    }
+    return false;
+}
+
+bool loopWireSuccessorHandedEdge(const Loop& loop, const RegionSet& rs, const MeshView& mv,
+                                 const std::vector<ChainGeom>& geom,
+                                 const std::vector<char>& collapsed,
+                                 const std::vector<TopoDS_Edge>& meshE,
+                                 const std::vector<char>& edgeOk, TopoDS_Edge& out, int* outCi) {
+    return loopWireEdgeAt(1, loop, rs, mv, geom, collapsed, meshE, edgeOk, out, outCi);
+}
+
+bool bothEndsSharedTShape(const TopoDS_Edge& a, const TopoDS_Edge& b) {
+    const TopoDS_Vertex aF = TopExp::FirstVertex(a, Standard_True);
+    const TopoDS_Vertex aL = TopExp::LastVertex(a, Standard_True);
+    const TopoDS_Vertex bF = TopExp::FirstVertex(b, Standard_True);
+    const TopoDS_Vertex bL = TopExp::LastVertex(b, Standard_True);
+    return (sameVtxTShape(aF, bF) && sameVtxTShape(aL, bL)) ||
+           (sameVtxTShape(aF, bL) && sameVtxTShape(aL, bF));
+}
+
+struct LoopWireSlot {
+    size_t wireIx = 0;
+    int ci = -1;
+    TopoDS_Edge edge;
+};
+
+struct LoopConnWalk {
+    bool ok = false;
+    bool notDetermined = false;
+    int failWireIx = -1;
+    std::vector<size_t> order;
+    std::vector<char> forward;
+};
+
+double vtxMinDist3d(const TopoDS_Vertex& a, const TopoDS_Vertex& b) {
+    if (a.IsNull() || b.IsNull()) return 1e300;
+    return BRep_Tool::Pnt(a).Distance(BRep_Tool::Pnt(b));
+}
+
+double edgeEndpointMinDist(const TopoDS_Vertex& vtx, const TopoDS_Edge& e) {
+    const TopoDS_Vertex f = TopExp::FirstVertex(e, Standard_True);
+    const TopoDS_Vertex l = TopExp::LastVertex(e, Standard_True);
+    return std::min(vtxMinDist3d(vtx, f), vtxMinDist3d(vtx, l));
+}
+
+void collectJunctionCandidates(const TopoDS_Vertex& vtx, const std::vector<LoopWireSlot>& slots,
+                               const std::vector<char>& visited, size_t fromIx,
+                               std::vector<std::pair<size_t, double>>& tsHits,
+                               std::vector<std::pair<size_t, double>>& geoNear) {
+    tsHits.clear();
+    geoNear.clear();
+    for (size_t j = 0; j < slots.size(); j++) {
+        if (visited[j] || j == fromIx) continue;
+        const TopoDS_Edge& e = slots[j].edge;
+        const TopoDS_Vertex f = TopExp::FirstVertex(e, Standard_True);
+        const TopoDS_Vertex l = TopExp::LastVertex(e, Standard_True);
+        if (sameVtxTShape(f, vtx) || sameVtxTShape(l, vtx)) {
+            tsHits.push_back({j, 0.0});
+            continue;
+        }
+        const double d = edgeEndpointMinDist(vtx, e);
+        if (d < 1e299) geoNear.push_back({j, d});
+    }
+}
+
+// D-S3-164: walk starts at chainIdx[0] in AS-BUILT orientation and steps from
+// that edge's HEAD (Last vertex). Direction is never derived from a start vertex.
+bool loopConnectivityWalk(const std::vector<LoopWireSlot>& slots, int rid,
+                          const char* loopLabel, LoopConnWalk& out) {
+    out = {};
+    const size_t n = slots.size();
+    if (n == 0) return false;
+    const TopoDS_Edge& seed = slots[0].edge;
+    if (n == 1) {
+        const TopoDS_Vertex sF = TopExp::FirstVertex(seed, Standard_True);
+        const TopoDS_Vertex sL = TopExp::LastVertex(seed, Standard_True);
+        if (sameVtxTShape(sF, sL)) {
+            out.ok = true;
+            out.order = {0};
+            out.forward = {1};
+            return true;
+        }
+        out.notDetermined = true;
+        std::fprintf(stderr,
+                     "DIAG_OP2G_JUNCTION rid=%d loop=%s ci=%d candidates=0 dists=single-open\n",
+                     rid, loopLabel ? loopLabel : "?", slots[0].ci);
+        return false;
+    }
+    if (n == 2 && bothEndsSharedTShape(slots[0].edge, slots[1].edge)) {
+        out.ok = true;
+        out.order = {0, 1};
+        out.forward = {1, 1};
+        return true;
+    }
+    std::vector<char> visited(n, 0);
+    std::vector<size_t> ord;
+    std::vector<char> fwd;
+    visited[0] = 1;
+    ord.push_back(0);
+    fwd.push_back(1);
+    TopoDS_Vertex freeVtx = TopExp::LastVertex(seed, Standard_True);
+    while (ord.size() < n) {
+        std::vector<std::pair<size_t, double>> tsHits, geoNear;
+        collectJunctionCandidates(freeVtx, slots, visited, ord.back(), tsHits, geoNear);
+        if (tsHits.size() != 1) {
+            out.notDetermined = true;
+            out.failWireIx = (int)ord.back();
+            std::fprintf(stderr,
+                         "DIAG_OP2G_JUNCTION rid=%d loop=%s ci=%d candidates=%zu dists=",
+                         rid, loopLabel ? loopLabel : "?", slots[ord.back()].ci, tsHits.size());
+            if (tsHits.empty() && !geoNear.empty()) {
+                for (size_t k = 0; k < geoNear.size(); k++)
+                    std::fprintf(stderr, "%s%.9f", k ? "," : "", geoNear[k].second);
+            } else {
+                for (size_t k = 0; k < tsHits.size(); k++)
+                    std::fprintf(stderr, "%s0", k ? "," : "");
+            }
+            std::fprintf(stderr, "\n");
+            return false;
+        }
+        const size_t nextIx = tsHits[0].first;
+        visited[nextIx] = 1;
+        ord.push_back(nextIx);
+        const TopoDS_Edge& ne = slots[nextIx].edge;
+        const TopoDS_Vertex nf = TopExp::FirstVertex(ne, Standard_True);
+        const bool nextFwd = sameVtxTShape(nf, freeVtx);
+        fwd.push_back(nextFwd ? 1 : 0);
+        TopoDS_Edge neDir = nextFwd ? ne : TopoDS::Edge(ne.Reversed());
+        freeVtx = TopExp::LastVertex(neDir, Standard_True);
+    }
+    out.ok = true;
+    out.order = std::move(ord);
+    out.forward = std::move(fwd);
+    return true;
+}
+
+bool buildLoopWireSlots(const Loop& loop, const RegionSet& rs, const MeshView& mv,
+                        const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
+                        const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
+                        std::vector<LoopWireSlot>& slots) {
+    slots.clear();
+    size_t wireIx = 0;
+    for (size_t chainPos = 0; chainPos < loop.chainIdx.size(); chainPos++) {
+        const int ci = loop.chainIdx[chainPos];
+        const size_t nE = chainWireEdgeCount(ci, rs, geom, collapsed);
+        for (size_t edgeIx = 0; edgeIx < nE; edgeIx++) {
+            LoopWireSlot s;
+            s.wireIx = wireIx++;
+            s.ci = ci;
+            if (!loopChainHandedEdge(chainPos, edgeIx, loop, rs, mv, geom, collapsed, meshE, edgeOk,
+                                     s.edge))
+                return false;
+            slots.push_back(std::move(s));
+        }
+    }
+    return !slots.empty();
+}
+
+TopoDS_Edge directedSlotEdge(const LoopWireSlot& s, char forward) {
+    return forward ? s.edge : TopoDS::Edge(s.edge.Reversed());
+}
+
+bool walkOrderMatchesAppend(const LoopConnWalk& walk) {
+    if (walk.order.size() != walk.forward.size()) return false;
+    for (size_t i = 0; i < walk.order.size(); i++)
+        if (walk.order[i] != i) return false;
+    return true;
+}
+
+bool collectWireEdges(const TopoDS_Wire& w, std::vector<TopoDS_Edge>& edges);
+
+void registerShippedLoopOrder(int rid, const char* loopLabel, const TopoDS_Wire& w,
+                              const LoopConnWalk& walk, const std::vector<LoopWireSlot>& slots) {
+    if (!walk.ok || walk.order.empty()) return;
+    std::vector<TopoDS_Edge> shipped;
+    if (!collectWireEdges(w, shipped)) return;
+    const size_t n = walk.order.size();
+    if (shipped.size() != n) {
+        std::fprintf(stderr,
+                     "REG_OP2G_LOOPORDER rid=%d loop=%s shipped=%zu walk=%zu mismatch=count\n", rid,
+                     loopLabel ? loopLabel : "?", shipped.size(), n);
+        return;
+    }
+    bool same = true;
+    for (size_t i = 0; i < n; i++) {
+        const TopoDS_Edge want = directedSlotEdge(slots[walk.order[i]], walk.forward[i]);
+        const void* a = diagTShapePtr(shipped[i]);
+        const void* b = diagTShapePtr(want);
+        if (a != b) {
+            same = false;
+            break;
+        }
+    }
+    std::fprintf(stderr, "REG_OP2G_LOOPORDER rid=%d loop=%s shippedVsWalk=%s\n", rid,
+                 loopLabel ? loopLabel : "?", same ? "same" : "reordered");
+}
+
+const char* loopRoleLabel(LoopRole role) {
+    switch (role) {
+    case LoopRole::Outer:
+        return "outer";
+    case LoopRole::Inner:
+        return "inner";
+    case LoopRole::CapLow:
+        return "capLow";
+    case LoopRole::CapHigh:
+        return "capHigh";
+    }
+    return "?";
+}
+
+double minEndpointDist3d(const TopoDS_Vertex& a0, const TopoDS_Vertex& a1,
+                          const TopoDS_Vertex& b0, const TopoDS_Vertex& b1) {
+    auto d = [](const TopoDS_Vertex& a, const TopoDS_Vertex& b) -> double {
+        if (a.IsNull() || b.IsNull()) return 1e300;
+        return BRep_Tool::Pnt(a).Distance(BRep_Tool::Pnt(b));
+    };
+    return std::min(std::min(d(a0, b0), d(a0, b1)), std::min(d(a1, b0), d(a1, b1)));
+}
+
+// D-S3-147 / D-S3-159: orient seed so its head (Last) is the single shared junction
+// TShape with the connectivity successor; both/two shared -> area-only (b).
+bool orientSeedBySuccessor(TopoDS_Edge& seed, const TopoDS_Edge& succ, int seedCi, int succCi,
+                           WireAppendOri& st, int rid, const char* loopLabel) {
+    const TopoDS_Vertex sF = TopExp::FirstVertex(seed, Standard_True);
+    const TopoDS_Vertex sL = TopExp::LastVertex(seed, Standard_True);
+    const TopoDS_Vertex nF = TopExp::FirstVertex(succ, Standard_True);
+    const TopoDS_Vertex nL = TopExp::LastVertex(succ, Standard_True);
+    if (bothEndsSharedTShape(seed, succ)) {
+        st.seedOrientedBy = "area-only";
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2E_SEED seedCi=%d succCi=%d shared=both seedOrientedBy=area-only "
+                         "seedTailT=%p seedHeadT=%p succTailT=%p succHeadT=%p\n",
+                         seedCi, succCi, diagTShapePtr(sF), diagTShapePtr(sL), diagTShapePtr(nF),
+                         diagTShapePtr(nL));
+        return true;
+    }
+    const void* juncTs = nullptr;
+    TopoDS_Vertex junc;
+    int nSharedTs = 0;
+    auto noteShare = [&](const TopoDS_Vertex& a, const TopoDS_Vertex& b) {
+        if (!sameVtxTShape(a, b)) return;
+        const void* ts = diagTShapePtr(a);
+        if (!ts) return;
+        if (juncTs && ts != juncTs)
+            nSharedTs = 2;
+        else {
+            juncTs = ts;
+            junc = a;
+            nSharedTs = 1;
+        }
+    };
+    noteShare(sF, nF);
+    noteShare(sF, nL);
+    noteShare(sL, nF);
+    noteShare(sL, nL);
+    if (nSharedTs == 2) {
+        st.seedOrientedBy = "area-only";
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2E_SEED seedCi=%d succCi=%d shared=two seedOrientedBy=area-only "
+                         "seedTailT=%p seedHeadT=%p succTailT=%p succHeadT=%p\n",
+                         seedCi, succCi, diagTShapePtr(sF), diagTShapePtr(sL), diagTShapePtr(nF),
+                         diagTShapePtr(nL));
+        return true;
+    }
+    if (nSharedTs == 0) {
+        const double dist = minEndpointDist3d(sF, sL, nF, nL);
+        std::fprintf(stderr,
+                     "DIAG_OP2G_JUNCTION rid=%d loop=%s ci=%d candidates=0 dists=%.9f\n", rid,
+                     loopLabel ? loopLabel : "?", seedCi, dist);
+        st.notDetermined++;
+        gOriNotDetermined++;
+        st.seedOrientedBy = "notDetermined";
+        return false;
+    }
+    const bool headAtJ = sameVtxTShape(sL, junc);
+    const bool tailAtJ = sameVtxTShape(sF, junc);
+    if (headAtJ && !tailAtJ) {
+        st.seedOrientedBy = "successor";
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2E_SEED seedCi=%d succCi=%d shared=one junctionT=%p "
+                         "seedOrientedBy=successor seedReversed=0\n",
+                         seedCi, succCi, juncTs);
+        return true;
+    }
+    if (tailAtJ && !headAtJ) {
+        seed = TopoDS::Edge(seed.Reversed());
+        st.reversedByRule++;
+        st.seedReversed = 1;
+        st.seedOrientedBy = "successor";
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2E_SEED seedCi=%d succCi=%d shared=one junctionT=%p "
+                         "seedOrientedBy=successor seedReversed=1\n",
+                         seedCi, succCi, juncTs);
+        return true;
+    }
+    st.notDetermined++;
+    gOriNotDetermined++;
+    st.seedOrientedBy = "notDetermined";
+    std::fprintf(stderr,
+                 "DIAG_WIREORI2_NOTDET site=seed-successor seedCi=%d succCi=%d shared=one "
+                 "ambiguous headAt=%d tailAt=%d junctionT=%p\n",
+                 seedCi, succCi, headAtJ ? 1 : 0, tailAtJ ? 1 : 0, juncTs);
+    return false;
+}
+
+// D-S3-117/118/119: one rule at append. Local handle only (N4). Seed = loop start
+
+TopoDS_Vertex loopStartVertex(const Loop& loop, const RegionSet& rs, const MeshView& mv,
+                              const std::vector<TopoDS_Edge>& meshE) {
+    const int startLv = loopStartMeshVert(loop, rs);
+    if (startLv < 0 || loop.chainIdx.empty()) return {};
+    const int ci = loop.chainIdx[0];
+    if (ci < 0 || (size_t)ci >= rs.chains.size()) return {};
+    const BoundaryChain& ch = rs.chains[(size_t)ci];
+    for (int eid : ch.meshEdges) {
+        if (eid < 0 || (size_t)eid >= mv.nEdge || (size_t)eid >= meshE.size()) continue;
+        if (meshE[(size_t)eid].IsNull()) continue;
+        const auto& ev = mv.compEdges[eid];
+        if (ev.first != startLv && ev.second != startLv) continue;
+        const bool fwd = (ev.first == startLv);
+        const TopoDS_Edge me =
+            fwd ? meshE[(size_t)eid] : TopoDS::Edge(meshE[(size_t)eid].Reversed());
+        return TopExp::FirstVertex(me, Standard_True);
+    }
+    return {};
+}
+
+// D-S3-147/117/159: seed preset or as-built fallback; later edges by TShape continuity.
+TopoDS_Edge orientAppendedEdge(const TopoDS_Edge& eIn, WireAppendOri& st, int ci,
+                               const char* site) {
+    TopoDS_Edge e = eIn;
+    if (e.IsNull()) return e;
+    if (st.useSlotOri && st.slotConsume < st.slotOri.size()) {
+        e = st.slotOri[st.slotConsume++];
+        st.havePrev = true;
+        st.prev = e;
+        return e;
+    }
+    if (st.wholeLoopAsBuilt) {
+        st.havePrev = true;
+        st.prev = e;
+        return e;
+    }
+    if (!st.havePrev) {
+        if (st.seedPreset) {
+            e = st.seedPresetEdge;
+            st.seedPreset = false;
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_OP2D_SEED_EDGE ci=%d seedOrientedBy=%s seedReversed=%d\n", ci,
+                             st.seedOrientedBy ? st.seedOrientedBy : "?", st.seedReversed);
+            st.havePrev = true;
+            st.prev = e;
+            return e;
+        }
+        st.notDetermined++;
+        gOriNotDetermined++;
+        st.seedOrientedBy = "notDetermined";
+        std::fprintf(stderr, "DIAG_WIREORI2_NOTDET site=seed-missing ci=%d\n", ci);
+        st.havePrev = true;
+        st.prev = e;
+        return e;
+    }
+    const TopoDS_Vertex prevHead = TopExp::LastVertex(st.prev, Standard_True);
+    const TopoDS_Vertex first = TopExp::FirstVertex(e, Standard_True);
+    const TopoDS_Vertex last = TopExp::LastVertex(e, Standard_True);
+    if (sameVtxTShape(first, prevHead)) {
+        // continuous
+    } else if (sameVtxTShape(last, prevHead)) {
+        e = TopoDS::Edge(e.Reversed());
+        st.reversedByRule++;
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2G_REV ci=%d site=%s tailT=%p headT=%p prevHeadT=%p\n", ci,
+                         site ? site : "continuity", diagTShapePtr(first), diagTShapePtr(last),
+                         diagTShapePtr(prevHead));
+    } else {
+        st.notDetermined++;
+        gOriNotDetermined++;
+        std::fprintf(stderr,
+                     "DIAG_WIREORI2_NOTDET site=continuity ci=%d neither-vertex-matches\n", ci);
+    }
+    st.prev = e;
+    return e;
+}
+
 bool appendPolyline(BRep_Builder& B, TopoDS_Wire& w, const MeshView& mv, const BoundaryChain& ch,
                     bool reversed, const std::vector<TopoDS_Edge>& meshE,
-                    const std::vector<char>& edgeOk, const Region* plateR, int ci) {
+                    const std::vector<char>& edgeOk, const Region* plateR, int ci,
+                    WireAppendOri& ori) {
     std::vector<int> vs = walkVerts(ch, reversed);
     if (vs.size() < 2 && !(ch.closedLoop && vs.size() == 1)) {
         // closed with verts==edges; need >= 2 for a polyline
@@ -2444,30 +3104,47 @@ bool appendPolyline(BRep_Builder& B, TopoDS_Wire& w, const MeshView& mv, const B
         bool fwd = (ev.first == va);
         diagNoteEdge(meshE[(size_t)eid], "appendPolyline");
         noteWirePop(meshE[(size_t)eid], "appendPolyline", ci);
+        bool boundBefore = false;
         if (plateR && plateR->type == SurfType::Plane && isAnalytic(plateR)) {
             const void* ts = diagTShapePtr(meshE[(size_t)eid]);
-            if (!ts || !gSeamTShapes.count(ts))
+            if (!ts || !gSeamTShapes.count(ts)) {
                 bindEdgePcurveOnInternedPlane(meshE[(size_t)eid], *plateR, mv, "poly", ci);
+                boundBefore = true;
+            }
         }
-        B.Add(w, fwd ? meshE[(size_t)eid] : TopoDS::Edge(meshE[(size_t)eid].Reversed()));
+        TopoDS_Edge native = meshE[(size_t)eid];
+        TopoDS_Edge addE = fwd ? native : TopoDS::Edge(native.Reversed());
+        const TopoDS_Vertex contVtx =
+            ori.havePrev ? TopExp::LastVertex(ori.prev, Standard_True) : TopoDS_Vertex();
+        const int revBefore = ori.reversedByRule;
+        addE = orientAppendedEdge(addE, ori, ci, "appendPolyline");
+        dumpOp2bBind(addE, native, ci, "appendPolyline", ori.reversedByRule - revBefore, 0,
+                     boundBefore ? "interned-before" : "none", plateR, contVtx);
+        B.Add(w, addE);
     }
     return true;
 }
 
-bool appendCollapsed(BRep_Builder& B, TopoDS_Wire& w, const ChainGeom& g, bool reversed, int ci) {
+bool appendCollapsed(BRep_Builder& B, TopoDS_Wire& w, const ChainGeom& g, bool reversed, int ci,
+                     WireAppendOri& ori, const Region* plateR) {
     if (g.edges.empty()) return false;
+    auto addOne = [&](const TopoDS_Edge& native, const TopoDS_Edge& handed) {
+        diagNoteEdge(handed, "appendCollapsed");
+        noteWirePop(handed, "appendCollapsed", ci);
+        const TopoDS_Vertex contVtx =
+            ori.havePrev ? TopExp::LastVertex(ori.prev, Standard_True) : TopoDS_Vertex();
+        const int revBefore = ori.reversedByRule;
+        TopoDS_Edge addE = orientAppendedEdge(handed, ori, ci, "appendCollapsed");
+        dumpOp2bBind(addE, native, ci, "appendCollapsed", ori.reversedByRule - revBefore, 0,
+                     "bindAllVariants-before", plateR, contVtx);
+        B.Add(w, addE);
+    };
     if (!reversed) {
-        for (const auto& e : g.edges) {
-            diagNoteEdge(e, "appendCollapsed");
-            noteWirePop(e, "appendCollapsed", ci);
-            B.Add(w, e);
-        }
+        for (const auto& e : g.edges) addOne(e, e);
     } else {
         for (int i = (int)g.edges.size() - 1; i >= 0; i--) {
-            TopoDS_Edge rev = TopoDS::Edge(g.edges[(size_t)i].Reversed());
-            diagNoteEdge(rev, "appendCollapsed");
-            noteWirePop(rev, "appendCollapsed", ci);
-            B.Add(w, rev);
+            TopoDS_Edge native = g.edges[(size_t)i];
+            addOne(native, TopoDS::Edge(native.Reversed()));
         }
     }
     return true;
@@ -2480,19 +3157,184 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
     BRep_Builder B;
     B.MakeWire(w);
     if (loop.chainIdx.size() != loop.reversed.size()) return false;
-    for (size_t i = 0; i < loop.chainIdx.size(); i++) {
-        int ci = loop.chainIdx[i];
+    Loop walk = loop;
+    int flipped = 0;
+    double area = 0.0;
+    double vtxRes = 0.0;
+    double areaFloor = 0.0;
+    int wanted = 0;
+    if (plateR && plateR->type == SurfType::Plane) {
+        area = loopSignedAreaUV(walk, rs, mv, *plateR);
+        vtxRes = loopUvMinEdgeLen(walk, rs, mv, *plateR);
+        areaFloor = Precision::SquareConfusion();
+        const bool degen = std::fabs(area) <= areaFloor;
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2C_SENSE rid=%d role=%d area=%.6g absArea=%.6g vtxRes=%.6g "
+                         "areaFloor=%.6g degen=%d\n",
+                         plateR->id, (int)walk.role, area, std::fabs(area), vtxRes, areaFloor,
+                         degen ? 1 : 0);
+        if (degen) {
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_OP2B_DEGEN rid=%d role=%d area=%.6g vtxRes=%.6g -- A4 not built\n",
+                             plateR->id, (int)walk.role, area, vtxRes);
+            return false;
+        }
+        const gp_Dir z = plateR->ax.Direction();
+        const gp_Dir outward = plateR->outwardNormal ? z : gp_Dir(z.Reversed());
+        const int signZ = (z.Dot(outward) >= 0.0) ? 1 : -1;
+        // Outer CCW about outward => area*signZ > 0; inner opposite.
+        const bool inner = (walk.role == LoopRole::Inner);
+        wanted = inner ? -signZ : signZ;
+        if ((area > 0.0) != (wanted > 0))
+            flipped = 1; // tentative; re-measured on the finished wire below
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_OP2B_SENSE rid=%d role=%d area=%.6g wanted=%d flipped=%d\n",
+                         plateR->id, (int)walk.role, area, wanted, flipped);
+    }
+    WireAppendOri ori;
+    const int ci0 = walk.chainIdx.empty() ? -1 : walk.chainIdx[0];
+    const int rev0 = walk.chainIdx.empty() ? 0 : (int)walk.reversed[0];
+    const int startLv = loopStartMeshVert(walk, rs);
+    const size_t nWireE = loopWireEdgeCount(walk, rs, geom, collapsed);
+    const char* loopLbl = loopRoleLabel(walk.role);
+    const int rid = plateR ? plateR->id : -1;
+    if (nWireE == 0) return false;
+    std::vector<LoopWireSlot> slots;
+    if (!buildLoopWireSlots(walk, rs, mv, geom, collapsed, meshE, edgeOk, slots)) return false;
+    LoopConnWalk conn;
+    bool useAsBuilt = false;
+    int succCi = -1;
+    int loopNotDet = 0;
+    const char* walkCmp = "same";
+    if (nWireE == 1) {
+        ori.seedOrientedBy = "area-only";
+        ori.seedPresetEdge = slots[0].edge;
+        ori.seedPreset = true;
+    } else {
+        if (!loopConnectivityWalk(slots, rid, loopLbl, conn)) {
+            useAsBuilt = true;
+            loopNotDet = 1;
+            ori.wholeLoopAsBuilt = true;
+            ori.seedOrientedBy = "as-built";
+            gOriNotDetermined++;
+        } else {
+            walkCmp = walkOrderMatchesAppend(conn) ? "same" : "reordered";
+            const size_t succWireIx = conn.order[1];
+            TopoDS_Edge seedE = slots[0].edge;
+            TopoDS_Edge succE = slots[succWireIx].edge;
+            succCi = slots[succWireIx].ci;
+            if (!orientSeedBySuccessor(seedE, succE, ci0, succCi, ori, rid, loopLbl)) {
+                useAsBuilt = true;
+                loopNotDet = 1;
+                ori = {};
+                ori.wholeLoopAsBuilt = true;
+                ori.seedOrientedBy = "as-built";
+            } else {
+                ori.seedPresetEdge = seedE;
+                ori.seedPreset = true;
+                if (conn.ok && conn.order.size() == slots.size() &&
+                    strcmp(ori.seedOrientedBy ? ori.seedOrientedBy : "", "area-only") != 0) {
+                    ori.slotOri.assign(slots.size(), TopoDS_Edge());
+                    ori.slotOri[conn.order[0]] = seedE;
+                    TopoDS_Edge prevE = seedE;
+                    for (size_t k = 1; k < conn.order.size(); k++) {
+                        const size_t ix = conn.order[k];
+                        TopoDS_Edge e = slots[ix].edge;
+                        const TopoDS_Vertex prevHead = TopExp::LastVertex(prevE, Standard_True);
+                        const TopoDS_Vertex first = TopExp::FirstVertex(e, Standard_True);
+                        const TopoDS_Vertex last = TopExp::LastVertex(e, Standard_True);
+                        if (sameVtxTShape(first, prevHead)) {
+                            // already continuous
+                        } else if (sameVtxTShape(last, prevHead)) {
+                            e = TopoDS::Edge(e.Reversed());
+                            ori.reversedByRule++;
+                            if (diagP2Enabled())
+                                std::fprintf(stderr,
+                                             "DIAG_OP2G_REV ci=%d site=walk-pred tailT=%p "
+                                             "headT=%p prevHeadT=%p\n",
+                                             slots[ix].ci, diagTShapePtr(first),
+                                             diagTShapePtr(last), diagTShapePtr(prevHead));
+                        } else {
+                            ori.notDetermined++;
+                            gOriNotDetermined++;
+                            std::fprintf(stderr,
+                                         "DIAG_WIREORI2_NOTDET site=walk-pred ci=%d "
+                                         "neither-vertex-matches\n",
+                                         slots[ix].ci);
+                        }
+                        ori.slotOri[ix] = e;
+                        prevE = e;
+                    }
+                    ori.useSlotOri = true;
+                }
+            }
+        }
+    }
+    if (diagP2Enabled())
+        std::fprintf(stderr,
+                     "DIAG_OP2D_SEED_SETUP rid=%d ci0=%d nWireE=%zu seedOrientedBy=%s "
+                     "seedReversed=%d asBuilt=%d walk=%s\n",
+                     rid, ci0, nWireE, ori.seedOrientedBy ? ori.seedOrientedBy : "?",
+                     ori.seedReversed, useAsBuilt ? 1 : 0, walkCmp);
+    for (size_t i = 0; i < walk.chainIdx.size(); i++) {
+        int ci = walk.chainIdx[i];
         if (ci < 0 || (size_t)ci >= rs.chains.size()) return false;
-        bool rev = loop.reversed[i] != 0;
+        bool rev = walk.reversed[i] != 0;
         bool ok;
         if ((size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
             (size_t)ci < geom.size() && geom[(size_t)ci].collapsed && !geom[(size_t)ci].edges.empty())
-            ok = appendCollapsed(B, w, geom[(size_t)ci], rev, (int)ci);
+            ok = appendCollapsed(B, w, geom[(size_t)ci], rev, (int)ci, ori, plateR);
         else
             ok = appendPolyline(B, w, mv, rs.chains[(size_t)ci], rev, meshE, edgeOk, plateR,
-                                (int)ci);
+                                (int)ci, ori);
         if (!ok) return false;
     }
+    // Role sense after continuity: reverse the closed wire, not the chain walk.
+    // reverseLoopWalk on s09_mixed (analytic|faceted) yielded notDetermined at the first
+    // junction (weVisited=1/4). Wire.Reversed() keeps TShape joins.
+    // D-S3-164 step 3: finished-wire sense by signed area (mesh area is A4 only).
+    if (!useAsBuilt && plateR && plateR->type == SurfType::Plane && wanted != 0) {
+        const double warea = wireSignedAreaUV(w, *plateR);
+        const bool needFlip = (warea > 0.0) != (wanted > 0);
+        flipped = needFlip ? 1 : 0;
+        if (needFlip)
+            w = TopoDS::Wire(w.Reversed());
+        area = warea;
+    } else if (!useAsBuilt && flipped) {
+        w = TopoDS::Wire(w.Reversed());
+    }
+    const char* loopLblDone = loopRoleLabel(walk.role);
+    const int continuityRev = ori.reversedByRule - ori.seedReversed;
+    const int loopNotDetTotal = loopNotDet + ori.notDetermined;
+    std::fprintf(stderr,
+                 "DIAG_OP2G_LOOP rid=%d loop=%s nE=%zu walkOrderFromAppend=%s seedCi=%d "
+                 "succCi(connectivity)=%d seedOrientedBy=%s seedReversed=%d continuityRev=%d "
+                 "flipped=%d notDetermined=%d area=%.6g\n",
+                 rid, loopLblDone, nWireE, walkCmp, ci0, succCi,
+                 ori.seedOrientedBy ? ori.seedOrientedBy : "?", ori.seedReversed, continuityRev,
+                 flipped, loopNotDetTotal, area);
+    if (conn.ok && plateR)
+        registerShippedLoopOrder(rid, loopLblDone, w, conn, slots);
+    if (rid == 2 && walk.role == LoopRole::Outer && diagP2Enabled()) {
+        std::fprintf(stderr,
+                     "DIAG_OP2G_HUB2_OUTER walkOrderFromAppend=%s seedCi=%d seedReversed=%d "
+                     "reversedByRule=%d continuityRev=%d (seed odd-one-out if continuityRev>>seed)\n",
+                     walkCmp, ci0, ori.seedReversed, ori.reversedByRule, continuityRev);
+    }
+    if (diagP2Enabled() && plateR) {
+        std::fprintf(stderr,
+                     "DIAG_OP2D_SEED rid=%d wireIx=%zu ci0=%d rev0=%d startLv=%d "
+                     "seedOrientedBy=%s seedReversed=%d reversedByRule=%d notDetermined=%d "
+                     "flipped=%d area=%.6g\n",
+                     plateR->id, gPlateWireOri.size(), ci0, rev0, startLv,
+                     ori.seedOrientedBy ? ori.seedOrientedBy : "?", ori.seedReversed,
+                     ori.reversedByRule, loopNotDetTotal, flipped, area);
+    }
+    gPlateWireOri.push_back({ori.reversedByRule, loopNotDetTotal, ori.seedReversed, flipped, ci0,
+                             ori.seedOrientedBy ? ori.seedOrientedBy : "none", loopLblDone});
     w.Closed(Standard_True);
     return true;
 }
@@ -4602,6 +5444,7 @@ void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F);
 Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
                                       const Handle(Geom_Surface)& srf, const char* kind);
 thread_local std::unordered_set<const void*> gSeamTShapes;
+thread_local int lastCanonClearPass = -1;
 thread_local int gCompNTri = 0;
 
 int countSeamEdgesOnWire(const TopoDS_Wire& w) {
@@ -5795,6 +6638,20 @@ double bindTolFromDevLegacy(double dev, double cap) {
 void stampTolWriter(const TopoDS_Edge& e, const char* site) {
     const void* ts = diagTShapePtr(e);
     if (ts && site) gLastTolWriter[ts] = site;
+}
+
+void fireTolRewriteEdge(BRep_Builder& B, const TopoDS_Edge& e, double after, const char* site,
+                        double meshCap) {
+    const double before = BRep_Tool::Tolerance(e);
+    if (after <= before + Precision::PConfusion()) return;
+    B.UpdateEdge(e, after);
+    stampTolWriter(e, site);
+    gTolRewriteFire++;
+    if (diagP2Enabled())
+        std::fprintf(stderr,
+                     "DIAG_TOLREWRITE site=%s before=%.9g after=%.9g meshCap=%.9g overCap=%d\n",
+                     site ? site : "?", before, after, meshCap,
+                     (meshCap > 0.0 && after > meshCap + Precision::PConfusion()) ? 1 : 0);
 }
 
 const char* lastTolWriterOf(const TopoDS_Edge& e) {
@@ -7746,10 +8603,9 @@ void edgeExactPlaneAndOther(const TopoDS_Face& f, const TopoDS_Edge& e, double& 
 void dumpDiagPcInvalid(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow, const RegionSet& rs,
                        const MeshView& mv, const std::vector<ChainGeom>& geom,
                        const std::vector<char>& collapsed, const std::vector<TopoDS_Edge>& meshE) {
-    if (f.IsNull()) return;
+    if (f.IsNull() || rid < 0) return;
     static thread_local std::unordered_set<int> dumped;
-    if (dumped.count(rid)) return;
-    dumped.insert(rid);
+    if (!dumped.insert(rid).second) return;
     const double tol = std::max(mv.sewTol, Precision::PConfusion());
 
     auto matchChain = [&](const TopoDS_Edge& e, const gp_Pnt& p0, const gp_Pnt& p1) -> int {
@@ -8305,7 +9161,7 @@ void dumpDiagWireOri2StopCause(int rid, char tryAB, const char* wireLabel, const
 
 void dumpDiagWireOri2One(int rid, char tryAB, const TopoDS_Face& face, const TopoDS_Wire& w,
                          const char* wireLabel, const RegionSet& rs,
-                         const std::vector<ChainGeom>& geom) {
+                         const std::vector<ChainGeom>& geom, const WireOriTally* tally) {
     if (!diagP2Enabled() || w.IsNull() || face.IsNull()) return;
     const std::vector<TopoDS_Edge> elist = wireEdgesIterator2(w);
     const int nE = (int)elist.size();
@@ -8314,6 +9170,11 @@ void dumpDiagWireOri2One(int rid, char tryAB, const TopoDS_Face& face, const Top
     const char* orientReal = "not-determined";
     std::string anaWire = "not-determined";
     std::string anaFace = "not-determined";
+    const int revBy = tally ? tally->reversedByRule : -1;
+    const int notDet = tally ? tally->notDetermined : -1;
+    const int seedRev = tally ? tally->seedReversed : -1;
+    const int flippedLp = tally ? tally->flipped : -1;
+    const char* seedBy = tally && tally->seedOrientedBy ? tally->seedOrientedBy : "none";
     try {
         BRepCheck_Analyzer an(face, Standard_True);
         anaWire = analyzerWireStatusList(an, face, w);
@@ -8347,9 +9208,11 @@ void dumpDiagWireOri2One(int rid, char tryAB, const TopoDS_Face& face, const Top
     }
     std::fprintf(stderr,
                  "DIAG_WIREORI2 rid=%d try=%c wire=%s nE=%d weVisited=%d/%d stopIe=%s "
-                 "closed2dReal=%s orientationReal=%s anaWire=%s anaFace=%s\n",
+                 "closed2dReal=%s orientationReal=%s anaWire=%s anaFace=%s "
+                 "reversedByRule=%d notDetermined=%d seedOrientedBy=%s seedReversed=%d "
+                 "flipped=%d\n",
                  rid, tryAB, wireLabel, nE, weVisited, nE, stopStr, closed2d, orientReal,
-                 anaWire.c_str(), anaFace.c_str());
+                 anaWire.c_str(), anaFace.c_str(), revBy, notDet, seedBy, seedRev, flippedLp);
     dumpDiagWireOri2Edges(rid, tryAB, wireLabel, face, w, rs, geom);
     if (stopIe >= 0) dumpDiagWireOri2StopCause(rid, tryAB, wireLabel, face, w, stopIe);
 }
@@ -8357,20 +9220,23 @@ void dumpDiagWireOri2One(int rid, char tryAB, const TopoDS_Face& face, const Top
 void dumpDiagWireOri2AtKeepTry(int rid, const TopoDS_Face& face, const TopoDS_Wire& ow,
                                const std::vector<TopoDS_Wire>& innerW, const RegionSet& rs,
                                const std::vector<ChainGeom>& geom) {
-    if (!diagP2Enabled() || rid < 0 || rid > 3 || face.IsNull()) return;
-    static thread_local bool printed[4] = {false, false, false, false};
-    if (printed[rid]) return;
-    printed[rid] = true;
-    dumpDiagWireOri2One(rid, 'A', face, ow, "OUT", rs, geom);
+    if (!diagP2Enabled() || rid < 0 || face.IsNull()) return;
+    static thread_local std::unordered_set<int> printed;
+    if (!printed.insert(rid).second) return;
+    auto tallyAt = [](size_t i) -> const WireOriTally* {
+        if (i >= gPlateWireOri.size()) return nullptr;
+        return &gPlateWireOri[i];
+    };
+    dumpDiagWireOri2One(rid, 'A', face, ow, "OUT", rs, geom, tallyAt(0));
     for (size_t ii = 0; ii < innerW.size(); ii++) {
         char lbl[16];
         std::snprintf(lbl, sizeof(lbl), "IN%zu", ii);
-        dumpDiagWireOri2One(rid, 'A', face, innerW[ii], lbl, rs, geom);
+        dumpDiagWireOri2One(rid, 'A', face, innerW[ii], lbl, rs, geom, tallyAt(1 + ii));
     }
     if (rid == 2) {
         try {
             const TopoDS_Wire owB = TopoDS::Wire(ow.Reversed());
-            dumpDiagWireOri2One(rid, 'B', face, owB, "OUT", rs, geom);
+            dumpDiagWireOri2One(rid, 'B', face, owB, "OUT", rs, geom, tallyAt(0));
         } catch (const Standard_Failure&) {
         }
     }
@@ -8380,6 +9246,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                      const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                      const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
                      TopoDS_Face& outF) {
+    gPlateWireOri.clear();
     const Loop* outer = nullptr;
     std::vector<const Loop*> inners;
     for (const Loop& lp : r.loops) {
@@ -8427,8 +9294,9 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
                 dumpDiagAnalyzerBothTries(r.id, outF, ow);
                 dumpDiagPcInvalid(r.id, outF, ow, rs, mv, geom, collapsed, meshE);
-                if (r.id <= 3) dumpDiagWireOri2AtKeepTry(r.id, outF, ow, innerW, rs, geom);
             }
+            if (diagP2Enabled())
+                dumpDiagWireOri2AtKeepTry(r.id, outF, ow, innerW, rs, geom);
             if (faceIsValid(outF) || ensureFaceValid(outF, meshTolCap(mv, &r))) {
                 if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
                     dumpPcurveFrames(r, ow);
@@ -8460,6 +9328,9 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                     ow2.Closed(Standard_True);
                     TopoDS_Face f2;
                     if (makeFaceKeep(gpl, ow2, innerW, r.outwardNormal, f2) && faceIsValid(f2)) {
+                        gReconnectFires++;
+                        std::fprintf(stderr, "DIAG_RECONNECT fire=1 rid=%d nTri=%d\n", r.id,
+                                     (int)mv.nTri);
                         outF = f2;
                         ow = ow2;
                         gReconnectFire++;
@@ -10238,9 +11109,9 @@ void fitAnalyticTolerances(const TopoDS_Shape& shape) {
             }
             if (d > cap) continue;
             if (d > BRep_Tool::Tolerance(e)) {
-                B.UpdateEdge(e, std::min(d * 1.001 + Precision::Confusion(), cap));
-                stampTolWriter(e, "other");
-                gTolRewriteFire++;
+                fireTolRewriteEdge(B, e,
+                                   std::min(d * 1.001 + Precision::Confusion(), cap), "other",
+                                   cap);
             }
         }
     }
@@ -10253,6 +11124,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
     out.clear();
     try {
         gCompNTri = (int)mv.nTri;
+        gReconnectFires = 0;
+        gOriNotDetermined = 0;
+        lastCanonClearPass = -1;
         if (mv.nTri == 0) return false;
         if (verts.size() < mv.nVtx) return false;
         if (!regionSetConsistent(mv, rs, verts)) {
@@ -10412,7 +11286,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     continue;
                 }
                 // analytic | analytic
-                static int lastCanonClearPass = -1;
                 if (recoverPass != lastCanonClearPass) {
                     gRegionSurf.clear();
                     gSurfIdent.clear();
@@ -11437,8 +12310,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                      Precision::Confusion(),
                                  spCap);
                     bb.UpdateEdge(e, fat);
-                    stampTolWriter(e, "other");
-                    gTolRewriteFire++;
+                    fireTolRewriteEdge(bb, e, fat, "sameParamRelax", spCap);
                 }
                 if (any)
                     BRepLib::SameParameter(sh, std::min(sewTol * 10.0, spCap),
@@ -11688,6 +12560,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         dumpShippedInContext(built, builtRid, rs);
         dumpTolBindSummary();
         dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
+        std::fprintf(stderr, "DIAG_RECONNECT_SUM fires=%d nTri=%d notDetermined=%d\n",
+                     gReconnectFires, (int)mv.nTri, gOriNotDetermined);
         out = std::move(built);
         return true;
     } catch (const Standard_Failure&) {
