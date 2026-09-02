@@ -1,0 +1,44 @@
+{
+  "id": "nwcyl-baseline",
+  "authority": "nwcyl_baseline.json",
+  "engineRef": "ab6a7ee667d78d95e62022fb474f6191741c3540",
+  "notes": "NW-CYL per-part baselines (D-S3-15). Ratchet up when landing improves nGTMatched or lowers nPhantom \u2014 see nwcyl_gate.py header.",
+  "parts": {
+    "handle-pickup": {
+      "nGTMatched": 97,
+      "nPhantom": 27,
+      "nGtTotal": 54,
+      "gtSource": "diag/handle-pickup/ground-truth.json"
+    },
+    "handle-lock": {
+      "nGTMatched": 15,
+      "nPhantom": 0,
+      "nGtTotal": 15,
+      "gtSource": "sidecar.live.cylinder_radii"
+    },
+    "S02": {
+      "nGTMatched": 12,
+      "nPhantom": 0,
+      "nGtTotal": 12,
+      "gtSource": "sidecar.recoverable"
+    },
+    "S04": {
+      "nGTMatched": 0,
+      "nPhantom": 31,
+      "nGtTotal": 1,
+      "gtSource": "sidecar.recoverable"
+    },
+    "S05": {
+      "nGTMatched": 2,
+      "nPhantom": 0,
+      "nGtTotal": 2,
+      "gtSource": "sidecar.recoverable"
+    },
+    "S11-b": {
+      "nGTMatched": 12,
+      "nPhantom": 0,
+      "nGtTotal": 12,
+      "gtSource": "sidecar.recoverable"
+    }
+  }
+}

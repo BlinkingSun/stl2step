@@ -435,3 +435,29 @@ if(EXISTS "${_g01_plane}")
 endif()
 unset(_g01_plane)
 unset(_g01_plane_ratchet)
+# --- NW-CYL never-worse (D-S3-15, gates-g01-delta-nwcyl) ---
+set(_nwcyl_script "${CMAKE_CURRENT_SOURCE_DIR}/nwcyl_gate.py")
+set(_nwcyl_baseline "${CMAKE_CURRENT_SOURCE_DIR}/nwcyl_baseline.json")
+if(EXISTS "${_nwcyl_script}")
+    add_test(NAME nwcyl_gate_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_nwcyl_script}" --self-test)
+    set_tests_properties(nwcyl_gate_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step AND EXISTS "${_nwcyl_baseline}")
+        add_test(NAME nwcyl_gate
+            COMMAND "${Python3_EXECUTABLE}" "${_nwcyl_script}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --baseline "${_nwcyl_baseline}"
+                    --jobs 4)
+        set_tests_properties(nwcyl_gate PROPERTIES
+            LABELS "gates"
+            TIMEOUT 600
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_nwcyl_baseline}")
+        if(TARGET stl2step_corpus_gen)
+            set_tests_properties(nwcyl_gate PROPERTIES DEPENDS corpus_generate)
+        endif()
+    endif()
+endif()
+unset(_nwcyl_script)
+unset(_nwcyl_baseline)
