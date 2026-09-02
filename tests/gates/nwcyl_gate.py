@@ -84,29 +84,29 @@ def write_json(path: Path, doc: Dict[str, Any]) -> None:
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
 
 
-def load_gt_radii_all(part_id: str, sidecar: Mapping[str, Any]) -> Tuple[List[float], str]:
-    """GT cylinder multiset from sidecar (or HP diag ground-truth for multiplicity)."""
+def load_gt_radii_all(part_id: str, sidecar: Mapping[str, Any]) -> Tuple[List[Any], str]:
+    """Raw GT cylinder multiset (floats and/or annotated objects)."""
     if part_id == "handle-pickup" and HP_GT.is_file():
         doc = json.loads(HP_GT.read_text(encoding="utf-8"))
         raw_all = doc.get("cylinder_radii_all")
         if isinstance(raw_all, list) and raw_all:
-            return [float(x) for x in raw_all], "diag/handle-pickup/ground-truth.json"
+            return list(raw_all), "diag/handle-pickup/ground-truth.json"
 
     raw = sidecar.get("cylinder_radii_all")
     if isinstance(raw, list) and raw:
-        return [float(x) for x in raw], "sidecar.cylinder_radii_all"
+        return list(raw), "sidecar.cylinder_radii_all"
 
     for row in sidecar.get("live") or []:
         if not isinstance(row, dict):
             continue
         row_all = row.get("cylinder_radii_all")
         if isinstance(row_all, list) and row_all:
-            return [float(x) for x in row_all], "sidecar.live.cylinder_radii_all"
+            return list(row_all), "sidecar.live.cylinder_radii_all"
         row_r = row.get("cylinder_radii")
         if isinstance(row_r, list) and row_r:
-            return [float(x) for x in row_r], "sidecar.live.cylinder_radii"
+            return list(row_r), "sidecar.live.cylinder_radii"
 
-    out: List[float] = []
+    out: List[Any] = []
     for item in sidecar.get("recoverable") or []:
         if not isinstance(item, dict) or item.get("type") != "cylinder":
             continue
@@ -140,14 +140,21 @@ def compute_nwcyl(
     gt_all: Sequence[float],
     *,
     match_gt_radius,
+    extra_match_radii: Sequence[float] = (),
 ) -> Tuple[int, int, List[Dict[str, Any]]]:
-    """Return (nGTMatched, nPhantom, per-radius rows)."""
+    """Return (nGTMatched, nPhantom, per-radius rows).
+
+    gt_all is the mesh-recoverable denominator (gtTotal / missing listing).
+    extra_match_radii (non-recoverable GT) still match as real — never phantoms.
+    """
     gt_counts: Counter = Counter(float(x) for x in gt_all)
-    gt_keys = list(gt_counts.keys())
+    match_keys = list(gt_counts.keys()) + [
+        float(x) for x in extra_match_radii if float(x) not in gt_counts
+    ]
     built_match: Counter = Counter()
     n_phantom = 0
     for r in built:
-        g = match_gt_radius(float(r), gt_keys)
+        g = match_gt_radius(float(r), match_keys)
         if g is None:
             n_phantom += 1
         else:
@@ -213,18 +220,24 @@ def measure_part(
     if not sidecar_path.is_file():
         raise GateError(f"{part_id}: sidecar missing: {sidecar_path}")
     sidecar = load_json(sidecar_path)
-    gt_all, gt_src = load_gt_radii_all(part_id, sidecar)
-    if not gt_all:
+    raw, gt_src = load_gt_radii_all(part_id, sidecar)
+    recoverable, nonrec, all_r = prg.split_cylinder_radii_all(raw)
+    if not all_r and not recoverable:
         raise GateError(f"{part_id}: no GT cylinder radii in sidecar")
+    extra = [float(e.get("radius")) for e in nonrec]
     verify = part_id not in ("handle-lock", "Body11")
     conv = convert_part(prg, binary=binary, stl=stl, work=work, verify=verify)
     n_matched, n_phantom, per_radius = compute_nwcyl(
-        conv["built"], gt_all, match_gt_radius=prg.match_gt_radius
+        conv["built"],
+        recoverable,
+        match_gt_radius=prg.match_gt_radius,
+        extra_match_radii=extra,
     )
     return {
         "nGTMatched": n_matched,
         "nPhantom": n_phantom,
-        "nGtTotal": len(gt_all),
+        "nGtTotal": len(recoverable),
+        "nNotMeshRecoverable": len(nonrec),
         "gtSource": gt_src,
         "perRadius": per_radius,
         "nBuilt": len(conv["built"]),
@@ -278,6 +291,8 @@ def run_measure(args: argparse.Namespace) -> int:
                 f"  {pid}: nGTMatched={row['nGTMatched']} nPhantom={row['nPhantom']} "
                 f"gtTotal={row['nGtTotal']}  {format_radius_table(row['perRadius'])}"
             )
+            if int(row.get("nNotMeshRecoverable") or 0):
+                print(f"    GT not mesh-recoverable (n={row['nNotMeshRecoverable']})")
     out = args.baseline.resolve()
     write_json(out, doc)
     print(f"nwcyl_gate --measure wrote {out} ({len(parts)} parts)")
@@ -333,6 +348,9 @@ def run_gate(args: argparse.Namespace) -> int:
         lines.append(line)
         print(line)
         print(f"    radii: {format_radius_table(now['perRadius'])}")
+        n_non = int(now.get("nNotMeshRecoverable") or 0)
+        if n_non:
+            print(f"    GT not mesh-recoverable (n={n_non})")
         if not ok_match:
             failures.append(
                 f"{pid}: nGTMatched {n_match} < baseline {b_match}"
@@ -410,8 +428,25 @@ def _self_test() -> int:
 
     sc_hp = load_json(CORPUS / "handle-pickup.expected.json")
     gt_hp, src_hp = load_gt_radii_all("handle-pickup", sc_hp)
-    check(len(gt_hp) == 54, f"handle-pickup GT multiset len=54 (got {len(gt_hp)})")
+    rec_hp, non_hp, all_hp = prg.split_cylinder_radii_all(gt_hp)
+    check(len(all_hp) == 54, f"handle-pickup GT census still 54 (got {len(all_hp)})")
+    check(len(rec_hp) == 52, f"handle-pickup recoverable gtTotal=52 (got {len(rec_hp)})")
+    check(len(non_hp) == 2, f"handle-pickup hex note n=2 (got {len(non_hp)})")
     check("ground-truth" in src_hp, "HP multiplicity from diag ground-truth")
+
+    extra = [float(e["radius"]) for e in non_hp]
+    n_hex, p_hex, per_hex = compute_nwcyl(
+        [3.0] * 10 + [11.544154],
+        rec_hp,
+        match_gt_radius=prg.match_gt_radius,
+        extra_match_radii=extra,
+    )
+    check(p_hex == 0, "R=11.544 shipped face is not a phantom")
+    check(
+        not any(abs(float(row["radius"]) - 11.544154) < 1e-6 for row in per_hex),
+        "hex radius excluded from missing listing",
+    )
+    check(n_hex == 11, "hex face counts as a real GT match")
 
     try:
         load_baseline(Path("/tmp/not-nwcyl.json"))

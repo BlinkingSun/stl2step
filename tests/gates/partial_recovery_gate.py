@@ -136,8 +136,23 @@ FALLBACK_GT_RADII: Tuple[float, ...] = (
     100.0,
 )
 
+HEXNOTE_REASON = (
+    "circumscribed cylinder of a hex boss; CAD faces #1533/#1535; "
+    "mesh has 6 flats — see eprime-v2-step1.md §4"
+)
+HEXNOTE_RADIUS = 11.544154
+HEXNOTE_ENTRY: Dict[str, Any] = {
+    "radius": HEXNOTE_RADIUS,
+    "meshRecoverable": False,
+    "reason": HEXNOTE_REASON,
+    "cadFaces": [1533, 1535],
+}
+
 # tests/diag/handle-pickup/ground-truth.json cylinder_radii_all (54, multiplicity).
-FALLBACK_GT_RADII_ALL: Tuple[float, ...] = (
+# Two R=11.544154 entries are CAD circumscribed hex-boss cylinders (D-S3-23);
+# annotated meshRecoverable:false — not deleted. Single source is the JSON;
+# this fallback mirrors it when the file is absent.
+FALLBACK_GT_RADII_ALL: Tuple[Any, ...] = (
     0.5,
     2.0,
     2.55,
@@ -149,8 +164,8 @@ FALLBACK_GT_RADII_ALL: Tuple[float, ...] = (
     6.0,
     9.0,
     10.0,
-    11.544154,
-    11.544154,
+    dict(HEXNOTE_ENTRY),
+    dict(HEXNOTE_ENTRY),
     25.0,
     25.0,
     72.5,
@@ -328,7 +343,7 @@ def load_pickup_gt_radii_all(
     *,
     candidates: Optional[Sequence[Path]] = None,
 ) -> Tuple[List[float], str]:
-    """54-entry cylinder_radii_all multiset for D3F-7 (multiplicity-aware)."""
+    """54-entry cylinder_radii_all multiset (mixed floats / annotated objects)."""
     search = (
         [Path(p) for p in candidates]
         if candidates is not None
@@ -344,7 +359,7 @@ def load_pickup_gt_radii_all(
         raw = doc.get("cylinder_radii_all")
         if not isinstance(raw, list) or not raw:
             continue
-        return [float(x) for x in raw], str(p)
+        return list(raw), str(p)
     return list(FALLBACK_GT_RADII_ALL), "GROUND-TRUTH.md inline fallback (radii_all)"
 
 
@@ -424,6 +439,40 @@ def census_radii(cen: Dict[str, Any]) -> List[float]:
         except (TypeError, ValueError):
             continue
     return out
+
+
+def split_cylinder_radii_all(
+    raw: Sequence[Any],
+) -> Tuple[List[float], List[Dict[str, Any]], List[float]]:
+    """Split cylinder_radii_all into recoverable / non-recoverable / all floats.
+
+    Annotated objects with meshRecoverable:false stay in the JSON (not deleted)
+    but are excluded from the d3f7 denominator and NW-CYL gtTotal / missing
+    listing. Their radii still match as real GT (never phantoms).
+    """
+    recoverable: List[float] = []
+    non_recoverable: List[Dict[str, Any]] = []
+    all_radii: List[float] = []
+    for item in raw:
+        if isinstance(item, dict):
+            try:
+                radius = float(item["radius"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            rec = item.get("meshRecoverable", True)
+            all_radii.append(radius)
+            if rec is False:
+                non_recoverable.append(dict(item))
+            else:
+                recoverable.append(radius)
+        else:
+            try:
+                radius = float(item)
+            except (TypeError, ValueError):
+                continue
+            recoverable.append(radius)
+            all_radii.append(radius)
+    return recoverable, non_recoverable, all_radii
 
 
 def radii_multiset_containment(
@@ -699,10 +748,19 @@ def evaluate_pickup(
         nRadii=len(radii),
     )
 
-    gt_all = (
+    gt_raw = (
         list(gt_radii_all) if gt_radii_all is not None else list(FALLBACK_GT_RADII_ALL)
     )
-    ms_ok, ms_msg, ms_det = radii_multiset_containment(radii, gt_all)
+    recoverable, nonrec, _all_r = split_cylinder_radii_all(gt_raw)
+    if nonrec:
+        add(
+            "gt.notMeshRecoverable",
+            True,
+            f"GT not mesh-recoverable (n={len(nonrec)})",
+            n=len(nonrec),
+            radii=[float(e.get("radius")) for e in nonrec],
+        )
+    ms_ok, ms_msg, ms_det = radii_multiset_containment(radii, recoverable)
     # D3F-7 is a hard anti-inflation gate, never expected-red / never inverted.
     checks.append(
         Check(
@@ -882,8 +940,9 @@ def synthetic_pass_result() -> Dict[str, Any]:
 
 
 def synthetic_pass_census() -> Dict[str, Any]:
-    # First FLOOR_CYLINDERS entries of cylinder_radii_all — within multiplicity.
-    radii = list(FALLBACK_GT_RADII_ALL[:FLOOR_CYLINDERS])
+    # First FLOOR_CYLINDERS recoverable GT radii — within multiplicity.
+    recoverable, _non, _all = split_cylinder_radii_all(FALLBACK_GT_RADII_ALL)
+    radii = list(recoverable[:FLOOR_CYLINDERS])
     return {
         "ok": True,
         "surfaces": {
@@ -1154,7 +1213,7 @@ def run_live(
         n_tor = sum(int(e.get("count") or 0) for e in faceted if e.get("type") == "torus")
         print(
             f"partial_recovery_gate  pickup={pickup}  gt={gt_src}  "
-            f"gtAll={gt_all_src} n={len(gt_radii_all)}  "
+            f"gtAll={gt_all_src} n={len(split_cylinder_radii_all(gt_radii_all)[0])}  "
             f"faceted={faceted_src} (sphere={n_sph} torus={n_tor})  "
             f"strict={is_strict}  jobs={workers} threads/file={per_file}",
             flush=True,
@@ -1247,6 +1306,14 @@ def _self_test() -> int:
         "combined floor is 18+30=48 (charter combined>=100 STRUCK)",
     )
     check(len(FALLBACK_GT_RADII_ALL) == 54, f"GT radii_all multiplicity 54 (got {len(FALLBACK_GT_RADII_ALL)})")
+    fb_rec, fb_non, fb_all = split_cylinder_radii_all(FALLBACK_GT_RADII_ALL)
+    check(len(fb_all) == 54, f"split all-radii still 54 (got {len(fb_all)})")
+    check(len(fb_rec) == 52, f"d3f7 denominator excludes hex (got {len(fb_rec)})")
+    check(len(fb_non) == 2, f"GT not mesh-recoverable n=2 (got {len(fb_non)})")
+    check(
+        all(float(e.get("radius")) == HEXNOTE_RADIUS for e in fb_non),
+        "non-recoverable entries are R=11.544154",
+    )
     check("12 deferred" in NAMED_GAP and "R=92.5" in NAMED_GAP, "named gap cites 12 deferred + R=92.5")
     check("2 over-budget" in NAMED_GAP, "named gap cites 2 over-budget")
     check("5 no-bound" in NAMED_GAP, "named gap cites 5 no-bound")
@@ -1389,6 +1456,32 @@ def _self_test() -> int:
         synthetic_pass_result(), phantom_cen, gt_radii, 0, strict=True
     )
     check("census.radii" in failing_names(ph), "phantom radius fails census.radii")
+
+    file_raw, file_src = load_pickup_gt_radii_all()
+    file_rec, file_non, file_all = split_cylinder_radii_all(file_raw)
+    check(len(file_all) == 54, f"JSON cylinder_radii_all still 54 (got {len(file_all)})")
+    check(len(file_rec) == 52, f"JSON recoverable denominator 52 (got {len(file_rec)})")
+    check(len(file_non) == 2, f"JSON hex note n=2 (got {len(file_non)})")
+    check(
+        all(e.get("meshRecoverable") is False for e in file_non)
+        and all("hex boss" in str(e.get("reason") or "") for e in file_non),
+        "JSON hex entries carry meshRecoverable:false + reason",
+    )
+    check(
+        any(c.name == "gt.notMeshRecoverable" and "n=2" in c.message for c in pass_checks),
+        "synthetic-pass prints GT not mesh-recoverable (n=2)",
+    )
+
+    hex_cen = synthetic_pass_census()
+    hex_cen["cylinder_radii"] = list(hex_cen["cylinder_radii"]) + [HEXNOTE_RADIUS]
+    hex_ch = evaluate_pickup(
+        synthetic_pass_result(), hex_cen, gt_radii, 0, strict=True
+    )
+    check("census.radii" not in failing_names(hex_ch), "R=11.544 face is a real match, not a phantom")
+    check(
+        "d3f7.radiiMultiset" not in failing_names(hex_ch),
+        "R=11.544 is excluded from d3f7 denominator (not over-seg)",
+    )
 
     over_cen = synthetic_pass_census()
     over_cen["cylinder_radii"] = list(over_cen["cylinder_radii"]) + [0.5]

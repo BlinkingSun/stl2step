@@ -76,8 +76,18 @@
     6.0,
     9.0,
     10.0,
-    11.544154,
-    11.544154,
+    {
+      "radius": 11.544154,
+      "meshRecoverable": false,
+      "reason": "circumscribed cylinder of a hex boss; CAD faces #1533/#1535; mesh has 6 flats — see eprime-v2-step1.md §4",
+      "cadFaces": [1533, 1535]
+    },
+    {
+      "radius": 11.544154,
+      "meshRecoverable": false,
+      "reason": "circumscribed cylinder of a hex boss; CAD faces #1533/#1535; mesh has 6 flats — see eprime-v2-step1.md §4",
+      "cadFaces": [1533, 1535]
+    },
     25.0,
     25.0,
     72.5,
@@ -109,7 +119,7 @@
   "triangleCount": 3338,
   "vertices": 1665,
   "edges": 233,
-  "notes": "Census from tests/tools/step_census.py on the original CAD STEP (GROUND-TRUTH.md). Recoverable by TrueForm: 18 planes + 54 cylinders. 9 spheres + 6 tori stay faceted. ORIGINAL STEP stays out of the repo.",
+  "notes": "Census from tests/tools/step_census.py on the original CAD STEP (GROUND-TRUTH.md). Recoverable by TrueForm: 18 planes + 52 mesh-recoverable cylinders. 2 of 54 CAD cylinders (R=11.544154 ×2, faces #1533/#1535) are circumscribed cylinders of a hex boss — mesh has 6 flats, not a cylinder tessellation (D-S3-23 / eprime-v2-step1.md §4); annotated meshRecoverable:false, not deleted. 9 spheres + 6 tori stay faceted. ORIGINAL STEP stays out of the repo.",
   "d3_9_exclusion": {
     "schema": "d3-9-exclusion-v1",
     "description": "D3-9 geometric fillet-detector exclusion set E for Handle pickup (equal-theta is struck). 21 GT faces: 6 tori + 9 spheres + six non-axis rounds. Gate fillet_exclusion_e0 must read this object rather than hard-coding face ids or thresholds.",
