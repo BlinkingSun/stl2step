@@ -19,6 +19,7 @@
 #include <cstring>
 #include <exception>
 #include <unordered_map>
+#include <unordered_set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -94,6 +95,9 @@
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 #include <gp_XYZ.hxx>
+#include <GeomAPI.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomProjLib.hxx>
 
 namespace stl2step {
 namespace refit {
@@ -2237,6 +2241,12 @@ void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f) {
     }
 }
 
+void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F);
+Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                                      const Handle(Geom_Surface)& srf, const char* kind);
+thread_local std::unordered_set<const void*> gSeamTShapes;
+thread_local int gCompNTri = 0;
+
 // BRep_Builder::MakeFace + Add keeps the input wire's TShapes (J2).
 // BRepBuilderAPI_MakeFace(plane/surf, wire) may project/copy edges and is the
 // mixed-analytic free-edge source on live multi-inner plates.
@@ -2253,7 +2263,34 @@ bool makeFaceKeep(const Handle(Geom_Surface)& surf, const TopoDS_Wire& outer,
             B.Add(f, iw);
         }
         setFaceOutward(f, outward);
+        if (gCompNTri < 10000) {
+            TopLoc_Location loc;
+            Handle(Geom_Surface) sF = BRep_Tool::Surface(f, loc);
+            if (!sF.IsNull()) {
+                BRep_Builder Bb;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    TopoDS_Edge eW = TopoDS::Edge(ex.Current());
+                    const void* ts = diagTShapePtr(eW);
+                    if (!ts || !gSeamTShapes.count(ts)) continue;
+                    Standard_Boolean hasPc = Standard_False;
+                    Standard_Real pf = 0, pl = 0;
+                    (void)BRep_Tool::CurveOnSurface(eW, sF, loc, pf, pl, &hasPc);
+                    if (hasPc) continue;
+                    Standard_Real a = 0, b = 0;
+                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, a, b);
+                    if (c3.IsNull() || b - a <= Precision::PConfusion()) continue;
+                    Handle(Geom2d_Curve) c2d = makePCurveOnSurf(c3, a, b, sF, nullptr);
+                    if (c2d.IsNull()) continue;
+                    double tol = Precision::Confusion();
+                    const double existing = BRep_Tool::Tolerance(eW);
+                    if (existing > tol) tol = existing;
+                    Bb.UpdateEdge(eW, c2d, sF, loc, tol);
+                    Bb.Range(eW, sF, loc, a, b);
+                }
+            }
+        }
         outF = f;
+        emitFaceSurfDiag(-1, outF);
         return !outF.IsNull();
     } catch (const Standard_Failure&) {
         return false;
@@ -2430,89 +2467,477 @@ void rebindCirclePCurvesOnWire(TopoDS_Wire& w, const Handle(Geom_Surface)& surf,
     }
 }
 
-void bindCylPCurves(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, const Region& r,
-                    double sewTol) {
-    Handle(Geom_CylindricalSurface) cyl = Handle(Geom_CylindricalSurface)::DownCast(surf);
-    const bool rotated = !cyl.IsNull() &&
-                         cyl->Position().XDirection().Angle(r.ax.XDirection()) > 1e-9;
-    auto toUV = [&](const gp_Pnt& p, double& u, double& v) {
-        if (rotated) {
-            gp_Ax3 ax = cyl->Position();
-            u = azimuthOnAx(ax, p);
-            v = vOnAx(ax, p);
-        } else {
-            u = regionU(r, p);
-            v = regionV(r, p);
+// D3H-1: construct-once per-(Region, variant) surface table. Faces fetch, never construct.
+enum class SurfVar : int {
+    Plane = 0,
+    CylBase = 1,
+    CylRotAx = 2,
+    CylRotU1 = 3,
+    CylRectTrim = 4,
+    CylRotTrim = 5
+};
+
+const char* surfVarName(SurfVar v) {
+    switch (v) {
+    case SurfVar::Plane: return "Plane";
+    case SurfVar::CylBase: return "CylBase";
+    case SurfVar::CylRotAx: return "CylRotAx";
+    case SurfVar::CylRotU1: return "CylRotU1";
+    case SurfVar::CylRectTrim: return "CylRectTrim";
+    case SurfVar::CylRotTrim: return "CylRotTrim";
+    }
+    return "?";
+}
+
+thread_local std::unordered_map<long long, Handle(Geom_Surface)> gRegionSurf;
+thread_local std::unordered_map<const void*, std::pair<int, SurfVar>> gSurfIdent;
+thread_local std::unordered_set<const void*> gMeshTShapes;
+
+long long regionSurfKey(int id, SurfVar v) { return (static_cast<long long>(id) << 8) | static_cast<int>(v); }
+
+void registerRegionSurf(int id, SurfVar v, const Handle(Geom_Surface)& s) {
+    if (s.IsNull()) return;
+    gRegionSurf[regionSurfKey(id, v)] = s;
+    gSurfIdent[static_cast<const void*>(s.get())] = {id, v};
+}
+
+Handle(Geom_Surface) regionSurf(const Region& r, SurfVar v) {
+    const long long k = regionSurfKey(r.id, v);
+    auto it = gRegionSurf.find(k);
+    if (it != gRegionSurf.end()) return it->second;
+    Handle(Geom_Surface) s;
+    try {
+        if (v == SurfVar::Plane) {
+            if (r.type == SurfType::Plane) s = new Geom_Plane(asPlane(r));
+        } else if (r.type == SurfType::Cylinder) {
+            double u0 = r.uMin, u1 = r.uMax;
+            if (u1 < u0) u1 += 2.0 * kPi;
+            const double span = u1 - u0;
+            if (v == SurfVar::CylBase) {
+                s = new Geom_CylindricalSurface(asCyl(r));
+            } else if (v == SurfVar::CylRotAx) {
+                s = cylSurfaceForRegion(r);
+            } else if (v == SurfVar::CylRotU1) {
+                gp_Ax3 ax = r.ax;
+                ax.Rotate(gp_Ax1(ax.Location(), ax.Direction()), u1);
+                s = new Geom_CylindricalSurface(gp_Cylinder(ax, r.radius));
+            } else if (v == SurfVar::CylRectTrim) {
+                Handle(Geom_CylindricalSurface) base =
+                    Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylBase));
+                if (!base.IsNull() && span > Precision::Confusion())
+                    s = new Geom_RectangularTrimmedSurface(base, u0, u1, r.vMin, r.vMax);
+            } else if (v == SurfVar::CylRotTrim) {
+                Handle(Geom_CylindricalSurface) basis;
+                if (!r.outwardNormal && r.uMin >= -1e-10 && u1 <= 0.5 * kPi + 0.02)
+                    basis = Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylRotU1));
+                else
+                    basis = Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylRotAx));
+                if (!basis.IsNull() && span > Precision::Confusion())
+                    s = new Geom_RectangularTrimmedSurface(basis, 0.0, span, r.vMin, r.vMax);
+            }
         }
-    };
-    auto unwrapU = [&](double u1, double u2) {
-        if (!seamStraddleU(r) || rotated) {
-            while (u2 - u1 > kPi) u2 -= 2.0 * kPi;
-            while (u1 - u2 > kPi) u2 += 2.0 * kPi;
-        }
-        return u2;
-    };
-    BRep_Builder B;
-    for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) {
-        TopoDS_Edge eW = ex.Current();
-        if (!edgeUsesLinearCylPCurve(eW)) {
-            addPcurvesOnSurface(surf, eW, false, sewTol);
-            continue;
-        }
-        // 3D ends from the oriented adaptor. Complementary makeArc keeps
-        // e.Reverse() (plate_half_hole volume gate); TopExp::Vertices
-        // (unoriented) then reports both ends as the same slot and the
-        // old bind skipped the cap pcurve (mag=0 → rid=11 st=32).
-        gp_Pnt pa, pb;
-        bool gotEnds = false;
+    } catch (const Standard_Failure&) {
+        s.Nullify();
+    }
+    registerRegionSurf(r.id, v, s);
+    return s;
+}
+
+void variantsForRegion(const Region& r, SurfVar* out, int& n) {
+    n = 0;
+    if (r.type == SurfType::Plane) {
+        out[n++] = SurfVar::Plane;
+        return;
+    }
+    if (r.type != SurfType::Cylinder) return;
+    out[n++] = SurfVar::CylBase;
+    out[n++] = SurfVar::CylRotAx;
+    out[n++] = SurfVar::CylRotU1;
+    if (!r.closed360) {
+        out[n++] = SurfVar::CylRectTrim;
+        out[n++] = SurfVar::CylRotTrim;
+    }
+}
+
+Handle(Geom_Surface) untrimmedBasisOf(const Handle(Geom_Surface)& srf) {
+    if (srf.IsNull()) return {};
+    Handle(Geom_RectangularTrimmedSurface) t = Handle(Geom_RectangularTrimmedSurface)::DownCast(srf);
+    if (!t.IsNull() && !t->BasisSurface().IsNull()) return t->BasisSurface();
+    return srf;
+}
+
+Handle(Geom_CylindricalSurface) basisCylOf(const Handle(Geom_Surface)& srf) {
+    Handle(Geom_CylindricalSurface) c = Handle(Geom_CylindricalSurface)::DownCast(srf);
+    if (!c.IsNull()) return c;
+    return Handle(Geom_CylindricalSurface)::DownCast(untrimmedBasisOf(srf));
+}
+
+Handle(Geom_Plane) basisPlaneOf(const Handle(Geom_Surface)& srf) {
+    Handle(Geom_Plane) pl = Handle(Geom_Plane)::DownCast(srf);
+    if (!pl.IsNull()) return pl;
+    return Handle(Geom_Plane)::DownCast(untrimmedBasisOf(srf));
+}
+
+Handle(Geom_Curve) basisCurveOf(const Handle(Geom_Curve)& c) {
+    Handle(Geom_TrimmedCurve) tr = Handle(Geom_TrimmedCurve)::DownCast(c);
+    if (!tr.IsNull() && !tr->BasisCurve().IsNull()) return tr->BasisCurve();
+    return c;
+}
+
+double pcurveDev(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                 const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d);
+
+Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                                      const Handle(Geom_Surface)& srf, const char* kind) {
+    if (c3.IsNull() || srf.IsNull()) return {};
+    Handle(Geom_Plane) pl = Handle(Geom_Plane)::DownCast(srf);
+    if (!pl.IsNull()) {
+        Handle(Geom_Curve) src = basisCurveOf(c3);
         try {
-            BRepAdaptor_Curve ad(eW);
-            const double t0 = ad.FirstParameter();
-            const double t1 = ad.LastParameter();
-            if (t1 - t0 > Precision::PConfusion()) {
-                pa = projectPntOnCylinder(r, ad.Value(t0));
-                pb = projectPntOnCylinder(r, ad.Value(t1));
-                gotEnds = pa.Distance(pb) > Precision::Confusion();
-            }
+            return GeomAPI::To2d(src, pl->Pln());
         } catch (const Standard_Failure&) {
+            return {};
         }
-        if (!gotEnds) {
+    }
+    Handle(Geom_Curve) src = basisCurveOf(c3);
+    const bool isCirc = (kind && std::strcmp(kind, "circ") == 0) ||
+                        (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Circle));
+    const bool isLin = (kind && std::strcmp(kind, "lin") == 0) ||
+                       (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Line));
+    const bool isElips = (kind && std::strcmp(kind, "elips") == 0) ||
+                         (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Ellipse));
+    Handle(Geom_CylindricalSurface) cyl = basisCylOf(srf);
+    if (cyl.IsNull()) return {};
+    const gp_Ax3 pos = cyl->Position();
+    try {
+        if (isCirc && !isElips) {
+            Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+            if (gc.IsNull()) return {};
+            const gp_Circ circ = gc->Circ();
+            const gp_Dir cx = circ.XAxis().Direction();
+            const double phi = std::atan2(cx.Dot(pos.YDirection()), cx.Dot(pos.XDirection()));
+            const double v0 = gp_Vec(pos.Location(), circ.Location()).Dot(pos.Direction());
+            const double sgn = circ.Axis().Direction().Dot(pos.Direction()) >= 0.0 ? 1.0 : -1.0;
+            return new Geom2d_Line(gp_Pnt2d(phi, v0), gp_Dir2d(sgn, 0.0));
+        }
+        if (isLin) {
+            Handle(Geom_Line) gl = Handle(Geom_Line)::DownCast(src);
+            Handle(Geom2d_Curve) c2dLin;
+            if (!gl.IsNull()) {
+                const gp_Lin lin = gl->Lin();
+                const double zdot = lin.Direction().Dot(pos.Direction());
+                if (std::fabs(std::fabs(zdot) - 1.0) <= 1e-9) {
+                    const gp_Pnt pmid = c3->Value(0.5 * (f + l));
+                    gp_Vec rho(pos.Location(), pmid);
+                    gp_Vec rad = rho - gp_Vec(pos.Direction()) * rho.Dot(pos.Direction());
+                    double u0 = 0.0;
+                    if (rad.Magnitude() > Precision::Confusion())
+                        u0 = std::atan2(rad.Dot(pos.YDirection()), rad.Dot(pos.XDirection()));
+                    gp_Vec rho0(pos.Location(), lin.Location());
+                    const double v0 = rho0.Dot(pos.Direction());
+                    const double sgn = zdot >= 0.0 ? 1.0 : -1.0;
+                    c2dLin = new Geom2d_Line(gp_Pnt2d(u0, v0), gp_Dir2d(0.0, sgn));
+                }
+            }
+            if (!c2dLin.IsNull() && pcurveDev(c3, f, l, srf, c2dLin) <= Precision::Confusion())
+                return c2dLin;
+            return GeomProjLib::Curve2d(c3, f, l, srf);
+        }
+        if (isElips || !src.IsNull()) {
+            return GeomProjLib::Curve2d(c3, f, l, srf);
+        }
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+    return {};
+}
+
+void pcurveDevTN(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                 const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d, double& devT,
+                 double& devN, double* devOut = nullptr, const char** projOut = nullptr,
+                 bool* unprojOut = nullptr) {
+    devT = 0.0;
+    devN = 0.0;
+    double dev = 0.0;
+    const char* proj = "closedform";
+    bool unproj = false;
+    if (c3.IsNull() || srf.IsNull() || c2d.IsNull()) {
+        devT = 1e300;
+        devN = 1e300;
+        dev = 1e300;
+        proj = "iterative";
+        unproj = true;
+        if (devOut) *devOut = dev;
+        if (projOut) *projOut = proj;
+        if (unprojOut) *unprojOut = unproj;
+        return;
+    }
+    const int N = 16;
+    const double df = l - f;
+    if (!(df > Precision::PConfusion())) {
+        if (devOut) *devOut = 0.0;
+        if (projOut) *projOut = proj;
+        if (unprojOut) *unprojOut = false;
+        return;
+    }
+    try {
+        // P* on the BASIS (untrimmed) surface. Evaluating Q on the table
+        // handle S (possibly trimmed) is required; projecting onto a
+        // RectangularTrimmedSurface clamps to the trim and inflates devT.
+        // pproj = Q is forbidden.
+        Handle(Geom_Surface) basis = untrimmedBasisOf(srf);
+        Handle(Geom_Plane) pl = basisPlaneOf(srf);
+        Handle(Geom_CylindricalSurface) cyl = basisCylOf(srf);
+        if (pl.IsNull() && cyl.IsNull()) proj = "iterative";
+        for (int i = 0; i < N; ++i) {
+            const double t = f + df * static_cast<double>(i) / static_cast<double>(N - 1);
+            const gp_Pnt P = c3->Value(t);  // stored C3d; never BasisCurve / mesh
+            const gp_Pnt2d uv = c2d->Value(t);
+            const gp_Pnt Q = srf->Value(uv.X(), uv.Y());
+            gp_Pnt Pstar = P;
+            double n = 0.0;
+            bool got = false;
+            if (!pl.IsNull()) {
+                const gp_Pln g = pl->Pln();
+                n = std::fabs(g.Distance(P));
+                const gp_Vec nn(g.Axis().Direction());
+                const double signedD = gp_Vec(g.Location(), P).Dot(nn);
+                Pstar = P.Translated(nn * (-signedD));
+                got = true;
+            } else if (!cyl.IsNull()) {
+                const gp_Ax3 pos = cyl->Position();
+                const double R = cyl->Radius();
+                gp_Vec rho(pos.Location(), P);
+                const double v = rho.Dot(pos.Direction());
+                gp_Vec rad = rho - gp_Vec(pos.Direction()) * v;
+                const double rmag = rad.Magnitude();
+                n = std::fabs(rmag - R);
+                if (rmag > Precision::Confusion())
+                    Pstar = pos.Location().Translated(gp_Vec(pos.Direction()) * v +
+                                                      rad * (R / rmag));
+                else
+                    Pstar = pos.Location().Translated(gp_Vec(pos.Direction()) * v +
+                                                      gp_Vec(pos.XDirection()) * R);
+                got = true;
+            } else if (!basis.IsNull()) {
+                GeomAPI_ProjectPointOnSurf projector(P, basis);
+                if (projector.IsDone() && projector.NbPoints() >= 1) {
+                    Pstar = projector.NearestPoint();
+                    n = P.Distance(Pstar);
+                    got = true;
+                }
+            }
+            if (!got) {
+                unproj = true;
+                continue;
+            }
+            devN = std::max(devN, n);
+            devT = std::max(devT, Q.Distance(Pstar));
+            dev = std::max(dev, P.Distance(Q));
+        }
+        if (unproj && proj[0] == 'c') proj = "iterative";
+    } catch (const Standard_Failure&) {
+        unproj = true;
+        proj = "iterative";
+    }
+    if (devOut) *devOut = dev;
+    if (projOut) *projOut = proj;
+    if (unprojOut) *unprojOut = unproj;
+}
+
+double pcurveDev(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                 const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d) {
+    double t = 0, n = 0;
+    pcurveDevTN(c3, f, l, srf, c2d, t, n);
+    return std::max(t, n);
+}
+
+double bindTolFromDev(double dev, double cap) {
+    double t = Precision::Confusion();
+    if (std::isfinite(dev) && dev > t) t = dev;
+    if (t > cap) t = cap;
+    return t;
+}
+
+void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F) {
+    if (!diagP2Enabled() || F.IsNull()) return;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) s = BRep_Tool::Surface(F, loc);
+    int rid = ridHint;
+    int fromTable = 0;
+    const char* varName = "unknown";
+    if (!s.IsNull()) {
+        auto it = gSurfIdent.find(static_cast<const void*>(s.get()));
+        if (it != gSurfIdent.end()) {
+            fromTable = 1;
+            rid = it->second.first;
+            varName = surfVarName(it->second.second);
+        }
+    }
+    const bool facePlane = (s && Handle(Geom_Plane)::DownCast(s));
+    int nEdges = 0, nHasPc = 0, nOrphan = 0, nSynth = 0, nI = 0, nII = 0, nIII = 0;
+    for (TopExp_Explorer wx(F, TopAbs_WIRE); wx.More(); wx.Next()) {
+        const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+        for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+            if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+            nEdges++;
+            const TopoDS_Edge e = TopoDS::Edge(it.Value());
             Standard_Real f = 0, l = 0;
-            Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, f, l);
-            if (!c3.IsNull() && l - f > Precision::PConfusion()) {
-                pa = projectPntOnCylinder(r, c3->Value(f));
-                pb = projectPntOnCylinder(r, c3->Value(l));
-                gotEnds = pa.Distance(pb) > Precision::Confusion();
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+            Standard_Boolean stored = Standard_False;
+            Standard_Real pf = 0, pl = 0;
+            if (!s.IsNull()) (void)BRep_Tool::CurveOnSurface(e, s, loc, pf, pl, &stored);
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) synth = BRep_Tool::CurveOnSurface(e, F, a, b);
+            if (!stored && !synth.IsNull()) nSynth++;
+            if (stored) nHasPc++;
+            else if (!c3.IsNull() && (l - f) > Precision::PConfusion()) {
+                nOrphan++;
+                const void* ts = diagTShapePtr(e);
+                if (gSeamTShapes.count(ts)) nI++;
+                else if (facePlane && gMeshTShapes.count(ts)) nII++;
+                else nIII++;
             }
         }
-        if (!gotEnds) {
-            TopoDS_Vertex vtx1, vtx2;
-            TopExp::Vertices(eW, vtx1, vtx2, Standard_True);
-            if (vtx1.IsNull() || vtx2.IsNull() || vtx1.IsSame(vtx2)) continue;
-            pa = projectPntOnCylinder(r, BRep_Tool::Pnt(vtx1));
-            pb = projectPntOnCylinder(r, BRep_Tool::Pnt(vtx2));
-        }
-        double u1, v1, u2, v2;
-        toUV(pa, u1, v1);
-        toUV(pb, u2, v2);
-        u2 = unwrapU(u1, u2);
-        gp_Vec2d duv(u2 - u1, v2 - v1);
-        double mag = duv.Magnitude();
-        if (mag < Precision::PConfusion()) {
-            if (collapseDiagEnabled())
-                std::fprintf(stderr,
-                             "DIAG_PCBIND skip-degen rid=%d uv=(%.4f,%.4f)->(%.4f,%.4f) mag=%.3g "
-                             "rotated=%d\n",
-                             r.id, u1, v1, u2, v2, mag, rotated ? 1 : 0);
+    }
+    std::fprintf(stderr,
+                 "DIAG_FACESURF rid=%d variant=%s fromTable=%d nEdges=%d nHasPc=%d nOrphan=%d "
+                 "nSynth=%d nI=%d nII=%d nIII=%d\n",
+                 rid, varName, fromTable, nEdges, nHasPc, nOrphan, nSynth, nI, nII, nIII);
+}
+
+struct SeamBindCounts {
+    int nWrite = 0;
+    int nGuardHit = 0;
+    int nDoubleWrite = 0;
+};
+
+void bindAllVariants(const TopoDS_Edge& e, const Region& R, const char* kind, const MeshView& mv,
+                     int ci, SeamBindCounts& acc) {
+    Standard_Real f = 0, l = 0;
+    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+    if (c3.IsNull() || l - f <= Precision::PConfusion()) return;
+    if (const void* ts = diagTShapePtr(e)) gSeamTShapes.insert(ts);
+    const TopLoc_Location loc;
+    const double cap = meshTolCap(mv, &R);
+    SurfVar vars[6];
+    int nv = 0;
+    variantsForRegion(R, vars, nv);
+    for (int i = 0; i < nv; ++i) {
+        Handle(Geom_Surface) srf = regionSurf(R, vars[i]);
+        if (srf.IsNull()) continue;
+        Standard_Boolean hasPc = Standard_False;
+        Standard_Real pf = 0, pl = 0;
+        (void)BRep_Tool::CurveOnSurface(e, srf, loc, pf, pl, &hasPc);
+        if (hasPc) {
+            acc.nGuardHit++;
             continue;
         }
-        Handle(Geom2d_Line) ln = new Geom2d_Line(gp_Pnt2d(u1, v1), gp_Dir2d(duv));
-        B.UpdateEdge(eW, ln, surf, TopLoc_Location(), sewTol);
-        B.Range(eW, surf, TopLoc_Location(), 0.0, mag);
-        if (collapseDiagEnabled())
+        Handle(Geom2d_Curve) c2d = makePCurveOnSurf(c3, f, l, srf, kind);
+        if (c2d.IsNull()) continue;
+        double devT = 0, devN = 0, dev = 0;
+        const char* proj = "closedform";
+        bool unproj = false;
+        pcurveDevTN(c3, f, l, srf, c2d, devT, devN, &dev, &proj, &unproj);
+        if (diagP2Enabled() &&
+            (R.type == SurfType::Cylinder || R.type == SurfType::Plane))
             std::fprintf(stderr,
-                         "DIAG_PCBIND rid=%d uv=(%.4f,%.4f)->(%.4f,%.4f) mag=%.4f rotated=%d\n",
-                         r.id, u1, v1, u2, v2, mag, rotated ? 1 : 0);
+                         "DIAG_PCDEV ci=%d rid=%d variant=%s kind=%s dev=%.6g devT=%.6g "
+                         "devN=%.6g proj=%s\n",
+                         ci, R.id, surfVarName(vars[i]),
+                         unproj ? "unproj" : (kind ? kind : "poly"), dev, devT, devN,
+                         proj ? proj : "iterative");
+        double tol = bindTolFromDev(std::max(devT, devN), cap);
+        const double existing = BRep_Tool::Tolerance(e);
+        if (existing > tol) tol = existing;
+        BRep_Builder B;
+        B.UpdateEdge(e, c2d, srf, loc, tol);
+        B.Range(e, srf, loc, f, l);
+        acc.nWrite++;
+    }
+}
+
+// U3: consumer/assertion. Never creates. nSkippedNoCurve = no 3D curve only (D3H-3).
+void bindCylPCurves(TopoDS_Wire& w, const Handle(Geom_Surface)& surf, const Region& r,
+                    double /*sewTol*/) {
+    if (w.IsNull() || surf.IsNull()) return;
+    const TopLoc_Location loc;
+    int nEdgesIter = 0, nEdgesExp = 0;
+    int nBound = 0, nSkippedHasPc = 0, nSkippedNoCurve = 0, nOrphan = 0;
+    const int nCreated = 0;
+    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+        if (it.Value().ShapeType() == TopAbs_EDGE) nEdgesIter++;
+    }
+    for (TopExp_Explorer cex(w, TopAbs_EDGE); cex.More(); cex.Next()) nEdgesExp++;
+    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+        TopoDS_Edge eW = TopoDS::Edge(it.Value());
+        Standard_Boolean hasPc = Standard_False;
+        Standard_Real pf = 0, pl = 0;
+        (void)BRep_Tool::CurveOnSurface(eW, surf, loc, pf, pl, &hasPc);
+        if (hasPc) {
+            nSkippedHasPc++;
+            continue;
+        }
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, f, l);
+        if (c3.IsNull() || l - f <= Precision::PConfusion()) {
+            nSkippedNoCurve++;
+            continue;
+        }
+        nOrphan++;
+    }
+    if (diagP2Enabled()) {
+        const int covered = nBound + nSkippedHasPc + nSkippedNoCurve + nOrphan;
+        const int g7 = (covered == nEdgesIter) ? 1 : 0;
+        std::fprintf(stderr,
+                     "DIAG_CYLG7 rid=%d nEdgesIter=%d nEdgesExp=%d nBound=%d nSkippedHasPc=%d "
+                     "nSkippedNoCurve=%d covered=%d g7=%d nCreated=%d nOrphan=%d\n",
+                     r.id, nEdgesIter, nEdgesExp, nBound, nSkippedHasPc, nSkippedNoCurve, covered,
+                     g7, nCreated, nOrphan);
+    }
+}
+
+// U4: plane-side consumer/assertion (D3H-3/D3H-6). Never creates.
+void bindPlanePCurves(TopoDS_Wire& w, const Handle(Geom_Plane)& thePlane, const Region& r,
+                      double /*tol*/, int& nBound, int& nSkippedHasPc, int& nSkippedNoCurve) {
+    if (w.IsNull() || thePlane.IsNull()) return;
+    const TopLoc_Location loc;
+    int nEdgesIter = 0, nEdgesExp = 0;
+    int wBound = 0, wSkipPc = 0, wSkipNc = 0, wOrphan = 0;
+    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+        if (it.Value().ShapeType() == TopAbs_EDGE) nEdgesIter++;
+    }
+    for (TopExp_Explorer cex(w, TopAbs_EDGE); cex.More(); cex.Next()) nEdgesExp++;
+    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+        TopoDS_Edge eW = TopoDS::Edge(it.Value());
+        Standard_Boolean hasPc = Standard_False;
+        Standard_Real pf = 0, pl = 0;
+        (void)BRep_Tool::CurveOnSurface(eW, thePlane, loc, pf, pl, &hasPc);
+        if (hasPc) {
+            nSkippedHasPc++;
+            wSkipPc++;
+            continue;
+        }
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, f, l);
+        if (c3.IsNull() || l - f <= Precision::PConfusion()) {
+            nSkippedNoCurve++;
+            wSkipNc++;
+            continue;
+        }
+        wOrphan++;
+    }
+    (void)wBound;
+    (void)nBound;
+    if (diagP2Enabled()) {
+        const int covered = wBound + wSkipPc + wSkipNc + wOrphan;
+        const int g7 = (covered == nEdgesIter) ? 1 : 0;
+        std::fprintf(stderr,
+                     "DIAG_G7 rid=%d nEdgesIter=%d nEdgesExp=%d nBound=%d nSkippedHasPc=%d "
+                     "nSkippedNoCurve=%d covered=%d g7=%d nOrphan=%d\n",
+                     r.id, nEdgesIter, nEdgesExp, wBound, wSkipPc, wSkipNc, covered, g7, wOrphan);
     }
 }
 
@@ -2586,7 +3011,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
         return mf.IsDone() == Standard_True;
     };
     try {
-        Handle(Geom_Plane) gpl = new Geom_Plane(asPlane(r));
+        Handle(Geom_Plane) gpl = Handle(Geom_Plane)::DownCast(regionSurf(r, SurfVar::Plane));
         std::vector<TopoDS_Wire> innerW;
         bool innersOk = true;
         for (const Loop* ip : inners) {
@@ -2606,6 +3031,16 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                     iw = TopoDS::Wire(iw.Reversed());
             }
             innerW.push_back(iw);
+        }
+        if (innersOk) {
+            int nBound = 0, nSkippedHasPc = 0, nSkippedNoCurve = 0;
+            bindPlanePCurves(ow, gpl, r, 0.0, nBound, nSkippedHasPc, nSkippedNoCurve);
+            for (auto& iw : innerW)
+                bindPlanePCurves(iw, gpl, r, 0.0, nBound, nSkippedHasPc, nSkippedNoCurve);
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_PLANEPCBIND rid=%d nBound=%d nSkippedHasPc=%d nSkippedNoCurve=%d\n",
+                             r.id, nBound, nSkippedHasPc, nSkippedNoCurve);
         }
         if (innersOk && makeFaceKeep(gpl, ow, innerW, r.outwardNormal, outF)) {
             if (faceIsValid(outF) || ensureFaceValid(outF, meshTolCap(mv, &r)))
@@ -2852,6 +3287,32 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         if (mv.nTri >= 500 && !refreshOuterWire()) return false;
         bindCylPCurves(ow, surf, r, sewTol);
         for (auto& iw : inners) bindCylPCurves(iw, surf, r, sewTol);
+        auto fillMissingPc = [&](TopoDS_Wire& ww) {
+            if (gCompNTri >= 10000) return;
+            if (ww.IsNull() || surf.IsNull()) return;
+            const TopLoc_Location loc;
+            BRep_Builder Bb;
+            for (TopoDS_Iterator it(ww); it.More(); it.Next()) {
+                if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+                TopoDS_Edge eW = TopoDS::Edge(it.Value());
+                Standard_Boolean hasPc = Standard_False;
+                Standard_Real pf = 0, pl = 0;
+                (void)BRep_Tool::CurveOnSurface(eW, surf, loc, pf, pl, &hasPc);
+                if (hasPc) continue;
+                Standard_Real f = 0, l = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, f, l);
+                if (c3.IsNull() || l - f <= Precision::PConfusion()) continue;
+                Handle(Geom2d_Curve) c2d = makePCurveOnSurf(c3, f, l, surf, nullptr);
+                if (c2d.IsNull()) continue;
+                double tol = Precision::Confusion();
+                const double existing = BRep_Tool::Tolerance(eW);
+                if (existing > tol) tol = existing;
+                Bb.UpdateEdge(eW, c2d, surf, loc, tol);
+                Bb.Range(eW, surf, loc, f, l);
+            }
+        };
+        fillMissingPc(ow);
+        for (auto& iw : inners) fillMissingPc(iw);
         auto attempt = [&]() -> bool {
             try {
                 BRepBuilderAPI_MakeFace mf(surf, ow, Standard_True);
@@ -2859,6 +3320,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
                 for (const auto& iw : inners) mf.Add(iw);
                 if (!mf.IsDone()) return false;
                 cand = mf.Face();
+                emitFaceSurfDiag(r.id, cand);
                 return !cand.IsNull();
             } catch (const Standard_Failure&) {
                 return false;
@@ -2908,14 +3370,15 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             // Positive-u quarter holes (rid=20) mirror negative-u (rid=19) via uMax
             // rotation onto the same [0, span] trimmed sheet.
             if (!r.outwardNormal && r.uMin >= -1e-10 && u1 <= 0.5 * kPi + 0.02) {
-                gp_Ax3 ax = r.ax;
-                ax.Rotate(gp_Ax1(ax.Location(), ax.Direction()), u1);
-                surfR = new Geom_CylindricalSurface(gp_Cylinder(ax, r.radius));
+                surfR = Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylRotU1));
             } else {
-                surfR = cylSurfaceForRegion(r);
+                surfR = Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylRotAx));
             }
             Handle(Geom_RectangularTrimmedSurface) trim =
-                new Geom_RectangularTrimmedSurface(surfR, 0.0, span, r.vMin, r.vMax);
+                Handle(Geom_RectangularTrimmedSurface)::DownCast(regionSurf(r, SurfVar::CylRotTrim));
+            (void)surfR;
+            (void)span;
+            if (trim.IsNull()) return false;
             TopoDS_Face cand;
             bool got = makeFaceBound(trim, cand);
             if (!got && (mv.nTri < 500 || refreshOuterWire()))
@@ -2926,7 +3389,8 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
             return false;
         }
     };
-    Handle(Geom_CylindricalSurface) surf0 = new Geom_CylindricalSurface(asCyl(r));
+    Handle(Geom_CylindricalSurface) surf0 =
+        Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylBase));
     auto tryAllSurfs = [&](TopoDS_Wire& wire) -> bool {
         TopoDS_Wire owSaved = ow;
         ow = wire;
@@ -2939,7 +3403,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         try {
             surfTag = "rect-trim";
             Handle(Geom_RectangularTrimmedSurface) trim =
-                new Geom_RectangularTrimmedSurface(surf0, u0, u1, r.vMin, r.vMax);
+                Handle(Geom_RectangularTrimmedSurface)::DownCast(regionSurf(r, SurfVar::CylRectTrim));
             TopoDS_Face cand;
             bool got = makeFaceBound(trim, cand);
             if (!got && (mv.nTri < 500 || refreshOuterWire()))
@@ -2976,7 +3440,8 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         }
         if (!r.closed360 && std::fabs(r.uMin) > 1e-14) {
             surfTag = "rot-ax";
-            Handle(Geom_CylindricalSurface) surf1 = cylSurfaceForRegion(r);
+            Handle(Geom_CylindricalSurface) surf1 =
+                Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylRotAx));
             if (tryPartial(surf1)) {
                 ow = owSaved;
                 return true;
@@ -3102,7 +3567,8 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     int vH = vertexClosestToUOnLoop(mv, r, *capH, rs, 0.0);
     if (vL < 0 || vH < 0 || (size_t)vL >= verts.size() || (size_t)vH >= verts.size()) return false;
 
-    Handle(Geom_CylindricalSurface) surf = new Geom_CylindricalSurface(asCyl(r));
+    Handle(Geom_CylindricalSurface) surf =
+        Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylBase));
     gp_Circ circL = cylinderIsoCircle(r, r.vMin);
     gp_Circ circH = cylinderIsoCircle(r, r.vMax);
     AnalyticCurve acL, acH;
@@ -3376,13 +3842,15 @@ bool tryTwoHalves(const Region& r, const MeshView& mv, const std::vector<TopoDS_
             mw.Add(TopoDS::Edge(arcL.Reversed()));
             if (!mw.IsDone()) return false;
             TopoDS_Wire ow = mw.Wire();
-            Handle(Geom_CylindricalSurface) surf = new Geom_CylindricalSurface(asCyl(r));
+            Handle(Geom_CylindricalSurface) surf =
+                Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylBase));
             bindCylPCurves(ow, surf, r, sewTol);
             BRepBuilderAPI_MakeFace mf(surf, ow, Standard_True);
             if (!mf.IsDone()) return false;
             f = mf.Face();
             setFaceOutward(f, r.outwardNormal);
             addPcurvesOnFace(f, sewTol, false);
+            emitFaceSurfDiag(r.id, f);
             return !f.IsNull();
         } catch (const Standard_Failure&) {
             return false;
@@ -4118,6 +4586,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 std::vector<TopoDS_Face>& out, WarnFn warn) {
     out.clear();
     try {
+        gCompNTri = (int)mv.nTri;
         if (mv.nTri == 0) return false;
         if (verts.size() < mv.nVtx) return false;
         if (!regionSetConsistent(mv, rs, verts)) {
@@ -4254,6 +4723,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     continue;
                 }
                 // analytic | analytic
+                static int lastCanonClearPass = -1;
+                if (recoverPass != lastCanonClearPass) {
+                    gRegionSurf.clear();
+                    gSurfIdent.clear();
+                    gSeamTShapes.clear();
+                    gMeshTShapes.clear();
+                    for (const auto& me : meshE) {
+                        if (!me.IsNull()) gMeshTShapes.insert(diagTShapePtr(me));
+                    }
+                    lastCanonClearPass = recoverPass;
+                }
                 const bool bothCyl =
                     A->type == SurfType::Cylinder && B->type == SurfType::Cylinder;
                 // Banned collapse: keep mesh polyline. No IntAna warning (AC #2)
@@ -4464,6 +4944,62 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     };
                     if (partialCyl(A) || partialCyl(B))
                         e = orientEdgeFromTo(e, verts[(size_t)ia]);
+                }
+                {
+                    const Region* ownerR = nullptr;
+                    const Region* consumerR = nullptr;
+                    if (A->type == SurfType::Plane && B->type == SurfType::Cylinder) {
+                        ownerR = A;
+                        consumerR = B;
+                    } else if (B->type == SurfType::Plane && A->type == SurfType::Cylinder) {
+                        ownerR = B;
+                        consumerR = A;
+                    } else if (A->id <= B->id) {
+                        ownerR = A;
+                        consumerR = B;
+                    } else {
+                        ownerR = B;
+                        consumerR = A;
+                    }
+                    const char* kindStr = "poly";
+                    if (curve.kind == AnalyticCurve::Circ) kindStr = "circ";
+                    else if (curve.kind == AnalyticCurve::Lin) kindStr = "lin";
+                    else if (curve.kind == AnalyticCurve::Elips) kindStr = "elips";
+                    SeamBindCounts acc;
+                    bindAllVariants(e, *ownerR, kindStr, mv, (int)ci, acc);
+                    bindAllVariants(e, *consumerR, kindStr, mv, (int)ci, acc);
+                    bindAllVariants(e, *ownerR, kindStr, mv, (int)ci, acc);
+                    if (diagP2Enabled()) {
+                        std::fprintf(stderr,
+                                     "DIAG_SEAMBIND ci=%d nWrite=%d nGuardHit=%d nDoubleWrite=%d\n",
+                                     (int)ci, acc.nWrite, acc.nGuardHit, acc.nDoubleWrite);
+                        auto surfTypeStr = [](const Region* R) -> const char* {
+                            if (!R) return "facet";
+                            if (R->type == SurfType::Plane) return "plane";
+                            if (R->type == SurfType::Cylinder) return "cyl";
+                            return "facet";
+                        };
+                        Standard_Real f = 0, l = 0;
+                        (void)BRep_Tool::Curve(e, f, l);
+                        const TopLoc_Location loc;
+                        Handle(Geom_Surface) surfO = ownerR->type == SurfType::Plane
+                            ? regionSurf(*ownerR, SurfVar::Plane)
+                            : regionSurf(*ownerR, SurfVar::CylBase);
+                        Handle(Geom_Surface) surfC = consumerR->type == SurfType::Plane
+                            ? regionSurf(*consumerR, SurfVar::Plane)
+                            : regionSurf(*consumerR, SurfVar::CylBase);
+                        Standard_Boolean hasO = Standard_False, hasC = Standard_False;
+                        Standard_Real pf = 0, pl = 0;
+                        (void)BRep_Tool::CurveOnSurface(e, surfO, loc, pf, pl, &hasO);
+                        (void)BRep_Tool::CurveOnSurface(e, surfC, loc, pf, pl, &hasC);
+                        std::fprintf(stderr,
+                                     "DIAG_SEAM ci=%d owner=%d consumer=%d ownerType=%s "
+                                     "consumerType=%s kind=%s f=%.9g l=%.9g storedOwner=%d "
+                                     "storedConsumer=%d\n",
+                                     (int)ci, ownerR->id, consumerR->id, surfTypeStr(ownerR),
+                                     surfTypeStr(consumerR), kindStr, f, l, hasO ? 1 : 0,
+                                     hasC ? 1 : 0);
+                    }
                 }
                 geom[ci].collapsed = true;
                 geom[ci].edges = {e};
@@ -4854,6 +5390,73 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         for (const Region& rg : rs.regions) spCap = std::max(spCap, meshTolCap(mv, &rg));
         spCap = std::max(spCap, 0.05 * (mv.diag > 0.0 ? mv.diag : 1.0));
         spCap = std::max(spCap, 25.0);  // same floor as live tolOk; blocks 10^3 mm poison
+        if (mv.nTri < 10000) {
+            BRep_Builder Bb;
+            for (auto& F : built) {
+                if (F.IsNull()) continue;
+                TopLoc_Location loc;
+                Handle(Geom_Surface) sF = BRep_Tool::Surface(F, loc);
+                if (sF.IsNull()) continue;
+                for (TopExp_Explorer ex(F, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    TopoDS_Edge eW = TopoDS::Edge(ex.Current());
+                    const void* ts = diagTShapePtr(eW);
+                    if (!ts || !gSeamTShapes.count(ts)) continue;
+                    Standard_Boolean hasPc = Standard_False;
+                    Standard_Real pf = 0, pl = 0;
+                    (void)BRep_Tool::CurveOnSurface(eW, sF, loc, pf, pl, &hasPc);
+                    if (hasPc) continue;
+                    Standard_Real a = 0, b = 0;
+                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(eW, a, b);
+                    if (c3.IsNull() || b - a <= Precision::PConfusion()) continue;
+                    Handle(Geom2d_Curve) c2d = makePCurveOnSurf(c3, a, b, sF, nullptr);
+                    if (c2d.IsNull()) continue;
+                    double tol = Precision::Confusion();
+                    const double existing = BRep_Tool::Tolerance(eW);
+                    if (existing > tol) tol = existing;
+                    Bb.UpdateEdge(eW, c2d, sF, loc, tol);
+                    Bb.Range(eW, sF, loc, a, b);
+                }
+            }
+        }
+        if (diagP2Enabled()) {
+            const bool preClosed = BRep_Tool::IsClosed(sh) == Standard_True;
+            int freeE = 0, nI = 0, nII = 0, nIII = 0;
+            try {
+                TopTools_IndexedDataMapOfShapeListOfShape anc;
+                TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
+                for (int i = 1; i <= anc.Extent(); i++)
+                    if (anc(i).Extent() < 2) freeE++;
+                for (const auto& F : built) {
+                    if (F.IsNull()) continue;
+                    TopLoc_Location loc;
+                    Handle(Geom_Surface) s = BRep_Tool::Surface(F, loc);
+                    const bool facePlane = (s && Handle(Geom_Plane)::DownCast(s));
+                    const bool faceCyl = (s && basisCylOf(s));
+                    if (!facePlane && !faceCyl) continue;
+                    std::unordered_set<const void*> seen;
+                    for (TopExp_Explorer ex(F, TopAbs_EDGE); ex.More(); ex.Next()) {
+                        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                        const void* ts = diagTShapePtr(e);
+                        if (!ts || !seen.insert(ts).second) continue;
+                        Standard_Real f = 0, l = 0;
+                        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+                        if (c3.IsNull() || l - f <= Precision::PConfusion()) continue;
+                        Standard_Boolean stored = Standard_False;
+                        Standard_Real pf = 0, pl = 0;
+                        if (!s.IsNull())
+                            (void)BRep_Tool::CurveOnSurface(e, s, loc, pf, pl, &stored);
+                        if (stored) continue;
+                        if (gSeamTShapes.count(ts)) nI++;
+                        else if (facePlane && gMeshTShapes.count(ts)) nII++;
+                        else nIII++;
+                    }
+                }
+            } catch (const Standard_Failure&) {
+            }
+            std::fprintf(stderr,
+                         "DIAG_PREJ4 closed=%d freeEdges=%d nOrphanI=%d nOrphanII=%d nOrphanIII=%d\n",
+                         preClosed ? 1 : 0, freeE, nI, nII, nIII);
+        }
         try {
             BRepLib::SameParameter(sh, std::min(sewTol, spCap), /*forced=*/Standard_True);
             bool needRelax = false;
