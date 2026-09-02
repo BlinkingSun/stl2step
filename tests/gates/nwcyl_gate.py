@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""nwcyl_gate — NW-CYL never-worse (D-S3-15, amended D-S3-28).
+"""nwcyl_gate — NW-CYL never-worse (D-S3-15, v4 D-S3-34 multiplicity-capped).
+
+Rationale (D-S3-34): demoting 6-tri blend patches beyond the top-m is free;
+killing a true round drops a large face out of the top-m and fires; losing 8 of
+S02's 12 still fires; consolidation preserves coverage under a surviving top-m
+face. Option (b) — exempting engine predicates from the gate — is refused.
 
 Per part with a GT cylinder multiset in its sidecar, assert shipped analytic
 cylinders do not regress vs tests/gates/nwcyl_baseline.json:
 
-  nTriUnderGTMatchedCylinders(now) >= baseline.nTriUnderGTMatchedCylinders
+  nTriUnderGTMatchedCylinders(now) >= baseline  (multiplicity-capped coverage)
   nPhantom(now) <= baseline.nPhantom
 
-Triangle coverage counts mesh triangles in regiondump cylinder regions whose
-radius matches a GT entry @ 0.3% and that shipped as STEP CYLINDRICAL_SURFACE
-faces (census face radius matches region radius @ 0.3%). Source: regiondump
-per-region ``tris`` (segmentation), linked to shipped faces via
-stl2step_census ``cylinders[]`` radii. Face count is informational only.
+GT-matched coverage (v4): per GT radius class g with multiplicity m(g), let
+C(g) be shipped analytic cylinder faces matching g @ 0.3%, sorted by covered
+triangle count descending; coverage = sum of triangles over the first m(g)
+faces of C(g), summed over all g. Triangles come from regiondump cylinder
+regions attributed to each census face (axis + UV overlap). uncappedCoverage
+and faces are informational only (uncapped = sum all GT-matched face triangles
+without the top-m cap).
 
 Non-recoverable GT (meshRecoverable:false, e.g. HP hex-boss #1533/#1535) is
 excluded from gtTotal / the missing listing but still matches as real GT —
@@ -21,10 +28,10 @@ GT matching reuses partial_recovery_gate.py (match_gt_radius @ 0.3 %,
 split_cylinder_radii_all — do not fork rules).
 
 RATChet procedure (landing lane updates baseline when a part improves):
-  1. Run gate; note per-part triangles / faces / phantoms in the PASS line.
-  2. If triangle coverage rose or nPhantom fell vs baseline, edit
+  1. Run gate; note per-part capped tri / uncapped / faces / phantoms in PASS.
+  2. If capped coverage rose or nPhantom fell vs baseline, edit
      nwcyl_baseline.json (bump engineRef to the landing commit).
-  3. Commit baseline + gate in the same lane; never lower triangle coverage or
+  3. Commit baseline + gate in the same lane; never lower capped coverage or
      raise nPhantom in baseline without a measured regression fix elsewhere.
 
 Usage:
@@ -38,6 +45,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import subprocess
 import sys
 import tempfile
@@ -171,22 +179,24 @@ def region_shipped_as_cylinder(
     )
 
 
-def occt_census_radii(cen: Dict[str, Any]) -> List[float]:
-    out: List[float] = []
+def occt_census_cylinder_faces(cen: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Full cylinder face rows from stl2step_census (radius + axis + UV bounds)."""
+    out: List[Dict[str, Any]] = []
     for row in cen.get("cylinders") or []:
         if isinstance(row, dict) and "radius" in row:
-            try:
-                out.append(float(row["radius"]))
-            except (TypeError, ValueError):
-                continue
+            out.append(dict(row))
     if out:
         return out
     for r in cen.get("cylinder_radii") or []:
         try:
-            out.append(float(r))
+            out.append({"radius": float(r)})
         except (TypeError, ValueError):
             continue
     return out
+
+
+def occt_census_radii(cen: Dict[str, Any]) -> List[float]:
+    return [float(f["radius"]) for f in occt_census_cylinder_faces(cen)]
 
 
 def run_occt_census(census_bin: Path, step: Path) -> Dict[str, Any]:
@@ -215,7 +225,18 @@ def collect_cylinder_regions_from_dump(doc: Mapping[str, Any]) -> List[Dict[str,
             radius = float(reg["radius"])
         except (KeyError, TypeError, ValueError):
             return
-        rows.append({"radius": radius, "nTri": len(tris), "id": reg.get("id")})
+        rows.append(
+            {
+                "radius": radius,
+                "nTri": len(tris),
+                "id": reg.get("id"),
+                "ax": reg.get("ax"),
+                "uMin": reg.get("uMin"),
+                "uMax": reg.get("uMax"),
+                "vMin": reg.get("vMin"),
+                "vMax": reg.get("vMax"),
+            }
+        )
 
     if isinstance(doc.get("regions"), list):
         for reg in doc["regions"]:
@@ -248,19 +269,207 @@ def run_regiondump(dump_bin: Path, stl: Path, out_path: Path) -> Dict[str, Any]:
     return load_json(out_path)
 
 
+def _vec3(raw: Any) -> Optional[Tuple[float, float, float]]:
+    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        return (float(raw[0]), float(raw[1]), float(raw[2]))
+    if isinstance(raw, dict):
+        try:
+            return (float(raw["x"]), float(raw["y"]), float(raw["z"]))
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
+def _census_axis(face: Mapping[str, Any]) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+    axis = face.get("axis")
+    if not isinstance(axis, dict):
+        return None
+    loc = axis.get("location")
+    if loc is None:
+        loc = axis.get("loc")
+    direction = axis.get("direction")
+    if direction is None:
+        direction = axis.get("dir")
+    o = _vec3(loc)
+    d = _vec3(direction)
+    if o is None or d is None:
+        return None
+    return o, d
+
+
+def _region_axis(reg: Mapping[str, Any]) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float]]]:
+    ax = reg.get("ax")
+    if not isinstance(ax, dict):
+        return None
+    o = _vec3(ax.get("loc"))
+    d = _vec3(ax.get("dir"))
+    if o is None or d is None:
+        return None
+    return o, d
+
+
+def _norm_dir(d: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    n = (d[0] ** 2 + d[1] ** 2 + d[2] ** 2) ** 0.5
+    if n <= 0:
+        return (0.0, 0.0, 0.0)
+    return (d[0] / n, d[1] / n, d[2] / n)
+
+
+def _canonical_axis(
+    loc: Tuple[float, float, float], direction: Tuple[float, float, float]
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float]]:
+    d = _norm_dir(direction)
+    ax, ay, az = abs(d[0]), abs(d[1]), abs(d[2])
+    flip = False
+    if az >= ax and az >= ay:
+        flip = d[2] < 0
+    elif ay >= ax:
+        flip = d[1] < 0
+    else:
+        flip = d[0] < 0
+    if flip:
+        d = (-d[0], -d[1], -d[2])
+    t = loc[0] * d[0] + loc[1] * d[1] + loc[2] * d[2]
+    o = (loc[0] - t * d[0], loc[1] - t * d[1], loc[2] - t * d[2])
+    return o, d
+
+
+def _dirs_parallel(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> bool:
+    dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    return abs(abs(dot) - 1.0) < 1e-8
+
+
+def _axis_distance(
+    a_loc: Tuple[float, float, float],
+    a_dir: Tuple[float, float, float],
+    b_loc: Tuple[float, float, float],
+    b_dir: Tuple[float, float, float],
+) -> float:
+    dx = b_loc[0] - a_loc[0]
+    dy = b_loc[1] - a_loc[1]
+    dz = b_loc[2] - a_loc[2]
+    cx = a_dir[1] * b_dir[2] - a_dir[2] * b_dir[1]
+    cy = a_dir[2] * b_dir[0] - a_dir[0] * b_dir[2]
+    cz = a_dir[0] * b_dir[1] - a_dir[1] * b_dir[0]
+    cn = (cx * cx + cy * cy + cz * cz) ** 0.5
+    if cn < 1e-12:
+        px = dy * a_dir[2] - dz * a_dir[1]
+        py = dz * a_dir[0] - dx * a_dir[2]
+        pz = dx * a_dir[1] - dy * a_dir[0]
+        return (px * px + py * py + pz * pz) ** 0.5
+    return abs(dx * cx + dy * cy + dz * cz) / cn
+
+
+def _interval_overlap(a_min: float, a_max: float, b_min: float, b_max: float) -> float:
+    if not all(map(math.isfinite, (a_min, a_max, b_min, b_max))):
+        return 0.0
+    lo = max(min(a_min, a_max), min(b_min, b_max))
+    hi = min(max(a_min, a_max), max(b_min, b_max))
+    return max(0.0, hi - lo)
+
+
+def normalize_census_faces(census: Sequence[Any]) -> List[Dict[str, Any]]:
+    faces: List[Dict[str, Any]] = []
+    for i, item in enumerate(census):
+        if isinstance(item, (int, float)):
+            faces.append({"radius": float(item), "_idx": i})
+        elif isinstance(item, dict):
+            faces.append(dict(item))
+        else:
+            continue
+    return faces
+
+
+def region_matches_census_face(
+    reg: Mapping[str, Any],
+    face: Mapping[str, Any],
+    *,
+    match_gt_radius,
+    rad_tol: float = 1e-6,
+    axis_tol: float = 1e-6,
+) -> bool:
+    try:
+        r_rad = float(reg["radius"])
+        f_rad = float(face["radius"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not radii_near(r_rad, f_rad, match_gt_radius=match_gt_radius):
+        return False
+    reg_ax = _region_axis(reg)
+    face_ax = _census_axis(face)
+    if reg_ax is None or face_ax is None:
+        return True
+    r_loc, r_dir = _canonical_axis(*reg_ax)
+    f_loc, f_dir = _canonical_axis(*face_ax)
+    if not _dirs_parallel(r_dir, f_dir):
+        return False
+    return _axis_distance(r_loc, r_dir, f_loc, f_dir) <= axis_tol
+
+
+def census_face_match_score(reg: Mapping[str, Any], face: Mapping[str, Any]) -> float:
+    """Higher = better geometric overlap for picking one face among same-radius hits."""
+    try:
+        ru0, ru1 = float(reg.get("uMin", 0)), float(reg.get("uMax", 0))
+        rv0, rv1 = float(reg.get("vMin", 0)), float(reg.get("vMax", 0))
+        fu0, fu1 = float(face.get("uMin", 0)), float(face.get("uMax", 0))
+        fv0, fv1 = float(face.get("vMin", 0)), float(face.get("vMax", 0))
+    except (TypeError, ValueError):
+        return 0.0
+    u_ov = _interval_overlap(ru0, ru1, fu0, fu1)
+    v_ov = _interval_overlap(rv0, rv1, fv0, fv1)
+    return u_ov * v_ov + u_ov + v_ov
+
+
+def assign_region_triangles_to_faces(
+    census_faces: Sequence[Mapping[str, Any]],
+    cylinder_regions: Sequence[Mapping[str, Any]],
+    *,
+    match_gt_radius,
+) -> List[int]:
+    """Per census face index: triangle count from attributed mesh regions."""
+    face_tri = [0] * len(census_faces)
+    for reg in cylinder_regions:
+        try:
+            n_tri = int(reg.get("nTri") or 0)
+        except (TypeError, ValueError):
+            continue
+        if n_tri <= 0:
+            continue
+        hits: List[int] = []
+        scores: List[float] = []
+        for i, face in enumerate(census_faces):
+            if region_matches_census_face(
+                reg, face, match_gt_radius=match_gt_radius
+            ):
+                hits.append(i)
+                scores.append(census_face_match_score(reg, face))
+        if not hits:
+            continue
+        best = hits[0]
+        best_score = scores[0]
+        for j, sc in zip(hits[1:], scores[1:]):
+            if sc > best_score:
+                best, best_score = j, sc
+        if best_score <= 0.0:
+            best = min(hits, key=lambda i: (face_tri[i], i))
+        face_tri[best] += n_tri
+    return face_tri
+
+
 def compute_nwcyl(
-    census_face_radii: Sequence[float],
+    census_input: Sequence[Any],
     cylinder_regions: Sequence[Mapping[str, Any]],
     gt_all: Sequence[float],
     *,
     match_gt_radius,
     extra_match_radii: Sequence[float] = (),
-) -> Tuple[int, int, int, List[Dict[str, Any]]]:
-    """Return (nTriUnderGTMatched, nPhantom, nGTMatchedFaces, per-radius rows).
+) -> Tuple[int, int, int, int, List[Dict[str, Any]]]:
+    """Return (nTriCapped, nTriUncapped, nPhantom, nGTMatchedFaces, per-radius rows).
 
     gt_all is the mesh-recoverable denominator (gtTotal / missing listing).
     extra_match_radii (non-recoverable GT) still match as real — never phantoms.
     """
+    census_faces = normalize_census_faces(census_input)
     gt_counts: Counter = Counter(float(x) for x in gt_all)
     match_keys = list(gt_counts.keys()) + [
         float(x) for x in extra_match_radii if float(x) not in gt_counts
@@ -268,31 +477,47 @@ def compute_nwcyl(
 
     n_phantom = 0
     built_match_faces: Counter = Counter()
-    for r in census_face_radii:
-        g = match_gt_radius(float(r), match_keys)
+    for face in census_faces:
+        try:
+            r = float(face["radius"])
+        except (KeyError, TypeError, ValueError):
+            n_phantom += 1
+            continue
+        g = match_gt_radius(r, match_keys)
         if g is None:
             n_phantom += 1
         else:
             built_match_faces[g] += 1
 
     n_faces_matched = sum(built_match_faces.values())
-    n_tri_matched = 0
-    tri_by_gt: Counter = Counter()
-    for reg in cylinder_regions:
-        try:
-            r_rad = float(reg["radius"])
-            n_tri = int(reg.get("nTri") or 0)
-        except (KeyError, TypeError, ValueError):
-            continue
-        g = match_gt_radius(r_rad, match_keys)
-        if g is None:
-            continue
-        if not region_shipped_as_cylinder(
-            r_rad, census_face_radii, match_gt_radius=match_gt_radius
-        ):
-            continue
-        n_tri_matched += n_tri
-        tri_by_gt[g] += n_tri
+    face_tri = assign_region_triangles_to_faces(
+        census_faces, cylinder_regions, match_gt_radius=match_gt_radius
+    )
+
+    n_tri_uncapped = 0
+    n_tri_capped = 0
+    tri_by_gt_uncapped: Counter = Counter()
+    tri_by_gt_capped: Counter = Counter()
+
+    for g, mult in gt_counts.items():
+        face_tri_pairs: List[Tuple[int, int]] = []
+        for i, face in enumerate(census_faces):
+            try:
+                r = float(face["radius"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if match_gt_radius(r, [g]) is None:
+                continue
+            tri = face_tri[i]
+            if tri > 0:
+                face_tri_pairs.append((tri, i))
+        face_tri_pairs.sort(key=lambda x: (-x[0], x[1]))
+        uncapped = sum(t for t, _ in face_tri_pairs)
+        capped = sum(t for t, _ in face_tri_pairs[:mult])
+        tri_by_gt_uncapped[g] = uncapped
+        tri_by_gt_capped[g] = capped
+        n_tri_uncapped += uncapped
+        n_tri_capped += capped
 
     per_radius: List[Dict[str, Any]] = []
     for g, mult in sorted(gt_counts.items()):
@@ -300,16 +525,18 @@ def compute_nwcyl(
             {
                 "radius": g,
                 "built": int(built_match_faces.get(g, 0)),
-                "triangles": int(tri_by_gt.get(g, 0)),
+                "triangles": int(tri_by_gt_capped.get(g, 0)),
+                "uncappedTriangles": int(tri_by_gt_uncapped.get(g, 0)),
                 "gtMultiplicity": int(mult),
             }
         )
-    return n_tri_matched, n_phantom, n_faces_matched, per_radius
+    return n_tri_capped, n_tri_uncapped, n_phantom, n_faces_matched, per_radius
 
 
 def format_radius_table(per_radius: Sequence[Mapping[str, Any]]) -> str:
     bits = [
-        f"R={row['radius']} tri={row['triangles']} face={row['built']}/{row['gtMultiplicity']}"
+        f"R={row['radius']} tri={row['triangles']}/{row.get('uncappedTriangles', row['triangles'])} "
+        f"face={row['built']}/{row['gtMultiplicity']}"
         for row in per_radius
     ]
     return " ".join(bits)
@@ -364,10 +591,10 @@ def measure_part(
     cen = run_occt_census(census_bin, conv["step"])
     dump_path = work / f"{part_id}.regions.json"
     dump_doc = run_regiondump(dump_bin, stl, dump_path)
-    census_rs = occt_census_radii(cen)
+    census_faces = occt_census_cylinder_faces(cen)
     cyl_regions = collect_cylinder_regions_from_dump(dump_doc)
-    n_tri, n_phantom, n_faces, per_radius = compute_nwcyl(
-        census_rs,
+    n_tri, n_uncapped, n_phantom, n_faces, per_radius = compute_nwcyl(
+        census_faces,
         cyl_regions,
         recoverable,
         match_gt_radius=prg.match_gt_radius,
@@ -375,13 +602,14 @@ def measure_part(
     )
     return {
         "nTriUnderGTMatchedCylinders": n_tri,
+        "uncappedCoverage": n_uncapped,
         "nPhantom": n_phantom,
         "faces": n_faces,
         "nGtTotal": len(recoverable),
         "nNotMeshRecoverable": len(nonrec),
         "gtSource": gt_src,
         "perRadius": per_radius,
-        "nBuilt": len(census_rs),
+        "nBuilt": len(census_faces),
     }
 
 
@@ -423,10 +651,10 @@ def run_measure(args: argparse.Namespace) -> int:
         "authority": BASELINE_NAME,
         "engineRef": args.engine_ref,
         "notes": (
-            "NW-CYL per-part baselines (D-S3-28 triangle coverage). Ratchet up when "
-            "landing improves nTriUnderGTMatchedCylinders or lowers nPhantom — see "
-            "nwcyl_gate.py header. faces = shipped GT-matched cylinder face count "
-            "(informational). nGtTotal is mesh-recoverable GT only."
+            "NW-CYL v4 multiplicity-capped coverage (D-S3-34). Ratchet up when landing "
+            "improves nTriUnderGTMatchedCylinders or lowers nPhantom — see nwcyl_gate.py "
+            "header. uncappedCoverage and faces are informational. nGtTotal is "
+            "mesh-recoverable GT only."
         ),
         "parts": {},
     }
@@ -444,6 +672,7 @@ def run_measure(args: argparse.Namespace) -> int:
             )
             doc["parts"][pid] = {
                 "nTriUnderGTMatchedCylinders": row["nTriUnderGTMatchedCylinders"],
+                "uncappedCoverage": row["uncappedCoverage"],
                 "nPhantom": row["nPhantom"],
                 "faces": row["faces"],
                 "nGtTotal": row["nGtTotal"],
@@ -451,6 +680,7 @@ def run_measure(args: argparse.Namespace) -> int:
             }
             print(
                 f"  {pid}: tri={row['nTriUnderGTMatchedCylinders']} "
+                f"uncapped={row['uncappedCoverage']} "
                 f"face={row['faces']} phantom={row['nPhantom']} "
                 f"gtTotal={row['nGtTotal']}  {format_radius_table(row['perRadius'])}"
             )
@@ -506,6 +736,7 @@ def run_gate(args: argparse.Namespace) -> int:
         b_tri = baseline_tri_floor(base)
         b_phantom = int(base["nPhantom"])
         n_tri = int(now["nTriUnderGTMatchedCylinders"])
+        n_uncapped = int(now.get("uncappedCoverage") or 0)
         n_phantom = int(now["nPhantom"])
         n_faces = int(now["faces"])
         gt_total = int(now["nGtTotal"])
@@ -513,7 +744,8 @@ def run_gate(args: argparse.Namespace) -> int:
         ok_phantom = n_phantom <= b_phantom
         status = "PASS" if ok_tri and ok_phantom else "FAIL"
         line = (
-            f"  {pid}: tri={n_tri}/{b_tri} face={n_faces} phantom={n_phantom}/{b_phantom} "
+            f"  {pid}: tri={n_tri}/{b_tri} uncapped={n_uncapped} "
+            f"face={n_faces} phantom={n_phantom}/{b_phantom} "
             f"gtTotal={gt_total} [{status}]"
         )
         print(line)
@@ -556,13 +788,14 @@ def _self_test() -> int:
     gt_all = [2.0] * 12 + [5.0, 5.0]
     regions_good = [{"radius": 2.0, "nTri": 80}]
     census_good = [2.0] * 10 + [7.0, 7.0, 7.0]
-    n_tri, n_phantom, n_faces, per = compute_nwcyl(
+    tri, unc, n_phantom, n_faces, per = compute_nwcyl(
         census_good,
         regions_good,
         gt_all,
         match_gt_radius=prg.match_gt_radius,
     )
-    check(n_tri == 80, f"synthetic: triUnderGT=80 (got {n_tri})")
+    check(tri == 80, f"synthetic: triUnderGT=80 (got {tri})")
+    check(unc == 80, f"synthetic: uncapped=80 (got {unc})")
     check(n_phantom == 3, f"synthetic: nPhantom=3 (got {n_phantom})")
     check(n_faces == 10, f"synthetic: faces=10 (got {n_faces})")
     check(per[0]["triangles"] == 80 and per[0]["built"] == 10, "R=2 tri 80 face 10/12")
@@ -570,7 +803,7 @@ def _self_test() -> int:
     # Merge two GT-matched faces of the same radius: coverage unchanged, faces down.
     regions_merged = [{"radius": 2.0, "nTri": 80}]
     census_merged = [2.0] * 8 + [7.0]
-    tri_m, ph_m, face_m, _ = compute_nwcyl(
+    tri_m, unc_m, ph_m, face_m, _ = compute_nwcyl(
         census_merged,
         regions_merged,
         gt_all,
@@ -587,7 +820,7 @@ def _self_test() -> int:
     # Demote a GT round to facets: region still in dump but no shipped cylinder face.
     regions_demote = [{"radius": 2.0, "nTri": 80}]
     census_demote = [7.0]
-    tri_d, ph_d, face_d, _ = compute_nwcyl(
+    tri_d, _, ph_d, face_d, _ = compute_nwcyl(
         census_demote,
         regions_demote,
         gt_all,
@@ -605,7 +838,7 @@ def _self_test() -> int:
     # Phantom-only improvement.
     regions_ph = [{"radius": 2.0, "nTri": 80}]
     census_ph = [2.0] * 10
-    tri_p, ph_p, face_p, _ = compute_nwcyl(
+    tri_p, _, ph_p, face_p, _ = compute_nwcyl(
         census_ph,
         regions_ph,
         gt_all,
@@ -621,7 +854,7 @@ def _self_test() -> int:
     # Matched-face decrease without merge (lost GT face, region not shipped).
     regions_regress = [{"radius": 2.0, "nTri": 50}]
     census_regress = [2.0] * 8 + [7.0]
-    tri_r, ph_r, _, _ = compute_nwcyl(
+    tri_r, _, ph_r, _, _ = compute_nwcyl(
         census_regress,
         regions_regress,
         gt_all,
@@ -634,6 +867,48 @@ def _self_test() -> int:
             and ph_r <= baseline_row["nPhantom"]
         ),
         "coverage decrease fails NW-CYL inequality",
+    )
+
+    # v4: demote 50 tiny R=3 patches beyond top-21 — capped coverage unchanged.
+    gt_hp_r3 = [3.0] * 21
+    regions_hp = [{"radius": 3.0, "nTri": 100, "id": i} for i in range(21)] + [
+        {"radius": 3.0, "nTri": 6, "id": 100 + i} for i in range(50)
+    ]
+    census_hp_full = [3.0] * 71
+    tri_full, unc_full, _, _, _ = compute_nwcyl(
+        census_hp_full,
+        regions_hp,
+        gt_hp_r3,
+        match_gt_radius=prg.match_gt_radius,
+    )
+    check(tri_full == 2100, f"HP-like capped tri=2100 (got {tri_full})")
+    check(unc_full == 2400, f"HP-like uncapped tri=2400 (got {unc_full})")
+    census_hp_demoted = [3.0] * 21
+    regions_hp_kept = regions_hp[:21]
+    tri_dem, _, ph_dem, _, _ = compute_nwcyl(
+        census_hp_demoted,
+        regions_hp_kept,
+        gt_hp_r3,
+        match_gt_radius=prg.match_gt_radius,
+    )
+    check(
+        tri_dem >= tri_full and ph_dem <= 27,
+        "demote 50 tiny R=3 patches beyond top-21 must PASS",
+    )
+
+    # v4: kill one top-21 R=3 face — capped coverage drops.
+    census_hp_kill = [3.0] * 20
+    regions_hp_kill = regions_hp_kept[:20]
+    tri_kill, _, _, _, _ = compute_nwcyl(
+        census_hp_kill,
+        regions_hp_kill,
+        gt_hp_r3,
+        match_gt_radius=prg.match_gt_radius,
+    )
+    check(tri_kill == 2000, f"kill one top-21 face tri=2000 (got {tri_kill})")
+    check(
+        not (tri_kill >= tri_full),
+        "kill one top-21 R=3 face must FAIL NW-CYL",
     )
 
     sc = load_json(CORPUS / "handle-lock.expected.json")
@@ -650,7 +925,7 @@ def _self_test() -> int:
     check("ground-truth" in src_hp, "HP multiplicity from diag ground-truth")
 
     extra = [float(e["radius"]) for e in non_hp]
-    n_hex, p_hex, face_hex, per_hex = compute_nwcyl(
+    n_hex, unc_hex, p_hex, face_hex, per_hex = compute_nwcyl(
         [3.0] * 10 + [11.544154],
         [],
         rec_hp,
@@ -691,7 +966,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--engine-ref",
-        default="b3522499ad838d7e19da8c8d5d8f12e1d55aa6eb",
+        default="6948ec156b75aefaa5c3713bd951bc480cef5b52",
         help="commit recorded in baseline (measure mode)",
     )
     p.add_argument(
