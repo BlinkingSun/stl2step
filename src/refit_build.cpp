@@ -35,6 +35,7 @@
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 // BRepCheck_ListIteratorOfListOfStatus.hxx and
 // TopTools_ListIteratorOfListOfShape.hxx are typedef-only headers removed in
 // OCCT 8.0; iterate via ListOfStatus::Iterator / ListOfShape::Iterator.
@@ -286,6 +287,315 @@ void installEPrimeDemotion(const MeshView& mv, const RegionSet& rs) {
 
     const char* ev = std::getenv("STL2STEP_EPRIME_DIAG");
     const bool diagOn = ev && ev[0] && ev[0] != '0';
+    // E′′ v2 measurement (default-off, STL2STEP_EPRIME_DIAG only; no product change).
+    const double diagLen = mv.diag > 0.0 ? mv.diag : 1.0;
+    const double epsMesh = std::max(std::max(mv.weldTol, 1e-4 * diagLen), 1e-3);
+    const double epsPlane = std::max(std::max(epsMesh, mv.sewTol), 0.02);
+    auto meshTolCapInline = [&](const Region& rr) {
+        double c = std::max(mv.sewTol, Precision::Confusion());
+        c = std::max(c, rr.chordSagitta);
+        if (rr.radius > 0.0)
+            c = std::max(c, rr.radius * (1.0 - std::cos(kPi / 4.0)));
+        return c * 1.001 + Precision::Confusion();
+    };
+    auto axisSeparation = [](const Region& a, const Region& b) {
+        const gp_Vec dloc(a.ax.Location(), b.ax.Location());
+        return gp_Vec(a.ax.Direction()).Crossed(dloc).Magnitude();
+    };
+    auto fitResiduals = [&](const Region& rr, double& maxV, double& chordMid) {
+        maxV = 0.0;
+        chordMid = 0.0;
+        if (!(rr.radius > 0.0)) return;
+        gp_Cylinder cyl = asCyl(rr);
+        auto radDev = [&](const gp_Pnt& p) {
+            gp_Vec v(cyl.Location(), p);
+            return std::fabs(gp_Vec(cyl.Axis().Direction()).Crossed(v).Magnitude() -
+                             cyl.Radius());
+        };
+        for (int lt : rr.tris) {
+            if (lt < 0 || (size_t)lt >= mv.nTri) continue;
+            const int* T = mv.tris[mv.compTris[lt]];
+            for (int k = 0; k < 3; k++) maxV = std::max(maxV, radDev(gp_Pnt(mv.pts[T[k]])));
+        }
+        for (const BoundaryChain& ch : rs.chains) {
+            if (ch.regA != rr.id && ch.regB != rr.id) continue;
+            for (int eid : ch.meshEdges) {
+                if (eid < 0 || (size_t)eid >= mv.nEdge) continue;
+                const auto& evv = mv.compEdges[eid];
+                gp_Pnt a = pntOf(mv, evv.first), b = pntOf(mv, evv.second);
+                chordMid = std::max(chordMid, radDev(gp_Pnt(0.5 * (a.XYZ() + b.XYZ()))));
+            }
+        }
+    };
+    auto circleFitSigmaR = [&](const Region& rr, double& sigmaR, double& Rfit) {
+        sigmaR = 1e300;
+        Rfit = rr.radius;
+        if (!(rr.radius > 0.0)) return;
+        gp_Cylinder cyl = asCyl(rr);
+        const gp_Pnt origin = cyl.Location();
+        const gp_Dir axD = cyl.Axis().Direction();
+        std::vector<double> res;
+        res.reserve(rr.tris.size() * 3);
+        for (int lt : rr.tris) {
+            if (lt < 0 || (size_t)lt >= mv.nTri) continue;
+            const int* T = mv.tris[mv.compTris[lt]];
+            for (int k = 0; k < 3; k++) {
+                gp_Vec v(origin, gp_Pnt(mv.pts[T[k]]));
+                res.push_back(gp_Vec(axD).Crossed(v).Magnitude() - rr.radius);
+            }
+        }
+        const std::size_t np = res.size();
+        if (np < 2) return;
+        double mean = 0.0;
+        for (double e : res) mean += e;
+        mean /= static_cast<double>(np);
+        double ss = 0.0;
+        for (double e : res) {
+            const double d = e - mean;
+            ss += d * d;
+        }
+        const double sigmaE =
+            std::sqrt(ss / std::max(1.0, static_cast<double>(np) - 1.0));
+        const double spanU =
+            rr.closed360 ? 2.0 * kPi : std::max(0.0, rr.uMax - rr.uMin);
+        const double halfAng = std::min(0.5 * spanU, kPi);
+        double arcDen = 1.0 - std::cos(halfAng);
+        if (arcDen < 1e-9) arcDen = 1e-9;
+        sigmaR = sigmaE / (arcDen * std::sqrt(static_cast<double>(np)));
+    };
+    auto findRegById = [&](int id) -> const Region* {
+        if (id < 0) return nullptr;
+        for (const Region& rr : rs.regions)
+            if (rr.id == id) return &rr;
+        return nullptr;
+    };
+    struct S4Row {
+        double spanU = 0.0;
+        double sigmaR = 0.0;
+        double sigmaROverR = 0.0;
+        double clusterScatter = 0.0;
+        int clusterId = -1;
+        int chainN = 0;
+        int chainBestRid = -1;
+        double chainBestR = -1.0;
+        int chainBestNTri = -1;
+        double chainBestAbsDR = -1.0;
+        int confirmRid = -1;
+        int confirmNTri = -1;
+        double confirmR = -1.0;
+        int sibRelRid = -1;
+        double sibRelR = -1.0;
+        int sibRelNTri = -1;
+        double sibRelSep = -1.0;
+        double sibRelAbsDR = -1.0;
+        double sibRelAbsDROverCap = -1.0;
+        int absorbParent = -1;
+        const char* absorbFail = "related";
+        double absorbCarryDev = -1.0;
+        double absorbCarryLim = -1.0;
+    };
+    std::vector<S4Row> s4((size_t)n);
+    if (diagOn) {
+        std::vector<int> clParent((size_t)n);
+        for (int i = 0; i < n; ++i) clParent[(size_t)i] = i;
+        auto clFind = [&](int x) {
+            int r = x;
+            while (clParent[(size_t)r] != r) r = clParent[(size_t)r];
+            while (clParent[(size_t)x] != r) {
+                const int nxt = clParent[(size_t)x];
+                clParent[(size_t)x] = r;
+                x = nxt;
+            }
+            return r;
+        };
+        auto clUnite = [&](int a, int b) {
+            a = clFind(a);
+            b = clFind(b);
+            if (a == b) return;
+            if (a < b) clParent[(size_t)b] = a;
+            else clParent[(size_t)a] = b;
+        };
+        for (int i = 0; i < n; ++i) {
+            const Region& ri = rs.regions[(size_t)cylIdx[i]];
+            for (int j = i + 1; j < n; ++j) {
+                const Region& rj = rs.regions[(size_t)cylIdx[j]];
+                if (axisSin(ri.ax.Direction(), rj.ax.Direction()) > tauAx) continue;
+                const double sep = axisSeparation(ri, rj);
+                const double sepTol =
+                    std::max(meshTolCapInline(ri), meshTolCapInline(rj));
+                if (sep > sepTol) continue;
+                clUnite(i, j);
+            }
+        }
+        std::unordered_map<int, std::vector<int>> clusters;
+        for (int i = 0; i < n; ++i) clusters[clFind(i)].push_back(i);
+        for (int i = 0; i < n; ++i) {
+            const Region& r = rs.regions[(size_t)cylIdx[i]];
+            S4Row& row = s4[(size_t)i];
+            row.spanU = r.closed360 ? 2.0 * kPi : std::max(0.0, r.uMax - r.uMin);
+            double Rfit = r.radius;
+            circleFitSigmaR(r, row.sigmaR, Rfit);
+            row.sigmaROverR =
+                r.radius > 0.0 ? row.sigmaR / r.radius : row.sigmaR;
+            row.clusterId = clFind(i);
+            const auto& memb = clusters[row.clusterId];
+            double rMin = 1e300, rMax = -1e300, rSum = 0.0;
+            for (int mi : memb) {
+                const double Rm = rs.regions[(size_t)cylIdx[mi]].radius;
+                rMin = std::min(rMin, Rm);
+                rMax = std::max(rMax, Rm);
+                rSum += Rm;
+            }
+            const double rMean = memb.empty() ? r.radius : rSum / memb.size();
+            row.clusterScatter =
+                rMean > 0.0 ? (rMax - rMin) / rMean : 0.0;
+            for (const BoundaryChain& ch : rs.chains) {
+                int other = -1;
+                if (ch.regA == r.id) other = ch.regB;
+                else if (ch.regB == r.id) other = ch.regA;
+                if (other < 0) continue;
+                const Region* orr = findRegById(other);
+                if (!orr || orr->type != SurfType::Cylinder) continue;
+                row.chainN++;
+                const double dR = std::fabs(r.radius - orr->radius);
+                if (row.chainBestRid < 0 || (int)orr->tris.size() > row.chainBestNTri ||
+                    ((int)orr->tris.size() == row.chainBestNTri && dR < row.chainBestAbsDR)) {
+                    row.chainBestRid = orr->id;
+                    row.chainBestR = orr->radius;
+                    row.chainBestNTri = (int)orr->tris.size();
+                    row.chainBestAbsDR = dR;
+                }
+            }
+            for (int j = 0; j < n; ++j) {
+                if (j == i) continue;
+                const Region& s = rs.regions[(size_t)cylIdx[j]];
+                if ((int)s.tris.size() <= (int)r.tris.size()) continue;
+                bool related = false;
+                for (const BoundaryChain& ch : rs.chains) {
+                    if ((ch.regA == r.id && ch.regB == s.id) ||
+                        (ch.regB == r.id && ch.regA == s.id)) {
+                        related = true;
+                        break;
+                    }
+                }
+                if (!related && axisSin(r.ax.Direction(), s.ax.Direction()) > tauAx)
+                    continue;
+                double sSig = 1e300, sRfit = s.radius;
+                circleFitSigmaR(s, sSig, sRfit);
+                const double tol = std::max(row.sigmaR, sSig);
+                const double dR = std::fabs(r.radius - s.radius);
+                if (dR > tol) continue;
+                row.confirmRid = s.id;
+                row.confirmNTri = (int)s.tris.size();
+                row.confirmR = s.radius;
+                break;
+            }
+            const double sew = mv.sewTol > 0.0 ? mv.sewTol : Precision::Confusion();
+            auto vAbut = [&](const Region& a, const Region& b) {
+                const double aLo = std::min(a.vMin, a.vMax), aHi = std::max(a.vMin, a.vMax);
+                const double bLo = std::min(b.vMin, b.vMax), bHi = std::max(b.vMin, b.vMax);
+                if (aHi < bLo - sew) return false;
+                if (bHi < aLo - sew) return false;
+                return true;
+            };
+            for (int j = 0; j < n; ++j) {
+                if (j == i) continue;
+                const Region& s = rs.regions[(size_t)cylIdx[j]];
+                if ((int)s.tris.size() <= (int)r.tris.size()) continue;
+                if (axisSin(r.ax.Direction(), s.ax.Direction()) > tauAx) continue;
+                const double sep = axisSeparation(r, s);
+                const double sepTol = meshTolCapInline(s);
+                if (sep > sepTol) continue;
+                if (!vAbut(r, s)) continue;
+                const double dR = std::fabs(r.radius - s.radius);
+                if (!(dR > 0.0)) continue;
+                const double sCap = meshTolCapInline(s);
+                const double oC = sCap > 0.0 ? dR / sCap : dR;
+                if (dR > sCap) continue;
+                if (row.sibRelRid < 0 || oC < row.sibRelAbsDROverCap) {
+                    row.sibRelRid = s.id;
+                    row.sibRelR = s.radius;
+                    row.sibRelNTri = (int)s.tris.size();
+                    row.sibRelSep = sep;
+                    row.sibRelAbsDR = dR;
+                    row.sibRelAbsDROverCap = oC;
+                }
+            }
+        }
+        auto chainAdj = [&](int idA, int idB) {
+            for (const BoundaryChain& ch : rs.chains) {
+                if ((ch.regA == idA && ch.regB == idB) || (ch.regB == idA && ch.regA == idB))
+                    return true;
+            }
+            return false;
+        };
+        auto relatedTo = [&](const Region& rr, const Region& ss) {
+            if (chainAdj(rr.id, ss.id)) return true;
+            if (axisSin(rr.ax.Direction(), ss.ax.Direction()) > tauAx) return false;
+            return axisSeparation(rr, ss) <= meshTolCapInline(ss);
+        };
+        auto carryDev = [&](const Region& rr, const Region& ss) {
+            gp_Cylinder cyl = asCyl(ss);
+            double maxV = 0.0;
+            auto radDev = [&](const gp_Pnt& p) {
+                gp_Vec v(cyl.Location(), p);
+                return std::fabs(gp_Vec(cyl.Axis().Direction()).Crossed(v).Magnitude() -
+                                 cyl.Radius());
+            };
+            for (int lt : rr.tris) {
+                if (lt < 0 || (size_t)lt >= mv.nTri) continue;
+                const int* T = mv.tris[mv.compTris[lt]];
+                for (int k = 0; k < 3; k++) maxV = std::max(maxV, radDev(gp_Pnt(mv.pts[T[k]])));
+            }
+            return maxV;
+        };
+        const double sewAbs = mv.sewTol > 0.0 ? mv.sewTol : Precision::Confusion();
+        for (int i = 0; i < n; ++i) {
+            const Region& r = rs.regions[(size_t)cylIdx[i]];
+            S4Row& row = s4[(size_t)i];
+            int bestJ = -1;
+            bool anyRelated = false, anyWitness = false;
+            for (int j = 0; j < n; ++j) {
+                if (j == i) continue;
+                const Region& s = rs.regions[(size_t)cylIdx[j]];
+                if (!relatedTo(r, s)) continue;
+                anyRelated = true;
+                if (!(s4[(size_t)j].sigmaR < s4[(size_t)i].sigmaR &&
+                      (int)s.tris.size() > (int)r.tris.size()))
+                    continue;
+                anyWitness = true;
+                const double dev = carryDev(r, s);
+                const double lim = std::max(s.maxVertexDev, sewAbs);
+                if (row.absorbCarryDev < 0.0 || dev < row.absorbCarryDev) {
+                    row.absorbCarryDev = dev;
+                    row.absorbCarryLim = lim;
+                }
+                if (dev > lim) continue;
+                auto better = [&](int ja, int jb) {
+                    const Region& a = rs.regions[(size_t)cylIdx[ja]];
+                    const Region& b = rs.regions[(size_t)cylIdx[jb]];
+                    const int na = (int)a.tris.size(), nb = (int)b.tris.size();
+                    if (na != nb) return na > nb;
+                    if (s4[(size_t)ja].sigmaR != s4[(size_t)jb].sigmaR)
+                        return s4[(size_t)ja].sigmaR < s4[(size_t)jb].sigmaR;
+                    return a.id < b.id;
+                };
+                if (bestJ < 0 || better(j, bestJ)) bestJ = j;
+            }
+            if (bestJ >= 0) {
+                const Region& s = rs.regions[(size_t)cylIdx[bestJ]];
+                row.absorbParent = s.id;
+                row.absorbFail = "none";
+                row.absorbCarryDev = carryDev(r, s);
+                row.absorbCarryLim = std::max(s.maxVertexDev, sewAbs);
+            } else {
+                row.absorbParent = -1;
+                row.absorbFail = !anyRelated ? "related" : (!anyWitness ? "witness" : "carry");
+            }
+        }
+        std::fprintf(stderr, "DIAG_S4FIT_META nCyl=%d tauAx=%.6e epsPlane=%.6e\n", n, tauAx,
+                     epsPlane);
+    }
     for (int i = 0; i < n; ++i) {
         const Region& r = rs.regions[(size_t)cylIdx[i]];
         const double sinVs = axisSin(r.ax.Direction(), ahat);
@@ -298,6 +608,84 @@ void installEPrimeDemotion(const MeshView& mv, const RegionSet& rs) {
                          "sinVsDom=%.6e demoted=%d\n",
                          r.id, r.radius, r.tris.size(), r.closed360 ? 1 : 0, sinVs,
                          demote ? 1 : 0);
+        if (diagOn) {
+            double maxV = 0.0, chordMid = 0.0;
+            fitResiduals(r, maxV, chordMid);
+            const double cap = meshTolCapInline(r);
+            const double overR = r.radius > 0.0 ? maxV / r.radius : 0.0;
+            const double overCap = cap > 0.0 ? maxV / cap : 0.0;
+            const double chordOverCap = cap > 0.0 ? chordMid / cap : 0.0;
+            double minSibAbsDROverR = -1.0;
+            double minSibAbsDROverCap = -1.0;
+            int sibRid = -1, sibNTri = -1;
+            double sibR = -1.0;
+            for (int j = 0; j < n; ++j) {
+                if (j == i) continue;
+                const Region& s = rs.regions[(size_t)cylIdx[j]];
+                if ((int)s.tris.size() <= (int)r.tris.size()) continue;
+                if (axisSin(r.ax.Direction(), s.ax.Direction()) > tauAx) continue;
+                const double sep = axisSeparation(r, s);
+                if (sep > epsPlane) continue;
+                const double dR = std::fabs(r.radius - s.radius);
+                if (!(dR > 0.0)) continue;
+                const double oR = r.radius > 0.0 ? dR / r.radius : dR;
+                const double sCap = meshTolCapInline(s);
+                const double oC = sCap > 0.0 ? dR / sCap : dR;
+                if (minSibAbsDROverR < 0.0 || oR < minSibAbsDROverR) {
+                    minSibAbsDROverR = oR;
+                    minSibAbsDROverCap = oC;
+                    sibRid = s.id;
+                    sibNTri = (int)s.tris.size();
+                    sibR = s.radius;
+                }
+            }
+            const S4Row& row = s4[(size_t)i];
+            const int unident = row.sigmaROverR > 0.003 ? 1 : 0;
+            const int confirmed = row.confirmRid >= 0 ? 1 : 0;
+            const int sibIncon = row.sibRelRid >= 0 ? 1 : 0;
+            const int epp2 =
+                ((unident && !confirmed) || sibIncon) ? 1 : 0;
+            std::fprintf(stderr,
+                         "DIAG_S4FIT rid=%d R=%.9f nTri=%zu nSides=%d closed360=%d "
+                         "sinVs=%.6e spanU=%.6f sigmaR=%.9e sigmaROverR=%.9e "
+                         "clusterId=%d clusterScatter=%.9e chainN=%d chainBestRid=%d "
+                         "chainBestR=%.9f chainBestNTri=%d chainBestAbsDR=%.9e "
+                         "confirmRid=%d confirmR=%.9f confirmNTri=%d "
+                         "sibRelRid=%d sibRelR=%.9f sibRelNTri=%d sibRelSep=%.9e "
+                         "sibRelAbsDR=%.9e sibRelAbsDROverCap=%.9e "
+                         "unidentifiable=%d confirmed=%d siblingInconsistent=%d epp2=%d "
+                         "maxVertexDev=%.9f maxVertexDevOverR=%.9e "
+                         "chordSagitta=%.9f meshTolCap=%.9f minSibAbsDROverR=%.9e "
+                         "demoted=%d maxVertexDevOverCap=%.9e chordOverCap=%.9e "
+                         "minSibAbsDROverCap=%.9e sibRid=%d sibR=%.9f sibNTri=%d "
+                         "sagStored=%.9f maxDevStored=%.9f\n",
+                         r.id, r.radius, r.tris.size(), r.nSides, r.closed360 ? 1 : 0, sinVs,
+                         row.spanU, row.sigmaR, row.sigmaROverR, row.clusterId,
+                         row.clusterScatter, row.chainN, row.chainBestRid, row.chainBestR,
+                         row.chainBestNTri, row.chainBestAbsDR, row.confirmRid, row.confirmR,
+                         row.confirmNTri, row.sibRelRid, row.sibRelR, row.sibRelNTri,
+                         row.sibRelSep, row.sibRelAbsDR, row.sibRelAbsDROverCap, unident,
+                         confirmed, sibIncon, epp2, maxV, overR, chordMid, cap,
+                         minSibAbsDROverR, demote ? 1 : 0, overCap, chordOverCap,
+                         minSibAbsDROverCap, sibRid, sibR, sibNTri, r.chordSagitta,
+                         r.maxVertexDev);
+            std::fprintf(stderr,
+                         "DIAG_ABSORB rid=%d parent=%d fail=%s nTri=%zu sigmaR=%.9e "
+                         "carryDev=%.9e carryLim=%.9e unidentifiable=%d confirmed=%d "
+                         "siblingInconsistent=%d\n",
+                         r.id, row.absorbParent, row.absorbFail, r.tris.size(), row.sigmaR,
+                         row.absorbCarryDev, row.absorbCarryLim, unident, confirmed, sibIncon);
+        }
+    }
+    if (diagOn) {
+        for (const Region& r : rs.rejected) {
+            if (r.type != SurfType::Cylinder) continue;
+            std::fprintf(stderr,
+                         "DIAG_S4REJ rid=%d R=%.9f nTri=%zu nSides=%d closed360=%d "
+                         "reject=%d maxDevStored=%.9f\n",
+                         r.id, r.radius, r.tris.size(), r.nSides, r.closed360 ? 1 : 0,
+                         (int)r.reject, r.maxVertexDev);
+        }
     }
 }
 
@@ -2033,6 +2421,331 @@ double pcurveSignedArea(const TopoDS_Face& f, const TopoDS_Wire& w) {
     return 0.5 * A;
 }
 
+void dumpBRepStatusList(const BRepCheck_ListOfStatus& lst) {
+    for (BRepCheck_ListOfStatus::Iterator it(lst); it.More(); it.Next()) {
+        const int st = (int)it.Value();
+        if (st == (int)BRepCheck_NoError) continue;
+        std::fprintf(stderr, " st=%d(%s)", st, brepCheckName(st));
+    }
+}
+
+bool diagWireEnabled() { return diagP2Enabled(); }
+
+const char* topAbsStateName(TopAbs_State s) {
+    switch (s) {
+        case TopAbs_IN: return "IN";
+        case TopAbs_OUT: return "OUT";
+        case TopAbs_ON: return "ON";
+        default: return "?";
+    }
+}
+
+bool segIntersect2d(const gp_Pnt2d& a0, const gp_Pnt2d& a1, const gp_Pnt2d& b0, const gp_Pnt2d& b1,
+                    double tol) {
+    const double dax = a1.X() - a0.X(), day = a1.Y() - a0.Y();
+    const double dbx = b1.X() - b0.X(), dby = b1.Y() - b0.Y();
+    const double denom = dax * dby - day * dbx;
+    if (std::fabs(denom) < tol * tol) return false;
+    const double t = ((b0.X() - a0.X()) * dby - (b0.Y() - a0.Y()) * dbx) / denom;
+    const double u = ((b0.X() - a0.X()) * day - (b0.Y() - a0.Y()) * dax) / denom;
+    if (t < -tol || t > 1.0 + tol || u < -tol || u > 1.0 + tol) return false;
+    if (a0.Distance(b0) <= tol || a0.Distance(b1) <= tol || a1.Distance(b0) <= tol ||
+        a1.Distance(b1) <= tol)
+        return false;
+    return true;
+}
+
+void wireDiagMetrics(const TopoDS_Face& f, const TopoDS_Wire& w, double sewTol, double& areaUV,
+                     int& nSelfX, double& maxUVgap, int& nDup) {
+    areaUV = pcurveSignedArea(f, w);
+    nSelfX = 0;
+    maxUVgap = 0.0;
+    nDup = 0;
+    const double tol = std::max(sewTol, Precision::PConfusion());
+    struct Seg2d {
+        gp_Pnt2d a, b;
+        int ei;
+    };
+    std::vector<Seg2d> segs;
+    std::vector<gp_Pnt> mids;
+    int ei = 0;
+    gp_Pnt2d prevEnd;
+    bool havePrev = false;
+    const int nSample = 12;
+    try {
+        for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next(), ei++) {
+            const TopoDS_Edge e = ex.Current();
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+            gp_Pnt2d uv0, uv1;
+            if (!pc.IsNull()) {
+                uv0 = pc->Value(a);
+                uv1 = pc->Value(b);
+                gp_Pnt2d p0 = uv0;
+                for (int i = 1; i <= nSample; i++) {
+                    const double t = a + (b - a) * (double)i / (double)nSample;
+                    gp_Pnt2d p1 = pc->Value(t);
+                    segs.push_back({p0, p1, ei});
+                    p0 = p1;
+                }
+            }
+            if (havePrev && !pc.IsNull()) {
+                const double gap = prevEnd.Distance(uv0);
+                if (gap > maxUVgap) maxUVgap = gap;
+            }
+            if (!pc.IsNull()) {
+                prevEnd = uv1;
+                havePrev = true;
+            }
+            Standard_Real f3 = 0, l3 = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+            if (!c3.IsNull() && l3 > f3) {
+                const double tm = 0.5 * (f3 + l3);
+                mids.push_back(c3->Value(tm));
+            }
+        }
+        if (havePrev && (w.Closed() || BRep_Tool::IsClosed(w)) && !segs.empty()) {
+            gp_Pnt2d uvStart = segs.front().a;
+            const double gap = prevEnd.Distance(uvStart);
+            if (gap > maxUVgap) maxUVgap = gap;
+        }
+        for (size_t i = 0; i < segs.size(); i++) {
+            for (size_t j = i + 1; j < segs.size(); j++) {
+                if (segs[i].ei == segs[j].ei) continue;
+                if (std::abs(segs[i].ei - segs[j].ei) == 1) continue;
+                if (segIntersect2d(segs[i].a, segs[i].b, segs[j].a, segs[j].b, tol)) nSelfX++;
+            }
+        }
+        for (size_t i = 0; i < mids.size(); i++) {
+            for (size_t j = i + 1; j < mids.size(); j++) {
+                if (mids[i].Distance(mids[j]) <= tol) nDup++;
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+}
+
+void dumpDiagWire(int rid, int iw, const TopoDS_Face& f, const TopoDS_Wire& w,
+                  const BRepCheck_Analyzer& an, double sewTol, const char* stage,
+                  const TopTools_IndexedDataMapOfShapeListOfShape* anc,
+                  const TopTools_IndexedMapOfShape* faceMap, const std::vector<int>* faceRid,
+                  const std::vector<char>* eprimeFill, const RegionSet* rs) {
+    int nE = 0, pcurveMissing = 0, nCylE = 0, nFillE = 0, nPlnE = 0, nSeamFree = 0;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) sF;
+    try {
+        sF = BRep_Tool::Surface(f, loc);
+    } catch (const Standard_Failure&) {
+    }
+    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+        nE++;
+        const TopoDS_Edge e = TopoDS::Edge(it.Value());
+        Standard_Boolean hasPc = Standard_False;
+        Standard_Real pf = 0, pl = 0;
+        if (!sF.IsNull()) {
+            try {
+                (void)BRep_Tool::CurveOnSurface(e, sF, loc, pf, pl, &hasPc);
+            } catch (const Standard_Failure&) {
+                hasPc = Standard_False;
+            }
+        }
+        if (!hasPc) pcurveMissing++;
+        if (!anc || !faceMap || !faceRid || !rs) continue;
+        int eidx = anc->FindIndex(e);
+        if (eidx <= 0) {
+            nSeamFree++;
+            continue;
+        }
+        const int nAnc = anc->FindFromIndex(eidx).Extent();
+        if (nAnc < 2) {
+            nSeamFree++;
+            continue;
+        }
+        for (TopTools_ListOfShape::Iterator ait(anc->FindFromIndex(eidx)); ait.More(); ait.Next()) {
+            const TopoDS_Face fa = TopoDS::Face(ait.Value());
+            if (fa.IsSame(f)) continue;
+            int ia = faceMap->FindIndex(fa);
+            const int orid = (ia > 0 && (size_t)ia < faceRid->size()) ? (*faceRid)[(size_t)ia] : -1;
+            const bool fill = eprimeFill && orid >= 0 && (size_t)orid < eprimeFill->size() &&
+                              (*eprimeFill)[(size_t)orid];
+            const Region* rr = regionById(*rs, orid);
+            if (fill) nFillE++;
+            else if (rr && rr->type == SurfType::Cylinder) nCylE++;
+            else if (rr && rr->type == SurfType::Plane) nPlnE++;
+            else nSeamFree++;
+        }
+    }
+    const char* infPt = "?";
+    try {
+        BRepTopAdaptor_FClass2d cl(f, Precision::PConfusion());
+        infPt = topAbsStateName(cl.PerformInfinitePoint());
+    } catch (const Standard_Failure&) {
+    }
+    double areaUV = 0.0, maxUVgap = 0.0;
+    int nSelfX = 0, nDup = 0;
+    wireDiagMetrics(f, w, sewTol, areaUV, nSelfX, maxUVgap, nDup);
+    std::fprintf(stderr,
+                 "DIAG_WIRE rid=%d iw=%d nE=%d ori=%s faceOri=%s infPt=%s areaUV=%.6e nSelfX=%d "
+                 "maxUVgap=%.6e nDup=%d pcurveMissing=%d nCylE=%d nFillE=%d nPlnE=%d nSeamFree=%d "
+                 "sewTol=%.6e stage=%s",
+                 rid, iw, nE, w.Orientation() == TopAbs_FORWARD ? "F" : "R",
+                 f.Orientation() == TopAbs_FORWARD ? "F" : "R", infPt, areaUV, nSelfX, maxUVgap,
+                 nDup, pcurveMissing, nCylE, nFillE, nPlnE, nSeamFree, sewTol,
+                 stage ? stage : "-");
+    try {
+        Handle(BRepCheck_Result) res = an.Result(w);
+        if (!res.IsNull()) {
+            if (res->IsStatusOnShape(f)) dumpBRepStatusList(res->StatusOnShape(f));
+            dumpBRepStatuses(res);
+        }
+        Handle(BRepCheck_Result) fr = an.Result(f);
+        if (!fr.IsNull()) dumpBRepStatuses(fr);
+    } catch (const Standard_Failure&) {
+    }
+    std::fprintf(stderr, "\n");
+}
+
+void dumpDiagWiresOfFace(int rid, const TopoDS_Face& f, double sewTol, const char* stage = nullptr,
+                         const TopTools_IndexedDataMapOfShapeListOfShape* anc = nullptr,
+                         const TopTools_IndexedMapOfShape* faceMap = nullptr,
+                         const std::vector<int>* faceRid = nullptr,
+                         const std::vector<char>* eprimeFill = nullptr,
+                         const RegionSet* rs = nullptr) {
+    if (f.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(f, Standard_True);
+        int iw = 0;
+        for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), iw++)
+            dumpDiagWire(rid, iw, f, TopoDS::Wire(wx.Current()), an, sewTol, stage, anc, faceMap,
+                         faceRid, eprimeFill, rs);
+    } catch (const Standard_Failure&) {
+    }
+}
+
+const char* geomCurveKind(const Handle(Geom_Curve)& c) {
+    if (c.IsNull()) return "none";
+    Handle(Geom_Curve) b = c;
+    Handle(Geom_TrimmedCurve) tr = Handle(Geom_TrimmedCurve)::DownCast(c);
+    if (!tr.IsNull() && !tr->BasisCurve().IsNull()) b = tr->BasisCurve();
+    if (b->DynamicType() == STANDARD_TYPE(Geom_Circle)) return "circ";
+    if (b->DynamicType() == STANDARD_TYPE(Geom_Line)) return "lin";
+    if (b->DynamicType() == STANDARD_TYPE(Geom_Ellipse)) return "elips";
+    return "other";
+}
+
+int findSharedCylRid(const TopoDS_Edge& e, const std::vector<TopoDS_Face>& built,
+                     const std::vector<int>& builtRid, const RegionSet& rs, int selfRid) {
+    const void* ts = e.TShape().get();
+    if (!ts) return -1;
+    for (size_t i = 0; i < built.size(); i++) {
+        const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+        if (rid == selfRid) continue;
+        const Region* rr = regionById(rs, rid);
+        if (!rr || rr->type != SurfType::Cylinder) continue;
+        for (TopExp_Explorer ex(built[i], TopAbs_EDGE); ex.More(); ex.Next()) {
+            if (ex.Current().TShape().get() == ts) return rid;
+        }
+    }
+    return -1;
+}
+
+void dumpDiagM5(int rid, const TopoDS_Edge& e, const TopoDS_Face& f, int sharedCylRid, int st) {
+    Standard_Real f3 = 0, l3 = 0;
+    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+    const char* cty = geomCurveKind(c3);
+    Standard_Real f2 = 0, l2 = 0;
+    Standard_Boolean stored = Standard_False;
+    Handle(Geom2d_Curve) c2;
+    if (!f.IsNull()) c2 = BRep_Tool::CurveOnSurface(e, f, f2, l2, &stored);
+    const char* cls = stored ? "bound" : (c2.IsNull() ? "unbound" : "synth");
+    const double span3 = (double)(l3 - f3);
+    const double span2 = (double)(l2 - f2);
+    std::fprintf(stderr,
+                 "DIAG_M5 rid=%d class=%s cty=%s span3=%.6f span2=%.6f stored=%d "
+                 "sharedCylRid=%d st=%d\n",
+                 rid, cls, cty, span3, span2, stored ? 1 : 0, sharedCylRid, st);
+}
+
+void dumpM5OnShell(const BRepCheck_Analyzer& an, const std::vector<TopoDS_Face>& built,
+                   const std::vector<int>& builtRid, const RegionSet& rs) {
+    if (!diagP2Enabled()) return;
+    try {
+        for (size_t i = 0; i < built.size(); i++) {
+            const TopoDS_Face& f = built[i];
+            if (f.IsNull()) continue;
+            const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                Handle(BRepCheck_Result) er = an.Result(e);
+                if (er.IsNull()) continue;
+                for (BRepCheck_ListOfStatus::Iterator it(er->Status()); it.More(); it.Next()) {
+                    if ((int)it.Value() != 11) continue;
+                    dumpDiagM5(rid, e, f, findSharedCylRid(e, built, builtRid, rs, rid), 11);
+                }
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+}
+
+const char* builtAsName(BuiltAs a) {
+    switch (a) {
+        case BuiltAs::Single: return "Single";
+        case BuiltAs::Seamed360: return "Seamed360";
+        case BuiltAs::TwoHalves: return "TwoHalves";
+        case BuiltAs::ExplodedToFacets: return "ExplodedToFacets";
+        default: return "NotBuilt";
+    }
+}
+
+void formatStatusList(const Handle(BRepCheck_Result)& res, char* buf, size_t n) {
+    buf[0] = '\0';
+    if (res.IsNull() || n < 4) return;
+    size_t used = 0;
+    buf[used++] = '[';
+    buf[used] = '\0';
+    bool any = false;
+    for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next()) {
+        const int st = (int)it.Value();
+        if (st == (int)BRepCheck_NoError) continue;
+        int w = std::snprintf(buf + used, n - used, "%s%d", any ? "," : "", st);
+        if (w < 0 || (size_t)w >= n - used) break;
+        used += (size_t)w;
+        any = true;
+    }
+    if (used + 2 < n) {
+        buf[used++] = ']';
+        buf[used] = '\0';
+    }
+}
+
+int pcurveMissingOnFace(const TopoDS_Face& f) {
+    int n = 0;
+    if (f.IsNull()) return 0;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) sF = BRep_Tool::Surface(f, loc);
+    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+        Standard_Boolean hasPc = Standard_False;
+        Standard_Real pf = 0, pl = 0;
+        if (!sF.IsNull()) {
+            try {
+                (void)BRep_Tool::CurveOnSurface(e, sF, loc, pf, pl, &hasPc);
+            } catch (const Standard_Failure&) {
+            }
+        }
+        if (!hasPc) n++;
+    }
+    return n;
+}
+
+int countFaceEdges(const TopoDS_Face& f) {
+    int n = 0;
+    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) n++;
+    return n;
+}
+
 void dumpFaceTopo(int rid, const TopoDS_Face& f, const char* tag, const char* phase) {
     if (!collapseDiagEnabled() || f.IsNull()) return;
     try {
@@ -2123,7 +2836,7 @@ void dumpFaceTopo(int rid, const TopoDS_Face& f, const char* tag, const char* ph
 }
 
 void dumpShellCheck(const TopoDS_Shell& sh, const std::vector<TopoDS_Face>& built,
-                    const std::vector<int>& builtRid, const RegionSet& rs) {
+                    const std::vector<int>& builtRid, const RegionSet& rs, double sewTol) {
     if (!collapseDiagEnabled() || sh.IsNull()) return;
     try {
         BRepCheck_Analyzer an(sh, Standard_True);
@@ -2162,7 +2875,9 @@ void dumpShellCheck(const TopoDS_Shell& sh, const std::vector<TopoDS_Face>& buil
             dumpBRepStatuses(fr);
             dumpBRepStatuses(fan.Result(f));
             std::fprintf(stderr, "\n");
+            if (diagP2Enabled()) dumpDiagWiresOfFace(rid, f, sewTol, "shell-invalid");
         }
+        if (diagP2Enabled()) dumpM5OnShell(an, built, builtRid, rs);
         TopTools_IndexedDataMapOfShapeListOfShape anc;
         TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
         TopTools_IndexedMapOfShape faceMap;
@@ -2556,6 +3271,53 @@ void variantsForRegion(const Region& r, SurfVar* out, int& n) {
     if (!r.closed360) {
         out[n++] = SurfVar::CylRectTrim;
         out[n++] = SurfVar::CylRotTrim;
+    }
+}
+
+bool regionSurfOnFace(const Region& r, const Handle(Geom_Surface)& onFace) {
+    if (onFace.IsNull()) return false;
+    const void* p = onFace.get();
+    auto it = gSurfIdent.find(p);
+    if (it != gSurfIdent.end() && it->second.first == r.id) return true;
+    SurfVar vars[8];
+    int nv = 0;
+    variantsForRegion(r, vars, nv);
+    for (int i = 0; i < nv; i++) {
+        Handle(Geom_Surface) reg = regionSurf(r, vars[i]);
+        if (!reg.IsNull() && reg.get() == p) return true;
+    }
+    if (r.type == SurfType::Cylinder) {
+        Handle(Geom_Surface) rt = regionSurf(r, SurfVar::CylRectTrim);
+        if (!rt.IsNull() && rt.get() == p) return true;
+        Handle(Geom_Surface) rot = regionSurf(r, SurfVar::CylRotTrim);
+        if (!rot.IsNull() && rot.get() == p) return true;
+    }
+    return false;
+}
+
+void dumpFillIdentity(const TopoDS_Shell& sh, const std::vector<TopoDS_Face>& built,
+                      const std::vector<int>& builtRid, const RegionSet& rs) {
+    if (!diagP2Enabled() || sh.IsNull()) return;
+    int surfMismatch = 0, nRegionFaces = 0;
+    try {
+        for (size_t i = 0; i < built.size(); i++) {
+            const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+            if (rid < 0) continue;
+            const Region* rr = regionById(rs, rid);
+            if (!rr || !isAnalytic(rr)) continue;
+            if (rr->type != SurfType::Plane && rr->type != SurfType::Cylinder) continue;
+            if (rr->builtAs != BuiltAs::Single && rr->builtAs != BuiltAs::Seamed360 &&
+                rr->builtAs != BuiltAs::TwoHalves)
+                continue;
+            nRegionFaces++;
+            Handle(Geom_Surface) s = BRep_Tool::Surface(built[i]);
+            if (!regionSurfOnFace(*rr, s)) surfMismatch++;
+        }
+        // Main has no eprimeFill residue map: seamOrphan/seamChecked omitted (print less).
+        std::fprintf(stderr,
+                     "DIAG_FILLID surfMismatch=%d nRegionFaces=%d seamOrphan=%d seamChecked=%d\n",
+                     surfMismatch, nRegionFaces, 0, 0);
+    } catch (const Standard_Failure&) {
     }
 }
 
@@ -3472,6 +4234,22 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         if (tryAllSurfs(rev)) return true;
     }
     diagPartial("all-failed");
+    if (diagP2Enabled()) {
+        if (!outF.IsNull())
+            dumpDiagWiresOfFace(r.id, outF, sewTol, "buildPartialCylinder");
+        else {
+            int nE = 0;
+            if (!ow.IsNull()) {
+                for (TopoDS_Iterator it(ow); it.More(); it.Next())
+                    if (it.Value().ShapeType() == TopAbs_EDGE) nE++;
+            }
+            std::fprintf(stderr,
+                         "DIAG_WIRE rid=%d iw=0 nE=%d ori=? faceOri=? infPt=? areaUV=0 nSelfX=0 "
+                         "maxUVgap=0 nDup=0 pcurveMissing=-1 nCylE=0 nFillE=0 nPlnE=0 nSeamFree=0 "
+                         "sewTol=%.6e stage=buildPartialCylinder\n",
+                         r.id, nE, sewTol);
+        }
+    }
     return false;
 }
 
@@ -4403,6 +5181,39 @@ std::vector<int> selectU0Explode(const std::vector<CascadeHit>& culprits, const 
     uniqueSorted(cyls);
     uniqueSorted(smallPln);
     uniqueSorted(hubs);
+    if (collapseDiagEnabled()) {
+        const int nCyl = countAnalyticCylinders(rs);
+        auto emitU0 = [&](int rid, const char* bucket) {
+            const char* src = "-";
+            int faceValid = 1;
+            for (const CascadeHit& h : culprits) {
+                if (h.rid != rid) continue;
+                src = h.src ? h.src : "-";
+                faceValid = h.faceValid ? 1 : 0;
+                break;
+            }
+            int hop = 0;
+            for (const BoundaryChain& ch : rs.chains) {
+                if (!chainTouches(ch, rid)) continue;
+                const Region* o = regionById(rs, otherReg(ch, rid));
+                if (o && o->type == SurfType::Cylinder) ++hop;
+            }
+            std::fprintf(stderr,
+                         "DIAG_CASCADE u0 rid=%d bucket=%s hop=%d nCyl=%d hub=%d touchC360=%d "
+                         "culpritSrc=%s faceValid=%d\n",
+                         rid, bucket, hop, nCyl, isHubPlane(rs, rid) ? 1 : 0,
+                         touchesClosed360Cyl(rs, rid) ? 1 : 0, src, faceValid);
+        };
+        for (int id : cyls) emitU0(id, "cyls");
+        for (const CascadeHit& h : culprits) {
+            if (h.rid < 0 || regionExploded(exploded, h.rid)) continue;
+            const Region* r = regionById(rs, h.rid);
+            if (!r || r->type == SurfType::Cylinder) continue;
+            if (touchesClosed360Cyl(rs, h.rid)) emitU0(h.rid, "skip-C360");
+        }
+        for (int id : hubs) emitU0(id, "hubs");
+        for (int id : smallPln) emitU0(id, "smallPln");
+    }
     if (!cyls.empty()) {
         uniqueSorted(cyls);
         if (wouldSaturate(rs, exploded, cyls)) {
@@ -4526,6 +5337,117 @@ void diagCascadeExplode(int rid, CascadeRung rung, const RegionSet& rs) {
         std::fprintf(stderr, "%d", nbrs[i]);
     }
     std::fprintf(stderr, "]\n");
+}
+
+void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<TopoDS_Face>& built,
+                 const std::vector<int>& builtRid, const std::vector<char>& exploded, double sewTol) {
+    if (!diagP2Enabled()) return;
+    try {
+        TopoDS_Shell probe;
+        BRep_Builder pb;
+        pb.MakeShell(probe);
+        for (const auto& f : built) {
+            if (!f.IsNull()) pb.Add(probe, f);
+        }
+        const int closed = BRep_Tool::IsClosed(probe) ? 1 : 0;
+        int valid = 0;
+        BRepCheck_Analyzer an(probe, Standard_True, Standard_True);
+        try {
+            valid = an.IsValid() ? 1 : 0;
+        } catch (const Standard_Failure&) {
+            valid = 0;
+        }
+        double dVolAbs = 0;
+        for (const Region& reg : rs.regions) dVolAbs += std::fabs(reg.dVolPredicted);
+        const double meshVol = std::fabs(meshViewVolume(mv));
+        const double budget = std::max(1e-4 * meshVol, 3.0 * dVolAbs);
+        double shellVol = 0;
+        int volPass = 0;
+        try {
+            GProp_GProps gp;
+            BRepGProp::VolumeProperties(probe, gp);
+            shellVol = gp.Mass();
+            volPass = (std::fabs(shellVol - meshVol) <= budget) ? 1 : 0;
+        } catch (const Standard_Failure&) {
+            volPass = 0;
+        }
+        std::fprintf(stderr,
+                     "DIAG_R2PROBE comp=%zu nFaces=%d closed=%d valid=%d shellVol=%.6f "
+                     "meshVol=%.6f budget=%.6f volPass=%d\n",
+                     mv.nTri, (int)built.size(), closed, valid, shellVol, meshVol, budget, volPass);
+        dumpM5OnShell(an, built, builtRid, rs);
+        if (valid) return;
+        TopTools_IndexedDataMapOfShapeListOfShape anc;
+        TopExp::MapShapesAndAncestors(probe, TopAbs_EDGE, TopAbs_FACE, anc);
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(probe, TopAbs_FACE, faceMap);
+        std::vector<int> faceRid((size_t)faceMap.Extent() + 1, -1);
+        for (size_t i = 0; i < built.size(); i++) {
+            int idx = faceMap.FindIndex(built[i]);
+            if (idx > 0 && i < builtRid.size()) faceRid[(size_t)idx] = builtRid[i];
+        }
+        for (size_t i = 0; i < built.size(); i++) {
+            const TopoDS_Face& f = built[i];
+            if (f.IsNull()) continue;
+            Handle(BRepCheck_Result) fr = an.Result(f);
+            BRepCheck_Analyzer fan(f, Standard_True);
+            bool faceBad = !fan.IsValid();
+            if (!fr.IsNull()) {
+                for (BRepCheck_ListOfStatus::Iterator it(fr->Status()); it.More(); it.Next())
+                    if (it.Value() != BRepCheck_NoError) faceBad = true;
+            }
+            if (!faceBad) continue;
+            const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+            const Region* rr = regionById(rs, rid);
+            const char* kind = "other";
+            const char* bas = "NotBuilt";
+            if (rr) {
+                if (rr->type == SurfType::Plane) kind = "plane";
+                else if (rr->type == SurfType::Cylinder) kind = "cyl";
+                bas = builtAsName(rr->builtAs);
+                if (regionExploded(exploded, rid) || rr->builtAs == BuiltAs::ExplodedToFacets)
+                    kind = "facet";
+            } else
+                kind = "facet";
+            char faceSt[128], wireSt[128], edgeSt[128];
+            formatStatusList(fr, faceSt, sizeof(faceSt));
+            wireSt[0] = '[';
+            wireSt[1] = ']';
+            wireSt[2] = '\0';
+            edgeSt[0] = '[';
+            edgeSt[1] = ']';
+            edgeSt[2] = '\0';
+            try {
+                for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) {
+                    formatStatusList(an.Result(wx.Current()), wireSt, sizeof(wireSt));
+                    break;
+                }
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    Handle(BRepCheck_Result) er = an.Result(ex.Current());
+                    bool bad = false;
+                    if (!er.IsNull()) {
+                        for (BRepCheck_ListOfStatus::Iterator it(er->Status()); it.More();
+                             it.Next())
+                            if (it.Value() != BRepCheck_NoError) bad = true;
+                    }
+                    if (bad) {
+                        formatStatusList(er, edgeSt, sizeof(edgeSt));
+                        break;
+                    }
+                }
+            } catch (const Standard_Failure&) {
+            }
+            std::fprintf(stderr,
+                         "DIAG_R2INVALID rid=%d kind=%s builtAs=%s faceSt=%s wireSt=%s edgeSt=%s "
+                         "nE=%d pcurveMissing=%d\n",
+                         rid, kind, bas, faceSt, wireSt, edgeSt, countFaceEdges(f),
+                         pcurveMissingOnFace(f));
+            dumpDiagWiresOfFace(rid, f, sewTol, "r2-invalid", &anc, &faceMap, &faceRid, nullptr,
+                                &rs);
+        }
+    } catch (const Standard_Failure&) {
+        std::fprintf(stderr, "DIAG_R2PROBE threw\n");
+    }
 }
 
 }  // namespace
@@ -5419,6 +6341,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         }
         if (diagP2Enabled()) {
+            dumpFillIdentity(sh, built, builtRid, rs);
             const bool preClosed = BRep_Tool::IsClosed(sh) == Standard_True;
             int freeE = 0, nI = 0, nII = 0, nIII = 0;
             try {
@@ -5456,6 +6379,35 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             std::fprintf(stderr,
                          "DIAG_PREJ4 closed=%d freeEdges=%d nOrphanI=%d nOrphanII=%d nOrphanIII=%d\n",
                          preClosed ? 1 : 0, freeE, nI, nII, nIII);
+        }
+        if (diagWireEnabled()) {
+            try {
+                std::unordered_set<int> dumpedIdx;
+                TopTools_IndexedDataMapOfShapeListOfShape ancW;
+                TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, ancW);
+                TopTools_IndexedMapOfShape faceMapW;
+                TopExp::MapShapes(sh, TopAbs_FACE, faceMapW);
+                std::vector<int> faceRidW((size_t)faceMapW.Extent() + 1, -1);
+                for (size_t i = 0; i < built.size(); i++) {
+                    int idx = faceMapW.FindIndex(built[i]);
+                    if (idx > 0 && i < builtRid.size()) faceRidW[(size_t)idx] = builtRid[i];
+                }
+                auto dumpIdx = [&](size_t i, const char* stage) {
+                    if (i >= built.size() || !dumpedIdx.insert((int)i).second) return;
+                    const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+                    dumpDiagWiresOfFace(rid, built[i], sewTol, stage, &ancW, &faceMapW, &faceRidW,
+                                        nullptr, &rs);
+                };
+                for (size_t i = 0; i < built.size(); i++) {
+                    const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+                    if (rid >= 0 && rid <= 3) dumpIdx(i, "hub");
+                    const Region* rr = regionById(rs, rid);
+                    if (rr && rr->type == SurfType::Plane && (int)rr->tris.size() <= 7 &&
+                        rr->builtAs == BuiltAs::Single)
+                        dumpIdx(i, "sliver");
+                }
+            } catch (const Standard_Failure&) {
+            }
         }
         try {
             BRepLib::SameParameter(sh, std::min(sewTol, spCap), /*forced=*/Standard_True);
@@ -5619,6 +6571,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 goto try_rebuild;
             }
             restoreShared();
+            dumpR2Probe(mv, rs, built, builtRid, exploded, sewTol);
             out.clear();
             return false;
         }
@@ -5637,7 +6590,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         const bool shValid = shellIsValid(sh);
         // Site B is closed-but-invalid only. Open shells are site C (untouched).
         if (BRep_Tool::IsClosed(sh) && !shValid) {
-            dumpShellCheck(sh, built, builtRid, rs);
+            dumpShellCheck(sh, built, builtRid, rs, sewTol);
             std::vector<CascadeHit> culprits;
             collectFaceCulprits(built, builtRid, exploded, culprits);
             collectShellCulprits(sh, built, builtRid, rs, exploded, culprits);
@@ -5650,6 +6603,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             if (plan.hostR2 || cascadeSt.u2Done || !shValid) {
                 restoreShared();
+                dumpR2Probe(mv, rs, built, builtRid, exploded, sewTol);
                 out.clear();
                 return false;
             }
@@ -5691,6 +6645,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 if (plan.hostR2 && tightFail && !cascadeSt.u2Done) {
                     restoreShared();
+                    dumpR2Probe(mv, rs, built, builtRid, exploded, sewTol);
                     out.clear();
                     return false;
                 }
@@ -5701,6 +6656,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         fitAnalyticTolerances(sh);
 
+        dumpR2Probe(mv, rs, built, builtRid, exploded, sewTol);
         out = std::move(built);
         return true;
     } catch (const Standard_Failure&) {
