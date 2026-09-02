@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <sstream>
@@ -34,6 +35,8 @@
 #include <BRepGProp.hxx>
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepLib_ValidateEdge.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -56,8 +59,13 @@
 #include <BRep_ListIteratorOfListOfCurveRepresentation.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_Line.hxx>
+#include <Geom2d_Circle.hxx>
+#include <Geom2d_Ellipse.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_BSplineCurve.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_Ellipse.hxx>
 #include <Geom_Line.hxx>
@@ -915,6 +923,9 @@ double analyticSnapCap(const MeshView& mv, const Region* A, const Region* B) {
     return c;
 }
 
+extern thread_local int gTolRewriteFire;
+void stampTolWriter(const TopoDS_Edge& e, const char* site);
+
 // F4: absorb sagitta in edge/vertex tolerance, but NEVER inflate a shared
 // TShape past the mesh budget (adjudication F5). Beyond that the fit is
 // wrong — reject the region rather than poison every adjacent face.
@@ -951,8 +962,11 @@ bool ensureFaceValid(TopoDS_Face& f, double cap) {
             Handle(Geom_Curve) c = BRep_Tool::Curve(e, fp, lp);
             if (!c.IsNull()) d = std::max(d, devPnt(c->Value(0.5 * (fp + lp))));
             if (d > cap) return false;
-            if (d > BRep_Tool::Tolerance(e))
+            if (d > BRep_Tool::Tolerance(e)) {
                 B.UpdateEdge(e, std::min(d * 1.001 + Precision::Confusion(), cap));
+                stampTolWriter(e, "other");
+                gTolRewriteFire++;
+            }
         }
     } catch (const Standard_Failure&) {
         return false;
@@ -1377,6 +1391,35 @@ bool diagP2Enabled() {
     return cached != 0;
 }
 
+// Isolated TShape copy for print-only try-B / BRepCheck. Never fall back to live.
+TopoDS_Shape diagIsolatedCopy(const TopoDS_Shape& s) {
+    if (s.IsNull()) return {};
+    try {
+        BRepBuilderAPI_Copy cop(s, Standard_True);
+        if (cop.IsDone() && !cop.Shape().IsNull()) return cop.Shape();
+    } catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+void dumpDiagPlateLine(int rid, const TopoDS_Face& f) {
+    const TopoDS_Shape iso = diagIsolatedCopy(f);
+    if (iso.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(iso, Standard_True);
+        std::fprintf(stderr, "DIAG_PLATE rid=%d valid=%d", rid, an.IsValid() ? 1 : 0);
+        if (!an.IsValid()) {
+            Handle(BRepCheck_Result) res = an.Result(iso);
+            if (!res.IsNull()) {
+                for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next())
+                    std::fprintf(stderr, " st=%d", (int)it.Value());
+            }
+        }
+        std::fprintf(stderr, "\n");
+    } catch (const Standard_Failure&) {
+    }
+}
+
 bool diagJ6Enabled() {
     static int cached = -1;
     if (cached < 0) {
@@ -1401,13 +1444,27 @@ thread_local int gDiagMeshEGen = 0;
 thread_local std::unordered_map<const void*, const char*> gDiagEdgeSite;
 thread_local std::unordered_map<const void*, int> gDiagEdgeGen;
 thread_local bool gHubWireRowB = false;
+thread_local std::unordered_set<int> gChainSewFallbackCi;
+thread_local std::unordered_map<const void*, int> gWirePopCi;
+thread_local std::unordered_map<const void*, const char*> gWirePopSite;
 
 void setHubWireRowB() { gHubWireRowB = true; }
 const char* hubWireRowLabel() { return gHubWireRowB ? "B" : "A"; }
+void noteChainSewFallback(int ci) {
+    if (ci >= 0) gChainSewFallbackCi.insert(ci);
+}
 
 const void* diagTShapePtr(const TopoDS_Shape& s) {
     if (s.IsNull()) return nullptr;
     return (const void*)s.TShape().get();
+}
+
+void noteWirePop(const TopoDS_Edge& e, const char* site, int ci) {
+    if (e.IsNull() || !site) return;
+    const void* ts = diagTShapePtr(e);
+    if (!ts) return;
+    gWirePopSite[ts] = site;
+    gWirePopCi[ts] = ci;
 }
 
 void diagNoteEdge(const TopoDS_Edge& e, const char* site) {
@@ -2386,6 +2443,7 @@ bool appendPolyline(BRep_Builder& B, TopoDS_Wire& w, const MeshView& mv, const B
         const auto& ev = mv.compEdges[eid];
         bool fwd = (ev.first == va);
         diagNoteEdge(meshE[(size_t)eid], "appendPolyline");
+        noteWirePop(meshE[(size_t)eid], "appendPolyline", ci);
         if (plateR && plateR->type == SurfType::Plane && isAnalytic(plateR)) {
             const void* ts = diagTShapePtr(meshE[(size_t)eid]);
             if (!ts || !gSeamTShapes.count(ts))
@@ -2396,17 +2454,19 @@ bool appendPolyline(BRep_Builder& B, TopoDS_Wire& w, const MeshView& mv, const B
     return true;
 }
 
-bool appendCollapsed(BRep_Builder& B, TopoDS_Wire& w, const ChainGeom& g, bool reversed) {
+bool appendCollapsed(BRep_Builder& B, TopoDS_Wire& w, const ChainGeom& g, bool reversed, int ci) {
     if (g.edges.empty()) return false;
     if (!reversed) {
         for (const auto& e : g.edges) {
             diagNoteEdge(e, "appendCollapsed");
+            noteWirePop(e, "appendCollapsed", ci);
             B.Add(w, e);
         }
     } else {
         for (int i = (int)g.edges.size() - 1; i >= 0; i--) {
             TopoDS_Edge rev = TopoDS::Edge(g.edges[(size_t)i].Reversed());
             diagNoteEdge(rev, "appendCollapsed");
+            noteWirePop(rev, "appendCollapsed", ci);
             B.Add(w, rev);
         }
     }
@@ -2427,7 +2487,7 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
         bool ok;
         if ((size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
             (size_t)ci < geom.size() && geom[(size_t)ci].collapsed && !geom[(size_t)ci].edges.empty())
-            ok = appendCollapsed(B, w, geom[(size_t)ci], rev);
+            ok = appendCollapsed(B, w, geom[(size_t)ci], rev, (int)ci);
         else
             ok = appendPolyline(B, w, mv, rs.chains[(size_t)ci], rev, meshE, edgeOk, plateR,
                                 (int)ci);
@@ -4268,16 +4328,263 @@ void dumpDiagPlateSelfx(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow, co
     }
 }
 
+
+const char* topAbsOriName(TopAbs_Orientation o) {
+    switch (o) {
+        case TopAbs_FORWARD: return "FORWARD";
+        case TopAbs_REVERSED: return "REVERSED";
+        case TopAbs_INTERNAL: return "INTERNAL";
+        case TopAbs_EXTERNAL: return "EXTERNAL";
+        default: return "?";
+    }
+}
+
+std::string formatBRepStatusListAll(const BRepCheck_ListOfStatus& lst) {
+    std::string s = "[";
+    bool any = false;
+    for (BRepCheck_ListOfStatus::Iterator it(lst); it.More(); it.Next()) {
+        if (any) s += ',';
+        any = true;
+        const int st = (int)it.Value();
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%d:%s", st, brepCheckName(st));
+        s += buf;
+    }
+    s += ']';
+    return s;
+}
+
+Handle(BRepCheck_Result) analyzerResultOf(const BRepCheck_Analyzer& an, const TopoDS_Shape& s) {
+    try {
+        return an.Result(s);
+    } catch (const Standard_Failure&) {
+        return Handle(BRepCheck_Result)();
+    }
+}
+
+std::string analyzerStatusOwn(const Handle(BRepCheck_Result)& res) {
+    if (res.IsNull()) return "[]";
+    try {
+        return formatBRepStatusListAll(res->Status());
+    } catch (const Standard_Failure&) {
+        return "[]";
+    }
+}
+
+std::string analyzerStatusOnFace(const Handle(BRepCheck_Result)& res, const TopoDS_Face& f) {
+    if (res.IsNull()) return "[]";
+    try {
+        if (res->IsStatusOnShape(f)) return formatBRepStatusListAll(res->StatusOnShape(f));
+        res->InitContextIterator();
+        for (; res->MoreShapeInContext(); res->NextShapeInContext()) {
+            if (res->ContextualShape().IsSame(f) || res->ContextualShape().IsEqual(f))
+                return formatBRepStatusListAll(res->StatusOnShape());
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return "[]";
+}
+
+bool firstNonNoErrorInList(const BRepCheck_ListOfStatus& lst, BRepCheck_Status& st) {
+    for (BRepCheck_ListOfStatus::Iterator it(lst); it.More(); it.Next()) {
+        if (it.Value() != BRepCheck_NoError) {
+            st = it.Value();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool firstInContextError(const Handle(BRepCheck_Result)& res, const TopoDS_Face& f,
+                         BRepCheck_Status& st) {
+    if (res.IsNull()) return false;
+    try {
+        if (res->IsStatusOnShape(f)) return firstNonNoErrorInList(res->StatusOnShape(f), st);
+        res->InitContextIterator();
+        for (; res->MoreShapeInContext(); res->NextShapeInContext()) {
+            if (res->ContextualShape().IsSame(f) || res->ContextualShape().IsEqual(f))
+                return firstNonNoErrorInList(res->StatusOnShape(), st);
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return false;
+}
+
+bool firstOwnError(const Handle(BRepCheck_Result)& res, BRepCheck_Status& st) {
+    if (res.IsNull()) return false;
+    try {
+        return firstNonNoErrorInList(res->Status(), st);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// D-S3-99 print-only: walk BRepCheck_Analyzer's result map. No geometry change.
+void dumpDiagAnalyzerMap(int rid, char tryAB, const TopoDS_Face& f, const TopoDS_Wire& ow) {
+    if (f.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(f, Standard_True);
+        int nFaceExam = 0, nFacePres = 0, nWireExam = 0, nWirePres = 0;
+        int nEdgeExam = 0, nEdgePres = 0, nVertExam = 0, nVertPres = 0;
+        char firstSub[64] = "none";
+        BRepCheck_Status firstSt = BRepCheck_NoError;
+        bool firstMissed = false;
+        bool haveFirst = false;
+
+        auto considerFirst = [&](const char* kind, int idx, const Handle(BRepCheck_Result)& res) {
+            if (haveFirst) return;
+            BRepCheck_Status st = BRepCheck_NoError;
+            if (!firstInContextError(res, f, st)) return;
+            haveFirst = true;
+            firstSt = st;
+            if (idx < 0)
+                std::snprintf(firstSub, sizeof(firstSub), "%s", kind);
+            else
+                std::snprintf(firstSub, sizeof(firstSub), "%s %d", kind, idx);
+            BRepCheck_Status own = BRepCheck_NoError;
+            firstMissed = !firstOwnError(res, own);
+        };
+
+        {
+            nFaceExam++;
+            Handle(BRepCheck_Result) res = analyzerResultOf(an, f);
+            if (!res.IsNull()) nFacePres++;
+            const std::string own = analyzerStatusOwn(res);
+            const std::string ctx = analyzerStatusOnFace(res, f);
+            std::fprintf(stderr,
+                         "DIAG_ANALYZER rid=%d try=%c sub=face status=%s inContext=%s\n", rid,
+                         tryAB, own.c_str(), ctx.c_str());
+        }
+
+        TopoDS_Wire outerW;
+        int outerIw = -1, maxNE = -1;
+        int iw = 0;
+        for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), iw++) {
+            nWireExam++;
+            const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+            Handle(BRepCheck_Result) res = analyzerResultOf(an, w);
+            if (!res.IsNull()) nWirePres++;
+            const std::string own = analyzerStatusOwn(res);
+            const std::string ctx = analyzerStatusOnFace(res, f);
+            std::fprintf(stderr,
+                         "DIAG_ANALYZER rid=%d try=%c sub=wire %d status=%s inContext=%s\n", rid,
+                         tryAB, iw, own.c_str(), ctx.c_str());
+            considerFirst("wire", iw, res);
+            int nE = 0;
+            for (TopoDS_Iterator it(w); it.More(); it.Next())
+                if (it.Value().ShapeType() == TopAbs_EDGE) nE++;
+            if (nE > maxNE) {
+                maxNE = nE;
+                outerW = w;
+                outerIw = iw;
+            }
+        }
+
+        TopTools_IndexedMapOfShape emap, vmap;
+        TopExp::MapShapes(f, TopAbs_EDGE, emap);
+        TopExp::MapShapes(f, TopAbs_VERTEX, vmap);
+        for (int ie = 1; ie <= emap.Extent(); ie++) {
+            nEdgeExam++;
+            const TopoDS_Shape& e = emap(ie);
+            Handle(BRepCheck_Result) res = analyzerResultOf(an, e);
+            if (!res.IsNull()) nEdgePres++;
+            const std::string own = analyzerStatusOwn(res);
+            const std::string ctx = analyzerStatusOnFace(res, f);
+            std::fprintf(stderr,
+                         "DIAG_ANALYZER rid=%d try=%c sub=edge %d status=%s inContext=%s\n", rid,
+                         tryAB, ie - 1, own.c_str(), ctx.c_str());
+            considerFirst("edge", ie - 1, res);
+        }
+        for (int iv = 1; iv <= vmap.Extent(); iv++) {
+            nVertExam++;
+            const TopoDS_Shape& v = vmap(iv);
+            Handle(BRepCheck_Result) res = analyzerResultOf(an, v);
+            if (!res.IsNull()) nVertPres++;
+            const std::string own = analyzerStatusOwn(res);
+            const std::string ctx = analyzerStatusOnFace(res, f);
+            std::fprintf(stderr,
+                         "DIAG_ANALYZER rid=%d try=%c sub=vertex %d status=%s inContext=%s\n", rid,
+                         tryAB, iv - 1, own.c_str(), ctx.c_str());
+            considerFirst("vertex", iv - 1, res);
+        }
+
+        if (!haveFirst) {
+            Handle(BRepCheck_Result) fres = analyzerResultOf(an, f);
+            BRepCheck_Status st = BRepCheck_NoError;
+            if (firstInContextError(fres, f, st) || firstOwnError(fres, st)) {
+                haveFirst = true;
+                firstSt = st;
+                std::snprintf(firstSub, sizeof(firstSub), "face");
+                BRepCheck_Status own = BRepCheck_NoError;
+                firstMissed = firstInContextError(fres, f, st) && !firstOwnError(fres, own);
+            }
+        }
+
+        std::fprintf(stderr,
+                     "DIAG_ANALYZER_COV rid=%d try=%c face=%d/%d wire=%d/%d edge=%d/%d "
+                     "vertex=%d/%d\n",
+                     rid, tryAB, nFacePres, nFaceExam, nWirePres, nWireExam, nEdgePres, nEdgeExam,
+                     nVertPres, nVertExam);
+        std::fprintf(stderr,
+                     "DIAG_ANALYZER_VERDICT rid=%d try=%c first=%s:%s replicaMissed=%d "
+                     "missBecause=%s\n",
+                     rid, tryAB, haveFirst ? firstSub : "none",
+                     haveFirst ? brepCheckName((int)firstSt) : "NoError", firstMissed ? 1 : 0,
+                     firstMissed ? "Status() not StatusOnShape(face)" : "Status() already had it");
+
+        if (tryAB == 'A' && !outerW.IsNull()) {
+            const char *c2s = "?", *oris = "?";
+            try {
+                BRepCheck_Wire chk(outerW);
+                chk.GeometricControls(Standard_True);
+                c2s = brepCheckName((int)chk.Closed2d(f, Standard_False));
+                oris = brepCheckName((int)chk.Orientation(f, Standard_False));
+            } catch (const Standard_Failure&) {
+            }
+            const TopAbs_Orientation wOri = outerW.Orientation();
+            const TopAbs_Orientation fOri = f.Orientation();
+            const TopAbs_Orientation rel = TopAbs::Compose(fOri, wOri);
+            (void)ow;
+            std::fprintf(stderr,
+                         "DIAG_ANALYZER_OUTER rid=%d try=A iw=%d closed2d=%s orientation=%s "
+                         "wireOri=%s faceOri=%s relative=%s\n",
+                         rid, outerIw, c2s, oris, topAbsOriName(wOri), topAbsOriName(fOri),
+                         topAbsOriName(rel));
+        }
+    } catch (const Standard_Failure&) {
+        std::fprintf(stderr, "DIAG_ANALYZER rid=%d try=%c sub=face status=[] inContext=[]\n", rid,
+                     tryAB);
+    }
+}
+
+void dumpDiagAnalyzerBothTries(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow) {
+    static thread_local std::unordered_set<int> dumped;
+    if (dumped.count(rid)) return;
+    dumped.insert(rid);
+    dumpDiagAnalyzerMap(rid, 'A', f, ow);
+    try {
+        const TopoDS_Face fB = TopoDS::Face(f.Reversed());
+        dumpDiagAnalyzerMap(rid, 'B', fB, ow.IsNull() ? ow : TopoDS::Wire(ow.Reversed()));
+    } catch (const Standard_Failure&) {
+    }
+}
+
+
 void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow,
                            const RegionSet& rs, const MeshView& mv,
                            const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                            const std::vector<TopoDS_Edge>& meshE, double sewTol) {
     if (!diagPlatesEnabled() && !diagP2Enabled()) return;
+    const TopoDS_Shape isoF = diagIsolatedCopy(f);
+    const TopoDS_Shape isoW = diagIsolatedCopy(ow);
+    if (isoF.IsNull()) return;
+    const TopoDS_Face fChk = TopoDS::Face(isoF);
+    const TopoDS_Wire wChk = isoW.IsNull() ? TopoDS_Wire() : TopoDS::Wire(isoW);
     try {
-        BRepCheck_Analyzer an(f, Standard_True);
+        BRepCheck_Analyzer an(fChk, Standard_True);
         std::fprintf(stderr, "DIAG_PLATE rid=%d valid=%d", rid, an.IsValid() ? 1 : 0);
-        if (!an.IsValid() && !f.IsNull()) {
-            Handle(BRepCheck_Result) res = an.Result(f);
+        if (!an.IsValid()) {
+            Handle(BRepCheck_Result) res = an.Result(fChk);
             if (!res.IsNull()) {
                 for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More();
                      it.Next())
@@ -4285,7 +4592,8 @@ void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow,
             }
         }
         std::fprintf(stderr, "\n");
-        if (!an.IsValid()) dumpDiagPlateSelfx(rid, f, ow, rs, mv, geom, collapsed, meshE, sewTol);
+        if (!an.IsValid() && !wChk.IsNull())
+            dumpDiagPlateSelfx(rid, fChk, wChk, rs, mv, geom, collapsed, meshE, sewTol);
     } catch (const Standard_Failure&) {
     }
 }
@@ -4321,11 +4629,14 @@ void dumpDiagCylFail(const Region& r, const Loop* outer, const char* stage, cons
     char wireSt[64] = "[]";
     if (!cand.IsNull()) {
         try {
-            BRepCheck_Analyzer an(cand, Standard_True);
-            formatStatusList(an.Result(cand), faceSt, sizeof(faceSt));
-            for (TopExp_Explorer wx(cand, TopAbs_WIRE); wx.More(); wx.Next()) {
-                formatStatusList(an.Result(TopoDS::Wire(wx.Current())), wireSt, sizeof(wireSt));
-                break;
+            const TopoDS_Shape iso = diagIsolatedCopy(cand);
+            if (!iso.IsNull()) {
+                BRepCheck_Analyzer an(iso, Standard_True);
+                formatStatusList(an.Result(iso), faceSt, sizeof(faceSt));
+                for (TopExp_Explorer wx(iso, TopAbs_WIRE); wx.More(); wx.Next()) {
+                    formatStatusList(an.Result(TopoDS::Wire(wx.Current())), wireSt, sizeof(wireSt));
+                    break;
+                }
             }
         } catch (const Standard_Failure&) {
         }
@@ -4375,6 +4686,7 @@ bool makeFaceKeep(const Handle(Geom_Surface)& surf, const TopoDS_Wire& outer,
                     if (existing > tol) tol = existing;
                     Bb.UpdateEdge(eW, c2d, sF, loc, tol);
                     Bb.Range(eW, sF, loc, a, b);
+                    stampTolWriter(eW, "other");
                 }
             }
         }
@@ -5310,12 +5622,268 @@ double pcurveDev(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
     return std::max(t, n);
 }
 
-double bindTolFromDev(double dev, double cap) {
+// --- TL1: exact-deviation edge tolerance at bindTolFromDev (D-S3-111..113) ---
+thread_local int gBindTolUnhandled = 0;
+thread_local int gBindTolOverCap = 0;
+thread_local int gBindTolOverCapGenuine = 0;
+thread_local int gBindTolBrepGtExact = 0;
+thread_local int gBindTolBrepLeExact = 0;
+thread_local int gCylSideTolChanged = 0;
+thread_local int gReconnectFire = 0;
+thread_local int gTolRewriteFire = 0;
+thread_local std::unordered_set<const void*> gBindTolUnhandledTShapes;
+thread_local std::unordered_map<std::string, std::unordered_set<const void*>> gBindTolUnhandledByClass;
+thread_local std::unordered_set<const void*> gBindTolOverCapTShapes;
+thread_local std::unordered_map<const void*, const char*> gLastTolWriter;
+thread_local std::unordered_map<const void*, double> gAllPlateEdgeTol;
+thread_local int gTolCheckRows = 0;
+thread_local int gTolCheckBrepLeExact = 0;
+thread_local int gTolCheckPlaneRows = 0;
+thread_local int gTolCheckPlaneBrepLe = 0;
+thread_local int gTolCheckCylRows = 0;
+thread_local int gTolCheckCylBrepLe = 0;
+thread_local int gIncontextPlateFlagged = 0;
+thread_local int gIncontextPlateExamined = 0;
+thread_local int gIncontextShippedFlagged = 0;
+thread_local int gIncontextShippedExamined = 0;
+
+double distToAxis(const gp_Ax1& ax, const gp_Pnt& p) {
+    gp_Vec v(ax.Location(), p);
+    gp_Vec ad(ax.Direction());
+    return (v - ad * v.Dot(ad)).Magnitude();
+}
+
+double planeSignedDistBind(const gp_Pln& pl, const gp_Pnt& p) {
+    Standard_Real a = 0, b = 0, c = 0, d = 0;
+    pl.Coefficients(a, b, c, d);
+    return a * p.X() + b * p.Y() + c * p.Z() + d;
+}
+
+double curveSurfDevAtBind(const Handle(Geom_Curve)& c3, Standard_Real t,
+                          const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d,
+                          const TopLoc_Location& loc) {
+    const gp_Pnt P = c3->Value(t);
+    const gp_Pnt2d uv = c2d->Value(t);
+    gp_Pnt Q = srf->Value(uv.X(), uv.Y());
+    if (!loc.IsIdentity()) Q.Transform(loc.Transformation());
+    return P.Distance(Q);
+}
+
+double brepDevMaxOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f3, Standard_Real l3,
+                        const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& pc,
+                        Standard_Real a, Standard_Real b, const TopLoc_Location& loc);
+
+// D-S3-111 circle-on-plane: |offset| + R·sin(tilt) + R·(1−cos(tilt)) at the same
+// extremal parameter as the normal-offset maximum (To2d ellipse in-plane term).
+double circleOnPlaneMax(const gp_Pln& pl, const gp_Circ& circ) {
+    const double off = std::fabs(planeSignedDistBind(pl, circ.Location()));
+    double ang = circ.Axis().Direction().Angle(pl.Axis().Direction());
+    ang = std::min(ang, kPi - ang);  // anti-parallel is still coplanar (φ=0, not 2R)
+    const double R = circ.Radius();
+    return off + R * std::sin(ang) + R * (1.0 - std::cos(ang));
+}
+
+// Circle on cylinder: constant radial offset |dist_to_axis − R| when the circle axis is
+// parallel to the cylinder axis; otherwise the radial span [d−r, d+r] vs R.
+double circleOnCylMax(const Handle(Geom_CylindricalSurface)& cyl, const gp_Circ& circ,
+                      const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                      const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d,
+                      const TopLoc_Location& loc) {
+    const gp_Ax1 cax = cyl->Axis();
+    const double Rcyl = cyl->Radius();
+    double m = std::max(curveSurfDevAtBind(c3, f, srf, c2d, loc),
+                        curveSurfDevAtBind(c3, l, srf, c2d, loc));
+    const double d0 = distToAxis(cax, circ.Location());
+    const double r = circ.Radius();
+    const double parallel = std::fabs(circ.Axis().Direction().Dot(cax.Direction()));
+    if (parallel > 1.0 - 1e-9) {
+        // Cap circle (center on axis): constant ring distance r. Latitude circle (center on
+        // surface): center distance d0 ≈ R. Constant radial offset |d_ring − R|.
+        const double dRing = (d0 <= Precision::Confusion()) ? r : d0;
+        m = std::max(m, std::fabs(dRing - Rcyl));
+    }
+    return m;
+}
+
+void noteBindTolUnhandled(const TopoDS_Edge& e, const char* cls) {
+    const void* ts = diagTShapePtr(e);
+    if (!ts) return;
+    if (gBindTolUnhandledTShapes.insert(ts).second) {
+        gBindTolUnhandled++;
+        if (cls) gBindTolUnhandledByClass[cls].insert(ts);
+    }
+}
+
+// Closed form supremum |C(t)-S(P(t))| at bind site. Returns -1 if unhandled.
+double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                      const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d,
+                      const TopLoc_Location& loc, const char** clsOut) {
+    if (clsOut) *clsOut = "unhandled";
+    if (c3.IsNull() || srf.IsNull() || c2d.IsNull()) return -1.0;
+    Handle(Geom_Plane) gpl = Handle(Geom_Plane)::DownCast(srf);
+    Handle(Geom_CylindricalSurface) gcyl = basisCylOf(srf);
+    if (gpl.IsNull() && gcyl.IsNull()) {
+        if (clsOut) *clsOut = "unhandled-surface";
+        return -1.0;
+    }
+    Handle(Geom_Curve) src = basisCurveOf(c3);
+    if (src.IsNull()) src = c3;
+    if (src->DynamicType() == STANDARD_TYPE(Geom_Line)) {
+        if (clsOut) *clsOut = "affine";
+        return std::max(curveSurfDevAtBind(c3, f, srf, c2d, loc),
+                        curveSurfDevAtBind(c3, l, srf, c2d, loc));
+    }
+    if (src->DynamicType() == STANDARD_TYPE(Geom_Circle)) {
+        Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+        if (!gc.IsNull()) {
+            if (!gpl.IsNull()) {
+                gp_Pln pl = gpl->Pln();
+                if (!loc.IsIdentity()) pl.Transform(loc.Transformation());
+                if (clsOut) *clsOut = "circle-on-plane";
+                return circleOnPlaneMax(pl, gc->Circ());
+            }
+            if (!gcyl.IsNull()) {
+                if (clsOut) *clsOut = "circle-on-cylinder";
+                return circleOnCylMax(gcyl, gc->Circ(), c3, f, l, srf, c2d, loc);
+            }
+        }
+    }
+    Handle(Geom_BSplineCurve) bs = Handle(Geom_BSplineCurve)::DownCast(src);
+    if (!bs.IsNull() && bs->Degree() <= 1) {
+        if (!gpl.IsNull()) {
+            gp_Pln pl = gpl->Pln();
+            if (!loc.IsIdentity()) pl.Transform(loc.Transformation());
+            double m = std::max(curveSurfDevAtBind(c3, f, srf, c2d, loc),
+                                curveSurfDevAtBind(c3, l, srf, c2d, loc));
+            for (int i = 1; i <= bs->NbPoles(); i++) {
+                const double t = (bs->NbPoles() > 1)
+                                     ? f + (l - f) * (double)(i - 1) / (double)(bs->NbPoles() - 1)
+                                     : f;
+                m = std::max(m, curveSurfDevAtBind(c3, t, srf, c2d, loc));
+            }
+            if (clsOut) *clsOut = "polyline";
+            return m;
+        }
+        if (!gcyl.IsNull()) {
+            if (clsOut) *clsOut = "unhandled-polyline-cyl";
+            return -1.0;
+        }
+    }
+    if (clsOut) *clsOut = "unhandled-other";
+    return -1.0;
+}
+
+double dense4096MaxOnPlane(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                           const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d,
+                           const TopLoc_Location& loc) {
+    double m = 0.0;
+    for (int i = 0; i < 4096; i++) {
+        const double u = (double)i / 4095.0;
+        const double t = f + u * (l - f);
+        m = std::max(m, curveSurfDevAtBind(c3, t, srf, c2d, loc));
+    }
+    return m;
+}
+
+double bindTolFromDevLegacy(double dev, double cap) {
     double t = Precision::Confusion();
     if (std::isfinite(dev) && dev > t) t = dev;
     if (t > cap) t = cap;
     return t;
 }
+
+void stampTolWriter(const TopoDS_Edge& e, const char* site) {
+    const void* ts = diagTShapePtr(e);
+    if (ts && site) gLastTolWriter[ts] = site;
+}
+
+const char* lastTolWriterOf(const TopoDS_Edge& e) {
+    const void* ts = diagTShapePtr(e);
+    if (!ts) return "unknown";
+    auto it = gLastTolWriter.find(ts);
+    return (it == gLastTolWriter.end() || !it->second) ? "unknown" : it->second;
+}
+
+double exactOrSampledOnPair(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                            const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d,
+                            const TopLoc_Location& loc) {
+    const char* cls = nullptr;
+    const double ex = exactMaxAtBind(c3, f, l, srf, c2d, loc, &cls);
+    if (ex >= 0.0 && std::isfinite(ex)) return ex;
+    return brepDevMaxOnSurf(c3, f, l, srf, c2d, f, l, loc);
+}
+
+// Max exact deviation over every CurveOnSurface the edge already carries, plus extraThis
+// (the pcurve about to be bound). Unhandled classes use the 23-sample grid (named residue).
+double maxExactAllPcurves(const TopoDS_Edge& e, double extraThis) {
+    double m = extraThis;
+    try {
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+        Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
+        if (te.IsNull() || c3.IsNull()) return m;
+        for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More(); it.Next()) {
+            Handle(BRep_CurveOnSurface) cos = Handle(BRep_CurveOnSurface)::DownCast(it.Value());
+            if (cos.IsNull() || cos->Surface().IsNull() || cos->PCurve().IsNull()) continue;
+            const double ex =
+                exactOrSampledOnPair(c3, f, l, cos->Surface(), cos->PCurve(), cos->Location());
+            if (ex > m) m = ex;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return m;
+}
+
+// D-S3-124: one scalar must strictly exceed max over ALL pcurves. Inherited equality
+// (existing <= maxAll) is REPLACED. Fat inherited is never lowered. cap is guardrail 3.
+bool bindTolFromExact(double exactMax, double sampled, double existing, double cap, double* tolOut,
+                      bool* overCapOut) {
+    if (overCapOut) *overCapOut = false;
+    const double thisDev = (exactMax >= 0.0 && std::isfinite(exactMax)) ? exactMax : sampled;
+    if (thisDev > cap) {
+        if (overCapOut) *overCapOut = true;
+        if (tolOut) *tolOut = existing;
+        return false;
+    }
+    const double want = std::max(Precision::Confusion(), thisDev + Precision::PConfusion());
+    double tol;
+    if (existing <= thisDev)
+        tol = want;
+    else
+        tol = std::max(existing, want);
+    if (tolOut) *tolOut = tol;
+    return true;
+}
+
+// Apply D-S3-124: declared tol exceeds max over all pcurves. Guardrail 3 applies to
+// THIS pcurve's deviation vs this surface's cap — not to a sibling pcurve's exact.
+bool applyBindTolAllPcurves(const TopoDS_Edge& e, double exactThis, double sampled, double cap,
+                            double* tolOut, bool* overCapOut, double* maxAllOut) {
+    const double thisDev = (exactThis >= 0.0 && std::isfinite(exactThis)) ? exactThis : sampled;
+    const double existing = BRep_Tool::Tolerance(e);
+    const double others = maxExactAllPcurves(e, -1.0);
+    const double maxAll = std::max(thisDev, others);
+    if (maxAllOut) *maxAllOut = maxAll;
+    if (overCapOut) *overCapOut = false;
+    if (thisDev > cap) {
+        if (overCapOut) *overCapOut = true;
+        // Do not raise to thisDev. Still allow D-S3-124 against other pcurves.
+        const double wantOther =
+            (others > 0.0) ? std::max(Precision::Confusion(), others + Precision::PConfusion())
+                            : Precision::Confusion();
+        double tol = existing;
+        if (existing <= others) tol = std::max(tol, wantOther);
+        else tol = std::max(existing, wantOther);
+        if (tolOut) *tolOut = tol;
+        return false;
+    }
+    return bindTolFromExact(maxAll, sampled, existing, 1e300, tolOut, overCapOut);
+}
+
+double bindTolFromDev(double dev, double cap) {
+    return bindTolFromDevLegacy(dev, cap);
+}
+
 
 void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F) {
     if (!diagP2Enabled() || F.IsNull()) return;
@@ -5412,9 +5980,71 @@ void bindAllVariants(const TopoDS_Edge& e, const Region& R, const char* kind, co
                          ci, R.id, surfVarName(vars[i]),
                          unproj ? "unproj" : (kind ? kind : "poly"), dev, devT, devN,
                          proj ? proj : "iterative");
-        double tol = bindTolFromDev(std::max(devT, devN), cap);
+        const double sampled = std::max(devT, devN);
         const double existing = BRep_Tool::Tolerance(e);
-        if (existing > tol) tol = existing;
+        const char* bindCls = "unhandled";
+        double exact = exactMaxAtBind(c3, f, l, srf, c2d, loc, &bindCls);
+        const bool isCyl = !Handle(Geom_CylindricalSurface)::DownCast(srf).IsNull();
+        if (exact > cap && pinVerts && !plBind.IsNull()) {
+            Handle(Geom2d_Curve) projPc = makePCurveOnSurf(c3, f, l, srf, kind);
+            if (!projPc.IsNull()) {
+                const char* clsP = bindCls;
+                const double exactP = exactMaxAtBind(c3, f, l, srf, projPc, loc, &clsP);
+                if (exactP >= 0.0 && exactP <= cap) {
+                    c2d = projPc;
+                    exact = exactP;
+                    bindCls = clsP;
+                }
+            }
+        }
+        double tol = existing;
+        bool overCap = false;
+        double maxAll = exact;
+        if (exact < 0.0) noteBindTolUnhandled(e, bindCls);
+        const bool okTol = applyBindTolAllPcurves(e, exact, sampled, cap, &tol, &overCap, &maxAll);
+        if (overCap) {
+            gBindTolOverCap++;
+            if (const void* ts = diagTShapePtr(e)) gBindTolOverCapTShapes.insert(ts);
+            const double brep = brepDevMaxOnSurf(c3, f, l, srf, c2d, f, l, loc);
+            const int genuine = (brep > cap) ? 1 : 0;
+            if (genuine) gBindTolOverCapGenuine++;
+            if (diagP2Enabled() || diagPlatesEnabled())
+                std::fprintf(stderr,
+                             "DIAG_OVERCAP ci=%d rid=%d class=%s exactMax=%.9f cap=%.9f "
+                             "brepMax=%.9f existing=%.9f genuine=%d site=bindAllVariants\n",
+                             ci, R.id, bindCls, maxAll, cap, brep, existing, genuine);
+            stampTolWriter(e, isCyl ? "cylSide" : "internedPlane-overCap-skip");
+            if (!okTol) tol = existing;
+        } else if (exact < 0.0) {
+            stampTolWriter(e, "legacy");
+        } else if (isCyl) {
+            stampTolWriter(e, "cylSide");
+        } else {
+            stampTolWriter(e, "bindTolFromExact");
+        }
+        if (diagP2Enabled() && (Handle(Geom_Plane)::DownCast(srf) || isCyl))
+            std::fprintf(stderr,
+                         "DIAG_BINDTOL ci=%d rid=%d class=%s exact=%.9f sampled=%.9f tol=%.9f "
+                         "existing=%.9f cap=%.9f overCap=%d\n",
+                         ci, R.id, bindCls, exact, sampled, tol, existing, cap, overCap ? 1 : 0);
+        if (diagP2Enabled() && isCyl && exact >= 0.0) {
+            const double brep = brepDevMaxOnSurf(c3, f, l, srf, c2d, f, l, loc);
+            gTolCheckRows++;
+            gTolCheckCylRows++;
+            if (brep >= 0.0) {
+                if (brep <= exact + 1e-12) {
+                    gTolCheckBrepLeExact++;
+                    gTolCheckCylBrepLe++;
+                } else
+                    gBindTolBrepGtExact++;
+            }
+            std::fprintf(stderr,
+                         "DIAG_TOLCHECK_CYL ci=%d rid=%d class=%s exactMax=%.9f brepMax=%.9f "
+                         "edgeTol=%.9f brepVerdict=%s\n",
+                         ci, R.id, bindCls, exact, brep, tol,
+                         (brep >= 0.0 && brep > exact + 1e-12) ? "brep>exact" : "brep<=exact");
+        }
+        if (isCyl && std::fabs(tol - existing) > Precision::PConfusion()) gCylSideTolChanged++;
         BRep_Builder B;
         B.UpdateEdge(e, c2d, srf, loc, tol);
         B.Range(e, srf, loc, f, l);
@@ -5449,9 +6079,50 @@ void bindEdgePcurveOnInternedPlane(const TopoDS_Edge& e, const Region& plnR, con
     const char* proj = "closedform";
     bool unproj = false;
     pcurveDevTN(c3, f, l, srf, c2d, devT, devN, &dev, &proj, &unproj);
-    double tol = bindTolFromDev(std::max(devT, devN), cap);
+    const double sampled = std::max(devT, devN);
     const double existing = BRep_Tool::Tolerance(e);
-    if (existing > tol) tol = existing;
+    const char* bindCls = "unhandled";
+    double exact = exactMaxAtBind(c3, f, l, srf, c2d, loc, &bindCls);
+    if (exact > cap && !plBind.IsNull()) {
+        Handle(Geom2d_Curve) projPc = makePCurveOnSurf(c3, f, l, srf, kind);
+        if (!projPc.IsNull()) {
+            const char* clsP = bindCls;
+            const double exactP = exactMaxAtBind(c3, f, l, srf, projPc, loc, &clsP);
+            if (exactP >= 0.0 && exactP <= cap) {
+                c2d = projPc;
+                exact = exactP;
+                bindCls = clsP;
+            }
+        }
+    }
+    double tol = existing;
+    bool overCap = false;
+    double maxAll = exact;
+    if (exact < 0.0) noteBindTolUnhandled(e, bindCls);
+    const bool okTol = applyBindTolAllPcurves(e, exact, sampled, cap, &tol, &overCap, &maxAll);
+    if (overCap) {
+        gBindTolOverCap++;
+        if (const void* ts = diagTShapePtr(e)) gBindTolOverCapTShapes.insert(ts);
+        const double brep = brepDevMaxOnSurf(c3, f, l, srf, c2d, f, l, loc);
+        const int genuine = (brep > cap) ? 1 : 0;
+        if (genuine) gBindTolOverCapGenuine++;
+        if (diagP2Enabled() || diagPlatesEnabled())
+            std::fprintf(stderr,
+                         "DIAG_OVERCAP ci=%d rid=%d class=%s exactMax=%.9f cap=%.9f "
+                         "brepMax=%.9f existing=%.9f genuine=%d site=internedPlane\n",
+                         ci, plnR.id, bindCls, maxAll, cap, brep, existing, genuine);
+        stampTolWriter(e, "internedPlane-overCap-skip");
+        if (!okTol) tol = existing;
+    } else if (exact < 0.0) {
+        stampTolWriter(e, "legacy");
+    } else {
+        stampTolWriter(e, "bindTolFromExact");
+    }
+    if (diagP2Enabled())
+        std::fprintf(stderr,
+                     "DIAG_BINDTOL ci=%d rid=%d class=%s exact=%.9f sampled=%.9f tol=%.9f "
+                     "existing=%.9f cap=%.9f overCap=%d\n",
+                     ci, plnR.id, bindCls, exact, sampled, tol, existing, cap, overCap ? 1 : 0);
     BRep_Builder B;
     B.UpdateEdge(e, c2d, srf, loc, tol);
     B.Range(e, srf, loc, f, l);
@@ -6121,94 +6792,220 @@ bool addPcurvesThenFace(const Handle(Geom_Surface)& surf, TopoDS_Wire& outer,
     return !outF.IsNull();
 }
 
-const char* hubWireEdgeClass(const TopoDS_Edge& e, const RegionSet& rs, int hubRid) {
-    const void* ts = diagTShapePtr(e);
-    if (ts && gSeamTShapes.count(ts)) return "seam";
-    for (const BoundaryChain& ch : rs.chains) {
-        if (ch.regA != hubRid && ch.regB != hubRid) continue;
-        for (int eid : ch.meshEdges) {
-            (void)eid;
-        }
-        const int other = ch.regA == hubRid ? ch.regB : ch.regA;
-        const Region* rr = regionById(rs, other);
-        if (!rr) continue;
-        if (rr->type == SurfType::Cylinder) return "cyl";
-        if (rr->type == SurfType::Plane) return "pln";
-    }
-    return "fill";
+bool hubWireEdgeUv(const TopoDS_Edge& e, const Handle(Geom_Surface)& surf, const TopLoc_Location& loc,
+                   gp_Pnt2d& uv0, gp_Pnt2d& uv1) {
+    Standard_Boolean hasPc = Standard_False;
+    Standard_Real pf = 0, pl = 0;
+    Handle(Geom2d_Curve) c2 = BRep_Tool::CurveOnSurface(e, surf, loc, pf, pl, &hasPc);
+    if (!hasPc || c2.IsNull()) return false;
+    if (e.Orientation() == TopAbs_REVERSED) std::swap(pf, pl);
+    uv0 = c2->Value(pf);
+    uv1 = c2->Value(pl);
+    return true;
 }
 
-void dumpDiagHubWire(const Region& r, const TopoDS_Wire& ow, const Handle(Geom_Surface)& surf,
-                     const RegionSet& rs, double sewTol) {
-    if (!diagP2Enabled() || ow.IsNull()) return;
-    const char* row = hubWireRowLabel();
+void dumpDiagHubWire(const Region& r, const TopoDS_Wire& ow, const Handle(Geom_Plane)& gpl,
+                     const RegionSet& rs, const MeshView& mv, const std::vector<ChainGeom>& geom,
+                     const std::vector<char>& collapsed, const std::vector<TopoDS_Edge>& meshE,
+                     const std::vector<TopoDS_Wire>& innerW, bool outward) {
+    if (!diagP2Enabled() || ow.IsNull() || gpl.IsNull()) return;
+    const double sewTol = mv.sewTol;
+    const double tol = std::max(sewTol, Precision::PConfusion());
     const TopLoc_Location loc;
+    const Handle(Geom_Surface) surf = gpl;
+    const int rid = r.id;
+
+    auto matchChain = [&](const TopoDS_Edge& e, const gp_Pnt& p0, const gp_Pnt& p1) -> int {
+        const void* ts = diagTShapePtr(e);
+        for (size_t ci = 0; ci < geom.size(); ci++) {
+            for (const TopoDS_Edge& ge : geom[ci].edges) {
+                if (!ge.IsNull() && (e.IsSame(ge) || (ts && diagTShapePtr(ge) == ts)))
+                    return (int)ci;
+            }
+        }
+        for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+            for (int eid : rs.chains[ci].meshEdges) {
+                if (eid < 0 || (size_t)eid >= meshE.size() || meshE[(size_t)eid].IsNull()) continue;
+                if (e.IsSame(meshE[(size_t)eid]) || (ts && diagTShapePtr(meshE[(size_t)eid]) == ts))
+                    return (int)ci;
+            }
+        }
+        int best = -1;
+        double bestD = 1e300;
+        for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+            const BoundaryChain& ch = rs.chains[ci];
+            if (ch.meshVerts.size() < 2) continue;
+            gp_Pnt a = pntOf(mv, ch.meshVerts.front());
+            gp_Pnt b = pntOf(mv, ch.meshVerts.back());
+            const double d = std::min(p0.Distance(a) + p1.Distance(b), p0.Distance(b) + p1.Distance(a));
+            if (d < bestD) {
+                bestD = d;
+                best = (int)ci;
+            }
+        }
+        return (best >= 0 && bestD <= 2.0 * tol) ? best : -1;
+    };
+
+    auto edgeInfo = [&](const TopoDS_Edge& e) {
+        struct Info {
+            const char* cls;
+            int ci;
+            int partner;
+            int fb;
+        } info{"fill", -1, -1, 0};
+        const void* ts = diagTShapePtr(e);
+        if (ts && gSeamTShapes.count(ts)) {
+            info.cls = "seam";
+            return info;
+        }
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(e, v0, v1, Standard_True);
+        gp_Pnt p0 = v0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v0);
+        gp_Pnt p1 = v1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v1);
+        info.ci = matchChain(e, p0, p1);
+        bool isMeshE = false;
+        if (info.ci >= 0 && (size_t)info.ci < rs.chains.size()) {
+            for (int eid : rs.chains[(size_t)info.ci].meshEdges) {
+                if (eid < 0 || (size_t)eid >= meshE.size() || meshE[(size_t)eid].IsNull()) continue;
+                if (e.IsSame(meshE[(size_t)eid]) || (ts && diagTShapePtr(meshE[(size_t)eid]) == ts)) {
+                    isMeshE = true;
+                    break;
+                }
+            }
+            const BoundaryChain& ch = rs.chains[(size_t)info.ci];
+            info.partner = (ch.regA == rid) ? ch.regB : ch.regA;
+            if (info.partner < 0) info.partner = ch.regA >= 0 ? ch.regA : ch.regB;
+            info.fb = gChainSewFallbackCi.count(info.ci) ? 1 : 0;
+            if (info.ci >= 0 && (size_t)info.ci < collapsed.size() && collapsed[(size_t)info.ci] &&
+                (size_t)info.ci < geom.size() && geom[(size_t)info.ci].collapsed &&
+                !geom[(size_t)info.ci].edges.empty()) {
+                const Region* rr = regionById(rs, info.partner);
+                if (rr && rr->type == SurfType::Cylinder) info.cls = "cyl";
+                else if (rr && rr->type == SurfType::Plane) info.cls = "pln";
+                else info.cls = "span";
+            } else if (isMeshE) {
+                info.cls = "meshE";
+            } else {
+                const Region* rr = regionById(rs, info.partner);
+                if (rr && rr->type == SurfType::Cylinder) info.cls = "cyl";
+                else if (rr && rr->type == SurfType::Plane) info.cls = "pln";
+                else info.cls = "fill";
+            }
+        }
+        return info;
+    };
+
     struct HubE {
+        int idx;
         const void* eT;
         const void* v0T;
         const void* v1T;
         const char* cls;
+        int ci;
+        int partner;
+        int fb;
         int storedPc;
         gp_Pnt p0, p1;
+        gp_Pnt2d uv0, uv1;
+        int haveUv;
         TopoDS_Edge e;
     };
-    std::vector<HubE> edges;
-    int i = 0;
-    for (TopoDS_Iterator it(ow); it.More(); it.Next(), i++) {
-        if (it.Value().ShapeType() != TopAbs_EDGE) continue;
-        const TopoDS_Edge e = TopoDS::Edge(it.Value());
-        TopoDS_Vertex v0, v1;
-        TopExp::Vertices(e, v0, v1, Standard_True);
-        HubE he;
-        he.e = e;
-        he.eT = diagTShapePtr(e);
-        he.v0T = diagTShapePtr(v0);
-        he.v1T = diagTShapePtr(v1);
-        he.p0 = BRep_Tool::Pnt(v0);
-        he.p1 = BRep_Tool::Pnt(v1);
-        he.cls = hubWireEdgeClass(e, rs, r.id);
-        he.storedPc = 0;
-        if (!surf.IsNull()) {
-            Standard_Boolean hasPc = Standard_False;
-            Standard_Real pf = 0, pl = 0;
-            (void)BRep_Tool::CurveOnSurface(e, surf, loc, pf, pl, &hasPc);
-            if (hasPc) he.storedPc = 1;
+
+    int r7Hubwire = 0, r7HubwirePresent = 0;
+    int r7Share = 0, r7SharePresent = 0;
+    int r7Comp = 0, r7CompPresent = 0;
+    int r7Pair = 0, r7PairPresent = 0;
+    int r7Inner = 0, r7InnerPresent = 0;
+    int r7Orient = 0, r7OrientPresent = 0;
+
+    auto collectEdges = [&](const TopoDS_Wire& w, bool explorer) -> std::vector<TopoDS_Edge> {
+        std::vector<TopoDS_Edge> out;
+        if (explorer) {
+            for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next()) out.push_back(ex.Current());
+        } else {
+            for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+                if (it.Value().ShapeType() == TopAbs_EDGE) out.push_back(TopoDS::Edge(it.Value()));
+            }
         }
-        std::fprintf(stderr,
-                     "DIAG_HUBWIRE rid=%d row=%s i=%d eT=%p v0T=%p v1T=%p class=%s storedPc=%d "
-                     "p0=(%.4f,%.4f,%.4f) p1=(%.4f,%.4f,%.4f)\n",
-                     r.id, row, i, he.eT, he.v0T, he.v1T, he.cls, he.storedPc, he.p0.X(), he.p0.Y(),
-                     he.p0.Z(), he.p1.X(), he.p1.Y(), he.p1.Z());
-        edges.push_back(he);
-    }
-    const double tol = std::max(sewTol, Precision::PConfusion());
-    int nGap3dOverTol = 0;
-    double maxGap3d = 0.0;
-    int nSharedVtx = 0;
-    int nStoredPc = 0;
-    for (const HubE& he : edges)
-        if (he.storedPc) nStoredPc++;
-    for (size_t j = 0; j + 1 < edges.size(); j++) {
-        const double g = edges[j].p1.Distance(edges[j + 1].p0);
-        if (g > maxGap3d) maxGap3d = g;
-        if (g > tol) nGap3dOverTol++;
-        if (edges[j].v1T && edges[j].v1T == edges[j + 1].v0T) nSharedVtx++;
-        std::fprintf(stderr,
-                     "DIAG_HUBWIRE rid=%d row=%s gap3d(%zu)=%.6f sameVtxTShape(%zu,%zu)=%d\n", r.id,
-                     row, j, g, j, j + 1, (edges[j].v1T == edges[j + 1].v0T) ? 1 : 0);
-    }
-    if (!edges.empty() && (ow.Closed() || BRep_Tool::IsClosed(ow))) {
-        const size_t last = edges.size() - 1;
-        const double g = edges[last].p1.Distance(edges[0].p0);
-        if (g > maxGap3d) maxGap3d = g;
-        if (g > tol) nGap3dOverTol++;
-        if (edges[last].v1T && edges[last].v1T == edges[0].v0T) nSharedVtx++;
-        std::fprintf(stderr,
-                     "DIAG_HUBWIRE rid=%d row=%s gap3d(%zu)=%.6f sameVtxTShape(%zu,0)=%d\n", r.id,
-                     row, last, g, last, (edges[last].v1T == edges[0].v0T) ? 1 : 0);
-    }
-    int nComp = 0;
-    if (!edges.empty()) {
+        return out;
+    };
+
+    auto dumpWireRow = [&](const TopoDS_Wire& w, int iw, bool explorer) {
+        gHubWireRowB = explorer;
+        const char* row = hubWireRowLabel();
+        const std::vector<TopoDS_Edge> elist = collectEdges(w, explorer);
+        std::vector<HubE> edges;
+        edges.reserve(elist.size());
+        int i = 0;
+        for (const TopoDS_Edge& e : elist) {
+            TopoDS_Vertex v0, v1;
+            TopExp::Vertices(e, v0, v1, Standard_True);
+            auto inf = edgeInfo(e);
+            HubE he;
+            he.idx = i++;
+            he.e = e;
+            he.eT = diagTShapePtr(e);
+            he.v0T = diagTShapePtr(v0);
+            he.v1T = diagTShapePtr(v1);
+            he.p0 = BRep_Tool::Pnt(v0);
+            he.p1 = BRep_Tool::Pnt(v1);
+            he.cls = inf.cls;
+            he.ci = inf.ci;
+            he.partner = inf.partner;
+            he.fb = inf.fb;
+            he.storedPc = 0;
+            he.haveUv = hubWireEdgeUv(e, surf, loc, he.uv0, he.uv1) ? 1 : 0;
+            if (he.haveUv) he.storedPc = 1;
+            r7Hubwire++;
+            r7HubwirePresent++;
+            std::fprintf(stderr,
+                         "DIAG_HUBWIRE rid=%d row=%s iw=%d i=%d eT=%p v0T=%p v1T=%p class=%s "
+                         "ci=%d partner=%d fb=%d storedPc=%d "
+                         "p0=(%.4f,%.4f,%.4f) p1=(%.4f,%.4f,%.4f) "
+                         "uv0=(%.4f,%.4f) uv1=(%.4f,%.4f) haveUv=%d\n",
+                         rid, row, iw, he.idx, he.eT, he.v0T, he.v1T, he.cls, he.ci, he.partner,
+                         he.fb, he.storedPc, he.p0.X(), he.p0.Y(), he.p0.Z(), he.p1.X(), he.p1.Y(),
+                         he.p1.Z(), he.uv0.X(), he.uv0.Y(), he.uv1.X(), he.uv1.Y(), he.haveUv);
+            edges.push_back(he);
+        }
+
+        int nGap3dOverTol = 0;
+        double maxGap3d = 0.0;
+        int nSharedVtx = 0;
+        auto gapPair = [&](size_t j, size_t k) {
+            if (j >= edges.size() || k >= edges.size()) return;
+            const double g3 = edges[j].p1.Distance(edges[k].p0);
+            if (g3 > maxGap3d) maxGap3d = g3;
+            if (g3 > tol) nGap3dOverTol++;
+            const int sameVtx = (edges[j].v1T && edges[j].v1T == edges[k].v0T) ? 1 : 0;
+            if (sameVtx) nSharedVtx++;
+            double gUv = -1.0;
+            if (edges[j].haveUv && edges[k].haveUv) gUv = edges[j].uv1.Distance(edges[k].uv0);
+            const bool report = !sameVtx || gUv > tol || g3 > tol ||
+                                (rid == 2 && iw == 0 &&
+                                 ((int)j == 39 || (int)j == 71 || (int)k == 40 || (int)k == 72));
+            r7Pair++;
+            if (report) r7PairPresent++;
+            if (report) {
+                std::fprintf(stderr,
+                             "DIAG_HUBWIRE_PAIR rid=%d row=%s iw=%d i=%zu|%zu sameVtx=%d "
+                             "gap3d=%.6f gapUv=%.6f ciA=%d ciB=%d clsA=%s clsB=%s fbA=%d fbB=%d\n",
+                             rid, row, iw, j, k, sameVtx, g3, gUv, edges[j].ci, edges[k].ci,
+                             edges[j].cls, edges[k].cls, edges[j].fb, edges[k].fb);
+            }
+            std::fprintf(stderr,
+                         "DIAG_HUBWIRE rid=%d row=%s gap3d(%zu,%zu)=%.6f gapUv=%.6f "
+                         "sameVtxTShape=%d\n",
+                         rid, row, j, k, g3, gUv, sameVtx);
+        };
+        for (size_t j = 0; j + 1 < edges.size(); j++) gapPair(j, j + 1);
+        if (!edges.empty() && (w.Closed() || BRep_Tool::IsClosed(w))) gapPair(edges.size() - 1, 0);
+
+        std::unordered_map<const void*, std::vector<int>> vtxEdges;
+        for (size_t k = 0; k < edges.size(); k++) {
+            if (edges[k].v0T) vtxEdges[edges[k].v0T].push_back((int)k);
+            if (edges[k].v1T) vtxEdges[edges[k].v1T].push_back((int)k);
+        }
         std::vector<int> parent(edges.size());
         for (size_t k = 0; k < edges.size(); k++) parent[k] = (int)k;
         auto find = [&](int x) {
@@ -6231,138 +7028,1351 @@ void dumpDiagHubWire(const Region& r, const TopoDS_Wire& ow, const Handle(Geom_S
                     unite((int)a, (int)b);
             }
         }
-        std::unordered_set<int> roots;
-        for (size_t k = 0; k < edges.size(); k++) roots.insert(find((int)k));
-        nComp = (int)roots.size();
-    }
-    std::fprintf(stderr,
-                 "DIAG_HUBWIRE_SUM rid=%d row=%s nE=%zu nComp=%d nGap3dOverTol=%d maxGap3d=%.4f "
-                 "nSharedVtx=%d nStoredPc=%d\n",
-                 r.id, row, edges.size(), nComp, nGap3dOverTol, maxGap3d, nSharedVtx, nStoredPc);
-    // Oriented pcurve UV at vertices that 3D-share a TShape (D-S3-70).
-    if (!surf.IsNull()) {
-        double maxShareUv = 0;
-        int si = -1, sj = -1;
-        int nPairsShared = 0, nPairsExamined = 0, nPairsOverTol = 0;
-        for (size_t a = 0; a < edges.size(); a++) {
-            for (size_t b = a + 1; b < edges.size(); b++) {
-                struct Hit {
-                    gp_Pnt2d uv;
-                    int ok;
-                };
-                auto uvAt = [&](const HubE& he, const void* vt) -> Hit {
-                    Hit h{{}, 0};
-                    if (!vt) return h;
-                    try {
-                        Standard_Boolean hasPc = Standard_False;
-                        Standard_Real pf = 0, pl = 0;
-                        Handle(Geom2d_Curve) c2 =
-                            BRep_Tool::CurveOnSurface(he.e, surf, loc, pf, pl, &hasPc);
-                        if (!hasPc || c2.IsNull()) return h;
-                        TopoDS_Vertex v0, v1;
-                        TopExp::Vertices(he.e, v0, v1, Standard_True);
-                        const void* t0 = diagTShapePtr(v0);
-                        const void* t1 = diagTShapePtr(v1);
-                        gp_Pnt2d uv;
-                        if (t0 == vt) uv = c2->Value(he.e.Orientation() == TopAbs_REVERSED ? pl : pf);
-                        else if (t1 == vt) uv = c2->Value(he.e.Orientation() == TopAbs_REVERSED ? pf : pl);
-                        else return h;
-                        h.uv = uv;
-                        h.ok = 1;
-                    } catch (const Standard_Failure&) {
-                    }
-                    return h;
-                };
-                const void* shared = nullptr;
-                if (edges[a].v0T && (edges[a].v0T == edges[b].v0T || edges[a].v0T == edges[b].v1T))
-                    shared = edges[a].v0T;
-                else if (edges[a].v1T &&
-                         (edges[a].v1T == edges[b].v0T || edges[a].v1T == edges[b].v1T))
-                    shared = edges[a].v1T;
-                if (!shared) continue;
-                nPairsShared++;
-                Hit ha = uvAt(edges[a], shared);
-                Hit hb = uvAt(edges[b], shared);
-                if (!ha.ok || !hb.ok) continue;
-                nPairsExamined++;
-                const double g = ha.uv.Distance(hb.uv);
-                double dElA = -1, dElB = -1;
-                Handle(Geom_Plane) plShare = Handle(Geom_Plane)::DownCast(surf);
-                if (!plShare.IsNull()) {
-                    gp_Pnt p3;
-                    if (edges[a].v0T == shared) p3 = edges[a].p0;
-                    else if (edges[a].v1T == shared) p3 = edges[a].p1;
-                    else if (edges[b].v0T == shared) p3 = edges[b].p0;
-                    else p3 = edges[b].p1;
-                    Standard_Real ue = 0, ve = 0;
-                    ElSLib::Parameters(plShare->Pln(), p3, ue, ve);
-                    const gp_Pnt2d uvEl(ue, ve);
-                    dElA = ha.uv.Distance(uvEl);
-                    dElB = hb.uv.Distance(uvEl);
-                }
-                if (g > tol) {
-                    nPairsOverTol++;
-                    std::fprintf(stderr,
-                                 "DIAG_SHAREDUV rid=%d i=%d j=%d gapUv=%.8f clsA=%s clsB=%s "
-                                 "uvA=(%.6f,%.6f) uvB=(%.6f,%.6f) dElA=%.8f dElB=%.8f\n",
-                                 r.id, (int)a, (int)b, g, edges[a].cls, edges[b].cls, ha.uv.X(),
-                                 ha.uv.Y(), hb.uv.X(), hb.uv.Y(), dElA, dElB);
-                    gp_Pnt pV;
-                    if (edges[a].v0T == shared) pV = edges[a].p0;
-                    else if (edges[a].v1T == shared) pV = edges[a].p1;
-                    else if (edges[b].v0T == shared) pV = edges[b].p0;
-                    else pV = edges[b].p1;
-                    int nInc = 0;
-                    double d1 = -1, d2 = -1, d3 = -1, th = -1;
-                    int br1 = -1, br2 = -1, br3 = -1;
-                    const Region* iA = nullptr;
-                    const Region* iB = nullptr;
-                    for (const Region& rr : rs.regions) {
-                        if (!isAnalytic(&rr)) continue;
-                        const double d = regionPointDev(&rr, pV);
-                        double bound = sewTol > 0.0 ? sewTol : Precision::Confusion();
-                        if (rr.maxVertexDev > bound) bound = rr.maxVertexDev;
-                        if (d > bound + 1.0) continue;
-                        nInc++;
-                        if (nInc == 1) {
-                            d1 = d;
-                            br1 = rr.id;
-                            iA = &rr;
-                        } else if (nInc == 2) {
-                            d2 = d;
-                            br2 = rr.id;
-                            iB = &rr;
-                        } else if (nInc == 3) {
-                            d3 = d;
-                            br3 = rr.id;
-                        }
-                        const char gate = (d <= bound) ? 'Y' : 'N';
-                        std::fprintf(stderr,
-                                     "DIAG_HUB2VTX i=%d j=%d incRid=%d type=%s d=%.8f bound=%.8f "
-                                     "gate=%c nInc=%d\n",
-                                     (int)a, (int)b, rr.id,
-                                     rr.type == SurfType::Plane ? "plane" : "cyl", d, bound, gate,
-                                     nInc);
-                    }
-                    if (iA && iB) th = dihedralBetweenRegions(iA, iB, pV);
-                    std::fprintf(stderr,
-                                 "DIAG_HUB2VTX_SUM i=%d j=%d d1=%.8f d2=%.8f d3=%.8f theta=%.6f "
-                                 "boundRids=%d,%d,%d nInc=%d p=(%.6f,%.6f,%.6f)\n",
-                                 (int)a, (int)b, d1, d2, d3, th, br1, br2, br3, nInc, pV.X(),
-                                 pV.Y(), pV.Z());
-                }
-                if (g > maxShareUv) {
-                    maxShareUv = g;
-                    si = (int)a;
-                    sj = (int)b;
-                }
+        std::unordered_map<int, std::vector<int>> comps;
+        for (size_t k = 0; k < edges.size(); k++) comps[find((int)k)].push_back((int)k);
+        int compIdx = 0;
+        for (const auto& cp : comps) {
+            const std::vector<int>& el = cp.second;
+            std::unordered_set<const void*> vtx;
+            for (int ei : el) {
+                if (edges[(size_t)ei].v0T) vtx.insert(edges[(size_t)ei].v0T);
+                if (edges[(size_t)ei].v1T) vtx.insert(edges[(size_t)ei].v1T);
             }
+            int deg1 = 0;
+            for (const void* vt : vtx) {
+                int deg = 0;
+                auto it = vtxEdges.find(vt);
+                if (it != vtxEdges.end()) {
+                    for (int ei : it->second)
+                        if (std::find(el.begin(), el.end(), ei) != el.end()) deg++;
+                }
+                if (deg == 1) deg1++;
+            }
+            const char* kind = (deg1 == 0 && !vtx.empty()) ? "cycle" : "path";
+            r7Comp++;
+            r7CompPresent++;
+            std::fprintf(stderr,
+                         "DIAG_HUBWIRE_COMP rid=%d row=%s iw=%d comp=%d kind=%s lenE=%zu nVtx=%zu\n",
+                         rid, row, iw, compIdx++, kind, el.size(), vtx.size());
         }
         std::fprintf(stderr,
-                     "DIAG_SHAREDUV_SUM rid=%d maxGapUv=%.8f i=%d j=%d sewTol=%.8f nE=%zu "
-                     "pairsShared=%d pairsExamined=%d pairsOverTol=%d/%d\n",
-                     r.id, maxShareUv, si, sj, sewTol, edges.size(), nPairsShared, nPairsExamined,
-                     nPairsOverTol, std::max(nPairsExamined, 1));
+                     "DIAG_HUBWIRE_SUM rid=%d row=%s iw=%d nE=%zu nComp=%zu nGap3dOverTol=%d "
+                     "maxGap3d=%.4f nSharedVtx=%d nStoredPc=%zu\n",
+                     rid, row, iw, edges.size(), comps.size(), nGap3dOverTol, maxGap3d, nSharedVtx,
+                     edges.size());
+
+        if (!explorer && iw == 0) {
+            double maxShareUv = 0;
+            int si = -1, sj = -1;
+            int nPairsShared = 0, nPairsExamined = 0, nPairsOverTol = 0;
+            for (size_t a = 0; a < edges.size(); a++) {
+                for (size_t b = a + 1; b < edges.size(); b++) {
+                    const void* shared = nullptr;
+                    if (edges[a].v0T &&
+                        (edges[a].v0T == edges[b].v0T || edges[a].v0T == edges[b].v1T))
+                        shared = edges[a].v0T;
+                    else if (edges[a].v1T &&
+                             (edges[a].v1T == edges[b].v0T || edges[a].v1T == edges[b].v1T))
+                        shared = edges[a].v1T;
+                    if (!shared) continue;
+                    nPairsShared++;
+                    gp_Pnt2d ua, ub;
+                    int oka = 0, okb = 0;
+                    if (edges[a].v0T == shared) {
+                        ua = edges[a].uv0;
+                        oka = edges[a].haveUv;
+                    } else if (edges[a].v1T == shared) {
+                        ua = edges[a].uv1;
+                        oka = edges[a].haveUv;
+                    }
+                    if (edges[b].v0T == shared) {
+                        ub = edges[b].uv0;
+                        okb = edges[b].haveUv;
+                    } else if (edges[b].v1T == shared) {
+                        ub = edges[b].uv1;
+                        okb = edges[b].haveUv;
+                    }
+                    if (!oka || !okb) continue;
+                    nPairsExamined++;
+                    r7Share++;
+                    r7SharePresent++;
+                    const double g = ua.Distance(ub);
+                    if (g > tol) nPairsOverTol++;
+                    if (g > maxShareUv) {
+                        maxShareUv = g;
+                        si = (int)a;
+                        sj = (int)b;
+                    }
+                }
+            }
+            std::fprintf(stderr,
+                         "DIAG_SHAREDUV_SUM rid=%d maxGapUv=%.8f i=%d j=%d sewTol=%.8f nE=%zu "
+                         "pairsShared=%d pairsExamined=%d pairsOverTol=%d/%d\n",
+                         rid, maxShareUv, si, sj, sewTol, edges.size(), nPairsShared,
+                         nPairsExamined, nPairsOverTol, std::max(nPairsExamined, 1));
+        }
+    };
+
+    dumpWireRow(ow, 0, false);
+    dumpWireRow(ow, 0, true);
+    gHubWireRowB = false;
+
+    // try-B / FClass2d / BRepCheck on isolated copies — live wires stay untouched.
+    TopoDS_Wire owCopy;
+    std::vector<TopoDS_Wire> innerCopy;
+    bool copiesOk = false;
+    try {
+        const TopoDS_Shape owIso = diagIsolatedCopy(ow);
+        if (!owIso.IsNull()) {
+            owCopy = TopoDS::Wire(owIso);
+            copiesOk = true;
+            innerCopy.reserve(innerW.size());
+            for (const auto& iw : innerW) {
+                const TopoDS_Shape iwIso = diagIsolatedCopy(iw);
+                if (iwIso.IsNull()) {
+                    copiesOk = false;
+                    break;
+                }
+                innerCopy.push_back(TopoDS::Wire(iwIso));
+            }
+        }
+    } catch (const Standard_Failure&) {
+        copiesOk = false;
+    }
+    TopoDS_Face diagF;
+    if (copiesOk && makeFaceKeep(gpl, owCopy, innerCopy, outward, diagF) && !diagF.IsNull()) {
+        int iiw = 0;
+        for (TopExp_Explorer wx(diagF, TopAbs_WIRE); wx.More(); wx.Next(), iiw++) {
+            const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+            int nEw = 0;
+            for (TopoDS_Iterator it(w); it.More(); it.Next())
+                if (it.Value().ShapeType() == TopAbs_EDGE) nEw++;
+            const char* infPt = "?";
+            try {
+                BRepTopAdaptor_FClass2d cl(diagF, Precision::PConfusion());
+                infPt = topAbsStateName(cl.PerformInfinitePoint());
+            } catch (const Standard_Failure&) {
+            }
+            r7Inner++;
+            r7InnerPresent++;
+            std::fprintf(stderr, "DIAG_HUBWIRE_INNER rid=%d iw=%d outer=%d infPt=%s nE=%d\n", rid, iiw,
+                         w.IsSame(owCopy) ? 1 : 0, infPt, nEw);
+        }
+        if (rid == 0 || rid == 2 || rid == 3) {
+            try {
+                BRepCheck_Wire chk(owCopy);
+                chk.GeometricControls(Standard_True);
+                const BRepCheck_Status c2d = chk.Closed2d(diagF, Standard_False);
+                const BRepCheck_Status ori = chk.Orientation(diagF, Standard_False);
+                BRepCheck_Face fc(diagF);
+                fc.GeometricControls(Standard_True);
+                r7Orient++;
+                r7OrientPresent++;
+                std::fprintf(stderr,
+                             "DIAG_HUBORIENT rid=%d closed2d=%s wireOrient=%s intersectWires=%s "
+                             "imbrication=%s orientationOfWires=%s\n",
+                             rid, brepCheckName((int)c2d), brepCheckName((int)ori),
+                             brepCheckName((int)fc.IntersectWires(Standard_False)),
+                             brepCheckName((int)fc.ClassifyWires(Standard_False)),
+                             brepCheckName((int)fc.OrientationOfWires(Standard_False)));
+            } catch (const Standard_Failure&) {
+            }
+        }
+    }
+
+    std::fprintf(stderr,
+                 "DIAG_OPEN2D_R7 rid=%d hubwire=%d/%d shareduv=%d/%d comp=%d/%d pair=%d/%d "
+                 "inner=%d/%d orient=%d/%d\n",
+                 rid, r7HubwirePresent, r7Hubwire, r7SharePresent, r7Share, r7CompPresent, r7Comp,
+                 r7PairPresent, r7Pair, r7InnerPresent, r7Inner, r7OrientPresent, r7Orient);
+}
+void dumpDiagWirePop(const Region& r, const TopoDS_Wire& ow, const RegionSet& rs,
+                     const MeshView& mv, const std::vector<ChainGeom>& geom,
+                     const std::vector<TopoDS_Edge>& meshE) {
+    if (!diagP2Enabled() || ow.IsNull()) return;
+    const char* part = sliverCensusPartName((int)mv.nTri);
+    const int rid = r.id;
+    const double sewTol = mv.sewTol;
+    auto chainByTShape = [&](const TopoDS_Edge& e) -> int {
+        const void* ts = diagTShapePtr(e);
+        for (size_t ci = 0; ci < geom.size(); ci++) {
+            for (const TopoDS_Edge& ge : geom[ci].edges) {
+                if (!ge.IsNull() && (e.IsSame(ge) || (ts && diagTShapePtr(ge) == ts)))
+                    return (int)ci;
+            }
+        }
+        for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+            for (int eid : rs.chains[ci].meshEdges) {
+                if (eid < 0 || (size_t)eid >= meshE.size() || meshE[(size_t)eid].IsNull()) continue;
+                if (e.IsSame(meshE[(size_t)eid]) || (ts && diagTShapePtr(meshE[(size_t)eid]) == ts))
+                    return (int)ci;
+            }
+        }
+        return -1;
+    };
+    auto plateSide = [&](int ci) -> int {
+        if (ci < 0 || (size_t)ci >= rs.chains.size()) return 0;
+        const BoundaryChain& ch = rs.chains[(size_t)ci];
+        return (ch.regA == rid || ch.regB == rid) ? 1 : 0;
+    };
+
+    std::vector<TopoDS_Edge> elist;
+    for (TopoDS_Iterator it(ow); it.More(); it.Next()) {
+        if (it.Value().ShapeType() == TopAbs_EDGE) elist.push_back(TopoDS::Edge(it.Value()));
+    }
+    const int nE = (int)elist.size();
+    int nChainE = 0, nNonChainE = 0, nSeam = 0;
+    int r7E = 0, r7Eok = 0, r7Drop = 0, r7DropOk = 0, r7Cov = 0, r7CovOk = 0;
+    std::string sites;
+    struct Rec {
+        int i, matchCi, originCi, partner, cylRid, closed360, seam, plateSide, fb;
+        const void *eT, *v0T, *v1T;
+        const char *site, *cls;
+        gp_Pnt p0, p1;
+        TopoDS_Edge e;
+    };
+    std::vector<Rec> recs;
+    recs.reserve(elist.size());
+    std::unordered_set<const void*> chainVtx;
+    for (const TopoDS_Edge& e : elist) {
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(e, v0, v1, Standard_True);
+        const int mci = chainByTShape(e);
+        if (mci >= 0) {
+            chainVtx.insert(diagTShapePtr(v0));
+            chainVtx.insert(diagTShapePtr(v1));
+        }
+    }
+    for (int i = 0; i < nE; i++) {
+        const TopoDS_Edge& e = elist[(size_t)i];
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(e, v0, v1, Standard_True);
+        Rec x;
+        x.i = i;
+        x.e = e;
+        x.eT = diagTShapePtr(e);
+        x.v0T = diagTShapePtr(v0);
+        x.v1T = diagTShapePtr(v1);
+        x.p0 = BRep_Tool::Pnt(v0);
+        x.p1 = BRep_Tool::Pnt(v1);
+        x.matchCi = chainByTShape(e);
+        x.originCi = -1;
+        x.site = "?";
+        if (x.eT && gWirePopCi.count(x.eT)) x.originCi = gWirePopCi[x.eT];
+        if (x.eT && gWirePopSite.count(x.eT)) x.site = gWirePopSite[x.eT];
+        x.seam = (x.eT && gSeamTShapes.count(x.eT)) ? 1 : 0;
+        x.partner = -1;
+        x.cylRid = x.seam ? seamCylinderRid(e, rs, geom) : -1;
+        x.closed360 = 0;
+        x.fb = 0;
+        x.plateSide = plateSide(x.matchCi);
+        if (x.matchCi >= 0 && (size_t)x.matchCi < rs.chains.size()) {
+            const BoundaryChain& ch = rs.chains[(size_t)x.matchCi];
+            x.partner = (ch.regA == rid) ? ch.regB : ch.regA;
+            x.fb = gChainSewFallbackCi.count(x.matchCi) ? 1 : 0;
+        }
+        if (x.cylRid >= 0) {
+            const Region* cr = regionById(rs, x.cylRid);
+            if (cr) x.closed360 = cr->closed360 ? 1 : 0;
+        }
+        x.cls = x.seam ? "seam" : (x.matchCi >= 0 ? "chain" : "nonchain");
+        if (x.matchCi >= 0) nChainE++;
+        else nNonChainE++;
+        if (x.seam) nSeam++;
+        recs.push_back(x);
+        if (sites.find(x.site) == std::string::npos) {
+            if (!sites.empty()) sites += ",";
+            sites += x.site;
+        }
+        const int vShare = ((x.v0T && chainVtx.count(x.v0T)) || (x.v1T && chainVtx.count(x.v1T)))
+                               ? 1
+                               : 0;
+        if (x.matchCi < 0 || (rid >= 0 && rid <= 3 && x.seam)) {
+            r7E++;
+            r7Eok++;
+            std::fprintf(stderr,
+                         "DIAG_WIREPOP_E rid=%d iw=0 i=%d eT=%p v0T=%p v1T=%p cls=%s "
+                         "matchCi=%d originCi=%d site=%s partner=%d plateSide=%d seam=%d "
+                         "cylRid=%d closed360=%d fb=%d vShareChain=%d "
+                         "p0=(%.4f,%.4f,%.4f) p1=(%.4f,%.4f,%.4f)\n",
+                         rid, i, x.eT, x.v0T, x.v1T, x.cls, x.matchCi, x.originCi, x.site,
+                         x.partner, x.plateSide, x.seam, x.cylRid, x.closed360, x.fb, vShare,
+                         x.p0.X(), x.p0.Y(), x.p0.Z(), x.p1.X(), x.p1.Y(), x.p1.Z());
+        }
+    }
+    if (rid == 2 && nE > 40) {
+        const Rec& a = recs[39];
+        const Rec& b = recs[40];
+        const double gOri = a.p1.Distance(b.p0);
+        const double dA0B0 = a.p0.Distance(b.p0);
+        const double dA0B1 = a.p0.Distance(b.p1);
+        const double dA1B0 = a.p1.Distance(b.p0);
+        const double dA1B1 = a.p1.Distance(b.p1);
+        const int anyShare = (a.v0T == b.v0T || a.v0T == b.v1T || a.v1T == b.v0T || a.v1T == b.v1T)
+                                 ? 1
+                                 : 0;
+        const int seqShare = (a.v1T && a.v1T == b.v0T) ? 1 : 0;
+        std::fprintf(stderr,
+                     "DIAG_WIREPOP_GAP rid=2 i=39|40 gap3d_oriented=%.6f d_v1_v0=%.6f "
+                     "dA0B0=%.6f dA0B1=%.6f dA1B0=%.6f dA1B1=%.6f anyShareVtx=%d seqShare=%d "
+                     "matchCi=%d|%d originCi=%d|%d site=%s|%s seam=%d|%d cylRid=%d|%d\n",
+                     gOri, dA1B0, dA0B0, dA0B1, dA1B0, dA1B1, anyShare, seqShare, a.matchCi,
+                     b.matchCi, a.originCi, b.originCi, a.site, b.site, a.seam, b.seam, a.cylRid,
+                     b.cylRid);
+    }
+
+    // Removal test: drop TShape-unmatched (true non-chain) edges.
+    std::vector<int> kept;
+    for (const Rec& x : recs)
+        if (x.matchCi >= 0) kept.push_back(x.i);
+        else {
+            r7Drop++;
+            r7DropOk++;
+        }
+    std::unordered_map<const void*, int> deg;
+    std::unordered_map<const void*, const void*> par;
+    auto fnd = [&](const void* x) {
+        if (!par.count(x)) par[x] = x;
+        const void* r0 = x;
+        while (par[r0] != r0) r0 = par[r0];
+        return r0;
+    };
+    auto uni = [&](const void* a, const void* b) {
+        if (!a || !b) return;
+        a = fnd(a);
+        b = fnd(b);
+        if (a != b) par[a] = b;
+    };
+    for (int idx : kept) {
+        const Rec& x = recs[(size_t)idx];
+        if (x.v0T) deg[x.v0T]++;
+        if (x.v1T) deg[x.v1T]++;
+        uni(x.v0T, x.v1T);
+    }
+    std::unordered_set<const void*> roots;
+    int nDeg1 = 0, nDeg2 = 0, nOdd = 0;
+    for (const auto& kv : deg) {
+        roots.insert(fnd(kv.first));
+        if (kv.second == 1) nDeg1++;
+        else if (kv.second == 2) nDeg2++;
+        if (kv.second % 2) nOdd++;
+    }
+    const int nComp = (int)roots.size();
+    const int tshapeCycle = (nComp == 1 && nDeg1 == 0 && nOdd == 0 && (int)kept.size() >= 3) ? 1 : 0;
+    std::fprintf(stderr,
+                 "DIAG_WIREPOP_REMOVE rid=%d nE_before=%d nE_after=%d nDropped=%d nComp=%d "
+                 "nDeg1=%d nDeg2=%d tshapeCycle=%d\n",
+                 rid, nE, (int)kept.size(), nE - (int)kept.size(), nComp, nDeg1, nDeg2,
+                 tshapeCycle);
+    if (rid == 2) {
+        std::vector<int> keptS;
+        std::unordered_map<const void*, int> degS;
+        std::unordered_map<const void*, const void*> parS;
+        auto fndS = [&](const void* x) {
+            if (!x) return x;
+            if (!parS.count(x)) parS[x] = x;
+            const void* r0 = x;
+            while (parS[r0] != r0) r0 = parS[r0];
+            return r0;
+        };
+        auto uniS = [&](const void* a, const void* b) {
+            if (!a || !b) return;
+            a = fndS(a);
+            b = fndS(b);
+            if (a != b) parS[a] = b;
+        };
+        for (const Rec& x : recs) {
+            if (x.seam) continue;
+            keptS.push_back(x.i);
+            if (x.v0T) degS[x.v0T]++;
+            if (x.v1T) degS[x.v1T]++;
+            uniS(x.v0T, x.v1T);
+        }
+        int nDeg1S = 0, nCompS = 0;
+        std::unordered_set<const void*> rootsS;
+        for (const auto& kv : degS) {
+            rootsS.insert(fndS(kv.first));
+            if (kv.second == 1) nDeg1S++;
+        }
+        nCompS = (int)rootsS.size();
+        const int cycS = (nCompS == 1 && nDeg1S == 0 && (int)keptS.size() >= 3) ? 1 : 0;
+        std::fprintf(stderr,
+                     "DIAG_WIREPOP_SEAMDROP rid=2 nE_before=%d nSeam=%d nE_after=%d nComp=%d "
+                     "nDeg1=%d tshapeCycle=%d\n",
+                     nE, nSeam, (int)keptS.size(), nCompS, nDeg1S, cycS);
+    }
+    if (!tshapeCycle && rid == 2) {
+        for (size_t k = 0; k < kept.size(); k++) {
+            const Rec& a = recs[(size_t)kept[k]];
+            const Rec& b = recs[(size_t)kept[(k + 1) % kept.size()]];
+            const int seq = (a.v1T && a.v1T == b.v0T) ? 1 : 0;
+            const int any = (a.v0T == b.v0T || a.v0T == b.v1T || a.v1T == b.v0T || a.v1T == b.v1T)
+                                ? 1
+                                : 0;
+            if (seq) continue;
+            const double d = a.p1.Distance(b.p0);
+            std::fprintf(stderr,
+                         "DIAG_WIREPOP_RESIDGAP rid=%d i=%d|%d seqShare=%d anyShare=%d d3d=%.6f "
+                         "v1T=%p v0T=%p matchCi=%d|%d cls=%s|%s\n",
+                         rid, a.i, b.i, seq, any, d, a.v1T, b.v0T, a.matchCi, b.matchCi, a.cls,
+                         b.cls);
+        }
+        for (const auto& kv : deg) {
+            if (kv.second == 2) continue;
+            std::fprintf(stderr, "DIAG_WIREPOP_RESIDV rid=%d vT=%p deg=%d\n", rid, kv.first,
+                         kv.second);
+        }
+    }
+
+    // Covering chains for dropped stretches (hub 2).
+    if (rid == 2) {
+        std::unordered_set<int> inWire;
+        for (const Rec& x : recs)
+            if (x.matchCi >= 0) inWire.insert(x.matchCi);
+        for (const Rec& x : recs) {
+            if (x.matchCi >= 0) continue;
+            r7Cov++;
+            r7CovOk++;
+            int nSpan = 0;
+            std::string spanList;
+            for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+                const BoundaryChain& ch = rs.chains[ci];
+                if (ch.regA != rid && ch.regB != rid) continue;
+                if (ch.meshVerts.size() < 2) continue;
+                gp_Pnt a = pntOf(mv, ch.meshVerts.front());
+                gp_Pnt b = pntOf(mv, ch.meshVerts.back());
+                const double da = std::min(x.p0.Distance(a), x.p0.Distance(b));
+                const double db = std::min(x.p1.Distance(a), x.p1.Distance(b));
+                if (da > 2.0 * sewTol && db > 2.0 * sewTol) continue;
+                nSpan++;
+                if (!spanList.empty()) spanList += ",";
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%d%s", (int)ci, inWire.count((int)ci) ? "*" : "");
+                spanList += buf;
+            }
+            std::fprintf(stderr,
+                         "DIAG_WIREPOP_COVER rid=%d i=%d nSpan=%d inWireMarked=* chains=[%s] "
+                         "cylRid=%d site=%s\n",
+                         rid, x.i, nSpan, spanList.c_str(), x.cylRid, x.site);
+        }
+    }
+
+    if (sites.empty()) sites = "-";
+    std::fprintf(stderr,
+                 "DIAG_WIREPOP part=%s rid=%d iw=0 nE=%d nChainE=%d nNonChainE=%d nSeam=%d "
+                 "sites=[%s] r7e=%d/%d r7drop=%d/%d r7cov=%d/%d\n",
+                 part, rid, nE, nChainE, nNonChainE, nSeam, sites.c_str(), r7Eok, r7E, r7DropOk,
+                 r7Drop, r7CovOk, r7Cov);
+}
+
+Handle(Geom2d_Curve) basisCurve2dOf(const Handle(Geom2d_Curve)& c) {
+    Handle(Geom2d_TrimmedCurve) tr = Handle(Geom2d_TrimmedCurve)::DownCast(c);
+    if (!tr.IsNull() && !tr->BasisCurve().IsNull()) return tr->BasisCurve();
+    return c;
+}
+
+int countPcurvesOnFaceSurf(const TopoDS_Edge& e, const Handle(Geom_Surface)& sF) {
+    int n = 0;
+    if (e.IsNull() || sF.IsNull()) return 0;
+    try {
+        Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
+        if (te.IsNull()) return 0;
+        const void* want = static_cast<const void*>(sF.get());
+        for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More(); it.Next()) {
+            Handle(BRep_CurveOnSurface) cos = Handle(BRep_CurveOnSurface)::DownCast(it.Value());
+            if (cos.IsNull() || cos->Surface().IsNull()) continue;
+            if (static_cast<const void*>(cos->Surface().get()) == want) n++;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return n;
+}
+
+double maxDevPcurveVs3d(const TopoDS_Face& f, const TopoDS_Edge& e) {
+    double maxD = -1.0;
+    try {
+        TopLoc_Location loc;
+        Handle(Geom_Surface) srf = BRep_Tool::Surface(f, loc);
+        Standard_Real f3 = 0, l3 = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+        Standard_Real a = 0, b = 0;
+        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+        if (c3.IsNull() || pc.IsNull() || srf.IsNull() || l3 <= f3) return maxD;
+        const gp_Trsf tr = loc.Transformation();
+        for (int i = 0; i < 16; i++) {
+            const double u = (double)i / 15.0;
+            const gp_Pnt p3 = c3->Value(f3 + u * (l3 - f3));
+            const gp_Pnt2d uv = pc->Value(a + u * (b - a));
+            gp_Pnt ps = srf->Value(uv.X(), uv.Y());
+            if (!loc.IsIdentity()) ps.Transform(tr);
+            const double d = p3.Distance(ps);
+            if (d > maxD) maxD = d;
+        }
+    } catch (const Standard_Failure&) {
+        return -1.0;
+    }
+    return maxD;
+}
+
+thread_local std::unordered_map<const void*, double> gHpPlateEdgeTol;
+
+void noteHpPlateEdgeTols(const TopoDS_Face& f, int rid) {
+    if (f.IsNull() || rid < 0 || rid > 3) return;
+    try {
+        TopTools_IndexedMapOfShape em;
+        TopExp::MapShapes(f, TopAbs_EDGE, em);
+        for (int i = 1; i <= em.Extent(); i++) {
+            const TopoDS_Edge e = TopoDS::Edge(em(i));
+            const void* ts = diagTShapePtr(e);
+            if (ts) gHpPlateEdgeTol[ts] = BRep_Tool::Tolerance(e);
+        }
+    } catch (const Standard_Failure&) {
+    }
+}
+
+double planeSignedDist(const gp_Pln& pl, const gp_Pnt& p) {
+    Standard_Real a = 0, b = 0, c = 0, d = 0;
+    pl.Coefficients(a, b, c, d);
+    return a * p.X() + b * p.Y() + c * p.Z() + d;
+}
+
+bool facePlanePln(const TopoDS_Face& f, gp_Pln& out) {
+    TopLoc_Location loc;
+    Handle(Geom_Plane) gpl = Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(f, loc));
+    if (gpl.IsNull()) return false;
+    out = gpl->Pln();
+    if (!loc.IsIdentity()) out.Transform(loc.Transformation());
+    return true;
+}
+
+// D-S3-111: affine → |C(t)-S(P(t))| at endpoints (not vertex-to-plane); circle →
+// |offset|+R·sin(tilt); polyline → max over poles with pcurve when present.
+double exactMaxOnPlane(const TopoDS_Face& f, const TopoDS_Edge& e, const char* c3name) {
+    gp_Pln pl;
+    if (!facePlanePln(f, pl)) return -1.0;
+    Standard_Real f3 = 0, l3 = 0;
+    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+    Standard_Real a = 0, b = 0;
+    Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+    TopLoc_Location loc;
+    Handle(Geom_Surface) srf = BRep_Tool::Surface(f, loc);
+    double m = -1.0;
+    if (!c3.IsNull() && !pc.IsNull() && !srf.IsNull() && l3 > f3)
+        m = std::max(curveSurfDevAtBind(c3, f3, srf, pc, loc),
+                     curveSurfDevAtBind(c3, l3, srf, pc, loc));
+    if (c3name && std::strcmp(c3name, "Circle") == 0) {
+        try {
+            Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(basisCurveOf(c3));
+            if (!gc.IsNull()) {
+                const double circMax = circleOnPlaneMax(pl, gc->Circ());
+                return (m >= 0.0) ? std::max(m, circMax) : circMax;
+            }
+        } catch (const Standard_Failure&) {
+        }
+    }
+    if (c3name && std::strncmp(c3name, "Polyline", 8) == 0) {
+        try {
+            Handle(Geom_BSplineCurve) bs =
+                Handle(Geom_BSplineCurve)::DownCast(basisCurveOf(c3));
+            if (!bs.IsNull()) {
+                if (m < 0.0) m = 0.0;
+                for (int i = 1; i <= bs->NbPoles(); i++) {
+                    if (!pc.IsNull() && !srf.IsNull()) {
+                        const double t = (bs->NbPoles() > 1)
+                                             ? f3 + (l3 - f3) * (double)(i - 1) /
+                                                      (double)(bs->NbPoles() - 1)
+                                             : f3;
+                        m = std::max(m, curveSurfDevAtBind(c3, t, srf, pc, loc));
+                    } else
+                        m = std::max(m, std::fabs(planeSignedDist(pl, bs->Pole(i))));
+                }
+            }
+        } catch (const Standard_Failure&) {
+        }
+    }
+    if (m >= 0.0) return m;
+    TopoDS_Vertex v0, v1;
+    TopExp::Vertices(e, v0, v1, Standard_True);
+    const gp_Pnt p0 = v0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v0);
+    const gp_Pnt p1 = v1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v1);
+    return std::max(std::fabs(planeSignedDist(pl, p0)), std::fabs(planeSignedDist(pl, p1)));
+}
+
+// Replicate BRepCheck_Edge::InContext's BRepLib_ValidateEdge sampling.
+// NCONTROL in BRepCheck_Edge.cxx is 23; InContext uses ValidateEdge default 22
+// unless SetControlPointsNumber is called. We set 23 to match NCONTROL and do
+// not SetExitIfToleranceExceeded, so brepMax is the grid maximum not a first-hit.
+double brepCheckInContextMax(const TopoDS_Face& f, const TopoDS_Edge& e) {
+    double maxD = -1.0;
+    try {
+        TopLoc_Location loc;
+        Handle(Geom_Surface) srf = BRep_Tool::Surface(f, loc);
+        Standard_Real f3 = 0, l3 = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+        Standard_Real a = 0, b = 0;
+        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+        if (c3.IsNull() || pc.IsNull() || srf.IsNull() || l3 <= f3) return -1.0;
+        Handle(Geom_Surface) sb =
+            Handle(Geom_Surface)::DownCast(srf->Transformed(loc.Transformation()));
+        if (sb.IsNull()) sb = srf;
+        const gp_Trsf tr = loc.Transformation();
+        const int N = 23;
+        for (int i = 0; i < N; i++) {
+            const double u = (N > 1) ? (double)i / (double)(N - 1) : 0.0;
+            const gp_Pnt p3 = c3->Value(f3 + u * (l3 - f3));
+            const gp_Pnt2d uv = pc->Value(a + u * (b - a));
+            gp_Pnt ps = sb->Value(uv.X(), uv.Y());
+            if (!loc.IsIdentity()) ps.Transform(tr);
+            const double d = p3.Distance(ps);
+            if (d > maxD) maxD = d;
+        }
+    } catch (const Standard_Failure&) {
+        return -1.0;
+    }
+    return maxD;
+}
+
+double brepDevMaxOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f3, Standard_Real l3,
+                        const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& pc,
+                        Standard_Real a, Standard_Real b, const TopLoc_Location& loc) {
+    double maxD = -1.0;
+    try {
+        if (c3.IsNull() || pc.IsNull() || srf.IsNull() || l3 <= f3) return -1.0;
+        Handle(Geom_Surface) sb =
+            Handle(Geom_Surface)::DownCast(srf->Transformed(loc.Transformation()));
+        if (sb.IsNull()) sb = srf;
+        const gp_Trsf tr = loc.Transformation();
+        const int N = 23;
+        for (int i = 0; i < N; i++) {
+            const double u = (N > 1) ? (double)i / (double)(N - 1) : 0.0;
+            const gp_Pnt p3 = c3->Value(f3 + u * (l3 - f3));
+            const gp_Pnt2d uv = pc->Value(a + u * (b - a));
+            gp_Pnt ps = sb->Value(uv.X(), uv.Y());
+            if (!loc.IsIdentity()) ps.Transform(tr);
+            const double d = p3.Distance(ps);
+            if (d > maxD) maxD = d;
+        }
+    } catch (const Standard_Failure&) {
+        return -1.0;
+    }
+    return maxD;
+}
+
+double uvClosureGapOnFace(const TopoDS_Face& f, const TopoDS_Wire& w) {
+    double gap = 0.0;
+    gp_Pnt2d firstUv, prevUv;
+    bool havePrev = false, haveFirst = false;
+    try {
+        for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+            if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+            const TopoDS_Edge e = TopoDS::Edge(it.Value());
+            gp_Pnt2d uv0, uv1;
+            int stored = 0;
+            if (!edgeUvOnPlane(f, e, uv0, uv1, stored)) continue;
+            if (!haveFirst) {
+                firstUv = uv0;
+                haveFirst = true;
+            }
+            if (havePrev) {
+                const double g = prevUv.Distance(uv0);
+                if (g > gap) gap = g;
+            }
+            prevUv = uv1;
+            havePrev = true;
+        }
+        if (havePrev && haveFirst) {
+            const double g = prevUv.Distance(firstUv);
+            if (g > gap) gap = g;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return gap;
+}
+
+bool inContextHas8or11(const Handle(BRepCheck_Result)& res, const TopoDS_Face& f) {
+    auto scan = [](const BRepCheck_ListOfStatus& lst) {
+        for (BRepCheck_ListOfStatus::Iterator it(lst); it.More(); it.Next()) {
+            if (it.Value() == BRepCheck_InvalidCurveOnSurface ||
+                it.Value() == BRepCheck_InvalidSameParameterFlag)
+                return true;
+        }
+        return false;
+    };
+    if (res.IsNull()) return false;
+    try {
+        if (res->IsStatusOnShape(f)) return scan(res->StatusOnShape(f));
+        res->InitContextIterator();
+        for (; res->MoreShapeInContext(); res->NextShapeInContext()) {
+            if (res->ContextualShape().IsSame(f) || res->ContextualShape().IsEqual(f))
+                return scan(res->StatusOnShape());
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return false;
+}
+
+void edgeExactPlaneAndOther(const TopoDS_Face& f, const TopoDS_Edge& e, double& exactPlane,
+                            double& exactOther, double& brepPlane, double& brepOther) {
+    exactPlane = exactOther = brepPlane = brepOther = -1.0;
+    try {
+        TopLoc_Location locF;
+        Handle(Geom_Surface) sF = BRep_Tool::Surface(f, locF);
+        const void* want = sF.IsNull() ? nullptr : static_cast<const void*>(sF.get());
+        Standard_Real f3 = 0, l3 = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+        Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
+        if (te.IsNull() || c3.IsNull()) return;
+        for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More(); it.Next()) {
+            Handle(BRep_CurveOnSurface) cos = Handle(BRep_CurveOnSurface)::DownCast(it.Value());
+            if (cos.IsNull() || cos->Surface().IsNull() || cos->PCurve().IsNull()) continue;
+            const double ex = exactOrSampledOnPair(c3, f3, l3, cos->Surface(), cos->PCurve(),
+                                                    cos->Location());
+            const double br = brepDevMaxOnSurf(c3, f3, l3, cos->Surface(), cos->PCurve(), f3, l3,
+                                                 cos->Location());
+            const void* ph = static_cast<const void*>(cos->Surface().get());
+            if (want && ph == want) {
+                exactPlane = ex;
+                brepPlane = br;
+            } else {
+                if (ex > exactOther) exactOther = ex;
+                if (br > brepOther) brepOther = br;
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+}
+
+// D-S3-99 delta: classify in-context 8/11 edges. Print-only, try A only.
+void dumpDiagPcInvalid(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow, const RegionSet& rs,
+                       const MeshView& mv, const std::vector<ChainGeom>& geom,
+                       const std::vector<char>& collapsed, const std::vector<TopoDS_Edge>& meshE) {
+    if (f.IsNull()) return;
+    static thread_local std::unordered_set<int> dumped;
+    if (dumped.count(rid)) return;
+    dumped.insert(rid);
+    const double tol = std::max(mv.sewTol, Precision::PConfusion());
+
+    auto matchChain = [&](const TopoDS_Edge& e, const gp_Pnt& p0, const gp_Pnt& p1) -> int {
+        const void* ts = diagTShapePtr(e);
+        for (size_t ci = 0; ci < geom.size(); ci++) {
+            for (const TopoDS_Edge& ge : geom[ci].edges) {
+                if (!ge.IsNull() && (e.IsSame(ge) || (ts && diagTShapePtr(ge) == ts)))
+                    return (int)ci;
+            }
+        }
+        for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+            for (int eid : rs.chains[ci].meshEdges) {
+                if (eid < 0 || (size_t)eid >= meshE.size() || meshE[(size_t)eid].IsNull()) continue;
+                if (e.IsSame(meshE[(size_t)eid]) || (ts && diagTShapePtr(meshE[(size_t)eid]) == ts))
+                    return (int)ci;
+            }
+        }
+        int best = -1;
+        double bestD = 1e300;
+        for (size_t ci = 0; ci < rs.chains.size(); ci++) {
+            const BoundaryChain& ch = rs.chains[ci];
+            if (ch.meshVerts.size() < 2) continue;
+            gp_Pnt a = pntOf(mv, ch.meshVerts.front());
+            gp_Pnt b = pntOf(mv, ch.meshVerts.back());
+            const double d = std::min(p0.Distance(a) + p1.Distance(b), p0.Distance(b) + p1.Distance(a));
+            if (d < bestD) {
+                bestD = d;
+                best = (int)ci;
+            }
+        }
+        return (best >= 0 && bestD <= 2.0 * tol) ? best : -1;
+    };
+
+    auto classifyEdge = [&](const TopoDS_Edge& e, int& ci, int& partner) -> const char* {
+        ci = -1;
+        partner = -1;
+        const void* ts = diagTShapePtr(e);
+        if (ts && gSeamTShapes.count(ts)) return "seam";
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(e, v0, v1, Standard_True);
+        gp_Pnt p0 = v0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v0);
+        gp_Pnt p1 = v1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v1);
+        ci = matchChain(e, p0, p1);
+        bool isMeshE = false;
+        if (ci >= 0 && (size_t)ci < rs.chains.size()) {
+            for (int eid : rs.chains[(size_t)ci].meshEdges) {
+                if (eid < 0 || (size_t)eid >= meshE.size() || meshE[(size_t)eid].IsNull()) continue;
+                if (e.IsSame(meshE[(size_t)eid]) || (ts && diagTShapePtr(meshE[(size_t)eid]) == ts)) {
+                    isMeshE = true;
+                    break;
+                }
+            }
+            const BoundaryChain& ch = rs.chains[(size_t)ci];
+            partner = (ch.regA == rid) ? ch.regB : ch.regA;
+            if (partner < 0) partner = ch.regA >= 0 ? ch.regA : ch.regB;
+            if (ci >= 0 && (size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
+                (size_t)ci < geom.size() && geom[(size_t)ci].collapsed &&
+                !geom[(size_t)ci].edges.empty()) {
+                const Region* rr = regionById(rs, partner);
+                if (rr && rr->type == SurfType::Cylinder) return "cyl";
+                if (rr && rr->type == SurfType::Plane) return "pln";
+                return "span";
+            }
+            if (isMeshE) return "meshE";
+            const Region* rr = regionById(rs, partner);
+            if (rr && rr->type == SurfType::Cylinder) return "cyl";
+            if (rr && rr->type == SurfType::Plane) return "pln";
+            return "fill";
+        }
+        return "fill";
+    };
+
+    auto curve3dName = [&](const TopoDS_Edge& e, char* buf, size_t n) {
+        Standard_Real f3 = 0, l3 = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+        if (c3.IsNull()) {
+            std::snprintf(buf, n, "other");
+            return;
+        }
+        Handle(Geom_Curve) src = basisCurveOf(c3);
+        if (src.IsNull()) src = c3;
+        if (src->DynamicType() == STANDARD_TYPE(Geom_Line)) {
+            std::snprintf(buf, n, "Line");
+            return;
+        }
+        if (src->DynamicType() == STANDARD_TYPE(Geom_Circle)) {
+            std::snprintf(buf, n, "Circle");
+            return;
+        }
+        Handle(Geom_BSplineCurve) bs = Handle(Geom_BSplineCurve)::DownCast(src);
+        if (!bs.IsNull()) {
+            const int nSeg = std::max(1, bs->NbPoles() - 1);
+            if (bs->Degree() <= 1)
+                std::snprintf(buf, n, "Polyline:%d", nSeg);
+            else
+                std::snprintf(buf, n, "BSpline");
+            return;
+        }
+        std::snprintf(buf, n, "other");
+    };
+
+    auto pcurveKindName = [&](const TopoDS_Face& face, const TopoDS_Edge& e, char* buf, size_t n) {
+        try {
+            TopLoc_Location loc;
+            Handle(Geom_Plane) pl = Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(face, loc));
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, face, a, b);
+            if (pc.IsNull()) {
+                std::snprintf(buf, n, "none");
+                return;
+            }
+            Handle(Geom2d_Curve) src = basisCurve2dOf(pc);
+            if (src.IsNull()) src = pc;
+            if (src->DynamicType() == STANDARD_TYPE(Geom2d_Circle) ||
+                src->DynamicType() == STANDARD_TYPE(Geom2d_Ellipse)) {
+                std::snprintf(buf, n, "Geom2d_Circle/To2d");
+                return;
+            }
+            if (src->DynamicType() == STANDARD_TYPE(Geom2d_BSplineCurve)) {
+                std::snprintf(buf, n, "Geom2d_BSpline");
+                return;
+            }
+            if (src->DynamicType() == STANDARD_TYPE(Geom2d_Line)) {
+                bool pinned = false;
+                if (!pl.IsNull()) {
+                    TopoDS_Vertex vf, vl;
+                    TopExp::Vertices(e, vf, vl, Standard_False);
+                    if (!vf.IsNull() && !vl.IsNull()) {
+                        Standard_Real u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+                        ElSLib::Parameters(pl->Pln(), BRep_Tool::Pnt(vf), u0, v0);
+                        ElSLib::Parameters(pl->Pln(), BRep_Tool::Pnt(vl), u1, v1);
+                        const gp_Pnt2d uvA = pc->Value(a), uvB = pc->Value(b);
+                        const gp_Pnt2d vtx0(u0, v0), vtx1(u1, v1);
+                        const double dFwd = uvA.Distance(vtx0) + uvB.Distance(vtx1);
+                        const double dRev = uvA.Distance(vtx1) + uvB.Distance(vtx0);
+                        if (std::min(dFwd, dRev) <= 1e-6) pinned = true;
+                    }
+                }
+                std::snprintf(buf, n, pinned ? "Geom2d_Line(pinned)" : "projected");
+                return;
+            }
+            std::snprintf(buf, n, "projected");
+        } catch (const Standard_Failure&) {
+            std::snprintf(buf, n, "none");
+        }
+    };
+
+    auto birthSite = [&](const char* cls, int ci) -> const char* {
+        if (std::strcmp(cls, "meshE") == 0) return "bindEdgePcurveOnInternedPlane";
+        const bool col = (ci >= 0 && (size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
+                          (size_t)ci < geom.size() && geom[(size_t)ci].collapsed);
+        if (col) return "bindAllVariants";
+        if (std::strcmp(cls, "seam") == 0) return "makeFaceKeep-seam";
+        if (std::strcmp(cls, "cyl") == 0 || std::strcmp(cls, "pln") == 0 ||
+            std::strcmp(cls, "span") == 0)
+            return "bindAllVariants";
+        return "unknown";
+    };
+
+    try {
+        BRepCheck_Analyzer an(f, Standard_True);
+        TopLoc_Location loc;
+        Handle(Geom_Surface) sF = BRep_Tool::Surface(f, loc);
+        TopTools_IndexedMapOfShape emap;
+        TopExp::MapShapes(f, TopAbs_EDGE, emap);
+        std::map<std::string, int> hist;
+        int nFlagged = 0;
+        struct Row {
+            int ie;
+            const char* cls;
+            int ci;
+            int partner;
+            char c3[32];
+            char pk[40];
+            const char* birth;
+            int nPc;
+            double dev;
+            int sp;
+            int sr;
+            double etol;
+            bool flagged;
+            TopoDS_Edge e;
+        };
+        std::vector<Row> rows;
+        rows.reserve((size_t)emap.Extent());
+        for (int ie = 1; ie <= emap.Extent(); ie++) {
+            const TopoDS_Edge e = TopoDS::Edge(emap(ie));
+            Handle(BRepCheck_Result) res = analyzerResultOf(an, e);
+            const bool flagged = inContextHas8or11(res, f);
+            int ci = -1, partner = -1;
+            const char* cls = classifyEdge(e, ci, partner);
+            Row r;
+            r.ie = ie - 1;
+            r.cls = cls;
+            r.ci = ci;
+            r.partner = partner;
+            curve3dName(e, r.c3, sizeof(r.c3));
+            pcurveKindName(f, e, r.pk, sizeof(r.pk));
+            r.birth = birthSite(cls, ci);
+            r.nPc = countPcurvesOnFaceSurf(e, sF);
+            r.dev = maxDevPcurveVs3d(f, e);
+            r.sp = BRep_Tool::SameParameter(e) ? 1 : 0;
+            r.sr = BRep_Tool::SameRange(e) ? 1 : 0;
+            r.etol = BRep_Tool::Tolerance(e);
+            r.flagged = flagged;
+            r.e = e;
+            rows.push_back(r);
+            if (flagged) {
+                nFlagged++;
+                char key[128];
+                std::snprintf(key, sizeof(key), "%s,%s,%s", cls, r.c3, r.pk);
+                hist[key]++;
+                std::fprintf(stderr,
+                             "DIAG_PCINVALID rid=%d ie=%d class=%s ci=%d partner=%d curve3d=%s "
+                             "pcurveKind=%s pcurveBirthSite=%s nPcurvesOnThisFace=%d "
+                             "maxDev3d=%.6f sameParam=%d sameRange=%d edgeTol=%.6f\n",
+                             rid, r.ie, cls, ci, partner, r.c3, r.pk, r.birth, r.nPc, r.dev, r.sp,
+                             r.sr, r.etol);
+                double exactPlane = -1, exactOther = -1, brepPlane = -1, brepOther = -1;
+                edgeExactPlaneAndOther(f, e, exactPlane, exactOther, brepPlane, brepOther);
+                const Region* selfR = regionById(rs, rid);
+                const double cap = selfR ? meshTolCap(mv, selfR) : -1.0;
+                std::fprintf(stderr,
+                             "DIAG_FIRSTKEEP_FLAG rid=%d ie=%d class=%s lastWriter=%s "
+                             "tol=%.9g exactPlane=%.9g exactOther=%.9g brepMaxPlane=%.9g "
+                             "brepMaxOther=%.9g cap=%.9g\n",
+                             rid, r.ie, cls, lastTolWriterOf(e), r.etol, exactPlane, exactOther,
+                             brepPlane, brepOther, cap);
+            }
+        }
+        std::fprintf(stderr, "DIAG_PCINVALID_COV rid=%d flagged=%d/%d examined=%d present=%d\n",
+                     rid, nFlagged, emap.Extent(), emap.Extent(), emap.Extent());
+        for (const auto& kv : hist)
+            std::fprintf(stderr, "DIAG_PCINVALID_HIST rid=%d n=%d key=%s\n", rid, kv.second,
+                         kv.first.c_str());
+
+        std::unordered_map<std::string, int> ctrlN;
+        for (const Row& r : rows) {
+            if (r.flagged) continue;
+            int& k = ctrlN[r.cls];
+            if (k >= 5) continue;
+            k++;
+            std::fprintf(stderr,
+                         "DIAG_PCINVALID_CTRL rid=%d ie=%d class=%s ci=%d partner=%d curve3d=%s "
+                         "pcurveKind=%s pcurveBirthSite=%s nPcurvesOnThisFace=%d "
+                         "maxDev3d=%.6f sameParam=%d sameRange=%d edgeTol=%.6f\n",
+                         rid, r.ie, r.cls, r.ci, r.partner, r.c3, r.pk, r.birth, r.nPc, r.dev, r.sp,
+                         r.sr, r.etol);
+        }
+
+        noteHpPlateEdgeTols(f, rid);
+        try {
+            TopTools_IndexedMapOfShape emAll;
+            TopExp::MapShapes(f, TopAbs_EDGE, emAll);
+            for (int i = 1; i <= emAll.Extent(); i++) {
+                const TopoDS_Edge ee = TopoDS::Edge(emAll(i));
+                const void* ts = diagTShapePtr(ee);
+                if (ts) gAllPlateEdgeTol[ts] = BRep_Tool::Tolerance(ee);
+            }
+        } catch (const Standard_Failure&) {
+        }
+        gp_Pln platePln;
+        const bool havePln = facePlanePln(f, platePln);
+        const double plateTol = std::max(BRep_Tool::Tolerance(f), mv.sewTol);
+        const Region* selfR = regionById(rs, rid);
+
+        auto emitTol = [&](const Row& r) {
+            const double exact = exactMaxOnPlane(f, r.e, r.c3);
+            const double brep = brepCheckInContextMax(f, r.e);
+            gTolCheckRows++;
+            gTolCheckPlaneRows++;
+            if (exact >= 0.0 && brep >= 0.0) {
+                if (brep <= exact + 1e-12) {
+                    gTolCheckBrepLeExact++;
+                    gTolCheckPlaneBrepLe++;
+                } else
+                    gBindTolBrepGtExact++;
+            }
+            TopoDS_Vertex va, vb;
+            TopExp::Vertices(r.e, va, vb, Standard_True);
+            const double vt0 = va.IsNull() ? -1.0 : BRep_Tool::Tolerance(va);
+            const double vt1 = vb.IsNull() ? -1.0 : BRep_Tool::Tolerance(vb);
+            const double vo0 =
+                (!havePln || va.IsNull()) ? -1.0 : std::fabs(planeSignedDist(platePln, BRep_Tool::Pnt(va)));
+            const double vo1 =
+                (!havePln || vb.IsNull()) ? -1.0 : std::fabs(planeSignedDist(platePln, BRep_Tool::Pnt(vb)));
+            const char* verd = (exact > r.etol) ? "exact>tol" : "exact<=tol";
+            const char* brepVerd = (exact >= 0.0 && brep >= 0.0 && brep > exact + 1e-12) ? "brep>exact" : "brep<=exact";
+            std::fprintf(stderr,
+                         "DIAG_TOLCHECK rid=%d ie=%d class=%s curve3d=%s flagged=%d exactMax=%.9f "
+                         "edgeTol=%.9f brepMax=%.9f vtxTol0=%.9f vtxOff0=%.9f vtxTol1=%.9f "
+                         "vtxOff1=%.9f verdict=%s brepVerdict=%s\n",
+                         rid, r.ie, r.cls, r.c3, r.flagged ? 1 : 0, exact, r.etol, brep, vt0, vo0,
+                         vt1, vo1, verd, brepVerd);
+            if (std::strcmp(r.cls, "seam") == 0) {
+                const int cylRid = seamCylinderRid(r.e, rs, geom);
+                const Region* cr = regionById(rs, cylRid);
+                double angDeg = -1.0;
+                int isCirc = (std::strcmp(r.c3, "Circle") == 0) ? 1 : 0;
+                int coplanar = 0;
+                if (havePln && cr && cr->type == SurfType::Cylinder) {
+                    const double ang = cr->ax.Direction().Angle(platePln.Axis().Direction());
+                    angDeg = std::min(ang, kPi - ang) * 180.0 / kPi;
+                }
+                if (isCirc && havePln) {
+                    try {
+                        Standard_Real f3 = 0, l3 = 0;
+                        Handle(Geom_Curve) c3 = BRep_Tool::Curve(r.e, f3, l3);
+                        Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(basisCurveOf(c3));
+                        if (!gc.IsNull()) {
+                            const gp_Circ circ = gc->Circ();
+                            const double off = std::fabs(planeSignedDist(platePln, circ.Location()));
+                            const double ang =
+                                circ.Axis().Direction().Angle(platePln.Axis().Direction());
+                            const double tilt = circ.Radius() * std::sin(ang);
+                            const double plat = (selfR ? meshTolCap(mv, selfR) : plateTol);
+                            if (off <= plat && tilt <= plat) coplanar = 1;
+                            if (angDeg < 0.0)
+                                angDeg = std::min(ang, kPi - ang) * 180.0 / kPi;
+                        }
+                    } catch (const Standard_Failure&) {
+                    }
+                }
+                std::fprintf(stderr,
+                             "DIAG_SEAMGEOM rid=%d ie=%d cylRid=%d axisNormalAngleDeg=%.4f "
+                             "curveIsCircle=%d circlePlaneCoplanarWithPlate=%d exactMax=%.9f\n",
+                             rid, r.ie, cylRid, angDeg, isCirc, coplanar, exact);
+            }
+        };
+        std::unordered_map<std::string, int> ctrlN2;
+        for (const Row& r : rows) emitTol(r);
+
+        gIncontextPlateExamined++;
+        if (nFlagged > 0) gIncontextPlateFlagged++;
+        std::fprintf(stderr, "DIAG_INCONTEXT_COV rid=%d flagged=%d/%d examined=%d\n", rid,
+                     nFlagged, emap.Extent(), emap.Extent());
+
+        if (rid == 3 && !gHpPlateEdgeTol.empty()) {
+            std::vector<double> tols;
+            tols.reserve(gHpPlateEdgeTol.size());
+            for (const auto& kv : gHpPlateEdgeTol) tols.push_back(kv.second);
+            std::sort(tols.begin(), tols.end());
+            int nAbove1um = 0;
+            for (double t : tols)
+                if (t > 0.001) nAbove1um++;
+            const double med = tols[tols.size() / 2];
+            std::fprintf(stderr,
+                         "DIAG_TOLCHECK_DIST n=%zu min=%.9f median=%.9f max=%.9f nAbove1um=%d\n",
+                         tols.size(), tols.front(), med, tols.back(), nAbove1um);
+        }
+
+        if (rid == 2) {
+            TopoDS_Wire outerW;
+            int maxNE = -1;
+            for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) {
+                const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                int nE = 0;
+                for (TopoDS_Iterator it(w); it.More(); it.Next())
+                    if (it.Value().ShapeType() == TopAbs_EDGE) nE++;
+                if (nE > maxNE) {
+                    maxNE = nE;
+                    outerW = w;
+                }
+            }
+            if (outerW.IsNull() && !ow.IsNull()) outerW = ow;
+            const char *oOri = "?", *rOri = "?", *oC2 = "?", *rC2 = "?";
+            double oGap = -1.0, rGap = -1.0;
+            try {
+                BRepCheck_Wire chk(outerW);
+                chk.GeometricControls(Standard_True);
+                oC2 = brepCheckName((int)chk.Closed2d(f, Standard_False));
+                oOri = brepCheckName((int)chk.Orientation(f, Standard_False));
+                oGap = uvClosureGapOnFace(f, outerW);
+            } catch (const Standard_Failure&) {
+            }
+            try {
+                const TopoDS_Wire wr = TopoDS::Wire(outerW.Reversed());
+                BRepCheck_Wire chk(wr);
+                chk.GeometricControls(Standard_True);
+                rC2 = brepCheckName((int)chk.Closed2d(f, Standard_False));
+                rOri = brepCheckName((int)chk.Orientation(f, Standard_False));
+                rGap = uvClosureGapOnFace(f, wr);
+            } catch (const Standard_Failure&) {
+            }
+            const int clears =
+                (std::strcmp(rOri, "NoError") == 0 && std::strcmp(oOri, "NoError") != 0) ? 1 : 0;
+            const int gapRemains = (rGap > 1.0) ? 1 : 0;
+            std::fprintf(stderr,
+                         "DIAG_PCINVALID_WIREREV rid=2 origOrient=%s revOrient=%s origClosed2d=%s "
+                         "revClosed2d=%s origGap=%.5f revGap=%.5f clearsSt32=%d gapRemains=%d\n",
+                         oOri, rOri, oC2, rC2, oGap, rGap, clears, gapRemains);
+        }
+    } catch (const Standard_Failure&) {
+    }
+    (void)ow;
+}
+
+
+// --- OP2p: DIAG_WIREORI2 at first keep-try instant (D-S3-115) ---
+std::vector<TopoDS_Edge> wireEdgesIterator2(const TopoDS_Wire& w) {
+    std::vector<TopoDS_Edge> out;
+    for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+        if (it.Value().ShapeType() == TopAbs_EDGE) out.push_back(TopoDS::Edge(it.Value()));
+    }
+    return out;
+}
+
+std::vector<int> tshapeCycleFromEdge02(const std::vector<TopoDS_Edge>& elist) {
+    const int n = (int)elist.size();
+    if (n == 0) return {};
+    std::unordered_map<const void*, std::vector<std::pair<int, int>>> adj;
+    for (int i = 0; i < n; i++) {
+        TopoDS_Vertex t, h;
+        TopExp::Vertices(elist[(size_t)i], t, h, Standard_True);
+        const void* tT = diagTShapePtr(t);
+        const void* hT = diagTShapePtr(h);
+        if (tT) adj[tT].push_back({i, 1});
+        if (hT) adj[hT].push_back({i, 0});
+    }
+    std::vector<char> used((size_t)n, 0);
+    std::vector<int> order;
+    order.push_back(0);
+    used[0] = 1;
+    TopoDS_Vertex t0, h0;
+    TopExp::Vertices(elist[0], t0, h0, Standard_True);
+    const void* curVtx = diagTShapePtr(h0);
+    while ((int)order.size() < n && curVtx) {
+        bool found = false;
+        auto it = adj.find(curVtx);
+        if (it != adj.end()) {
+            for (const auto& pr : it->second) {
+                if (used[(size_t)pr.first]) continue;
+                order.push_back(pr.first);
+                used[(size_t)pr.first] = 1;
+                TopoDS_Vertex ta, hb;
+                TopExp::Vertices(elist[(size_t)pr.first], ta, hb, Standard_True);
+                curVtx = pr.second ? diagTShapePtr(hb) : diagTShapePtr(ta);
+                found = true;
+                break;
+            }
+        }
+        if (!found) break;
+    }
+    return order;
+}
+
+const char* vtxOriChar(TopAbs_Orientation o) {
+    if (o == TopAbs_FORWARD) return "F";
+    if (o == TopAbs_REVERSED) return "R";
+    return "?";
+}
+
+std::string analyzerWireStatusList(const BRepCheck_Analyzer& an, const TopoDS_Face& face,
+                                   const TopoDS_Wire& w) {
+    try {
+        Handle(BRepCheck_Result) res = an.Result(w);
+        if (res.IsNull()) return "not-determined";
+        return formatBRepStatusListAll(res->StatusOnShape(face));
+    } catch (const Standard_Failure&) {
+        return "not-determined";
+    }
+}
+
+void dumpDiagWireOri2Edges(int rid, char tryAB, const char* wireLabel, const TopoDS_Face& face,
+                           const TopoDS_Wire& w, const RegionSet& rs,
+                           const std::vector<ChainGeom>& geom) {
+    const std::vector<TopoDS_Edge> elist = wireEdgesIterator2(w);
+    const int nE = (int)elist.size();
+    const std::vector<int> order = tshapeCycleFromEdge02(elist);
+    const void* prevHeadT = nullptr;
+    for (size_t ki = 0; ki < order.size(); ki++) {
+        const int ie = order[ki];
+        if (ie < 0 || ie >= nE) continue;
+        const TopoDS_Edge& e = elist[(size_t)ie];
+        TopoDS_Vertex tail, head;
+        TopExp::Vertices(e, tail, head, Standard_True);
+        const void* tailT = diagTShapePtr(tail);
+        const void* headT = diagTShapePtr(head);
+        const char* junction = "ok";
+        if (ki > 0 && prevHeadT && tailT != prevHeadT) {
+            if (prevHeadT == headT) junction = "head-head";
+            else if (tailT == prevHeadT) junction = "tail-tail";
+            else junction = "mismatch";
+        }
+        int ci = -1;
+        const void* eT = diagTShapePtr(e);
+        if (eT && gWirePopCi.count(eT)) ci = gWirePopCi[eT];
+        const char* site = (eT && gWirePopSite.count(eT)) ? gWirePopSite[eT] : "not-determined";
+        int hasPc = 0, sameParam = BRep_Tool::SameParameter(e) ? 1 : 0;
+        try {
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, face, a, b);
+            hasPc = pc.IsNull() ? 0 : 1;
+        } catch (const Standard_Failure&) {
+            hasPc = -1;
+        }
+        const int nativeDir = (ki > 0 && prevHeadT && tailT != prevHeadT) ? -1 : +1;
+        std::fprintf(stderr,
+                     "DIAG_WIREORI2_E rid=%d try=%c wire=%s ie=%d ci=%d site=%s tailT=%p headT=%p "
+                     "prevHeadT=%p junction=%s vtxOriInEdge=%s,%s pcurveOnFace=%d sameParam=%d "
+                     "nativeDir=%+d\n",
+                     rid, tryAB, wireLabel, ie, ci, site, tailT, headT, prevHeadT, junction,
+                     vtxOriChar(tail.Orientation()), vtxOriChar(head.Orientation()), hasPc,
+                     sameParam, nativeDir);
+        prevHeadT = headT;
+    }
+}
+
+void dumpDiagWireOri2StopCause(int rid, char tryAB, const char* wireLabel, const TopoDS_Face& face,
+                               const TopoDS_Wire& w, int stopIe) {
+    if (stopIe < 0) return;
+    const std::vector<TopoDS_Edge> elist = wireEdgesIterator2(w);
+    if (stopIe >= (int)elist.size()) return;
+    const TopoDS_Edge& stopE = elist[(size_t)stopIe];
+    TopoDS_Vertex tail, head;
+    TopExp::Vertices(stopE, tail, head, Standard_True);
+    const TopoDS_Vertex stopVtx = head;
+    const void* stopT = diagTShapePtr(stopVtx);
+    const TopoDS_Edge& e0 = elist[0];
+    std::fprintf(stderr, "DIAG_WIREORI2_STOP rid=%d try=%c wire=%s stopIe=%d stopVtxT=%p\n", rid,
+                 tryAB, wireLabel, stopIe, stopT);
+    TopTools_IndexedDataMapOfShapeListOfShape vmap;
+    TopExp::MapShapesAndAncestors(face, TopAbs_VERTEX, TopAbs_EDGE, vmap);
+    try {
+        for (int i = 1; i <= vmap.FindIndex(stopVtx); i++) {
+            if (!vmap.FindFromIndex(i).Contains(stopVtx)) continue;
+        }
+        const TopTools_ListOfShape& adj = vmap.FindFromKey(stopVtx);
+        for (TopTools_ListIteratorOfListOfShape it(adj); it.More(); it.Next()) {
+            if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+            const TopoDS_Edge ae = TopoDS::Edge(it.Value());
+            TopoDS_Vertex ta, hb;
+            TopExp::Vertices(ae, ta, hb, Standard_True);
+            int hasPc = 0;
+            try {
+                Standard_Real a = 0, b = 0;
+                hasPc = BRep_Tool::CurveOnSurface(ae, face, a, b).IsNull() ? 0 : 1;
+            } catch (const Standard_Failure&) {
+                hasPc = -1;
+            }
+            std::fprintf(stderr,
+                         "DIAG_WIREORI2_STOPADJ rid=%d try=%c edgeT=%p oriTail=%s oriHead=%s "
+                         "pcurveOnFace=%d isSameE0=%d degenerated=%d\n",
+                         rid, tryAB, diagTShapePtr(ae), vtxOriChar(ta.Orientation()),
+                         vtxOriChar(hb.Orientation()), hasPc, ae.IsSame(e0) ? 1 : 0,
+                         BRep_Tool::Degenerated(ae) ? 1 : 0);
+        }
+    } catch (const Standard_Failure&) {
+        std::fprintf(stderr, "DIAG_WIREORI2_STOPADJ rid=%d try=%c adj=not-determined\n", rid,
+                     tryAB);
+    }
+}
+
+void dumpDiagWireOri2One(int rid, char tryAB, const TopoDS_Face& face, const TopoDS_Wire& w,
+                         const char* wireLabel, const RegionSet& rs,
+                         const std::vector<ChainGeom>& geom) {
+    if (!diagP2Enabled() || w.IsNull() || face.IsNull()) return;
+    const std::vector<TopoDS_Edge> elist = wireEdgesIterator2(w);
+    const int nE = (int)elist.size();
+    int weVisited = 0, stopIe = -1;
+    const char* closed2d = "not-determined";
+    const char* orientReal = "not-determined";
+    std::string anaWire = "not-determined";
+    std::string anaFace = "not-determined";
+    try {
+        BRepCheck_Analyzer an(face, Standard_True);
+        anaWire = analyzerWireStatusList(an, face, w);
+        try {
+            Handle(BRepCheck_Result) fres = an.Result(face);
+            if (!fres.IsNull()) anaFace = formatBRepStatusListAll(fres->StatusOnShape(face));
+        } catch (const Standard_Failure&) {
+            anaFace = "not-determined";
+        }
+        BRepCheck_Wire chk(w);
+        chk.GeometricControls(Standard_True);
+        closed2d = brepCheckName((int)chk.Closed2d(face, Standard_False));
+        orientReal = brepCheckName((int)chk.Orientation(face, Standard_False));
+    } catch (const Standard_Failure&) {
+    }
+    try {
+        BRepTools_WireExplorer ex(w, face);
+        while (ex.More()) {
+            weVisited++;
+            ex.Next();
+        }
+        if (weVisited < nE) stopIe = weVisited - 1;
+    } catch (const Standard_Failure&) {
+        stopIe = -2;
+    }
+    const char* stopStr = (stopIe >= 0) ? "ie" : "none";
+    char stopBuf[16];
+    if (stopIe >= 0) {
+        std::snprintf(stopBuf, sizeof(stopBuf), "%d", stopIe);
+        stopStr = stopBuf;
+    }
+    std::fprintf(stderr,
+                 "DIAG_WIREORI2 rid=%d try=%c wire=%s nE=%d weVisited=%d/%d stopIe=%s "
+                 "closed2dReal=%s orientationReal=%s anaWire=%s anaFace=%s\n",
+                 rid, tryAB, wireLabel, nE, weVisited, nE, stopStr, closed2d, orientReal,
+                 anaWire.c_str(), anaFace.c_str());
+    dumpDiagWireOri2Edges(rid, tryAB, wireLabel, face, w, rs, geom);
+    if (stopIe >= 0) dumpDiagWireOri2StopCause(rid, tryAB, wireLabel, face, w, stopIe);
+}
+
+void dumpDiagWireOri2AtKeepTry(int rid, const TopoDS_Face& face, const TopoDS_Wire& ow,
+                               const std::vector<TopoDS_Wire>& innerW, const RegionSet& rs,
+                               const std::vector<ChainGeom>& geom) {
+    if (!diagP2Enabled() || rid < 0 || rid > 3 || face.IsNull()) return;
+    static thread_local bool printed[4] = {false, false, false, false};
+    if (printed[rid]) return;
+    printed[rid] = true;
+    dumpDiagWireOri2One(rid, 'A', face, ow, "OUT", rs, geom);
+    for (size_t ii = 0; ii < innerW.size(); ii++) {
+        char lbl[16];
+        std::snprintf(lbl, sizeof(lbl), "IN%zu", ii);
+        dumpDiagWireOri2One(rid, 'A', face, innerW[ii], lbl, rs, geom);
+    }
+    if (rid == 2) {
+        try {
+            const TopoDS_Wire owB = TopoDS::Wire(ow.Reversed());
+            dumpDiagWireOri2One(rid, 'B', face, owB, "OUT", rs, geom);
+        } catch (const Standard_Failure&) {
+        }
     }
 }
 
@@ -6379,11 +8389,6 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
     if (!outer) return false;
     TopoDS_Wire ow;
     if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk, &r)) return false;
-    if (diagP2Enabled() && r.id >= 0 && r.id <= 3) {
-        Handle(Geom_Plane) gplDbg =
-            Handle(Geom_Plane)::DownCast(regionSurf(r, SurfVar::Plane));
-        dumpDiagHubWire(r, ow, gplDbg, rs, mv.sewTol);
-    }
     try {
         Handle(Geom_Plane) gpl = Handle(Geom_Plane)::DownCast(regionSurf(r, SurfVar::Plane));
         std::vector<TopoDS_Wire> innerW;
@@ -6394,8 +8399,6 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                 innersOk = false;
                 break;
             }
-            // Hole loops must bind shared Seamed360 cap circles with reversed
-            // wire orientation (same TShape, flipped in the wire).
             if (ip->chainIdx.size() == 1) {
                 const int ci = ip->chainIdx[0];
                 if (ci >= 0 && (size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
@@ -6412,29 +8415,24 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             for (auto& iw : innerW)
                 bindPlanePCurves(iw, gpl, r, 0.0, nBound, nSkippedHasPc, nSkippedNoCurve);
             if (diagP2Enabled())
+                dumpDiagWirePop(r, ow, rs, mv, geom, meshE);
+            if (diagP2Enabled() && r.id >= 0 && r.id <= 3)
+                dumpDiagHubWire(r, ow, gpl, rs, mv, geom, collapsed, meshE, innerW, r.outwardNormal);
+            if (diagP2Enabled())
                 std::fprintf(stderr,
                              "DIAG_PLANEPCBIND rid=%d nBound=%d nSkippedHasPc=%d nSkippedNoCurve=%d\n",
                              r.id, nBound, nSkippedHasPc, nSkippedNoCurve);
         }
         if (innersOk && makeFaceKeep(gpl, ow, innerW, r.outwardNormal, outF)) {
+            if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
+                dumpDiagAnalyzerBothTries(r.id, outF, ow);
+                dumpDiagPcInvalid(r.id, outF, ow, rs, mv, geom, collapsed, meshE);
+                if (r.id <= 3) dumpDiagWireOri2AtKeepTry(r.id, outF, ow, innerW, rs, geom);
+            }
             if (faceIsValid(outF) || ensureFaceValid(outF, meshTolCap(mv, &r))) {
-                if (r.id >= 0 && r.id <= 3 && (diagPlatesEnabled() || diagP2Enabled())) {
+                if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
                     dumpPcurveFrames(r, ow);
-                    try {
-                        BRepCheck_Analyzer an(outF, Standard_True);
-                        std::fprintf(stderr, "DIAG_PLATE rid=%d valid=%d", r.id,
-                                     an.IsValid() ? 1 : 0);
-                        if (!an.IsValid() && !outF.IsNull()) {
-                            Handle(BRepCheck_Result) res = an.Result(outF);
-                            if (!res.IsNull()) {
-                                for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More();
-                                     it.Next())
-                                    std::fprintf(stderr, " st=%d", (int)it.Value());
-                            }
-                        }
-                        std::fprintf(stderr, "\n");
-                    } catch (const Standard_Failure&) {
-                    }
+                    dumpDiagPlateLine(r.id, outF);
                 }
                 return !outF.IsNull();
             }
@@ -6464,6 +8462,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                     if (makeFaceKeep(gpl, ow2, innerW, r.outwardNormal, f2) && faceIsValid(f2)) {
                         outF = f2;
                         ow = ow2;
+                        gReconnectFire++;
                     }
                 }
             } catch (const Standard_Failure&) {
@@ -6523,22 +8522,9 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             else outF = want;
         }
         ensureFaceValid(outF, meshTolCap(mv, &r));
-        if (r.id >= 0 && r.id <= 3 && (diagPlatesEnabled() || diagP2Enabled())) {
+        if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
             dumpPcurveFrames(r, ow);
-            try {
-                BRepCheck_Analyzer an(outF, Standard_True);
-                std::fprintf(stderr, "DIAG_PLATE rid=%d valid=%d", r.id, an.IsValid() ? 1 : 0);
-                if (!an.IsValid() && !outF.IsNull()) {
-                    Handle(BRepCheck_Result) res = an.Result(outF);
-                    if (!res.IsNull()) {
-                        for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More();
-                             it.Next())
-                            std::fprintf(stderr, " st=%d", (int)it.Value());
-                    }
-                }
-                std::fprintf(stderr, "\n");
-            } catch (const Standard_Failure&) {
-            }
+            dumpDiagPlateLine(r.id, outF);
         }
         return !outF.IsNull();
     } catch (const Standard_Failure&) {
@@ -6721,6 +8707,7 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
                 if (existing > tol) tol = existing;
                 Bb.UpdateEdge(eW, c2d, surf, loc, tol);
                 Bb.Range(eW, surf, loc, f, l);
+                stampTolWriter(eW, "other");
             }
         };
         fillMissingPc(ow);
@@ -8007,6 +9994,91 @@ int hopCylCount(const RegionSet& rs, int rid) {
 
 void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<TopoDS_Face>& built,
                  const std::vector<int>& builtRid, const std::vector<char>& eprimeFill,
+                 const std::vector<char>& exploded, double sewTol);
+
+void dumpShippedInContext(const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                          const RegionSet& rs) {
+    if (!diagP2Enabled() && !diagPlatesEnabled()) return;
+    int nPlane = 0, nFlagged = 0;
+    for (size_t i = 0; i < built.size(); i++) {
+        const TopoDS_Face& f = built[i];
+        if (f.IsNull()) continue;
+        const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+        const Region* r = regionById(rs, rid);
+        if (!r || r->type != SurfType::Plane || r->builtAs == BuiltAs::ExplodedToFacets) continue;
+        nPlane++;
+        try {
+            BRepCheck_Analyzer an(f, Standard_True);
+            TopTools_IndexedMapOfShape emap;
+            TopExp::MapShapes(f, TopAbs_EDGE, emap);
+            int flagged = 0;
+            for (int ie = 1; ie <= emap.Extent(); ie++) {
+                Handle(BRepCheck_Result) res = analyzerResultOf(an, TopoDS::Edge(emap(ie)));
+                if (inContextHas8or11(res, f)) flagged++;
+            }
+            gIncontextShippedExamined++;
+            if (flagged > 0) {
+                nFlagged++;
+                gIncontextShippedFlagged++;
+            }
+            std::fprintf(stderr, "DIAG_INCONTEXT_SHIPPED rid=%d flagged=%d/%d\n", rid, flagged,
+                         emap.Extent());
+        } catch (const Standard_Failure&) {
+        }
+    }
+    std::fprintf(stderr,
+                 "DIAG_INCONTEXT_SHIPPED_SUM plates=%d flaggedPlates=%d examined=%d flagged=%d\n",
+                 nPlane, nFlagged, gIncontextShippedExamined, gIncontextShippedFlagged);
+}
+
+void dumpTolBindSummary() {
+    if (!diagP2Enabled() && !diagPlatesEnabled()) return;
+    std::fprintf(stderr, "DIAG_BINDTOL_SUM unhandled=%d overCap=%d overCapUnique=%zu genuine=%d cylSideChanged=%d\n",
+                 gBindTolUnhandled, gBindTolOverCap, gBindTolOverCapTShapes.size(),
+                 gBindTolOverCapGenuine, gCylSideTolChanged);
+    for (const auto& kv : gBindTolUnhandledByClass)
+        std::fprintf(stderr, "DIAG_BINDTOL_UNHANDLED class=%s count=%zu\n", kv.first.c_str(),
+                     kv.second.size());
+    std::fprintf(stderr,
+                 "DIAG_TOLCHECK_SUM rows=%d brepLeExact=%d plane=%d/%d cyl=%d/%d brepGtExact=%d\n",
+                 gTolCheckRows, gTolCheckBrepLeExact, gTolCheckPlaneBrepLe, gTolCheckPlaneRows,
+                 gTolCheckCylBrepLe, gTolCheckCylRows, gBindTolBrepGtExact);
+    std::fprintf(stderr,
+                 "DIAG_INCONTEXT_SUM construction=%d/%d shipped=%d/%d\n",
+                 gIncontextPlateFlagged, gIncontextPlateExamined, gIncontextShippedFlagged,
+                 gIncontextShippedExamined);
+    std::fprintf(stderr, "DIAG_REPAIR_SUM reconnect=%d tolrewrite=%d\n", gReconnectFire,
+                 gTolRewriteFire);
+    if (!gHpPlateEdgeTol.empty()) {
+        std::vector<double> tols;
+        tols.reserve(gHpPlateEdgeTol.size());
+        for (const auto& kv : gHpPlateEdgeTol) tols.push_back(kv.second);
+        std::sort(tols.begin(), tols.end());
+        int nAbove1um = 0;
+        for (double t : tols)
+            if (t > 0.001) nAbove1um++;
+        const double med = tols[tols.size() / 2];
+        std::fprintf(stderr,
+                     "DIAG_TOLCHECK_DIST n=%zu min=%.9f median=%.9f max=%.9f nAbove1um=%d\n",
+                     tols.size(), tols.front(), med, tols.back(), nAbove1um);
+    }
+    if (!gAllPlateEdgeTol.empty()) {
+        std::vector<double> tols;
+        tols.reserve(gAllPlateEdgeTol.size());
+        for (const auto& kv : gAllPlateEdgeTol) tols.push_back(kv.second);
+        std::sort(tols.begin(), tols.end());
+        int nAbove1um = 0;
+        for (double t : tols)
+            if (t > 0.001) nAbove1um++;
+        const double med = tols[tols.size() / 2];
+        std::fprintf(stderr,
+                     "DIAG_TOLCHECK_DIST_ALL70 n=%zu min=%.9f median=%.9f max=%.9f nAbove1um=%d\n",
+                     tols.size(), tols.front(), med, tols.back(), nAbove1um);
+    }
+}
+
+void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<TopoDS_Face>& built,
+                 const std::vector<int>& builtRid, const std::vector<char>& eprimeFill,
                  const std::vector<char>& exploded, double sewTol) {
     if (!diagP2Enabled()) return;
     try {
@@ -8165,8 +10237,11 @@ void fitAnalyticTolerances(const TopoDS_Shape& shape) {
                 d = std::max(d, radDev(mid));
             }
             if (d > cap) continue;
-            if (d > BRep_Tool::Tolerance(e))
+            if (d > BRep_Tool::Tolerance(e)) {
                 B.UpdateEdge(e, std::min(d * 1.001 + Precision::Confusion(), cap));
+                stampTolWriter(e, "other");
+                gTolRewriteFire++;
+            }
         }
     }
 }
@@ -8343,6 +10418,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gSurfIdent.clear();
                     gSeamTShapes.clear();
                     gMeshTShapes.clear();
+                    gWirePopCi.clear();
+                    gWirePopSite.clear();
                     for (const auto& me : meshE) {
                         if (!me.IsNull()) gMeshTShapes.insert(diagTShapePtr(me));
                     }
@@ -8481,11 +10558,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                                                             : "elips";
                     const int fb = (maxDist > sewTol) ? 1 : 0;
                     if (recoverPass == 0 && rounds == 0 && fallbackGuardPass == 0 &&
-                        j6UncollapsePass == 0)
+                        j6UncollapsePass == 0) {
+                        if (fb) noteChainSewFallback((int)ci);
                         std::fprintf(stderr,
                                      "DIAG_CHAINSEW ci=%d kind=%s regA=%d regB=%d ratioSew=%.3f "
                                      "fallback=%d\n",
                                      (int)ci, kind, A->id, B->id, ratioSew, fb);
+                    }
                     if (fb) {
                         geom[ci] = ChainGeom{};
                         nNone++;
@@ -8664,6 +10743,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 geom[ci].collapsed = true;
                 geom[ci].edges = {e};
+                noteWirePop(e, "rebuildCollapsed", (int)ci);
                 collapsed[ci] = 1;
                 nOk++;
                 if (diagCoverEnabled()) {
@@ -9138,6 +11218,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (existing > tol) tol = existing;
                     Bb.UpdateEdge(eW, c2d, sF, loc, tol);
                     Bb.Range(eW, sF, loc, a, b);
+                    stampTolWriter(eW, "other");
                 }
             }
         }
@@ -9356,6 +11437,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                      Precision::Confusion(),
                                  spCap);
                     bb.UpdateEdge(e, fat);
+                    stampTolWriter(e, "other");
+                    gTolRewriteFire++;
                 }
                 if (any)
                     BRepLib::SameParameter(sh, std::min(sewTol * 10.0, spCap),
@@ -9602,6 +11685,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         fitAnalyticTolerances(sh);
 
+        dumpShippedInContext(built, builtRid, rs);
+        dumpTolBindSummary();
         dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
         out = std::move(built);
         return true;
