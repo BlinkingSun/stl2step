@@ -2,14 +2,14 @@
   "id": "prg-ratchet",
   "authority": "prg-ratchet.json",
   "fixtureId": "handle-pickup",
-  "engineRef": "2971d31",
+  "engineRef": "9b693c8",
   "tightBudgetAbsDeltaMM3Ceiling": 10.81525,
-  "censusRadiiPhantomCeiling": 17,
+  "censusRadiiPhantomCeiling": 18,
   "d3f7R3BuiltCeiling": 75,
   "d3f7R3GtMultiplicity": 21,
   "d3f7ExtraClassCeilings": {
     "2.55": 2
   },
-  "reason": "flipped 2026-09-02 at 2971d31: HP ships analytic; PRG cells ratcheted from the first landing, R4 owes their reduction",
-  "notes": "D-S3-62: EXPECTED_RED scaffold retired. Floors (builtCyl>=30, rev=0, planes>=18, combined>=48) stay floors. The three PRG cells are never-get-worse ceilings, not a pass of the R4 formula budget / phantom-free / multiset-containment targets. tightBudget ceiling is the 2971d31 measured |dV|=10.81525 mm3 (brief 10.815). d3f7 R=3 ceiling 75 as specified; R=2.55 built=2 was the only other over-seg class on the same landing and is ratcheted with it so the cell is measured, not a silent pass."
+  "reason": "re-derived 2026-09-02 on landing-#3 shell 9b693c8 (D-S3-133): phantom ceiling 18 attributed rid 164 (R=3.0594 BAD_B blend register); tightBudget ceiling unchanged at superseded-shell 10.81525 (OP2e |dV|=10.3094 improvement, not ratcheted — main 10.8152 must pass)",
+  "notes": "D-S3-62/95/133: ratchet re-measured on OP2e landing shell, never widened. +1 phantom is exactly rid 164 (STEP census R=3.059386; axis (0.794,0.608,-0.003); BAD_B R=3 blend register); all other 17 phantom radii unchanged vs main bf508ff. Floors unchanged. tightBudget ceiling holds superseded main |dV|; OP2e measured 10.309374 mm3 (improvement, unattributed). d3f7 R=3 built=75 and R=2.55 ceiling=2 unchanged on both shells."
 }

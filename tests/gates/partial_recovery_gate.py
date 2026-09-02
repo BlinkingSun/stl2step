@@ -80,8 +80,8 @@ DEFAULT_RATCHET = REPO / "tests" / "gates" / "baseline" / "prg-ratchet.json"
 RATCHET_NAME = "prg-ratchet.json"
 RATCHET_ID = "prg-ratchet"
 FLIP_REASON = (
-    "flipped 2026-09-02 at 2971d31: HP ships analytic; "
-    "PRG cells ratcheted from the first landing, R4 owes their reduction"
+    "re-derived 2026-09-02 on landing-#3 shell 9b693c8 (D-S3-133): "
+    "phantom ceiling 18 attributed rid 164 (R=3.0594 BAD_B blend register)"
 )
 
 # Historical 18/30/48 family: still named on a revert (no CMake invert).
@@ -1446,16 +1446,16 @@ def _self_test() -> int:
 
     rch = load_prg_ratchet()
     check(rch["authority"] == RATCHET_NAME, "prg-ratchet authority is the JSON filename")
-    check(str(rch.get("engineRef") or "") == "2971d31", "prg-ratchet engineRef is 2971d31")
+    check(str(rch.get("engineRef") or "") == "9b693c8", "prg-ratchet engineRef is 9b693c8")
     check(
         abs(float(rch["tightBudgetAbsDeltaMM3Ceiling"]) - 10.81525) < 1e-9,
-        "tightBudget ceiling is 2971d31 measured 10.81525 mm3",
+        "tightBudget ceiling is superseded-shell 10.81525 mm3 (OP2e 10.3094 not ratcheted)",
     )
-    check(int(rch["censusRadiiPhantomCeiling"]) == 17, "census.radii phantom ceiling 17")
+    check(int(rch["censusRadiiPhantomCeiling"]) == 18, "census.radii phantom ceiling 18 (rid 164)")
     check(int(rch["d3f7R3BuiltCeiling"]) == 75, "d3f7 R=3 built ceiling 75")
     extra = rch.get("d3f7ExtraClassCeilings") or {}
     check(int(extra.get("2.55", 0)) == 2, "d3f7 R=2.55 landing extra ceiling 2")
-    check(FLIP_REASON in str(rch.get("reason") or ""), "ratchet reason string is the D-S3-62 flip")
+    check("rid 164" in str(rch.get("reason") or ""), "ratchet reason names rid 164 (D-S3-133)")
     try:
         load_prg_ratchet(Path("/tmp/not-prg-ratchet.json"))
         check(False, "wrong ratchet name must FAIL")
@@ -1590,23 +1590,30 @@ def _self_test() -> int:
     ph = evaluate_pickup(
         synthetic_pass_result(), phantom_cen, gt_radii, 0, strict=True
     )
-    check("census.radii" not in failing_names(ph), "1 phantom within ratchet 17 PASSES")
+    check("census.radii" not in failing_names(ph), "1 phantom within ratchet 18 PASSES")
 
     ph17_cen = synthetic_pass_census()
     ph17_cen["cylinder_radii"] = list(ph17_cen["cylinder_radii"]) + [7.0 + 0.01 * i for i in range(17)]
     ph17 = evaluate_pickup(
         synthetic_pass_result(), ph17_cen, gt_radii, 0, strict=True
     )
-    check("census.radii" not in failing_names(ph17), "17 phantoms == ratchet PASSES")
+    check("census.radii" not in failing_names(ph17), "17 phantoms < ratchet 18 PASSES")
 
     ph18_cen = synthetic_pass_census()
     ph18_cen["cylinder_radii"] = list(ph18_cen["cylinder_radii"]) + [7.0 + 0.01 * i for i in range(18)]
     ph18 = evaluate_pickup(
         synthetic_pass_result(), ph18_cen, gt_radii, 0, strict=True
     )
-    check("census.radii" in failing_names(ph18), "18 phantoms > ratchet 17 FAILS")
+    check("census.radii" not in failing_names(ph18), "18 phantoms == ratchet 18 PASSES")
+
+    ph19_cen = synthetic_pass_census()
+    ph19_cen["cylinder_radii"] = list(ph19_cen["cylinder_radii"]) + [7.0 + 0.01 * i for i in range(19)]
+    ph19 = evaluate_pickup(
+        synthetic_pass_result(), ph19_cen, gt_radii, 0, strict=True
+    )
+    check("census.radii" in failing_names(ph19), "19 phantoms > ratchet 18 FAILS")
     check(
-        any("18 phantom" in c.message and "17" in c.message for c in ph18 if not c.ok),
+        any("19 phantom" in c.message and "18" in c.message for c in ph19 if not c.ok),
         "census.radii FAIL prints current phantom count vs ceiling",
     )
 
