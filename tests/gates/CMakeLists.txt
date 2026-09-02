@@ -399,3 +399,16 @@ if(EXISTS "${_g01_e0}")
 endif()
 unset(_g01_e0)
 unset(_g01_e0_ratchet)
+
+# --- gates-g01 census allowance ---
+# Anti-silent-waiver: censusValidExpected:false set is exactly {Body11}.
+set(_g01_allow "${CMAKE_CURRENT_SOURCE_DIR}/corpus_census_allowance.py")
+if(EXISTS "${_g01_allow}")
+    add_test(NAME corpus_census_allowance
+        COMMAND "${Python3_EXECUTABLE}" "${_g01_allow}"
+                --corpus "${CMAKE_CURRENT_SOURCE_DIR}/../corpus")
+    set_tests_properties(corpus_census_allowance PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+endif()
+unset(_g01_allow)

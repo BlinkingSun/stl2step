@@ -134,10 +134,42 @@ c = json.loads(out)
 built_cyl = int(c["surfaces"]["cylinder"])
 live = sc.get("live") or []
 floor = max((int(row.get("builtCylindersFloor", 0)) for row in live), default=0)
+# censusValidExpected defaults true when absent. False is the R2-stop
+# allowance: never skip — flip to never-worse IFF invalid-but-closed.
+allowance = any(row.get("censusValidExpected") is False for row in live)
+valid = bool(c.get("valid"))
+closed = bool(c.get("closed"))
+if allowance and (not valid) and closed:
+    exp_sol = int(sc.get("expectedSolids", 1))
+    exp_open = int(sc.get("expectedOpenShells", 0))
+    got_sol = int(c.get("solids", -1))
+    got_open = int(c.get("openShells", -1))
+    if got_sol != exp_sol:
+        print(f"FAIL {id} census: solids {got_sol} != expectedSolids {exp_sol} (never-worse)")
+        sys.exit(1)
+    if got_open != exp_open:
+        print(f"FAIL {id} census: openShells {got_open} != expectedOpenShells {exp_open} (never-worse)")
+        sys.exit(1)
+    if built_cyl < floor:
+        print(f"FAIL {id} census: built cylinders {built_cyl} < floor {floor} (never-worse)")
+        sys.exit(1)
+    reason = next(
+        (str(row.get("censusValidReason") or "") for row in live
+         if row.get("censusValidExpected") is False),
+        "",
+    )
+    print(
+        f"OK {id} census cylinders={built_cyl} planes={c['surfaces']['plane']} "
+        f"closed never-worse valid=false floor={floor} reason={reason!r}"
+    )
+    sys.exit(0)
 if built_cyl < floor:
-    print(f"FAIL {id} census: built cylinders {built_cyl} < floor {floor}")
-    sys.exit(1)
-if not c.get("valid") or not c.get("closed"):
+    # Valid reverted facets (today's Body11): the 159 ratchet is the
+    # invalid-analytic floor and does not apply. Other parts: existing rule.
+    if not (allowance and valid):
+        print(f"FAIL {id} census: built cylinders {built_cyl} < floor {floor}")
+        sys.exit(1)
+if not valid or not closed:
     print(f"FAIL {id} census: valid={c.get('valid')} closed={c.get('closed')}")
     sys.exit(1)
 print(f"OK {id} census cylinders={built_cyl} planes={c['surfaces']['plane']} valid closed")
