@@ -5,6 +5,10 @@ The set of corpus parts with any live[] row censusValidExpected == false
 must be exactly {Body11}. Each such part must have a non-empty
 censusValidReason and a non-zero builtCylindersFloor.
 
+Body11 also carries the D-S3-9 sibling gate: every live[] row must pin
+demotedSeedsShipped == 0 so the cylinder floor cannot be satisfied by E′
+leakage.
+
 Usage:
   corpus_census_allowance.py
   corpus_census_allowance.py --corpus DIR
@@ -74,6 +78,15 @@ def evaluate(sidecars: Dict[str, Dict[str, Any]]) -> List[str]:
         floor = max((int(r.get("builtCylindersFloor") or 0) for r in rows), default=0)
         if floor <= 0:
             fails.append(f"{pid}: builtCylindersFloor={floor} must be non-zero")
+    b11 = sidecars.get("Body11")
+    if isinstance(b11, dict):
+        b11_rows = [r for r in (b11.get("live") or []) if isinstance(r, dict)]
+        if not b11_rows:
+            fails.append("Body11: no live[] rows for demotedSeedsShipped sibling")
+        elif any(int(r.get("demotedSeedsShipped", -1)) != 0 for r in b11_rows):
+            fails.append(
+                "Body11: demotedSeedsShipped must be 0 on every live[] row (D-S3-9 sibling)"
+            )
     return fails
 
 
@@ -96,7 +109,13 @@ def run_gate(corpus: Path) -> int:
             (str(r.get("censusValidReason") or "") for r in rows if r.get("censusValidReason")),
             "",
         )
-        print(f"  {pid}: floor={floor} reason={reason!r}")
+        demoted = min(
+            (int(r.get("demotedSeedsShipped", -1)) for r in rows),
+            default=-1,
+        )
+        print(
+            f"  {pid}: floor={floor} demotedSeedsShipped={demoted} reason={reason!r}"
+        )
     print("corpus_census_allowance PASS")
     return 0
 
@@ -117,12 +136,16 @@ def _self_test() -> int:
             {
                 "component": 0,
                 "censusValidExpected": False,
-                "censusValidReason": "R2 validity stop: 159 analytic cylinders kept, census BRepCheck invalid pre-R2",
-                "builtCylindersFloor": 159,
+                "censusValidReason": (
+                    "re-derived 2026-09-02 from the leak-fixed chain-form "
+                    "build per D-S3-9/94; the 159 counted E-prime phantoms"
+                ),
+                "builtCylindersFloor": 136,
+                "demotedSeedsShipped": 0,
             }
         ]
     }
-    check(evaluate({"Body11": ok_doc}) == [], "Body11-only with reason+floor PASSES")
+    check(evaluate({"Body11": ok_doc}) == [], "Body11-only with reason+floor+sibling PASSES")
     extra = evaluate({"Body11": ok_doc, "S09": ok_doc})
     check(any("S09" in f for f in extra), "second false part FAILS")
     missing = evaluate({})
@@ -132,7 +155,8 @@ def _self_test() -> int:
             {
                 "censusValidExpected": False,
                 "censusValidReason": "",
-                "builtCylindersFloor": 159,
+                "builtCylindersFloor": 136,
+                "demotedSeedsShipped": 0,
             }
         ]
     }
@@ -146,6 +170,7 @@ def _self_test() -> int:
                 "censusValidExpected": False,
                 "censusValidReason": "R2 validity stop",
                 "builtCylindersFloor": 0,
+                "demotedSeedsShipped": 0,
             }
         ]
     }
@@ -155,6 +180,19 @@ def _self_test() -> int:
     )
     absent = evaluate({"S01": {"live": [{"builtCylindersFloor": 0}]}})
     check(any("missing" in f for f in absent), "absent key is not a false part")
+    no_sibling = {
+        "live": [
+            {
+                "censusValidExpected": False,
+                "censusValidReason": "re-derived",
+                "builtCylindersFloor": 136,
+            }
+        ]
+    }
+    check(
+        any("demotedSeedsShipped" in f for f in evaluate({"Body11": no_sibling})),
+        "Body11 missing demotedSeedsShipped FAILS",
+    )
     return 1 if fails else 0
 
 

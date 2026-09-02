@@ -72,7 +72,11 @@ PY
   if [[ "$smooth_exit" != "-1" ]]; then
     sout="/tmp/${id}_smooth.step"
     set +e
-    "$STL2STEP" "$stl" "$sout" --quiet --smooth >/tmp/"${id}"_smooth_result.json 2>/tmp/"${id}"_smooth_stderr.txt
+    if grep -q '"demotedSeedsShipped"' "$sidecar" 2>/dev/null; then
+      STL2STEP_EPRIME_DIAG=1 "$STL2STEP" "$stl" "$sout" --quiet --smooth >/tmp/"${id}"_smooth_result.json 2>/tmp/"${id}"_smooth_stderr.txt
+    else
+      "$STL2STEP" "$stl" "$sout" --quiet --smooth >/tmp/"${id}"_smooth_result.json 2>/tmp/"${id}"_smooth_stderr.txt
+    fi
     src=$?
     set -e
     "$PYTHON" - "$id" "$src" "$sidecar" /tmp/"${id}"_smooth_result.json <<'PY' || { FAIL=1; continue; }
@@ -114,7 +118,7 @@ if int(r.get("openShells", -1)) != exp_open:
 if not r.get("watertight", False):
     print(f"FAIL {id} smooth: watertight!=true")
     ok = False
-# File-truth census: built cylinders must meet every live[] floor (today 0).
+# File-truth census: built cylinders must meet every live[] floor.
 live = sc.get("live") or []
 floor = max((int(row.get("builtCylindersFloor", 0)) for row in live), default=0)
 smooth_cyl = int(r.get("smoothCylinders", 0))
@@ -125,9 +129,10 @@ if ok:
 sys.exit(0 if ok else 1)
 PY
     if [[ -n "$CENSUS" && -x "$CENSUS" ]]; then
-      "$PYTHON" - "$id" "$sidecar" "$sout" "$CENSUS" <<'PY' || { FAIL=1; continue; }
-import json, subprocess, sys
+      "$PYTHON" - "$id" "$sidecar" "$sout" "$CENSUS" "/tmp/${id}_smooth_stderr.txt" <<'PY' || { FAIL=1; continue; }
+import json, re, subprocess, sys
 id, sc_path, step, census = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+stderr_path = sys.argv[5] if len(sys.argv) > 5 else ""
 sc = json.load(open(sc_path))
 out = subprocess.check_output([census, step], text=True)
 c = json.loads(out)
@@ -139,6 +144,99 @@ floor = max((int(row.get("builtCylindersFloor", 0)) for row in live), default=0)
 allowance = any(row.get("censusValidExpected") is False for row in live)
 valid = bool(c.get("valid"))
 closed = bool(c.get("closed"))
+want_demoted = None
+for row in live:
+    if isinstance(row, dict) and "demotedSeedsShipped" in row:
+        want_demoted = int(row.get("demotedSeedsShipped") or 0)
+        break
+
+def census_radii(doc):
+    out = []
+    for face in doc.get("cylinders") or []:
+        try:
+            out.append(float(face["radius"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if out:
+        return out
+    for grp in doc.get("cylinderGroups") or []:
+        try:
+            n = int(grp.get("nFaces") or 1)
+            out.extend([float(grp["radius"])] * max(1, n))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+def match_gt_radius(radius, gt_radii, rel=0.003):
+    best = None
+    best_err = None
+    for g in gt_radii:
+        denom = abs(g)
+        if denom == 0.0:
+            if abs(radius) == 0.0:
+                return 0.0
+            continue
+        err = abs(radius - g) / denom
+        if err <= rel and (best_err is None or err < best_err):
+            best, best_err = g, err
+    return best
+
+def greedy_assign(built, pool):
+    remaining = list(pool)
+    leftover = []
+    n = 0
+    for r in built:
+        g = match_gt_radius(float(r), remaining)
+        if g is None:
+            leftover.append(r)
+            continue
+        popped = False
+        best_i, best_err = None, None
+        for i, p in enumerate(remaining):
+            denom = abs(p) or 1.0
+            err = abs(float(r) - p) / denom
+            if err <= 0.003 and (best_err is None or err < best_err):
+                best_i, best_err = i, err
+        if best_i is None:
+            leftover.append(r)
+        else:
+            remaining.pop(best_i)
+            n += 1
+            popped = True
+        del popped
+    return n, leftover
+
+if want_demoted is not None:
+    try:
+        err_text = open(stderr_path, errors="replace").read() if stderr_path else ""
+    except OSError:
+        err_text = ""
+    pat = re.compile(
+        r"DIAG_EPRIME rid=(\d+) R=([0-9.eE+-]+) nTri=(\d+) closed360=(\d+) "
+        r"sinVsDom=([0-9.eE+-]+) demoted=(\d+)"
+    )
+    demoted_rs, kept_rs = [], []
+    for m in pat.finditer(err_text):
+        radius = float(m.group(2))
+        if int(m.group(6)) == 1:
+            demoted_rs.append(radius)
+        else:
+            kept_rs.append(radius)
+    shipped = census_radii(c)
+    _n_kept, leftover = greedy_assign(shipped, kept_rs)
+    n_demoted_shipped, _ = greedy_assign(leftover, demoted_rs)
+    if n_demoted_shipped != want_demoted:
+        print(
+            f"FAIL {id} census: demoted seeds shipped {n_demoted_shipped} "
+            f"!= demotedSeedsShipped {want_demoted} "
+            f"(DIAG_EPRIME demoted={len(demoted_rs)} kept={len(kept_rs)})"
+        )
+        sys.exit(1)
+    print(
+        f"OK {id} sibling demotedSeedsShipped={n_demoted_shipped} "
+        f"eprime_demoted={len(demoted_rs)} kept={len(kept_rs)}"
+    )
+
 if allowance and (not valid) and closed:
     exp_sol = int(sc.get("expectedSolids", 1))
     exp_open = int(sc.get("expectedOpenShells", 0))
@@ -164,15 +262,12 @@ if allowance and (not valid) and closed:
     )
     sys.exit(0)
 if built_cyl < floor:
-    # Valid reverted facets (today's Body11): the 159 ratchet is the
-    # invalid-analytic floor and does not apply. Other parts: existing rule.
-    if not (allowance and valid):
-        print(f"FAIL {id} census: built cylinders {built_cyl} < floor {floor}")
-        sys.exit(1)
+    print(f"FAIL {id} census: built cylinders {built_cyl} < floor {floor}")
+    sys.exit(1)
 if not valid or not closed:
     print(f"FAIL {id} census: valid={c.get('valid')} closed={c.get('closed')}")
     sys.exit(1)
-print(f"OK {id} census cylinders={built_cyl} planes={c['surfaces']['plane']} valid closed")
+print(f"OK {id} census cylinders={built_cyl} planes={c['surfaces']['plane']} valid closed floor={floor}")
 PY
     fi
   fi
