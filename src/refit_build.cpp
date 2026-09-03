@@ -2849,6 +2849,143 @@ TopoDS_Edge directedSlotEdge(const LoopWireSlot& s, char forward) {
     return forward ? s.edge : TopoDS::Edge(s.edge.Reversed());
 }
 
+// D-S3-168 step 0: signed area of the walk's cyclic vertex sequence in plate UV.
+double walkSignedAreaUV(const std::vector<LoopWireSlot>& slots, const LoopConnWalk& conn,
+                        const Region& plate, size_t* nUvOut) {
+    if (nUvOut) *nUvOut = 0;
+    if (!conn.ok || conn.order.size() != conn.forward.size() || conn.order.empty()) return 0.0;
+    const gp_Pln pln(plate.ax);
+    std::vector<gp_Pnt2d> uv;
+    uv.reserve(conn.order.size() + 1);
+    for (size_t k = 0; k < conn.order.size(); k++) {
+        const size_t ix = conn.order[k];
+        if (ix >= slots.size()) continue;
+        const TopoDS_Edge e = directedSlotEdge(slots[ix], conn.forward[k]);
+        const TopoDS_Vertex v = TopExp::FirstVertex(e, Standard_True);
+        if (v.IsNull()) continue;
+        Standard_Real u = 0, vv = 0;
+        ElSLib::Parameters(pln, BRep_Tool::Pnt(v), u, vv);
+        const gp_Pnt2d q(u, vv);
+        if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
+        uv.push_back(q);
+    }
+    if (uv.size() >= 2 && uv.front().Distance(uv.back()) <= Precision::PConfusion()) uv.pop_back();
+    if (nUvOut) *nUvOut = uv.size();
+    if (uv.size() < 3) return 0.0;
+    double a = 0.0;
+    for (size_t i = 0; i < uv.size(); i++) {
+        const gp_Pnt2d& p0 = uv[i];
+        const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
+        a += p0.X() * p1.Y() - p1.X() * p0.Y();
+    }
+    return 0.5 * a;
+}
+
+// D-S3-171 case (c): signed area of one edge from the curve, not a 1-vertex polygon.
+// Circle: sign(axis · plate normal) × traversal orientation × π r².
+// Else: dense samples along the adaptor's own parameter range.
+double edgeCurveSignedAreaUV(const TopoDS_Edge& eIn, const Region& plate) {
+    if (eIn.IsNull()) return 0.0;
+    const gp_Pln pln(plate.ax);
+    const gp_Dir n = pln.Axis().Direction();
+    try {
+        BRepAdaptor_Curve ac(eIn);
+        if (ac.GetType() == GeomAbs_Circle) {
+            const gp_Circ circ = ac.Circle();
+            double s = circ.Axis().Direction().Dot(n);
+            if (eIn.Orientation() == TopAbs_REVERSED) s = -s;
+            const double r = circ.Radius();
+            return s * kPi * r * r;
+        }
+        const Standard_Real f = ac.FirstParameter();
+        const Standard_Real l = ac.LastParameter();
+        if (l - f <= Precision::PConfusion()) return 0.0;
+        std::vector<gp_Pnt2d> uv;
+        uv.reserve(32);
+        for (int i = 0; i < 32; i++) {
+            const Standard_Real t =
+                f + (l - f) * (Standard_Real)i / 32.0;
+            Standard_Real u = 0, vv = 0;
+            ElSLib::Parameters(pln, ac.Value(t), u, vv);
+            const gp_Pnt2d q(u, vv);
+            if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
+            uv.push_back(q);
+        }
+        if (uv.size() < 3) return 0.0;
+        double a = 0.0;
+        for (size_t i = 0; i < uv.size(); i++) {
+            const gp_Pnt2d& p0 = uv[i];
+            const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
+            a += p0.X() * p1.Y() - p1.X() * p0.Y();
+        }
+        return 0.5 * a;
+    } catch (const Standard_Failure&) {
+        return 0.0;
+    }
+}
+
+double walkCurveSignedAreaUV(const std::vector<LoopWireSlot>& slots, const LoopConnWalk& conn,
+                             const Region& plate) {
+    if (conn.ok && conn.order.size() == conn.forward.size() && !conn.order.empty()) {
+        double a = 0.0;
+        for (size_t k = 0; k < conn.order.size(); k++) {
+            const size_t ix = conn.order[k];
+            if (ix >= slots.size()) continue;
+            a += edgeCurveSignedAreaUV(directedSlotEdge(slots[ix], conn.forward[k]), plate);
+        }
+        return a;
+    }
+    if (slots.size() == 1) return edgeCurveSignedAreaUV(slots[0].edge, plate);
+    return 0.0;
+}
+
+double wireCurveSignedAreaUV(const TopoDS_Wire& w, const Region& plate) {
+    if (w.IsNull()) return 0.0;
+    double a = 0.0;
+    try {
+        for (BRepTools_WireExplorer ex(w); ex.More(); ex.Next())
+            a += edgeCurveSignedAreaUV(TopoDS::Edge(ex.Current()), plate);
+    } catch (const Standard_Failure&) {
+        return 0.0;
+    }
+    return a;
+}
+
+// D-S3-168 step 0.5: reverse the cyclic walk; keep chainIdx[0] as start.
+void reverseConnTraversal(LoopConnWalk& conn, const std::vector<LoopWireSlot>& slots) {
+    const size_t n = conn.order.size();
+    if (n < 1 || n != conn.forward.size() || conn.order[0] >= slots.size()) return;
+    if (n == 1) {
+        conn.forward[0] = conn.forward[0] ? 0 : 1;
+        return;
+    }
+    if (n == 2 && bothEndsSharedTShape(slots[conn.order[0]].edge, slots[conn.order[1]].edge)) {
+        for (size_t k = 0; k < n; k++)
+            conn.forward[k] = conn.forward[k] ? 0 : 1;
+        return;
+    }
+    std::reverse(conn.order.begin() + 1, conn.order.end());
+    conn.forward.assign(n, 1);
+    const TopoDS_Edge& seed = slots[conn.order[0]].edge;
+    const TopoDS_Edge& succ = slots[conn.order[1]].edge;
+    const TopoDS_Vertex sF = TopExp::FirstVertex(seed, Standard_True);
+    const TopoDS_Vertex sL = TopExp::LastVertex(seed, Standard_True);
+    const TopoDS_Vertex nF = TopExp::FirstVertex(succ, Standard_True);
+    const TopoDS_Vertex nL = TopExp::LastVertex(succ, Standard_True);
+    const bool headAtSucc = sameVtxTShape(sL, nF) || sameVtxTShape(sL, nL);
+    const bool tailAtSucc = sameVtxTShape(sF, nF) || sameVtxTShape(sF, nL);
+    conn.forward[0] = (headAtSucc && !tailAtSucc) ? 1 : 0;
+    TopoDS_Edge cur = conn.forward[0] ? seed : TopoDS::Edge(seed.Reversed());
+    TopoDS_Vertex freeVtx = TopExp::LastVertex(cur, Standard_True);
+    for (size_t k = 1; k < n; k++) {
+        const TopoDS_Edge& e = slots[conn.order[k]].edge;
+        const TopoDS_Vertex f = TopExp::FirstVertex(e, Standard_True);
+        conn.forward[k] = sameVtxTShape(f, freeVtx) ? 1 : 0;
+        TopoDS_Edge ed = conn.forward[k] ? e : TopoDS::Edge(e.Reversed());
+        freeVtx = TopExp::LastVertex(ed, Standard_True);
+    }
+}
+
 bool walkOrderMatchesAppend(const LoopConnWalk& walk) {
     if (walk.order.size() != walk.forward.size()) return false;
     for (size_t i = 0; i < walk.order.size(); i++)
@@ -3187,8 +3324,6 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
         // Outer CCW about outward => area*signZ > 0; inner opposite.
         const bool inner = (walk.role == LoopRole::Inner);
         wanted = inner ? -signZ : signZ;
-        if ((area > 0.0) != (wanted > 0))
-            flipped = 1; // tentative; re-measured on the finished wire below
         if (diagP2Enabled())
             std::fprintf(stderr,
                          "DIAG_OP2B_SENSE rid=%d role=%d area=%.6g wanted=%d flipped=%d\n",
@@ -3209,9 +3344,30 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
     int succCi = -1;
     int loopNotDet = 0;
     const char* walkCmp = "same";
+    int travReversed = 0;
+    bool senseFromCurve = false;
+    size_t senseNVtx = 0;
     if (nWireE == 1) {
+        // D-S3-171 case (c): single closed edge → area-only from the EDGE curve.
         ori.seedOrientedBy = "area-only";
-        ori.seedPresetEdge = slots[0].edge;
+        TopoDS_Edge seedE = slots[0].edge;
+        if (plateR && plateR->type == SurfType::Plane && wanted != 0) {
+            const double curveArea = edgeCurveSignedAreaUV(seedE, *plateR);
+            area = curveArea;
+            senseFromCurve = true;
+            senseNVtx = 1;
+            std::fprintf(stderr,
+                         "DIAG_OP2K_SENSE rid=%d loop=%s nVtx=1 areaSource=curve area=%.6f "
+                         "wanted=%+d\n",
+                         rid, loopLbl, curveArea, wanted);
+            if ((curveArea > 0.0) != (wanted > 0)) {
+                seedE = TopoDS::Edge(seedE.Reversed());
+                ori.seedReversed = 1;
+                ori.reversedByRule++;
+                travReversed = 1;
+            }
+        }
+        ori.seedPresetEdge = seedE;
         ori.seedPreset = true;
     } else {
         if (!loopConnectivityWalk(slots, rid, loopLbl, conn)) {
@@ -3222,7 +3378,53 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
             gOriNotDetermined++;
         } else {
             walkCmp = walkOrderMatchesAppend(conn) ? "same" : "reordered";
-            const size_t succWireIx = conn.order[1];
+            // D-S3-168 step 0.5: reverse the traversal if the walk polygon's
+            // sign disagrees with the loop role. |area|<=SquareConfusion → A4
+            // only when the sequence is a real polygon (>=3 vertices).
+            if (plateR && plateR->type == SurfType::Plane && wanted != 0) {
+                size_t nUv = 0;
+                const double seqArea = walkSignedAreaUV(slots, conn, *plateR, &nUv);
+                if (nUv >= 3) {
+                    const double areaFloorWalk = Precision::SquareConfusion();
+                    if (std::fabs(seqArea) <= areaFloorWalk) {
+                        if (diagP2Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_OP2B_DEGEN rid=%d role=%d area=%.6g vtxRes=%.6g "
+                                         "-- A4 not built (walk 0.5)\n",
+                                         plateR->id, (int)walk.role, seqArea, vtxRes);
+                        return false;
+                    }
+                    area = seqArea;
+                    senseNVtx = nUv;
+                    std::fprintf(stderr,
+                                 "DIAG_OP2K_SENSE rid=%d loop=%s nVtx=%zu areaSource=polygon "
+                                 "area=%.6f wanted=%+d\n",
+                                 rid, loopLbl, nUv, seqArea, wanted);
+                    if ((seqArea > 0.0) != (wanted > 0)) {
+                        reverseConnTraversal(conn, slots);
+                        travReversed = 1;
+                    }
+                } else {
+                    const double curveArea = walkCurveSignedAreaUV(slots, conn, *plateR);
+                    area = curveArea;
+                    senseFromCurve = true;
+                    senseNVtx = nUv;
+                    std::fprintf(stderr,
+                                 "DIAG_OP2K_SENSE rid=%d loop=%s nVtx=%zu areaSource=curve "
+                                 "area=%.6f wanted=%+d\n",
+                                 rid, loopLbl, nUv, curveArea, wanted);
+                    if ((curveArea > 0.0) != (wanted > 0)) {
+                        reverseConnTraversal(conn, slots);
+                        travReversed = 1;
+                    }
+                }
+            }
+            walkCmp = walkOrderMatchesAppend(conn) ? "same" : "reordered";
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_OP2J_TRAV rid=%d loop=%s reversed=%d area=%.6g wanted=%d\n",
+                             rid, loopLbl, travReversed, area, wanted);
+            const size_t succWireIx = conn.order.size() > 1 ? conn.order[1] : 0;
             TopoDS_Edge seedE = slots[0].edge;
             TopoDS_Edge succE = slots[succWireIx].edge;
             succCi = slots[succWireIx].ci;
@@ -3235,8 +3437,27 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
             } else {
                 ori.seedPresetEdge = seedE;
                 ori.seedPreset = true;
-                if (conn.ok && conn.order.size() == slots.size() &&
-                    strcmp(ori.seedOrientedBy ? ori.seedOrientedBy : "", "area-only") != 0) {
+                const bool areaOnly =
+                    strcmp(ori.seedOrientedBy ? ori.seedOrientedBy : "", "area-only") == 0;
+                if (areaOnly && conn.ok && conn.order.size() == slots.size()) {
+                    // Two-edge both-shared: apply the (possibly reversed) walk
+                    // forwards — same outcome as area-only, via the sequence.
+                    ori.slotOri.assign(slots.size(), TopoDS_Edge());
+                    for (size_t k = 0; k < conn.order.size(); k++) {
+                        const size_t ix = conn.order[k];
+                        TopoDS_Edge e = directedSlotEdge(slots[ix], conn.forward[k]);
+                        if (!conn.forward[k]) {
+                            ori.reversedByRule++;
+                            if (k == 0) ori.seedReversed = 1;
+                        }
+                        ori.slotOri[ix] = e;
+                        if (k == 0) {
+                            ori.seedPresetEdge = e;
+                            seedE = e;
+                        }
+                    }
+                    ori.useSlotOri = true;
+                } else if (conn.ok && conn.order.size() == slots.size()) {
                     ori.slotOri.assign(slots.size(), TopoDS_Edge());
                     ori.slotOri[conn.order[0]] = seedE;
                     TopoDS_Edge prevE = seedE;
@@ -3292,19 +3513,19 @@ bool buildLoopWire(TopoDS_Wire& w, const Loop& loop, const RegionSet& rs, const 
                                 (int)ci, ori);
         if (!ok) return false;
     }
-    // Role sense after continuity: reverse the closed wire, not the chain walk.
-    // reverseLoopWalk on s09_mixed (analytic|faceted) yielded notDetermined at the first
-    // junction (weVisited=1/4). Wire.Reversed() keeps TShape joins.
-    // D-S3-164 step 3: finished-wire sense by signed area (mesh area is A4 only).
+    // D-S3-168 step 3: wire-level sense is an assertion. On a well-built loop
+    // it is a no-op; print (do not reverse) when it is not.
     if (!useAsBuilt && plateR && plateR->type == SurfType::Plane && wanted != 0) {
-        const double warea = wireSignedAreaUV(w, *plateR);
-        const bool needFlip = (warea > 0.0) != (wanted > 0);
-        flipped = needFlip ? 1 : 0;
-        if (needFlip)
-            w = TopoDS::Wire(w.Reversed());
+        const double warea =
+            senseFromCurve ? wireCurveSignedAreaUV(w, *plateR) : wireSignedAreaUV(w, *plateR);
         area = warea;
-    } else if (!useAsBuilt && flipped) {
-        w = TopoDS::Wire(w.Reversed());
+        if ((warea > 0.0) != (wanted > 0)) {
+            flipped = 1;
+            std::fprintf(stderr,
+                         "DIAG_OP2J_ASSERT_SENSE rid=%d loop=%s wireArea=%.6g wanted=%d "
+                         "travReversed=%d -- not a no-op\n",
+                         rid, loopRoleLabel(walk.role), warea, wanted, travReversed);
+        }
     }
     const char* loopLblDone = loopRoleLabel(walk.role);
     const int continuityRev = ori.reversedByRule - ori.seedReversed;
