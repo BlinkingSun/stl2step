@@ -24,7 +24,7 @@ WS="stl2step-ci"
 
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no || true)"
 
 echo "== preflight: sync repo -> $HOST:~/$WS/repo (HEAD $SYNC_SHA)"
 ssh "$HOST" mkdir -p "$WS/repo"
@@ -36,6 +36,8 @@ ssh "$HOST" mkdir -p "$WS/repo"
 rsync -a --delete \
   --exclude '/build*/' --exclude '/_team/' --exclude '/.stl2step-*' \
   --exclude '/.ci-local/' \
+  --exclude '/tests/gates/baseline/.worktree-*' \
+  --exclude '/tests/gates/baseline/.build/' \
   "$REPO_ROOT/" "$HOST:$WS/repo/"
 
 LOG="$(mktemp)"
@@ -63,6 +65,21 @@ echo "== preflight: configure + build (-j$JOBS, nice 10)"
 nice -n 10 cmake -S repo -B build -DCMAKE_BUILD_TYPE=Release \
   -DSTL2STEP_BUILD_EXAMPLES=ON -DSTL2STEP_BUILD_TESTS=ON
 nice -n 10 cmake --build build -j "$JOBS"
+
+# Drop Mac-synced baseline artifacts; keep healthy node-built trees.
+for wt in repo/tests/gates/baseline/.worktree-*; do
+  [ -e "$wt" ] || continue
+  head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -z "$head" || "$head" != 187ead0d8cf3d3694153cbcff9314d65324fec63 ]]; then
+    echo "== preflight: removing invalid baseline worktree $wt"
+    rm -rf "$wt"
+  fi
+done
+build_cache="repo/tests/gates/baseline/.build/CMakeCache.txt"
+if [[ -f "$build_cache" ]] && grep -q '/Users/' "$build_cache" 2>/dev/null; then
+  echo "== preflight: removing Mac-synced baseline build cache"
+  rm -rf repo/tests/gates/baseline/.build
+fi
 
 echo "== preflight: ctest"
 # LD_LIBRARY_PATH only for the test binaries — exporting it globally makes
