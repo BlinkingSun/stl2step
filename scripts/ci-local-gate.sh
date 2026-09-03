@@ -159,6 +159,31 @@ refuse_missing() {
 
 # --- fresh-clone (catches the git add -u / untracked-header class) ---------
 
+# Reuse a fresh-clone macOS marker for THIS HEAD when it is younger than
+# STL2STEP_FRESH_MARKER_MAX_MIN minutes (default 120): the marker is only ever
+# written by a completed fresh clone of the identical commit, so re-cloning
+# minutes later proves nothing new and costs ~15 min per push. Older, missing
+# or malformed markers fall through to a real fresh clone. `--fresh-clone`
+# itself always clones.
+fresh_clone_or_reuse() {
+  local f="${MARKER_DIR}/${SHA}.macos.green" max="${STL2STEP_FRESH_MARKER_MAX_MIN:-120}" stamp now then age
+  if marker_ok "$f"; then
+    stamp="$(grep -Eo '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{4}' "$f" | tail -n1)"
+    if [ -n "$stamp" ]; then
+      then="$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$stamp" +%s 2>/dev/null || date -d "$stamp" +%s 2>/dev/null || echo 0)"
+      now="$(date +%s)"
+      if [ "$then" -gt 0 ]; then
+        age=$(( (now - then) / 60 ))
+        if [ "$age" -ge 0 ] && [ "$age" -lt "$max" ]; then
+          echo "== ci-local-gate: reusing fresh-clone marker for ${SHA} (age ${age} min < ${max})"
+          return 0
+        fi
+      fi
+    fi
+  fi
+  fresh_clone
+}
+
 fresh_clone() {
   local tmp dest build log summary
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/stl2step-fresh-XXXXXX")"
@@ -209,7 +234,7 @@ case "$CLASS" in
     ;;
   SCRIPT)
     echo "== ci-local-gate: scripts/*.sh only — macOS fresh-clone (no linux/windows markers)"
-    fresh_clone
+    fresh_clone_or_reuse
     echo "== ci-local-gate: PASS (script / fresh-clone)"
     exit 0
     ;;
@@ -220,7 +245,7 @@ case "$CLASS" in
       refuse_missing
     fi
     echo "== ci-local-gate: three-platform markers present; running FRESH-CLONE"
-    fresh_clone
+    fresh_clone_or_reuse
     echo "== ci-local-gate: PASS"
     exit 0
     ;;
