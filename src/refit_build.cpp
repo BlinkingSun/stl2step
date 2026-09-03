@@ -56,7 +56,6 @@
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <BRep_CurveOnSurface.hxx>
-#include <BRep_ListIteratorOfListOfCurveRepresentation.hxx>
 #include <Geom2d_Curve.hxx>
 #include <Geom2d_Line.hxx>
 #include <Geom2d_Circle.hxx>
@@ -6900,7 +6899,7 @@ double maxExactAllPcurves(const TopoDS_Edge& e, double extraThis) {
         Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
         Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
         if (te.IsNull() || c3.IsNull()) return m;
-        for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More(); it.Next()) {
+        for (BRep_ListOfCurveRepresentation::Iterator it(te->Curves()); it.More(); it.Next()) {
             Handle(BRep_CurveOnSurface) cos = Handle(BRep_CurveOnSurface)::DownCast(it.Value());
             if (cos.IsNull() || cos->Surface().IsNull() || cos->PCurve().IsNull()) continue;
             const double ex =
@@ -7238,7 +7237,7 @@ void dumpPcurveFrames(const Region& r, const TopoDS_Wire& w) {
         try {
             Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
             if (!te.IsNull()) {
-                for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More();
+                for (BRep_ListOfCurveRepresentation::Iterator it(te->Curves()); it.More();
                      it.Next()) {
                     Handle(BRep_CurveOnSurface) cos =
                         Handle(BRep_CurveOnSurface)::DownCast(it.Value());
@@ -8556,7 +8555,7 @@ int countPcurvesOnFaceSurf(const TopoDS_Edge& e, const Handle(Geom_Surface)& sF)
         Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
         if (te.IsNull()) return 0;
         const void* want = static_cast<const void*>(sF.get());
-        for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More(); it.Next()) {
+        for (BRep_ListOfCurveRepresentation::Iterator it(te->Curves()); it.More(); it.Next()) {
             Handle(BRep_CurveOnSurface) cos = Handle(BRep_CurveOnSurface)::DownCast(it.Value());
             if (cos.IsNull() || cos->Surface().IsNull()) continue;
             if (static_cast<const void*>(cos->Surface().get()) == want) n++;
@@ -8800,7 +8799,7 @@ void edgeExactPlaneAndOther(const TopoDS_Face& f, const TopoDS_Edge& e, double& 
         Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
         Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(e.TShape());
         if (te.IsNull() || c3.IsNull()) return;
-        for (BRep_ListIteratorOfListOfCurveRepresentation it(te->Curves()); it.More(); it.Next()) {
+        for (BRep_ListOfCurveRepresentation::Iterator it(te->Curves()); it.More(); it.Next()) {
             Handle(BRep_CurveOnSurface) cos = Handle(BRep_CurveOnSurface)::DownCast(it.Value());
             if (cos.IsNull() || cos->Surface().IsNull() || cos->PCurve().IsNull()) continue;
             const double ex = exactOrSampledOnPair(c3, f3, l3, cos->Surface(), cos->PCurve(),
@@ -9355,7 +9354,7 @@ void dumpDiagWireOri2StopCause(int rid, char tryAB, const char* wireLabel, const
             if (!vmap.FindFromIndex(i).Contains(stopVtx)) continue;
         }
         const TopTools_ListOfShape& adj = vmap.FindFromKey(stopVtx);
-        for (TopTools_ListIteratorOfListOfShape it(adj); it.More(); it.Next()) {
+        for (TopTools_ListOfShape::Iterator it(adj); it.More(); it.Next()) {
             if (it.Value().ShapeType() != TopAbs_EDGE) continue;
             const TopoDS_Edge ae = TopoDS::Edge(it.Value());
             TopoDS_Vertex ta, hb;

@@ -18,6 +18,7 @@ All notable changes to this project are documented here. The format follows
 - Diagnostics (all off unless `STL2STEP_P2_DIAG` is set): first-keep in-context census, tolerance/supremum prints, wire-order and orientation prints, repair-rung fire counters.
 
 ### Fixed
+- Builds against OpenCASCADE 8.0 as well as 7.9.
 - The four p2buildtest fixtures that had been failing (counterbore, full 360 hole, r8 360 explode caps, s09 mixed) pass: their plate wires close under the connectivity rule.
 - Diagnostic prints no longer construct on live shapes (they were altering the build when enabled).
 

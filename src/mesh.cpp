@@ -104,7 +104,7 @@ EdgeDump extractEdges(const TopoDS_Shape& shape) {
             Handle(Poly_Polygon3D) p3d = BRep_Tool::Polygon3D(edge, loc);
             if (p3d.IsNull()) continue;
             const gp_Trsf tr = loc.Transformation();
-            const TColgp_Array1OfPnt& arr = p3d->Nodes();
+            const auto& arr = p3d->Nodes();
             nodes.reserve((size_t)arr.Length());
             for (int k = arr.Lower(); k <= arr.Upper(); ++k) {
                 gp_Pnt p = arr(k);
