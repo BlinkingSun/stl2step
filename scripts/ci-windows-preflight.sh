@@ -80,50 +80,6 @@ if [[ -f repo/tests/gates/baseline/.build/CMakeCache.txt ]] \
   echo "== preflight: removing Mac-synced baseline build cache"
   rm -rf repo/tests/gates/baseline/.build
 fi
-# Windows preflight keeps the main build tree as a sibling of repo/ (not
-# repo/build). Point the default CURRENT_BUILD at the MSVC tree and wrap
-# build_baseline.sh so multi-config outputs land where the gate runner looks.
-if [[ -n "${MSYSTEM:-}" || "$(uname -s 2>/dev/null)" == MINGW* ]]; then
-  rm -rf repo/build
-  ln -sf ../build repo/build
-  real=repo/tests/gates/baseline/build_baseline.sh
-  if [[ ! -f "${real}.real" ]] || ! grep -q build_baseline.sh.real "$real" 2>/dev/null; then
-    cp -f "$real" "${real}.real"
-  fi
-  cat > "$real" <<'WRAPPER'
-#!/usr/bin/env bash
-set -euo pipefail
-dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export CMAKE_TOOLCHAIN_FILE="${CMAKE_TOOLCHAIN_FILE:-D:/vcpkg/scripts/buildsystems/vcpkg.cmake}"
-export STL2STEP_CURRENT_BUILD="${STL2STEP_CURRENT_BUILD:-$(cd "$dir/../../.." && pwd)/../build}"
-args=("$@")
-"${dir}/build_baseline.sh.real" "${args[@]}" || true
-cmake --build "${dir}/.build" --config Release --target stl2step -j 16 >/dev/null 2>&1 || true
-for cfg in Release Debug; do
-  src="${dir}/.build/${cfg}/stl2step.exe"
-  if [[ -f "$src" ]]; then
-    cp -f "$src" "${dir}/.build/stl2step.exe"
-    cp -f "$src" "${dir}/.build/stl2step"
-    ver="$("$src" --version)"
-    src_win="$(cygpath -w "$src")"
-    echo ""
-    echo "BASELINE_BIN=${src_win}"
-    echo "BASELINE_COMMIT=187ead0d8cf3d3694153cbcff9314d65324fec63"
-    echo "BASELINE_GENERATOR=Visual Studio 17 2022"
-    echo "BASELINE_BUILD_TYPE=${cfg}"
-    echo "BASELINE_VERSION=${ver}"
-    exit 0
-  fi
-done
-echo "error: gate baseline binary missing after build" >&2
-exit 1
-WRAPPER
-  chmod +x "$real"
-  echo "== preflight: pre-building gate baseline (Visual Studio)"
-  export CMAKE_TOOLCHAIN_FILE="D:/vcpkg/scripts/buildsystems/vcpkg.cmake"
-  export STL2STEP_CURRENT_BUILD="$(pwd)/build"
-  bash "$real" --generator "Visual Studio 17 2022" --build-type Release --current-build "$(pwd)/build"
-fi
 EOF
 cat > /tmp/stl2step-win-preflight.cmd <<'EOF'
 @echo off
@@ -141,8 +97,6 @@ cd /d D:\stl2step-ci
   -DCMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
   -DSTL2STEP_BUILD_EXAMPLES=ON -DSTL2STEP_BUILD_TESTS=ON || exit /b 1
 "%CMAKE%" --build build --config Release -j 14 || exit /b 1
-set STL2STEP_CURRENT_BUILD=D:\stl2step-ci\build
-set CMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake
 bash baseline-cleanup.sh || exit /b 1
 "%CTEST%" --test-dir build -C Release --output-on-failure
 EOF
