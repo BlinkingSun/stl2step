@@ -346,6 +346,10 @@ e.g. `ls *.stl | xargs -P8 -I{} stl2step {}`).
 
 ---
 
+## CI
+
+Node preflights (`scripts/ci-linux-preflight.sh` and `scripts/ci-windows-preflight.sh`) are single-tenant and refuse to start while another run holds the node lock (exit 5).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Note that OpenCASCADE, the geometry kernel this

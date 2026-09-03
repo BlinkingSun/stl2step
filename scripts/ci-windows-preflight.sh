@@ -36,6 +36,111 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
+SYNC_SHA_SHORT="${SYNC_SHA:0:7}"
+
+# Single-tenant node lock (NODE_LOCK_PROTOCOL=1; scripts/node-lock.sh).
+# --windows lock dir D:\team-node-lock. Owner is this preflight (local
+# hostname + pid). Equivalent to:
+#   scripts/node-lock.sh acquire --node "$HOST" --windows --name "windows-preflight-$SYNC_SHA_SHORT" --wait 1800
+LOCK_NAME="windows-preflight-${SYNC_SHA_SHORT}"
+LOCK_TTL=7200
+LOCK_WAIT=1800
+LOCK_HELD=0
+LOG=""
+
+_nl_ssh() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "$@"
+}
+_nl_parse() {
+  printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^${2}=//p" | head -1
+}
+_nl_owner() {
+  printf 'name=%s host=%s pid=%s started=%s ttl=%s' \
+    "$LOCK_NAME" "$(hostname 2>/dev/null || echo unknown)" "$$" "$(date +%s)" "$LOCK_TTL"
+}
+_nl_read() {
+  _nl_ssh 'cmd /c "if exist D:\team-node-lock\owner type D:\team-node-lock\owner"' 2>/dev/null | tr -d '\r' | head -1 || true
+}
+_nl_stale() {
+  local line="$1" started ttl age host pid now
+  started="$(_nl_parse "$line" started)"
+  ttl="$(_nl_parse "$line" ttl)"
+  host="$(_nl_parse "$line" host)"
+  pid="$(_nl_parse "$line" pid)"
+  [ -n "$started" ] || return 0
+  [ -n "$ttl" ] || ttl=7200
+  now=$(date +%s)
+  age=$((now - started))
+  if [ "$age" -ge "$ttl" ]; then
+    echo "stale-lock-broken name=$(_nl_parse "$line" name) age=${age}" >&2
+    return 0
+  fi
+  if [ "$host" = "$(hostname 2>/dev/null || echo unknown)" ] && [ -n "$pid" ] && [ "$pid" != 0 ] && ! kill -0 "$pid" 2>/dev/null; then
+    echo "stale-lock-broken name=$(_nl_parse "$line" name) age=${age}" >&2
+    return 0
+  fi
+  return 1
+}
+_nl_acquire() {
+  local start now elapsed owner retry=0 sleep_for
+  start=$(date +%s)
+  while :; do
+    owner="$(_nl_owner)"
+    if _nl_ssh "cmd /c \"mkdir D:\\team-node-lock 2>nul && echo ${owner}>D:\\team-node-lock\\owner\""; then
+      echo "acquired ${HOST} ${LOCK_NAME}"
+      return 0
+    fi
+    owner="$(_nl_read)"
+    if [ -n "$owner" ] && _nl_stale "$owner" && [ "$retry" -eq 0 ]; then
+      _nl_ssh 'cmd /c "rmdir /s /q D:\team-node-lock"' || true
+      retry=1
+      continue
+    fi
+    now=$(date +%s)
+    elapsed=$((now - start))
+    if [ "$LOCK_WAIT" -gt 0 ] && [ "$elapsed" -lt "$LOCK_WAIT" ]; then
+      sleep_for=$((LOCK_WAIT - elapsed))
+      [ "$sleep_for" -gt 15 ] && sleep_for=15
+      sleep "$sleep_for"
+      retry=0
+      continue
+    fi
+    echo "busy: ${owner}"
+    return 3
+  done
+}
+_nl_release() {
+  local owner name
+  owner="$(_nl_read)"
+  [ -n "$owner" ] || return 0
+  name="$(_nl_parse "$owner" name)"
+  [ "$name" = "$LOCK_NAME" ] || return 4
+  _nl_ssh 'cmd /c "rmdir /s /q D:\team-node-lock"'
+}
+_nl_status() {
+  local owner
+  owner="$(_nl_read)"
+  if [ -z "$owner" ]; then
+    echo free
+    return 0
+  fi
+  echo "$owner"
+  return 3
+}
+_nl_cleanup() {
+  if [ "$LOCK_HELD" = 1 ]; then
+    _nl_release >/dev/null 2>&1 || true
+    LOCK_HELD=0
+  fi
+  [ -n "${LOG:-}" ] && rm -f "$LOG"
+}
+
+if ! _nl_acquire; then
+  echo "REFUSE: node busy: $(_nl_status || true)" >&2
+  exit 5
+fi
+LOCK_HELD=1
+trap _nl_cleanup EXIT
 
 echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo (HEAD $SYNC_SHA)"
 ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\\repo) & mkdir D:\\stl2step-ci\\repo"
