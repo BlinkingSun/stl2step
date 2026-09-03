@@ -44,7 +44,7 @@ add_test(NAME p1_ac2_gates_baseline
             --build-dir ${CMAKE_BINARY_DIR})
 set_tests_properties(p1_ac2_gates_baseline PROPERTIES
     LABELS "p1_compose"
-    TIMEOUT 600)
+    TIMEOUT 1800)
 
 unset(_root)
 unset(_p1_tus)

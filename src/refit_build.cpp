@@ -7889,7 +7889,7 @@ void dumpDiagHubWire(const Region& r, const TopoDS_Wire& ow, const Handle(Geom_P
     const double sewTol = mv.sewTol;
     const double tol = std::max(sewTol, Precision::PConfusion());
     const TopLoc_Location loc;
-    const Handle(Geom_Surface) surf = gpl;
+    const Handle(Geom_Surface) surf(gpl);
     const int rid = r.id;
 
     auto matchChain = [&](const TopoDS_Edge& e, const gp_Pnt& p0, const gp_Pnt& p1) -> int {
