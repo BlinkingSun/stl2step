@@ -121,6 +121,14 @@ if(STL2STEP_BUILD_TESTS AND STL2STEP_BUILD_CLI)
                          "${CMAKE_CURRENT_BINARY_DIR}/cube.step")
     set_tests_properties(convert_cube PROPERTIES
         PASS_REGULAR_EXPRESSION "\"ok\":true.*\"solids\":1.*\"volumeDeltaPct\":0")
+    # Guard: CLI --version must equal the CMake project version (catches
+    # STL2STEP_VERSION_* macros drifting from project(VERSION ...)).
+    add_test(NAME version_matches_project
+        COMMAND stl2step --version)
+    string(REPLACE "." "\\." _stl2step_version_re "${PROJECT_VERSION}")
+    set_tests_properties(version_matches_project PROPERTIES
+        PASS_REGULAR_EXPRESSION "^stl2step ${_stl2step_version_re}[\r\n]*$")
+    unset(_stl2step_version_re)
 endif()
 
 # ---------------------------------------------------------------------------
