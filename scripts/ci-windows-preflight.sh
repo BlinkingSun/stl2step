@@ -35,7 +35,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no || true)"
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
 
 echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo (HEAD $SYNC_SHA)"
 ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\\repo) & mkdir D:\\stl2step-ci\\repo"
@@ -98,14 +98,16 @@ export CMAKE_TOOLCHAIN_FILE="${CMAKE_TOOLCHAIN_FILE:-D:/vcpkg/scripts/buildsyste
 export STL2STEP_CURRENT_BUILD="${STL2STEP_CURRENT_BUILD:-$(cd "$dir/../../.." && pwd)/../build}"
 args=("$@")
 "${dir}/build_baseline.sh.real" "${args[@]}" || true
+cmake --build "${dir}/.build" --config Release --target stl2step -j 16 >/dev/null 2>&1 || true
 for cfg in Release Debug; do
   src="${dir}/.build/${cfg}/stl2step.exe"
   if [[ -f "$src" ]]; then
     cp -f "$src" "${dir}/.build/stl2step.exe"
     cp -f "$src" "${dir}/.build/stl2step"
     ver="$("$src" --version)"
+    src_win="$(cygpath -w "$src")"
     echo ""
-    echo "BASELINE_BIN=${src}"
+    echo "BASELINE_BIN=${src_win}"
     echo "BASELINE_COMMIT=187ead0d8cf3d3694153cbcff9314d65324fec63"
     echo "BASELINE_GENERATOR=Visual Studio 17 2022"
     echo "BASELINE_BUILD_TYPE=${cfg}"

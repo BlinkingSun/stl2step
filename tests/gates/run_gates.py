@@ -392,7 +392,39 @@ def go(
     return GateOutcome(gate_id, ctx.fixture.id, status, message, hard=hard, details=details or {})
 
 
-def ensure_baseline(baseline_dir: Optional[Path]) -> "tuple[Optional[Path], Optional[str]]":
+_CONFIG_BUILD_DIRS = frozenset({"Release", "Debug", "RelWithDebInfo", "MinSizeRel"})
+
+
+def current_build_from_binary(binary: Path) -> Path:
+    """CMake build dir for the candidate CLI (--current-build for the baseline)."""
+    parent = binary.resolve().parent
+    if parent.name in _CONFIG_BUILD_DIRS:
+        return parent.parent
+    return parent
+
+
+def _baseline_bin_exists(path: Path) -> bool:
+    """Accept Unix, .exe, and multi-config layout paths."""
+    if path.is_file():
+        return True
+    if path.suffix.lower() != ".exe" and Path(str(path) + ".exe").is_file():
+        return True
+    return False
+
+
+def _resolve_baseline_bin(path: Path) -> Optional[Path]:
+    if path.is_file():
+        return path
+    exe = Path(str(path) + ".exe")
+    if path.suffix.lower() != ".exe" and exe.is_file():
+        return exe
+    return None
+
+
+def ensure_baseline(
+    baseline_dir: Optional[Path],
+    current_build: Optional[Path] = None,
+) -> "tuple[Optional[Path], Optional[str]]":
     """Build/locate the 187ead0 CLI once per run via p0-golden's build_baseline.sh.
 
     XFAIL is legal only when the baseline genuinely cannot be built. Never
@@ -412,7 +444,10 @@ def ensure_baseline(baseline_dir: Optional[Path]) -> "tuple[Optional[Path], Opti
         file=sys.stderr,
         flush=True,
     )
-    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    cmd = ["bash", str(script)]
+    if current_build is not None:
+        cmd.extend(["--current-build", current_build.resolve().as_posix()])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     combined = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0:
         tail = "\n".join(combined.strip().splitlines()[-30:])
@@ -426,13 +461,27 @@ def ensure_baseline(baseline_dir: Optional[Path]) -> "tuple[Optional[Path], Opti
         if line.startswith("BASELINE_BIN="):
             candidate = line.split("=", 1)[1].strip()
             if candidate:
-                bin_path = Path(candidate)
+                bin_path = _resolve_baseline_bin(Path(candidate))
             break
     if bin_path is None:
-        fallback = baseline_dir / ".build" / "stl2step"
-        if fallback.is_file():
-            bin_path = fallback
-    if bin_path is None or not bin_path.is_file():
+        build = baseline_dir / ".build"
+        for fallback in (
+            build / "stl2step",
+            build / "stl2step.exe",
+            build / "Release" / "stl2step",
+            build / "Release" / "stl2step.exe",
+            build / "Debug" / "stl2step",
+            build / "Debug" / "stl2step.exe",
+            build / "RelWithDebInfo" / "stl2step",
+            build / "RelWithDebInfo" / "stl2step.exe",
+            build / "MinSizeRel" / "stl2step",
+            build / "MinSizeRel" / "stl2step.exe",
+        ):
+            hit = _resolve_baseline_bin(fallback)
+            if hit is not None:
+                bin_path = hit
+                break
+    if bin_path is None or not _baseline_bin_exists(bin_path):
         tail = combined.strip()[-2000:]
         return None, (
             "baseline cannot be built: build_baseline.sh exited 0 but "
@@ -1189,7 +1238,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     baseline_bin: Optional[Path] = None
     baseline_error: Optional[str] = None
     if "G0.1" in gate_ids:
-        baseline_bin, baseline_error = ensure_baseline(baseline_dir)
+        baseline_bin, baseline_error = ensure_baseline(
+            baseline_dir, current_build_from_binary(binary)
+        )
 
     all_outcomes: List[GateOutcome] = []
     if args.jobs > 1 and len(fixtures) > 1:
