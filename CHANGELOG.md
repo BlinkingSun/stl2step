@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-03
+
+### Changed
+- **Plate-wire construction** (TrueForm): each planar region's boundary loop is now ordered by an exact vertex-connectivity walk over its own chain edges and oriented by continuity at construction; the loop's sense (outer counter-clockwise about the outward normal, inner clockwise) is taken from its signed area before orientation, so shipped edge orientations follow the part's geometry rather than an incidental construction order. On the bundled Handle pickup fixture all four large flats now build valid on the first attempt, including the flange, which ships as its two CAD faces.
+- **Edge tolerances at construction**: the tolerance written at the pcurve bind site is the exact closed-form maximum of the 3D-to-pcurve deviation over all of an edge's pcurves plus the strict-inequality margin, at one site for planes and cylinders; inherited tolerances equal to a deviation are replaced, fat inherited tolerances are never lowered, and a deviation above the mesh tolerance cap is counted as a construction defect rather than absorbed.
+- **Determinism**: plate-wire construction is a pure function of each loop's own chain set (a process-wide static in the collapsed-chain rebuild made single-threaded runs differ from multi-threaded ones); every corpus part now produces identical results and STEP data under any thread count.
+
+### Added
+- Gates: the plane census maps each shipped face to one ground-truth face (co-equation faces are no longer double counted); the partial-recovery phantom ratchet is re-derived from the current shell with the one new phantom attributed by region.
+- Diagnostics (all off unless `STL2STEP_P2_DIAG` is set): first-keep in-context census, tolerance/supremum prints, wire-order and orientation prints, repair-rung fire counters.
+
+### Fixed
+- The four p2buildtest fixtures that had been failing (counterbore, full 360 hole, r8 360 explode caps, s09 mixed) pass: their plate wires close under the connectivity rule.
+- Diagnostic prints no longer construct on live shapes (they were altering the build when enabled).
+
+### Known limitations (registered)
+- 111 of 638 Handle pickup seam chains ship as mesh polylines rather than analytic lines/arcs (surfaces exact, some edges not).
+- 27 small sliver plates reach validity only through the tolerance repair pass (their fitted plane does not contain their own mesh boundary).
+- Nine single-closed-edge inner loops decide a traversal reversal that has no carrier on a one-edge loop; no output consequence (reported by an internal assertion; fix scoped).
+
 ## [1.1.0] - 2026-08-30
 
 ### Added
