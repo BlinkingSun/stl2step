@@ -64,7 +64,7 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut 0.1.0 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/download/v1.2.0/SolidOut-0.1.0-macOS-AppleSilicon.dmg) from the [1.2.0 release](https://github.com/BlinkingSun/stl2step/releases/tag/v1.2.0). Signed with Developer ID and notarized by Apple.
+Download: [SolidOut for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/download/v1.2.0/SolidOut-macOS-AppleSilicon.dmg) from the [1.2.0 release](https://github.com/BlinkingSun/stl2step/releases/tag/v1.2.0). Signed with Developer ID and notarized by Apple.
 
 ![SolidOut with the Handle pickup mesh loaded (3,338 triangles)](https://github.com/BlinkingSun/stl2step/releases/download/v1.2.0/solidout-import-mesh.png)
 
