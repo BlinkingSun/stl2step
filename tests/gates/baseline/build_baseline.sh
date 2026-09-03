@@ -3,7 +3,7 @@
 #
 # Checks out 187ead0 without touching the current worktree, configures it
 # with the same CMake generator / build type as the current tree (or
-# Unix Makefiles + Release), and builds tests/gates/baseline/.build/stl2step.
+# CMake's platform default + Release), and builds tests/gates/baseline/.build/stl2step.
 #
 # Never commit the checkout, the build tree, or the binary.
 # Idempotent: a second run reuses the worktree and an incremental build.
@@ -63,15 +63,24 @@ cache_get() {
     sed -n "s/^${var}:[A-Z]*=//p" "$cache" | head -n1
 }
 
+is_vs_generator() {
+    [[ "${1:-}" == "Visual Studio"* ]]
+}
+
+emit_path() {
+    local p="$1"
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$p"
+    else
+        printf '%s\n' "$p"
+    fi
+}
+
 # Match the current tree's generator / build type when the caller did not
-# pick one. Fall back to the same defaults as the engine's CMakeLists
-# (Release) and this machine's previously-proven 187ead0 build
-# (Unix Makefiles).
+# pick one. If the cache and flag are both empty, omit -G so CMake uses
+# $CMAKE_GENERATOR or its platform default.
 if [[ -z "$GENERATOR" ]]; then
     GENERATOR="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_GENERATOR || true)"
-fi
-if [[ -z "$GENERATOR" ]]; then
-    GENERATOR="Unix Makefiles"
 fi
 if [[ -z "$BUILD_TYPE" ]]; then
     BUILD_TYPE="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_BUILD_TYPE || true)"
@@ -83,6 +92,10 @@ fi
 CXX_COMPILER="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_CXX_COMPILER || true)"
 C_COMPILER="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_C_COMPILER || true)"
 OCCT_DIR="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" OpenCASCADE_DIR || true)"
+TOOLCHAIN="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_TOOLCHAIN_FILE || true)"
+if [[ -z "$TOOLCHAIN" && -n "${CMAKE_TOOLCHAIN_FILE:-}" ]]; then
+    TOOLCHAIN="$CMAKE_TOOLCHAIN_FILE"
+fi
 if [[ -z "$OCCT_DIR" && -d /opt/homebrew/lib/cmake/opencascade ]]; then
     OCCT_DIR="/opt/homebrew/lib/cmake/opencascade"
 fi
@@ -147,8 +160,16 @@ if [[ ! -f "$BUILD_DIR/CMakeCache.txt" ]]; then
 else
     have_gen="$(cache_get "$BUILD_DIR/CMakeCache.txt" CMAKE_GENERATOR || true)"
     have_bt="$(cache_get "$BUILD_DIR/CMakeCache.txt" CMAKE_BUILD_TYPE || true)"
-    if [[ "$have_gen" != "$GENERATOR" || "$have_bt" != "$BUILD_TYPE" ]]; then
-        echo "build cache generator/type mismatch ($have_gen/$have_bt vs $GENERATOR/$BUILD_TYPE); reconfiguring"
+    mismatch=0
+    if [[ -n "$GENERATOR" && "$have_gen" != "$GENERATOR" ]]; then
+        mismatch=1
+    fi
+    # Multi-config generators leave CMAKE_BUILD_TYPE empty in the cache.
+    if [[ -n "$have_bt" && "$have_bt" != "$BUILD_TYPE" ]]; then
+        mismatch=1
+    fi
+    if [[ "$mismatch" -eq 1 ]]; then
+        echo "build cache generator/type mismatch ($have_gen/$have_bt vs ${GENERATOR:-<default>}/$BUILD_TYPE); reconfiguring"
         need_configure=1
     fi
 fi
@@ -156,53 +177,79 @@ fi
 CMAKE_ARGS=(
     -S "$SRC_DIR"
     -B "$BUILD_DIR"
-    -G "$GENERATOR"
+)
+if [[ -n "$GENERATOR" ]]; then
+    CMAKE_ARGS+=(-G "$GENERATOR")
+fi
+CMAKE_ARGS+=(
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
     -DSTL2STEP_BUILD_CLI=ON
     -DSTL2STEP_BUILD_TESTS=OFF
     -DSTL2STEP_BUILD_EXAMPLES=OFF
     -DSTL2STEP_INSTALL=OFF
 )
-if [[ -n "$C_COMPILER" ]]; then
-    CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$C_COMPILER")
+if ! is_vs_generator "$GENERATOR"; then
+    if [[ -n "$C_COMPILER" ]]; then
+        CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$C_COMPILER")
+    fi
+    if [[ -n "$CXX_COMPILER" ]]; then
+        CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$CXX_COMPILER")
+    fi
 fi
-if [[ -n "$CXX_COMPILER" ]]; then
-    CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$CXX_COMPILER")
+if [[ -n "$TOOLCHAIN" ]]; then
+    CMAKE_ARGS+=(-DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN")
 fi
 if [[ -n "$OCCT_DIR" ]]; then
     CMAKE_ARGS+=(-DOpenCASCADE_DIR="$OCCT_DIR")
 fi
 
 if [[ "$need_configure" -eq 1 ]]; then
-    echo "configuring baseline ($GENERATOR / $BUILD_TYPE)"
+    echo "configuring baseline (${GENERATOR:-<cmake default>} / $BUILD_TYPE)"
     cmake "${CMAKE_ARGS[@]}"
 else
-    echo "reusing existing baseline CMake cache ($GENERATOR / $BUILD_TYPE)"
+    echo "reusing existing baseline CMake cache (${GENERATOR:-<cmake default>} / $BUILD_TYPE)"
 fi
 
 echo "building baseline stl2step (-j $JOBS)"
-cmake --build "$BUILD_DIR" --target stl2step -j "$JOBS"
+cmake --build "$BUILD_DIR" --target stl2step --config "$BUILD_TYPE" -j "$JOBS"
 
-BIN="$BUILD_DIR/stl2step"
-if [[ ! -x "$BIN" ]]; then
-    echo "error: expected executable $BIN" >&2
+# After a no -G configure, report the generator CMake actually picked.
+if [[ -z "$GENERATOR" ]]; then
+    GENERATOR="$(cache_get "$BUILD_DIR/CMakeCache.txt" CMAKE_GENERATOR || true)"
+fi
+
+BIN=""
+for candidate in \
+    "$BUILD_DIR/stl2step" \
+    "$BUILD_DIR/stl2step.exe" \
+    "$BUILD_DIR/$BUILD_TYPE/stl2step" \
+    "$BUILD_DIR/$BUILD_TYPE/stl2step.exe"
+do
+    if [[ -f "$candidate" ]]; then
+        BIN="$candidate"
+        break
+    fi
+done
+if [[ -z "$BIN" ]]; then
+    echo "error: expected executable under $BUILD_DIR (stl2step[.exe] or $BUILD_TYPE/stl2step[.exe])" >&2
     exit 1
 fi
 
+BIN_EMIT="$(emit_path "$BIN")"
 VERSION_OUT="$("$BIN" --version)"
 {
     echo "COMMIT=$COMMIT"
-    echo "GENERATOR=$GENERATOR"
+    echo "GENERATOR=${GENERATOR}"
     echo "BUILD_TYPE=$BUILD_TYPE"
     echo "SRC=$SRC_DIR"
-    echo "BIN=$BIN"
+    echo "BIN=$BIN_EMIT"
     echo "VERSION=$VERSION_OUT"
 } > "$BUILD_DIR/.baseline-meta"
 
 echo
-echo "BASELINE_BIN=$BIN"
+echo "BASELINE_BIN=$BIN_EMIT"
 echo "BASELINE_COMMIT=$COMMIT"
-echo "BASELINE_GENERATOR=$GENERATOR"
+echo "BASELINE_GENERATOR=${GENERATOR}"
 echo "BASELINE_BUILD_TYPE=$BUILD_TYPE"
 echo "BASELINE_VERSION=$VERSION_OUT"
-echo "$BIN" > "$BUILD_DIR/BIN_PATH"
+echo "$BIN_EMIT" > "$BUILD_DIR/BIN_PATH"

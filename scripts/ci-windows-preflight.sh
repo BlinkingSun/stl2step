@@ -35,7 +35,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no || true)"
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
 
 echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo (HEAD $SYNC_SHA)"
 ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\\repo) & mkdir D:\\stl2step-ci\\repo"
@@ -79,33 +79,6 @@ if [[ -f repo/tests/gates/baseline/.build/CMakeCache.txt ]] \
     && grep -q '/Users/' repo/tests/gates/baseline/.build/CMakeCache.txt 2>/dev/null; then
   echo "== preflight: removing Mac-synced baseline build cache"
   rm -rf repo/tests/gates/baseline/.build
-fi
-# Windows preflight keeps the main build tree as a sibling of repo/ (not
-# repo/build). Warm the gate baseline with the MSVC generator before ctest so
-# build_baseline.sh does not fall back to Unix Makefiles.
-if [[ -n "${MSYSTEM:-}" || "$(uname -s 2>/dev/null)" == MINGW* ]]; then
-  baseline_bin="repo/tests/gates/baseline/.build/stl2step.exe"
-  if [[ ! -f "$baseline_bin" && ! -f repo/tests/gates/baseline/.build/stl2step ]]; then
-    echo "== preflight: pre-building gate baseline (Visual Studio)"
-    export CMAKE_TOOLCHAIN_FILE="D:/vcpkg/scripts/buildsystems/vcpkg.cmake"
-    bash repo/tests/gates/baseline/build_baseline.sh \
-      --generator "Visual Studio 17 2022" \
-      --build-type Release \
-      --current-build "$(pwd)/build" || true
-    cmake --build repo/tests/gates/baseline/.build --config Release --target stl2step -j 16
-    for cfg in Release Debug; do
-      src="repo/tests/gates/baseline/.build/${cfg}/stl2step.exe"
-      if [[ -f "$src" ]]; then
-        cp -f "$src" "$baseline_bin"
-        cp -f "$src" repo/tests/gates/baseline/.build/stl2step
-        break
-      fi
-    done
-    if [[ ! -f "$baseline_bin" ]]; then
-      echo "== preflight: gate baseline binary missing after warmup" >&2
-      exit 1
-    fi
-  fi
 fi
 EOF
 cat > /tmp/stl2step-win-preflight.cmd <<'EOF'

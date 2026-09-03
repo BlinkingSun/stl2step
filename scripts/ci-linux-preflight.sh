@@ -24,7 +24,7 @@ WS="stl2step-ci"
 
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no || true)"
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
 
 echo "== preflight: sync repo -> $HOST:~/$WS/repo (HEAD $SYNC_SHA)"
 ssh "$HOST" mkdir -p "$WS/repo"
