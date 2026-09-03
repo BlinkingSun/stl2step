@@ -348,7 +348,7 @@ e.g. `ls *.stl | xargs -P8 -I{} stl2step {}`).
 
 ## CI
 
-Node preflights (`scripts/ci-linux-preflight.sh` and `scripts/ci-windows-preflight.sh`) are single-tenant and refuse to start while another run holds the node lock (exit 5).
+Node preflights (`scripts/ci-linux-preflight.sh` and `scripts/ci-windows-preflight.sh`) are single-tenant and refuse to start while another run holds the node lock (exit 5). The Linux preflight builds with the distro's g++ of the same major as the hosted runner (`LINUX_CI_GCC_MAJOR`, default 13; installed on demand) and refuses to run with any other.
 
 ## License
 

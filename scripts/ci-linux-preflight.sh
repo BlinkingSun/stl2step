@@ -165,9 +165,51 @@ if [ ! -d "$MAMBA_ROOT_PREFIX/envs/occt" ]; then
 fi
 export CMAKE_PREFIX_PATH="$MAMBA_ROOT_PREFIX/envs/occt"
 
+# Compiler parity with hosted CI (2026-09-03): ubuntu-latest builds with its
+# distro GCC 13 while this node's default g++ is 15, and a handle initialisation
+# that GCC 15 accepted broke the hosted build after a green local round. Build
+# with the distro's g++-<LINUX_CI_GCC_MAJOR> (same frontend major as the hosted
+# runner, system C++ runtime like the runner) and refuse the marker when the
+# major differs. conda-forge's GCC was tried first and links against an older
+# C++ runtime than the env's OCCT needs, so the distro package is the right one.
+# A build tree configured with another compiler is discarded once.
+LINUX_CI_GCC_MAJOR="${LINUX_CI_GCC_MAJOR:-13}"
+NODE_CXX="/usr/bin/g++-${LINUX_CI_GCC_MAJOR}"
+NODE_CC="/usr/bin/gcc-${LINUX_CI_GCC_MAJOR}"
+if [ ! -x "$NODE_CXX" ]; then
+  if sudo -n true 2>/dev/null; then
+    echo "== preflight: installing g++-${LINUX_CI_GCC_MAJOR} (distro package) to match hosted CI"
+    sudo -n apt-get install -y -q "g++-${LINUX_CI_GCC_MAJOR}" "gcc-${LINUX_CI_GCC_MAJOR}"
+  else
+    echo "REFUSE: ${NODE_CXX} is missing and sudo needs a password; run: sudo apt-get install -y g++-${LINUX_CI_GCC_MAJOR} gcc-${LINUX_CI_GCC_MAJOR}" >&2
+    exit 6
+  fi
+fi
+GCC_MAJOR="$("$NODE_CXX" -dumpversion 2>/dev/null | cut -d. -f1)"
+echo "== preflight: compiler $("$NODE_CXX" --version 2>/dev/null | head -1) (major ${GCC_MAJOR:-?}; hosted CI major ${LINUX_CI_GCC_MAJOR})"
+if [ "$GCC_MAJOR" != "$LINUX_CI_GCC_MAJOR" ]; then
+  echo "REFUSE: node compiler major ${GCC_MAJOR:-?} != hosted CI major ${LINUX_CI_GCC_MAJOR}; not building" >&2
+  exit 6
+fi
+export CC="$NODE_CC" CXX="$NODE_CXX"
+if [ -f build/CMakeCache.txt ] && ! grep -q "^CMAKE_CXX_COMPILER:FILEPATH=${NODE_CXX}$" build/CMakeCache.txt; then
+  echo "== preflight: build tree was configured with another compiler; discarding it once"
+  rm -rf build
+fi
+
 JOBS=$(( $(nproc) - 2 )); [ "$JOBS" -lt 1 ] && JOBS=1
 echo "== preflight: configure + build (-j$JOBS, nice 10)"
-nice -n 10 cmake -S repo -B build -DCMAKE_BUILD_TYPE=Release \
+# Link against the env's C++ runtime (the one the OCCT libraries were built
+# against and the one the rpath loads at run time). Ubuntu's non-default g++-13
+# would otherwise resolve -lstdc++ to its own GCC 13 development runtime, which
+# predates the CXXABI symbols conda-forge's OCCT needs. CMAKE_BUILD_RPATH pins the
+# env lib dir into every build-tree executable, so tools that run DURING the
+# build (corpus generation) load OCCT without LD_LIBRARY_PATH (hosted CI exports
+# LD_LIBRARY_PATH globally instead; the preflight keeps cmake/curl off conda's libs).
+ENV_LIB="$MAMBA_ROOT_PREFIX/envs/occt/lib"
+nice -n 10 cmake -S repo -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" \
+  -DCMAKE_EXE_LINKER_FLAGS="-L${ENV_LIB}" -DCMAKE_SHARED_LINKER_FLAGS="-L${ENV_LIB}" \
+  -DCMAKE_BUILD_RPATH="${ENV_LIB}" \
   -DSTL2STEP_BUILD_EXAMPLES=ON -DSTL2STEP_BUILD_TESTS=ON
 nice -n 10 cmake --build build -j "$JOBS"
 
