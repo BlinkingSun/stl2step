@@ -25,13 +25,24 @@
 # marker — the remote run tested uncommitted / untracked files, not git.
 set -uo pipefail
 
+# Run from a private copy: bash reads scripts incrementally, so an edit to this
+# file while a run is executing garbles the run (measured 2026-09-03: a run lost
+# its marker step to a syntax error from the new content). The copy is removed
+# by _nl_cleanup at exit. ORIG_SCRIPT keeps the repo-relative path derivation.
+if [ -z "${PREFLIGHT_SELF_COPY:-}" ]; then
+  _pf_copy="$(mktemp "${TMPDIR:-/tmp}/ci-preflight-XXXXXX")"
+  cp "${BASH_SOURCE[0]}" "$_pf_copy"
+  PREFLIGHT_SELF_COPY="${BASH_SOURCE[0]}" exec bash "$_pf_copy" "$@"
+fi
+ORIG_SCRIPT="$PREFLIGHT_SELF_COPY"
+
 HOST="${1:-${STL2STEP_WIN_HOST:-}}"
 if [ -z "$HOST" ]; then
   echo "usage: scripts/ci-windows-preflight.sh <user@host>" >&2
   echo "   or: STL2STEP_WIN_HOST=<user@host> scripts/ci-windows-preflight.sh" >&2
   exit 1
 fi
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$ORIG_SCRIPT")/.." && pwd)"
 
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
@@ -128,6 +139,7 @@ _nl_status() {
   return 3
 }
 _nl_cleanup() {
+  [ -n "${PREFLIGHT_SELF_COPY:-}" ] && rm -f "$0" 2>/dev/null
   if [ "$LOCK_HELD" = 1 ]; then
     _nl_release >/dev/null 2>&1 || true
     LOCK_HELD=0
@@ -141,6 +153,15 @@ if ! _nl_acquire; then
 fi
 LOCK_HELD=1
 trap _nl_cleanup EXIT
+
+# Sync state is confirmed AFTER the lock: a tree edited during a lock wait would
+# otherwise be shipped under the wrong commit's name (2026-09-03).
+_pf_head="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if [ "$_pf_head" != "$SYNC_SHA" ]; then
+  echo "REFUSE: HEAD moved during the lock wait (${SYNC_SHA:0:7} -> ${_pf_head:0:7}); re-run" >&2
+  exit 7
+fi
+SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
 
 echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo (HEAD $SYNC_SHA)"
 ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\\repo) & mkdir D:\\stl2step-ci\\repo"
