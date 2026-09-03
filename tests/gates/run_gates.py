@@ -8,7 +8,9 @@ import difflib
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -421,6 +423,56 @@ def _resolve_baseline_bin(path: Path) -> Optional[Path]:
     return None
 
 
+_WIN_GIT_BASH = (
+    r"C:\Program Files\Git\bin\bash.exe",
+    r"C:\Program Files\Git\usr\bin\bash.exe",
+    r"C:\Program Files (x86)\Git\bin\bash.exe",
+)
+
+
+def _under_windows_system_dir(path: str) -> bool:
+    """True if *path* lives under %SystemRoot% (the WSL stub is System32\\bash.exe)."""
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    abs_path = os.path.normcase(os.path.abspath(path))
+    abs_root = os.path.normcase(os.path.abspath(root))
+    prefix = abs_root if abs_root.endswith(os.sep) else abs_root + os.sep
+    return abs_path == abs_root or abs_path.startswith(prefix)
+
+
+def _bash_tried_locations() -> List[str]:
+    tried: List[str] = []
+    env = os.environ.get("STL2STEP_BASH")
+    tried.append(f"STL2STEP_BASH={env}" if env else "STL2STEP_BASH (unset)")
+    tried.extend(_WIN_GIT_BASH)
+    found = shutil.which("bash")
+    if found:
+        note = " (Windows system directory, skipped)" if _under_windows_system_dir(found) else ""
+        tried.append(f"shutil.which(bash)={found}{note}")
+    else:
+        tried.append("shutil.which(bash)=(none)")
+    return tried
+
+
+def _bash_executable() -> Optional[str]:
+    """Resolve bash for build_baseline.sh.
+
+    On Windows, CreateProcess searches System32 before PATH, so a bare
+    ``bash`` name always hits the WSL stub even when Git Bash is on PATH.
+    Prefer an explicit Git for Windows path (or STL2STEP_BASH).
+    """
+    if sys.platform != "win32":
+        return shutil.which("bash") or "bash"
+
+    env = os.environ.get("STL2STEP_BASH")
+    for cand in ((env,) if env else ()) + _WIN_GIT_BASH:
+        if cand and os.path.isfile(cand):
+            return cand
+    found = shutil.which("bash")
+    if found and not _under_windows_system_dir(found):
+        return found
+    return None
+
+
 def ensure_baseline(
     baseline_dir: Optional[Path],
     current_build: Optional[Path] = None,
@@ -444,7 +496,13 @@ def ensure_baseline(
         file=sys.stderr,
         flush=True,
     )
-    cmd = ["bash", str(script)]
+    bash_exe = _bash_executable()
+    if bash_exe is None:
+        tried = "; ".join(_bash_tried_locations())
+        return None, (
+            "baseline cannot be built: no Git Bash found; tried: " + tried
+        )
+    cmd = [bash_exe, str(script)]
     if current_build is not None:
         cmd.extend(["--current-build", current_build.resolve().as_posix()])
     proc = subprocess.run(cmd, capture_output=True, text=True)
