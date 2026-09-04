@@ -277,8 +277,11 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams& p, const DerivedTol
 
 bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                      SegmentWork& work);
+// pass 1 runs after L/A (the stages that certify closed-360 cylinders) and
+// BEFORE B1; pass 2 runs after B1, for a ring whose neighbour cylinder only B1
+// finds. See the ordering note in refit_segment.cpp.
 bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                        SegmentWork& work);
+                        SegmentWork& work, int pass = 2);
 
 bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
 

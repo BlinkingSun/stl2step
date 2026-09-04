@@ -243,7 +243,7 @@ void sortAccepted(const MeshView& mv, SegmentWork& work) {
 }  // namespace
 
 bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
-                        const DerivedTols& tol, SegmentWork& work) {
+                        const DerivedTols& tol, SegmentWork& work, int pass) {
     try {
         if (!mv.pts || !mv.tris || mv.nTri == 0) return true;
         if (work.provisionals.empty() || work.accepted.empty()) return true;
@@ -268,8 +268,9 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
             for (const Region& a : work.accepted)
                 if (isClosedCyl(a)) nClosed++;
             std::fprintf(stderr,
-                         "DIAG_C_ENTRY nProv=%d nAcc=%d closed360Cyls=%d\n",
-                         (int)work.provisionals.size(), (int)work.accepted.size(), nClosed);
+                         "DIAG_C_ENTRY pass=%d nProv=%d nAcc=%d closed360Cyls=%d\n",
+                         pass, (int)work.provisionals.size(),
+                         (int)work.accepted.size(), nClosed);
         }
         if (cylIds.empty()) {
             if (cDiag)

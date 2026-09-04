@@ -20,7 +20,7 @@ namespace refit {
 bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                      SegmentWork& work);
 bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                        SegmentWork& work);
+                        SegmentWork& work, int pass);
 
 namespace {
 
@@ -56,8 +56,21 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     if (!growProvisionalA2(mv, p, tol, work)) return false;
     if (!claimLawBandsL(mv, p, tol, work)) return false;
     if (!claimNgonWallsA(mv, p, tol, work)) return false;
+    // A chamfer ring is claimed by the stage that can certify it, as soon as
+    // that stage's input exists. C's input is an ACCEPTED closed-360 cylinder,
+    // which L and A have already produced; it does not need B1. Running C only
+    // after B1 let B1 take the ring's provisionals first: on a 48-sided 45°
+    // frustum the fold between consecutive facets is 5.307 deg, just over the
+    // 5.0 deg seedInBand floor, so B1 seeds on the ring, adopts the seed pair's
+    // shared GENERATOR as an axis, and commits ~60 deg arcs as cylinders
+    // (R 15.4249 on B3/B4, R 14.9158 on B5) whose vertex residual is ~1.9e-2 mm
+    // -- against C's 1.9e-6 mm for the whole ring on the exact frustum. The
+    // ring then reached C in four disconnected pieces. Pass 2 is kept at its
+    // original point so a ring whose only closed-360 neighbour is a B1 cylinder
+    // is still claimed; provisionals pass 1 consumed are ineligible there.
+    if (!claimChamferConesC(mv, p, tol, work, 1)) return false;
     if (!claimCylindersB1(mv, p, tol, work)) return false;
-    if (!claimChamferConesC(mv, p, tol, work)) return false;
+    if (!claimChamferConesC(mv, p, tol, work, 2)) return false;
 
     if (p.doFillets) {
         if (!claimFilletsC1(mv, p, tol, work)) return false;
