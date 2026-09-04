@@ -122,6 +122,12 @@ def check_fillet_nbrs(rs: dict) -> list[str]:
     return errs
 
 
+# The origin label the region dump prints for an Origin::NgonWall claim
+# (D-130-18(2)). dump_regionset.cpp's originName() has cases only for
+# PlaneGrow/CylGrow/FilletStrip and falls through to "planeGrow" for NgonWall.
+NGON_WALL_DUMP_ORIGIN = "planeGrow"
+
+
 def check_recognition(stl_name: str, rs: dict) -> list[str]:
     errs: list[str] = []
     regions = rs.get("regions", [])
@@ -130,9 +136,23 @@ def check_recognition(stl_name: str, rs: dict) -> list[str]:
     stats = rs.get("stats", {})
 
     if stl_name == "S06.stl":
-        cyl = [r for r in regions if r.get("origin") == "cylGrow"]
-        if len(cyl) != 1:
-            errs.append(f"S06: expected 1 cylGrow, got {len(cyl)}")
+        # D-130-18(2): since ad5c814 S06's 8-gon wall is claimed by detector A
+        # (Origin::NgonWall) before B1 runs, with the STEP byte-identical; the
+        # origin cell is re-baselined from cylGrow to that claim. The region
+        # dump's originName() predates the enum's NgonWall member and renders
+        # it through its default branch as "planeGrow", so that is the label an
+        # NgonWall claim carries in a dump at this tip. The cell asks for
+        # exactly one cylinder region in total and that it carry the NgonWall
+        # label, so a B1 (cylGrow) claim cannot satisfy it.
+        all_cyl = [r for r in regions if r.get("type") == "cylinder"]
+        cyl = [r for r in all_cyl if r.get("origin") == NGON_WALL_DUMP_ORIGIN]
+        if len(all_cyl) != 1 or len(cyl) != 1:
+            errs.append(
+                f"S06: expected 1 NgonWall cylinder (dump origin "
+                f"{NGON_WALL_DUMP_ORIGIN!r}), got {len(cyl)} of "
+                f"{len(all_cyl)} cylinder region(s) with origins "
+                f"{[r.get('origin') for r in all_cyl]}"
+            )
         else:
             if cyl[0].get("nSides") != 8:
                 errs.append(f"S06: expected nSides=8, got {cyl[0].get('nSides')}")
