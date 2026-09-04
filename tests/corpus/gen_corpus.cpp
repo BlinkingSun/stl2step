@@ -997,8 +997,14 @@ FixtureResult buildCrossBores() {
     Sidecar sc;
     tagBattery130(sc);
     sc.recoverable = boxSixPlanes();
+    // The R8 surface is pierced by the R5 bore (5 < 8): both windows are
+    // enclosed, so it stays ONE face carrying two inner loops. The R5 surface
+    // is severed by the R8 bore (8 > 5): every generator of the R5 bore is cut,
+    // so its two remaining pieces share no edge and are TWO faces (D-130-17:
+    // edge-connected pieces of a surface are faces). Counted from the
+    // generator's geometry, not from engine output.
     sc.recoverable.push_back(cylRec(8.0, {30, 20, 0}, {0, 0, 1}, 1, 0, true));
-    sc.recoverable.push_back(cylRec(5.0, {0, 20, 15}, {1, 0, 0}, 1, 0, true));
+    sc.recoverable.push_back(cylRec(5.0, {0, 20, 15}, {1, 0, 0}, 2, 0, true));
     sc.intersections = {{"cyl R8", "cyl R5", "cylcyl"}};
     sc.exactVolume = exactVolumeCrossBores();  // D-130-15(1)
     return emitShape("cross_bores",
