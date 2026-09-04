@@ -383,6 +383,32 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 }
             }
 
+            // Diag only: the ring's provisionals as they REACH C -- claim state,
+            // slope, and the accepted region that consumed them. This is the
+            // measurement that separates "A2 never linked them" from "an earlier
+            // stage took them away". Decides nothing.
+            if (cDiag) {
+                for (int i = 0; i < nProv; ++i) {
+                    const Provisional& pr = work.provisionals[(std::size_t)i];
+                    if (pr.tris.empty()) continue;
+                    const double sl = provSlopeAbs(i, axis);
+                    if (!inSlopeWindow(sl)) continue;
+                    int owner = -1;
+                    for (int t : pr.tris) {
+                        if (t >= 0 && t < nTri && triAcc[(std::size_t)t] >= 0) {
+                            owner = triAcc[(std::size_t)t];
+                            break;
+                        }
+                    }
+                    std::fprintf(stderr,
+                                 "DIAG_C_PROV cyl=%d p=%d nTri=%d minTri=%d claim=%d "
+                                 "slope=%.6f touch=%d owner=%d\n",
+                                 cylI, i, (int)pr.tris.size(), minTriOf(pr.tris),
+                                 (int)pr.claim, sl, touchCyl[(std::size_t)i] ? 1 : 0,
+                                 owner);
+                }
+            }
+
             std::vector<int> seeds;
             for (int i = 0; i < nProv; ++i) {
                 if (!touchCyl[(std::size_t)i]) continue;
@@ -428,11 +454,29 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     stack.pop_back();
                     mem.push_back(u);
                     for (int v : adj[(std::size_t)u]) {
+                        // Diag only: name why a shared-edge neighbour of a ring
+                        // provisional is not linked into the flood.
+                        auto lrej = [&](const char* why, double a, double b) {
+                            if (cDiag)
+                                std::fprintf(stderr,
+                                             "DIAG_C_LINK cyl=%d seed=%d u=%d v=%d why=%s "
+                                             "a=%.6g b=%.6g\n",
+                                             cylI, seed, u, v, why, a, b);
+                        };
                         if (used[(std::size_t)v]) continue;
-                        if (work.provisionals[(std::size_t)v].claim != ProvClaim::Unclaimed)
+                        if (work.provisionals[(std::size_t)v].claim != ProvClaim::Unclaimed) {
+                            lrej("not-unclaimed",
+                                 (double)(int)work.provisionals[(std::size_t)v].claim, 0.0);
                             continue;
-                        if (work.provisionals[(std::size_t)v].tris.empty()) continue;
-                        if (!inSlopeWindow(provSlopeAbs(v, axis))) continue;
+                        }
+                        if (work.provisionals[(std::size_t)v].tris.empty()) {
+                            lrej("empty-provisional", 0.0, 0.0);
+                            continue;
+                        }
+                        if (!inSlopeWindow(provSlopeAbs(v, axis))) {
+                            lrej("slope-window", provSlopeAbs(v, axis), kSinALo);
+                            continue;
+                        }
                         used[(std::size_t)v] = 1;
                         stack.push_back(v);
                     }

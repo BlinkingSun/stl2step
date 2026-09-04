@@ -53,6 +53,15 @@ bool lawbandDiagOn() {
     return e && e[0] != '\0' && e[0] != '0';
 }
 
+// Diag only (STL2STEP_DIAG_A2): A2 grows PLANAR provisionals, so every link it
+// refuses is a statement about the mesh. Naming the predicate per refused link
+// is what turns "the ring arrives in pieces" into a measurement. Prints nothing
+// and decides nothing when off.
+bool a2DiagOn() {
+    const char* e = std::getenv("STL2STEP_DIAG_A2");
+    return e && e[0] != '\0' && e[0] != '0';
+}
+
 template <typename F>
 void lawParallelFor(size_t n, F&& fn) {
     unsigned hw = std::thread::hardware_concurrency();
@@ -1373,6 +1382,7 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
                        SegmentWork& work) {
     work.provisionals.clear();
     if (mv.nTri == 0) return true;
+    const bool a2Diag = a2DiagOn();
 
     const EdgeAdj ea = buildEdgeAdj(mv);
     std::vector<int> triLabel(mv.nTri, -1);
@@ -1435,15 +1445,42 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
                 for (const auto& nb : triNeighbors[t]) {
                     const int e = nb.first;
                     const int u = nb.second;
-                    if (triLabel[u] >= 0) continue;
-                    if (work.triChart[u] != chart) continue;
-                    if (triInLawBand(work, u)) continue;
+                    // Diag only: name the predicate that refuses this link.
+                    // Every `continue` below prints once and changes nothing.
+                    const bool aDiag = a2Diag;
+                    auto arej = [&](const char* why, double a, double b) {
+                        if (aDiag)
+                            std::fprintf(stderr,
+                                         "DIAG_A2_LINK p=%zu t=%d u=%d e=%d why=%s "
+                                         "a=%.9g b=%.9g\n",
+                                         work.provisionals.size(), t, u, e, why, a, b);
+                    };
+                    if (triLabel[u] >= 0) {
+                        arej("already-labelled", (double)triLabel[u], -1.0);
+                        continue;
+                    }
+                    if (work.triChart[u] != chart) {
+                        arej("other-chart", (double)work.triChart[u], (double)chart);
+                        continue;
+                    }
+                    if (triInLawBand(work, u)) {
+                        arej("in-law-band", 1.0, 0.0);
+                        continue;
+                    }
                     const double phi = edgeDihedralAbs(mv, e, ea);
-                    if (phi > tol.thetaSharp) continue;
+                    if (phi > tol.thetaSharp) {
+                        arej("sharp-edge", phi, tol.thetaSharp);
+                        continue;
+                    }
 
                     const gp_Dir n_u = triNormalLocal(mv, u);
                     const gp_Dir n_p = plane.Direction();
-                    if (std::abs(n_u.Dot(n_p)) < std::cos(tol.thetaPlane)) continue;
+                    if (std::abs(n_u.Dot(n_p)) < std::cos(tol.thetaPlane)) {
+                        arej("near-flat-normal-gate",
+                             std::acos(std::min(1.0, std::abs(n_u.Dot(n_p)))),
+                             tol.thetaPlane);
+                        continue;
+                    }
 
                     double maxD = 0.0;
                     const gp_Pnt loc = plane.Location();
@@ -1453,7 +1490,10 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
                             gp_Vec(loc, gp_Pnt(v)).Dot(gp_Vec(n_p)));
                         maxD = std::max(maxD, d);
                     }
-                    if (maxD > tol.epsPlane) continue;
+                    if (maxD > tol.epsPlane) {
+                        arej("plane-residual", maxD, tol.epsPlane);
+                        continue;
+                    }
 
                     std::vector<int> trial = growTris;
                     trial.push_back(u);
@@ -1482,6 +1522,20 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
     }
 
     sortProvisionals(work.provisionals);
+    if (a2Diag) {
+        std::fprintf(stderr, "DIAG_A2_PROV n=%zu\n", work.provisionals.size());
+        for (size_t i = 0; i < work.provisionals.size(); i++) {
+            const Provisional& pr = work.provisionals[i];
+            const gp_Dir nd = pr.plane.Direction();
+            std::fprintf(stderr,
+                         "  DIAG_A2_ONE p=%zu nTri=%zu minTri=%d chart=%d "
+                         "n=(%.6f,%.6f,%.6f) area=%.6g\n",
+                         i, pr.tris.size(),
+                         pr.tris.empty() ? -1 : *std::min_element(pr.tris.begin(),
+                                                                 pr.tris.end()),
+                         pr.chartId, nd.X(), nd.Y(), nd.Z(), pr.area);
+        }
+    }
     return true;
 }
 
@@ -1770,6 +1824,40 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams&, const DerivedTol
                          devTilt, std::abs(cTilt), ev.g.patch,
                          axisFinal.X(), axisFinal.Y(), axisFinal.Z(),
                          seedAxis.X(), seedAxis.Y(), seedAxis.Z());
+        }
+
+        // Diag only (STL2STEP_DIAG_FOLD): D-130-8's "the running axis common to
+        // every fold", measured on what B1 is about to commit. For a cylinder
+        // every adjacent-facet fold axis n_i x n_j is the axis exactly; for a
+        // conical band it is the shared GENERATOR and turns with azimuth.
+        // Prints nothing and decides nothing when off.
+        if (const char* fd = std::getenv("STL2STEP_DIAG_FOLD"); fd && fd[0] && fd[0] != '0') {
+            const gp_XYZ ax(axisFinal.X(), axisFinal.Y(), axisFinal.Z());
+            std::vector<std::pair<double, double>> wv;  // (|n_i x n_j|, alignment)
+            std::vector<char> inS(work.provisionals.size(), 0);
+            for (int m : members) inS[m] = 1;
+            for (int m : members) {
+                for (const ProvAdj& a : adj[m]) {
+                    if (a.other < 0 || a.other <= m) continue;
+                    if (!inS[a.other]) continue;
+                    const gp_Dir ni = work.provisionals[m].plane.Direction();
+                    const gp_Dir nj = work.provisionals[a.other].plane.Direction();
+                    const gp_XYZ cr = gp_XYZ(ni.X(), ni.Y(), ni.Z())
+                                          .Crossed(gp_XYZ(nj.X(), nj.Y(), nj.Z()));
+                    const double m2 = cr.Modulus();
+                    if (m2 <= 0.0) continue;
+                    wv.emplace_back(m2, std::abs(cr.Dot(ax)) / m2);
+                }
+            }
+            double amin = 1.0, wsum = 0.0, wacc = 0.0;
+            for (const auto& e : wv) { amin = std::min(amin, e.second);
+                                        wsum += e.first; wacc += e.first * e.second; }
+            std::fprintf(stderr,
+                         "DIAG_FOLD gate=%s |S|=%zu nTri=%zu R=%.6g nPair=%zu "
+                         "alignMin=%.9g alignW=%.9g\n",
+                         gateName(ev.failGate), members.size(), prePeelTris.size(),
+                         ev.radius, wv.size(), wv.empty() ? -1.0 : amin,
+                         wsum > 0.0 ? wacc / wsum : -1.0);
         }
 
         if (ev.failGate == Gate::PASS) {
