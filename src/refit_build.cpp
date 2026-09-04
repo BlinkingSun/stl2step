@@ -12216,10 +12216,21 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     }
                     fallbackUsed[ci] = usedFallback ? 1 : 0;
                 }
-                // Detector B: plane-loop CIRCLE replaces IntAna none/line (plane|plane
-                // is line-only). Never clobber an IntAna Circ/Elips. Never
-                // force-polyline on analytic|analytic when the loop is a circle.
-                if (plc && (curve.kind == AnalyticCurve::None || curve.kind == AnalyticCurve::Lin)) {
+                // Detector B: a plane-loop CIRCLE answers where IntAna has no
+                // answer at all. It never overrides a curve IntAna derived from
+                // the two shipped surfaces -- a shared edge has to lie on both,
+                // and two distinct planes meet along their Lin and nowhere else,
+                // so an arc there is off-surface by construction (on
+                // handle-pickup that swap took 42 plane|plane Lin chains, +42
+                // STEP edges, +22 faces and +1.26 mm3 of bulge past main).
+                // Circ/Elips were never overridden; Lin is now in the same class.
+                if (plc && curve.kind == AnalyticCurve::Lin && diagP2Enabled())
+                    std::fprintf(stderr,
+                                 "DIAG_130_PLCKEEPLIN ci=%d regA=%d regB=%d anaPair=%d "
+                                 "tA=%d tB=%d R=%.6f\n",
+                                 (int)ci, ch.regA, ch.regB, anaPair ? 1 : 0,
+                                 A ? (int)A->type : -1, B ? (int)B->type : -1, plcR);
+                if (plc && curve.kind == AnalyticCurve::None) {
                     curve.kind = AnalyticCurve::Circ;
                     curve.circ = gp_Circ(plcAx, plcR);
                 }
