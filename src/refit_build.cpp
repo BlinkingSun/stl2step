@@ -915,6 +915,18 @@ double partialFaceTolCap(const MeshView& mv, const Region& r) {
     return c * 1.001 + Precision::Confusion();
 }
 
+// D-130: plate-face validity budget. The plane analogue of partialFaceTolCap.
+// A plate's boundary edges can never sit closer to the fitted plane than the
+// region's own vertices do, so the face-validity cap must carry the region's
+// measured planar residual (Region::maxVertexDev, the same quantity the partial
+// cylinder cap already uses). meshTolCap alone is the sew budget and silently
+// refuses a cap plane whose rim rides an off-plane mesh vertex.
+double plateFaceTolCap(const MeshView& mv, const Region& r) {
+    double c = meshTolCap(mv, &r);
+    if (r.maxVertexDev > 0.0) c = std::max(c, r.maxVertexDev * 1.001 + Precision::Confusion());
+    return c;
+}
+
 // Snap budget for an accepted IntAna / constructed curve. Floor is SPEC-F2
 // max(sewTol, region.maxVertexDev, epsPlane). Ceiling is pickIntAna's
 // wrong-branch gate (max(sewTol*50, 1 mm)): a curve we kept is allowed
@@ -5035,7 +5047,43 @@ void dumpDiagPlateSelfx(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow, co
 
         auto edgeSelfxCls = [&](const TopoDS_Edge& e, int ownerRid) -> std::pair<const char*, int> {
             const void* ts = diagTShapePtr(e);
-            if (ts && gSeamTShapes.count(ts)) return {"seam", -1};
+            if (ts && gSeamTShapes.count(ts)) {
+                // D-130: name the chain the analytic edge came from (identity on the
+                // collapsed edge TShape) instead of reporting ci=-1 for every seam.
+                for (size_t ci = 0; ci < geom.size(); ci++) {
+                    for (const auto& ge : geom[ci].edges) {
+                        if (ge.IsNull() || diagTShapePtr(ge) != ts) continue;
+                        return {"seam", (int)ci};
+                    }
+                }
+                TopoDS_Vertex s0, s1;
+                TopExp::Vertices(e, s0, s1, Standard_True);
+                const int ciEnd = matchChain(e, s0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(s0),
+                                             s1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(s1));
+                if (ciEnd < 0) {
+                    static thread_local int nUnattrib = 0;
+                    if (nUnattrib < 6) {
+                        nUnattrib++;
+                        int nCollapsed = 0, nGeomE = 0;
+                        for (size_t ci = 0; ci < geom.size(); ci++) {
+                            if (geom[ci].collapsed) nCollapsed++;
+                            nGeomE += (int)geom[ci].edges.size();
+                        }
+                        TopoDS_Vertex q0, q1;
+                        TopExp::Vertices(e, q0, q1, Standard_True);
+                        const gp_Pnt a = q0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(q0);
+                        const gp_Pnt b = q1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(q1);
+                        std::fprintf(stderr,
+                                     "DIAG_130_UNATTRIB rid=%d eT=%p inSeamTShapes=%d "
+                                     "nChains=%zu nCollapsed=%d nGeomEdges=%d "
+                                     "p0=(%.4f,%.4f,%.4f) p1=(%.4f,%.4f,%.4f)\n",
+                                     ownerRid, ts, gSeamTShapes.count(ts) ? 1 : 0,
+                                     rs.chains.size(), nCollapsed, nGeomE, a.X(), a.Y(), a.Z(),
+                                     b.X(), b.Y(), b.Z());
+                    }
+                }
+                return {"seam", ciEnd};
+            }
             TopoDS_Vertex v0, v1;
             TopExp::Vertices(e, v0, v1, Standard_True);
             gp_Pnt p0 = v0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v0);
@@ -7994,14 +8042,25 @@ void dumpDiagHubWire(const Region& r, const TopoDS_Wire& ow, const Handle(Geom_P
             int fb;
         } info{"fill", -1, -1, 0};
         const void* ts = diagTShapePtr(e);
-        if (ts && gSeamTShapes.count(ts)) {
-            info.cls = "seam";
-            return info;
-        }
+        const bool isSeamTs = ts && gSeamTShapes.count(ts);
         TopoDS_Vertex v0, v1;
         TopExp::Vertices(e, v0, v1, Standard_True);
         gp_Pnt p0 = v0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v0);
         gp_Pnt p1 = v1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v1);
+        if (isSeamTs) {
+            // D-130: an analytic edge still belongs to a chain. Returning before
+            // matchChain reported ci=-1 for every seam edge and made the tripwire
+            // ("analytic edge with no chain index") unmeasurable.
+            info.cls = "seam";
+            info.ci = matchChain(e, p0, p1);
+            if (info.ci >= 0 && (size_t)info.ci < rs.chains.size()) {
+                const BoundaryChain& ch = rs.chains[(size_t)info.ci];
+                info.partner = (ch.regA == rid) ? ch.regB : ch.regA;
+                if (info.partner < 0) info.partner = ch.regA >= 0 ? ch.regA : ch.regB;
+                info.fb = gChainSewFallbackCi.count(info.ci) ? 1 : 0;
+            }
+            return info;
+        }
         info.ci = matchChain(e, p0, p1);
         bool isMeshE = false;
         if (info.ci >= 0 && (size_t)info.ci < rs.chains.size()) {
@@ -8922,11 +8981,40 @@ void dumpDiagPcInvalid(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow, con
         return (best >= 0 && bestD <= 2.0 * tol) ? best : -1;
     };
 
+    // D-130 tripwire support: an analytic (bindAllVariants) edge must still name
+    // its chain. Identity first -- a collapsed chain owns its edge TShapes -- then
+    // the endpoint match. Reporting ci=-1 for every seam edge (as this classifier
+    // used to, by returning before ci was computed) made the census unreadable and
+    // hid the edges that really have no chain.
+    auto chainOfCollapsedEdge = [&](const TopoDS_Edge& e) -> int {
+        const void* ts = diagTShapePtr(e);
+        if (!ts) return -1;
+        for (size_t ci = 0; ci < geom.size(); ci++) {
+            if (!geom[ci].collapsed) continue;
+            for (const auto& ge : geom[ci].edges)
+                if (!ge.IsNull() && diagTShapePtr(ge) == ts) return (int)ci;
+        }
+        return -1;
+    };
     auto classifyEdge = [&](const TopoDS_Edge& e, int& ci, int& partner) -> const char* {
         ci = -1;
         partner = -1;
         const void* ts = diagTShapePtr(e);
-        if (ts && gSeamTShapes.count(ts)) return "seam";
+        if (ts && gSeamTShapes.count(ts)) {
+            ci = chainOfCollapsedEdge(e);
+            if (ci < 0) {
+                TopoDS_Vertex s0, s1;
+                TopExp::Vertices(e, s0, s1, Standard_True);
+                ci = matchChain(e, s0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(s0),
+                                s1.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(s1));
+            }
+            if (ci >= 0 && (size_t)ci < rs.chains.size()) {
+                const BoundaryChain& ch = rs.chains[(size_t)ci];
+                partner = (ch.regA == rid) ? ch.regB : ch.regA;
+                if (partner < 0) partner = ch.regA >= 0 ? ch.regA : ch.regB;
+            }
+            return "seam";
+        }
         TopoDS_Vertex v0, v1;
         TopExp::Vertices(e, v0, v1, Standard_True);
         gp_Pnt p0 = v0.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(v0);
@@ -9631,6 +9719,195 @@ void dumpDiagPlateWireSense(const Region& r, const Handle(Geom_Plane)& gpl, cons
             probeSubset({(int)k}, lbl);
         }
     }
+    // D-130 step 3 localiser: is the refusal the wire sense, or the pcurve
+    // residual of an off-plane mesh vertex? Run the same analyzer on a COPY of
+    // the outer-only probe whose tolerances have been recomputed from geometry
+    // (BRepLib::UpdateTolerances). Copies never touch a live TShape.
+    {
+        const char* ownRaw = "?";
+        const char* ownUpd = "?";
+        std::string sRaw, sUpd;
+        int unorientableRaw = -1, unorientableUpd = -1;
+        double maxEdgeTolUpd = 0.0;
+        try {
+            BRep_Builder B;
+            TopoDS_Face probe;
+            B.MakeFace(probe, gpl, Precision::Confusion());
+            B.Add(probe, ow);
+            {
+                BRepCheck_Analyzer an(probe);
+                ownRaw = an.IsValid() ? "valid" : "invalid";
+                sRaw = analyzerStatusOwn(analyzerResultOf(an, probe));
+                Handle(BRepCheck_Face) fr =
+                    Handle(BRepCheck_Face)::DownCast(analyzerResultOf(an, probe));
+                if (!fr.IsNull()) unorientableRaw = fr->IsUnorientable() ? 1 : 0;
+            }
+            BRepBuilderAPI_Copy cp(probe);
+            TopoDS_Shape cs = cp.Shape();
+            if (!cs.IsNull()) {
+                BRepLib::UpdateTolerances(cs, Standard_True);
+                for (TopExp_Explorer ex(cs, TopAbs_EDGE); ex.More(); ex.Next())
+                    maxEdgeTolUpd =
+                        std::max(maxEdgeTolUpd, BRep_Tool::Tolerance(TopoDS::Edge(ex.Current())));
+                BRepCheck_Analyzer an2(cs);
+                ownUpd = an2.IsValid() ? "valid" : "invalid";
+                sUpd = analyzerStatusOwn(analyzerResultOf(an2, cs));
+                Handle(BRepCheck_Face) fr2 =
+                    Handle(BRepCheck_Face)::DownCast(analyzerResultOf(an2, cs));
+                if (!fr2.IsNull()) unorientableUpd = fr2->IsUnorientable() ? 1 : 0;
+            }
+        } catch (const Standard_Failure&) {
+        }
+        std::fprintf(stderr,
+                     "DIAG_OP2L_WHY rid=%d outerOnly raw=%s rawOwn=%s rawUnorientable=%d "
+                     "afterTolUpdate=%s updOwn=%s updUnorientable=%d maxEdgeTolUpd=%.6f\n",
+                     r.id, ownRaw, sRaw.empty() ? "-" : sRaw.c_str(), unorientableRaw, ownUpd,
+                     sUpd.empty() ? "-" : sUpd.c_str(), unorientableUpd, maxEdgeTolUpd);
+    // Which wire form does BRepCheck accept? as-built / reversed / MakeWire-rebuilt
+        // / rebuilt+reversed, each also with the face flag reversed. Diag-only.
+        auto variant = [&](const char* label, const TopoDS_Wire& w, bool revFace) {
+            if (w.IsNull()) return;
+            const char* v = "?";
+            std::string own;
+            int uno = -1;
+            const char* inf = "?";
+            try {
+                BRep_Builder B;
+                TopoDS_Face probe;
+                B.MakeFace(probe, gpl, Precision::Confusion());
+                B.Add(probe, w);
+                if (revFace) probe.Reverse();
+                BRepTopAdaptor_FClass2d cl(probe, Precision::PConfusion());
+                inf = topAbsStateName(cl.PerformInfinitePoint());
+                BRepCheck_Analyzer an(probe);
+                v = an.IsValid() ? "valid" : "invalid";
+                own = analyzerStatusOwn(analyzerResultOf(an, probe));
+                Handle(BRepCheck_Face) fr =
+                    Handle(BRepCheck_Face)::DownCast(analyzerResultOf(an, probe));
+                if (!fr.IsNull()) uno = fr->IsUnorientable() ? 1 : 0;
+            } catch (const Standard_Failure&) {
+            }
+            std::fprintf(stderr,
+                         "DIAG_OP2L_VAR rid=%d form=%s revFace=%d verdict=%s own=%s "
+                         "unorientable=%d infPt=%s\n",
+                         r.id, label, revFace ? 1 : 0, v, own.empty() ? "-" : own.c_str(), uno,
+                         inf);
+        };
+        TopoDS_Wire rebuilt;
+        try {
+            BRepBuilderAPI_MakeWire mw;
+            for (TopoDS_Iterator it(ow); it.More(); it.Next())
+                if (it.Value().ShapeType() == TopAbs_EDGE) mw.Add(TopoDS::Edge(it.Value()));
+            if (mw.IsDone()) {
+                rebuilt = mw.Wire();
+                rebuilt.Closed(Standard_True);
+            }
+        } catch (const Standard_Failure&) {
+        }
+        variant("asbuilt", ow, false);
+        variant("asbuilt", ow, true);
+        // Copy + BRepLib::SameParameter: does making every pcurve consistent with
+        // its 3d curve (tolerance recomputed on a copy) clear the refusal?
+        try {
+            BRep_Builder B;
+            TopoDS_Face probe;
+            B.MakeFace(probe, gpl, Precision::Confusion());
+            B.Add(probe, ow);
+            BRepBuilderAPI_Copy cp(probe);
+            TopoDS_Shape cs = cp.Shape();
+            if (!cs.IsNull()) {
+                BRepLib::SameParameter(cs, Precision::Confusion(), Standard_True);
+                BRepLib::UpdateTolerances(cs, Standard_True);
+                double mt = 0.0;
+                for (TopExp_Explorer ex(cs, TopAbs_EDGE); ex.More(); ex.Next())
+                    mt = std::max(mt, BRep_Tool::Tolerance(TopoDS::Edge(ex.Current())));
+                BRepCheck_Analyzer an(cs);
+                const std::string own = analyzerStatusOwn(analyzerResultOf(an, cs));
+                int uno = -1;
+                Handle(BRepCheck_Face) fr =
+                    Handle(BRepCheck_Face)::DownCast(analyzerResultOf(an, cs));
+                if (!fr.IsNull()) uno = fr->IsUnorientable() ? 1 : 0;
+                std::fprintf(stderr,
+                             "DIAG_OP2L_VAR rid=%d form=sameparam revFace=0 verdict=%s own=%s "
+                             "unorientable=%d infPt=- maxTol=%.6f\n",
+                             r.id, an.IsValid() ? "valid" : "invalid",
+                             own.empty() ? "-" : own.c_str(), uno, mt);
+            }
+        } catch (const Standard_Failure&) {
+        }
+        // Per-edge analyzer status on the outer-only probe (own + in this face).
+        try {
+            BRep_Builder B;
+            TopoDS_Face probe;
+            B.MakeFace(probe, gpl, Precision::Confusion());
+            B.Add(probe, ow);
+            BRepCheck_Analyzer an(probe);
+            TopTools_IndexedMapOfShape emap;
+            TopExp::MapShapes(probe, TopAbs_EDGE, emap);
+            for (int ie = 1; ie <= emap.Extent(); ie++) {
+                const TopoDS_Edge e = TopoDS::Edge(emap(ie));
+                const Handle(BRepCheck_Result) res = analyzerResultOf(an, e);
+                std::fprintf(stderr, "DIAG_OP2L_EDGE rid=%d ie=%d own=%s inFace=%s tol=%.7f\n",
+                             r.id, ie - 1, analyzerStatusOwn(res).c_str(),
+                             analyzerStatusOnFace(res, probe).c_str(), BRep_Tool::Tolerance(e));
+            }
+        } catch (const Standard_Failure&) {
+        }
+        variant("revwire", TopoDS::Wire(ow.Reversed()), false);
+        variant("rebuilt", rebuilt, false);
+        variant("rebuilt-rev", rebuilt.IsNull() ? rebuilt : TopoDS::Wire(rebuilt.Reversed()),
+                false);
+        // Per-edge UV chain on the probe face: pcurve presence on the FACE's own
+        // surface handle, oriented UV endpoints, and the gap to the previous edge.
+        // A 2d gap (or a missing pcurve) is what leaves BRepCheck unable to orient.
+        try {
+            BRep_Builder B;
+            TopoDS_Face probe;
+            B.MakeFace(probe, gpl, Precision::Confusion());
+            B.Add(probe, ow);
+            TopLoc_Location floc;
+            Handle(Geom_Surface) fs = BRep_Tool::Surface(probe, floc);
+            int nWE = 0, nNoPc = 0;
+            double maxGap2d = 0.0;
+            gp_Pnt2d prevEnd;
+            bool havePrev = false;
+            gp_Pnt2d firstStart;
+            for (BRepTools_WireExplorer we(ow, probe); we.More(); we.Next()) {
+                const TopoDS_Edge e = we.Current();
+                nWE++;
+                Standard_Real pf = 0, pl = 0;
+                Handle(Geom2d_Curve) pc =
+                    BRep_Tool::CurveOnSurface(e, fs, floc, pf, pl);
+                if (pc.IsNull()) {
+                    nNoPc++;
+                    std::fprintf(stderr, "DIAG_OP2L_UV rid=%d ie=%d pc=none\n", r.id, nWE - 1);
+                    havePrev = false;
+                    continue;
+                }
+                gp_Pnt2d a = pc->Value(pf), b = pc->Value(pl);
+                if (e.Orientation() == TopAbs_REVERSED) std::swap(a, b);
+                double gap = havePrev ? prevEnd.Distance(a) : 0.0;
+                if (havePrev) maxGap2d = std::max(maxGap2d, gap);
+                if (nWE == 1) firstStart = a;
+                std::fprintf(stderr,
+                             "DIAG_OP2L_UV rid=%d ie=%d ori=%s uvA=(%.5f,%.5f) uvB=(%.5f,%.5f) "
+                             "gapPrev=%.6f\n",
+                             r.id, nWE - 1, topAbsOriName(e.Orientation()), a.X(), a.Y(), b.X(),
+                             b.Y(), gap);
+                prevEnd = b;
+                havePrev = true;
+            }
+            const double closeGap = havePrev ? prevEnd.Distance(firstStart) : -1.0;
+            int nEtot = 0;
+            for (TopoDS_Iterator it(ow); it.More(); it.Next())
+                if (it.Value().ShapeType() == TopAbs_EDGE) nEtot++;
+            std::fprintf(stderr,
+                         "DIAG_OP2L_UVSUM rid=%d nEdges=%d wireExplorerVisited=%d noPc=%d "
+                         "maxGap2d=%.6f closeGap2d=%.6f\n",
+                         r.id, nEtot, nWE, nNoPc, maxGap2d, closeGap);
+        } catch (const Standard_Failure&) {
+        }
+    }
     const char* faceFwd = "?";
     const char* faceOut = "?";
     try {
@@ -9720,6 +9997,12 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                 std::fprintf(stderr,
                              "DIAG_PLANEPCBIND rid=%d nBound=%d nSkippedHasPc=%d nSkippedNoCurve=%d\n",
                              r.id, nBound, nSkippedHasPc, nSkippedNoCurve);
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_PLATETOL rid=%d sewTol=%.7f meshTolCap=%.7f maxVertexDev=%.7f "
+                             "plateCap=%.7f\n",
+                             r.id, mv.sewTol, meshTolCap(mv, &r), r.maxVertexDev,
+                             plateFaceTolCap(mv, r));
             dumpDiagPlateWireSense(r, gpl, ow, innerW, innerRev, "keep-try");
         }
         if (innersOk && makeFaceKeep(gpl, ow, innerW, r.outwardNormal, outF)) {
@@ -9729,7 +10012,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             }
             if (diagP2Enabled())
                 dumpDiagWireOri2AtKeepTry(r.id, outF, ow, innerW, rs, geom);
-            if (faceIsValid(outF) || ensureFaceValid(outF, meshTolCap(mv, &r))) {
+            if (faceIsValid(outF) || ensureFaceValid(outF, plateFaceTolCap(mv, r))) {
                 if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
                     dumpPcurveFrames(r, ow);
                     dumpDiagPlateLine(r.id, outF);
@@ -9824,7 +10107,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             else if (faceIsValid(other)) outF = other;
             else outF = want;
         }
-        ensureFaceValid(outF, meshTolCap(mv, &r));
+        ensureFaceValid(outF, plateFaceTolCap(mv, r));
         if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
             dumpPcurveFrames(r, ow);
             dumpDiagPlateLine(r.id, outF);
@@ -12801,6 +13084,16 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 closureHealCapSet = true;
             }
             const int freeBeforeHeal = countShellFreeEdges(sh);
+            // D-130: the free-edge census that actually decides the revert is the
+            // one the healer sees, not the post-explode DIAG_PREJ4 dump. Emit it
+            // once, on the first heal decision of the run.
+            if (diagP2Enabled() && freeBeforeHeal > 0 && closureHealIter == 0 &&
+                closureHealPendingRid < 0) {
+                std::fprintf(stderr, "DIAG_HEAL_CENSUS stage=preheal freeEdges=%d\n",
+                             freeBeforeHeal);
+                dumpDiagFreeEdges(sh, built, builtRid, eprimeFill, rs, mv, meshE, geom, collapsed,
+                                  sewTol);
+            }
             if (closureHealPendingRid >= 0) {
                 if (freeBeforeHeal >= closureHealPendingFree) {
                     if ((size_t)closureHealPendingRid < eprimeFill.size())
