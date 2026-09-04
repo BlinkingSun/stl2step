@@ -163,6 +163,16 @@ bool pcaPlane(const MeshView& mv, const std::vector<int>& tris, gp_Ax3& plane);
 bool eberlyCenterRadius(const MeshView& mv, const std::vector<int>& tris,
                         const gp_Dir& axis, gp_Pnt& center, double& radius);
 
+// Geometric least-squares cylinder over the unique vertices of `tris`, with the
+// axis DIRECTION among the unknowns (D-130-12). `axisSeed` is the starting
+// direction and fixes the returned hemisphere; `centerOut` is the axis point
+// nearest the vertex mean; `maxResidOut` is the max |radial distance - radius|
+// over those vertices. Levenberg-Marquardt, hard-capped at `maxIters` accepted
+// steps (I5). Returns false rather than a plausible-looking answer.
+bool cylinderFitLS(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axisSeed,
+                   gp_Dir& axisOut, gp_Pnt& centerOut, double& radiusOut, double& maxResidOut,
+                   int maxIters = 16);
+
 bool prattCircleFit(const gp_Pnt* points, std::size_t n, double spanRad,
                     gp_Pnt& center, double& radius);
 

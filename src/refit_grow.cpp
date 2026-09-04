@@ -2583,8 +2583,194 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
         }
     }
 
-    for (const LawBand& b : accepted) {
+    // D-130-12 -- THE ABSORB, AND ITS CERTIFICATE.
+    //
+    // A claimed band owns every adjacent unclaimed triangle that lies on the
+    // cylinder it has already certified. The equal-theta chain law is how a band
+    // is RECOGNISED; it is not what defines the band's EXTENT. A wall
+    // triangulated as a staggered strip has a mixed pitch (the plate's R=8.5
+    // bore alternates 1.956 deg and 3.913 deg), so testEqualTheta refuses to
+    // grow the chain past the first regular run even though every vertex of the
+    // rest of the ring sits on the radius the band has measured.
+    //
+    // ADMISSION.  tau = max(bandResid, q).
+    //   bandResid  the deviation the band ALREADY exhibits (LawBand::maxVertResid,
+    //              the surface certificate testOnSurface accepted it on). A
+    //              triangle inside it cannot move the certificate.
+    //   q          MeshView::quantFloor -- the mesh FILE's own coordinate
+    //              quantization (D-130-12: binary32 ulp at the mesh's largest
+    //              |coordinate|, times sqrt(3)/2; for ASCII the printed-decimal
+    //              grid). It is the radius of the ball a vertex may sit anywhere
+    //              inside purely from having been written to this file, so no
+    //              surface through those vertices can be certified tighter.
+    // Neither is a part-scale budget (the bounding-box tau this replaces read
+    // 0.1 % of its own value on the plate and 91 % on handle-pickup -- one number
+    // meaning two different things), and neither is a statistic of some other
+    // population (the accepted plane regions' residual max is A2's epsPlane
+    // showing through on a 3-facet patch: 105x looser, a7f7b99).
+    //
+    // REFIT.  The cylinder is re-measured on everything the band owns after each
+    // round, DIRECTION INCLUDED (cylinderFitLS). A 6-triangle seed does not pin
+    // an axis: with the direction frozen, the plate's cross bore reads its own
+    // far side as 6.87e-04 mm off-surface, and that number is the frozen
+    // direction, not the mesh. A round whose refit leaves the certificate
+    // (resid > tau) is rolled back whole, so the band never grows past what it
+    // can certify.
+    std::vector<std::vector<int>> claimTris;
+    std::vector<gp_XYZ> bandLoc(accepted.size(), gp_XYZ(0, 0, 0));
+    std::vector<gp_Dir> bandDir(accepted.size(), gp_Dir(0, 0, 1));
+    std::vector<double> bandR(accepted.size(), -1.0);
+    claimTris.reserve(accepted.size());
+    for (const LawBand& b : accepted) claimTris.push_back(b.tris);
+    {
+        const double q = std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0
+                             ? mv.quantFloor
+                             : 0.0;
+        std::vector<char> owned(static_cast<size_t>(mv.nTri), 0);
+        for (const auto& ts : claimTris) {
+            for (int t : ts)
+                if (t >= 0 && static_cast<size_t>(t) < mv.nTri) owned[static_cast<size_t>(t)] = 1;
+        }
+        const EdgeAdj eaA = buildEdgeAdj(mv);
+        int nAbsorb = 0;
+        for (size_t bi = 0; bi < accepted.size(); bi++) {
+            const LawBand& b = accepted[bi];
+            if (b.tris.size() < 3 || !(b.R > 0.0) || b.N < 2) continue;
+            const gp_XYZ ax0 = b.axis.Direction().XYZ();
+            const double tau = std::max(b.maxVertResid, q);
+            std::vector<char> inB(static_cast<size_t>(mv.nTri), 0);
+            for (int t : claimTris[bi])
+                if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inB[static_cast<size_t>(t)] = 1;
+            gp_XYZ curLoc = b.axis.Location().XYZ();
+            gp_XYZ curAx = ax0;
+            double curR = b.R;
+            // Only a LATERAL facet can be part of a wall: a cap triangle can have
+            // all three vertices on the rim circle and would otherwise pass the
+            // radius test. Same gate the N-gon detector uses to skip cones.
+            const double latBound = std::sin(tol.thetaSharp);
+            // Why the band stopped growing: measured, not assumed. "nocand" = no
+            // adjacent unclaimed triangle is on the certified cylinder;
+            // "rollback" = a round's refit left the certificate and was undone;
+            // "fitfail" = the least-squares cylinder did not resolve.
+            const char* stopWhy = "nocand";
+            int nRounds = 0, nLatSkip = 0, nOffCyl = 0;
+            bool grewB = true;
+            while (grewB) {
+                grewB = false;
+                std::vector<int> batch;
+                for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+                    if (owned[static_cast<size_t>(t)] || !mv.triEdges) continue;
+                    bool nbr = false;
+                    for (int sIdx = 0; sIdx < 3; sIdx++) {
+                        const int e = mv.triEdges[t][sIdx];
+                        const int u = (eaA.tri[e][0] == t) ? eaA.tri[e][1] : eaA.tri[e][0];
+                        if (u >= 0 && inB[static_cast<size_t>(u)]) {
+                            nbr = true;
+                            break;
+                        }
+                    }
+                    if (!nbr) continue;
+                    const gp_Dir nd = triNormalLocal(mv, t);
+                    if (std::abs(gp_XYZ(nd.X(), nd.Y(), nd.Z()).Dot(curAx)) >= latBound) {
+                        ++nLatSkip;
+                        continue;
+                    }
+                    bool onCyl = true;
+                    for (int c = 0; c < 3; c++) {
+                        const gp_XYZ pv = localTriVert(mv, t, c);
+                        const gp_XYZ d = pv - curLoc;
+                        if (std::abs((d - curAx * d.Dot(curAx)).Modulus() - curR) > tau) {
+                            onCyl = false;
+                            break;
+                        }
+                    }
+                    if (onCyl) batch.push_back(t);
+                    else ++nOffCyl;
+                }
+                if (batch.empty()) break;
+                std::vector<int> trial = claimTris[bi];
+                trial.insert(trial.end(), batch.begin(), batch.end());
+                std::sort(trial.begin(), trial.end());
+                trial.erase(std::unique(trial.begin(), trial.end()), trial.end());
+                gp_Dir fitAx;
+                gp_Pnt fitC;
+                double fitR = 0.0, resid = 0.0;
+                if (!cylinderFitLS(mv, trial, gp_Dir(curAx.X(), curAx.Y(), curAx.Z()), fitAx,
+                                   fitC, fitR, resid) ||
+                    !(fitR > 0.0)) {
+                    stopWhy = "fitfail";
+                    break;
+                }
+                if (resid > tau) {               // rollback: the round is not taken
+                    stopWhy = "rollback";
+                    break;
+                }
+                ++nRounds;
+                for (int t : batch) {
+                    inB[static_cast<size_t>(t)] = 1;
+                    owned[static_cast<size_t>(t)] = 1;
+                    nAbsorb++;
+                }
+                claimTris[bi] = std::move(trial);
+                curLoc = gp_XYZ(fitC.X(), fitC.Y(), fitC.Z());
+                curAx = fitAx.XYZ();
+                curR = fitR;
+                grewB = true;
+            }
+            if (lawbandDiagOn()) {
+                // The deviation the ABSORBED triangles actually exhibit against
+                // the band's final fitted cylinder -- measured, never inferred
+                // from tau, because it is the number a certificate is judged by.
+                std::vector<char> wasIn(static_cast<size_t>(mv.nTri), 0);
+                for (int t : accepted[bi].tris)
+                    if (t >= 0 && static_cast<size_t>(t) < mv.nTri)
+                        wasIn[static_cast<size_t>(t)] = 1;
+                double addDev = 0.0;
+                for (int t : claimTris[bi]) {
+                    if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+                    if (wasIn[static_cast<size_t>(t)]) continue;
+                    for (int c = 0; c < 3; c++) {
+                        const gp_XYZ pv = localTriVert(mv, t, c);
+                        const gp_XYZ d = pv - curLoc;
+                        addDev = std::max(addDev,
+                                          std::abs((d - curAx * d.Dot(curAx)).Modulus() - curR));
+                    }
+                }
+                std::fprintf(stderr,
+                             "  DIAG_LAWABS rid=%d R=%.6f nTri %zu -> %zu absorbedMaxDev=%.6g "
+                             "q=%.6g bandResid=%.6g tau=%.6g axisTiltRad=%.6g stop=%s "
+                             "rounds=%d latSkip=%d offCyl=%d "
+                             "loc=(%.9g,%.9g,%.9g) dir=(%.9g,%.9g,%.9g)\n",
+                             b.tris.empty() ? -1 : b.tris.front(), curR,
+                             accepted[bi].tris.size(), claimTris[bi].size(), addDev, q,
+                             b.maxVertResid, tau,
+                             std::acos(std::min(1.0, std::abs(curAx.Dot(ax0)))), stopWhy,
+                             nRounds, nLatSkip, nOffCyl, curLoc.X(), curLoc.Y(), curLoc.Z(),
+                             curAx.X(), curAx.Y(), curAx.Z());
+            }
+            if (claimTris[bi].size() != accepted[bi].tris.size()) {
+                bandLoc[bi] = curLoc;
+                bandDir[bi] = gp_Dir(curAx.X(), curAx.Y(), curAx.Z());
+                bandR[bi] = curR;
+            }
+        }
+        if (lawbandDiagOn())
+            std::fprintf(stderr,
+                         "DIAG_LAWABSORB nTri=%d bands=%zu weldTol=%.6g sewTol=%.6g "
+                         "diag=%.6g q=%.6g partScaleTauWas=%.6g\n",
+                         nAbsorb, accepted.size(), mv.weldTol, mv.sewTol, mv.diag, q,
+                         std::max({5e-5, 4.0 * mv.weldTol, 1e-6 * mv.diag}));
+    }
+
+    for (size_t bi = 0; bi < accepted.size(); bi++) {
+        LawBand b = accepted[bi];
         if (b.tris.size() < 3 || !(b.R > 0.0) || b.N < 2) continue;
+        b.tris = claimTris[bi];
+        if (bandR[bi] > 0.0) {
+            b.R = bandR[bi];
+            b.axis = gp_Ax1(gp_Pnt(bandLoc[bi].X(), bandLoc[bi].Y(), bandLoc[bi].Z()),
+                            bandDir[bi]);
+        }
         Region reg;
         fillLawBandRegion(mv, tol, b, reg);
         const int rid = reg.tris.empty() ? -1 : reg.tris.front();

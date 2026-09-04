@@ -425,6 +425,210 @@ bool eberlyCenterRadius(const MeshView& mv, const std::vector<int>& tris,
     return true;
 }
 
+// D-130-12 -- geometric least-squares cylinder with the AXIS DIRECTION among the
+// unknowns.
+//
+// eberlyCenterRadius solves for (centre, radius) with the direction HELD FIXED,
+// which is exactly right where the direction is already certified -- the chain
+// law's generator edges pin it for a band that spans a real arc. It is wrong for
+// a six-triangle seed: six facets span ~20 deg, the generator edges agree on a
+// direction to a few 1e-4 rad, and a cylinder whose axis is tilted by that much
+// reads the far side of a 137-facet ring as 7e-4 mm off-surface. That number is
+// an artefact of the frozen direction, not a property of the mesh (D-130-12).
+//
+// So minimise the same geometric objective over all of it:
+//     E(W, C, r) = SUM_v ( |(I - W W^T)(P_v - C)| - r )^2 ,   |W| = 1.
+// r is eliminated analytically (at the minimum it is the mean of the radial
+// distances), leaving four unknowns: two tangent components of W and two
+// components of C in the plane perpendicular to W. Levenberg-Marquardt with an
+// explicit decrease test; every step is capped and every reduction runs in
+// ascending global vertex id, so the result is bit-identical under --threads
+// (I5). The axial position of C is not an unknown -- a cylinder's axis point is
+// not unique -- so it is canonicalised at the end to the axis point nearest the
+// vertex mean, the same convention eberlyCenterRadius returns.
+bool cylinderFitLS(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axisSeed,
+                   gp_Dir& axisOut, gp_Pnt& centerOut, double& radiusOut, double& maxResidOut,
+                   int maxIters) {
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.empty() || !mv.pts || !mv.tris || !mv.compTris) return false;
+
+    std::vector<int> gids;
+    for (int t : ids) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        const int g = mv.compTris[t];
+        for (int k = 0; k < 3; ++k) gids.push_back(mv.tris[g][k]);
+    }
+    std::sort(gids.begin(), gids.end());
+    gids.erase(std::unique(gids.begin(), gids.end()), gids.end());
+    if (gids.size() < 6) return false;   // 4 unknowns + r; fewer is not a fit
+
+    std::vector<gp_XYZ> P;
+    P.reserve(gids.size());
+    gp_XYZ mean(0.0, 0.0, 0.0);
+    for (int g : gids) {
+        const gp_XYZ p = mv.pts[g];
+        if (!finite3(p.X(), p.Y(), p.Z())) return false;
+        P.push_back(p);
+        mean += p;
+    }
+    const double n = static_cast<double>(P.size());
+    mean.Divide(n);
+
+    gp_XYZ W(axisSeed.XYZ());
+    const double wm0 = W.Modulus();
+    if (wm0 < kEps) return false;
+    W.Divide(wm0);
+    const gp_XYZ Wseed = W;
+
+    gp_Pnt c0;
+    double r0 = 0.0;
+    if (!eberlyCenterRadius(mv, ids, gp_Dir(W.X(), W.Y(), W.Z()), c0, r0) || !(r0 > 0.0))
+        return false;
+    gp_XYZ C = c0.XYZ();
+
+    // rho, r and the sum of squares for one (W, C). Returns false on a vertex on
+    // the axis, where rho is not differentiable.
+    std::vector<double> rho(P.size(), 0.0);
+    auto evaluate = [&](const gp_XYZ& Wc, const gp_XYZ& Cc, double& rOut, double& eOut) {
+        double sum = 0.0;
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const gp_XYZ d = P[i] - Cc;
+            const gp_XYZ rad = d - Wc * d.Dot(Wc);
+            const double m = rad.Modulus();
+            if (!std::isfinite(m) || m < kEps) return false;
+            rho[i] = m;
+            sum += m;
+        }
+        rOut = sum / n;
+        double e = 0.0;
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const double f = rho[i] - rOut;
+            e += f * f;
+        }
+        if (!std::isfinite(e)) return false;
+        eOut = e;
+        return true;
+    };
+
+    double r = r0, E = 0.0;
+    if (!evaluate(W, C, r, E)) return false;
+
+    double lambda = 1e-6;
+    const int iterCap = maxIters > 0 ? maxIters : 16;
+    for (int it = 0; it < iterCap; ++it) {
+        gp_XYZ U, V;
+        if (!axisFrame(W, U, V)) break;
+
+        // J rows: d rho_i / d(theta) for theta = (W along U, W along V, C along
+        // U, C along V), then mean-centred because r is the mean of rho.
+        std::array<double, 4> colMean{ { 0.0, 0.0, 0.0, 0.0 } };
+        std::vector<std::array<double, 4>> J(P.size());
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const gp_XYZ d = P[i] - C;
+            const double wd = d.Dot(W);
+            const gp_XYZ rad = d - W * wd;
+            const double m = rho[i];
+            const gp_XYZ rhat = rad / m;
+            J[i][0] = -wd * d.Dot(U) / m;
+            J[i][1] = -wd * d.Dot(V) / m;
+            J[i][2] = -rhat.Dot(U);
+            J[i][3] = -rhat.Dot(V);
+            for (int k = 0; k < 4; ++k) colMean[k] += J[i][k];
+        }
+        for (int k = 0; k < 4; ++k) colMean[k] /= n;
+
+        std::array<std::array<double, 4>, 4> A{};
+        std::array<double, 4> b{ { 0.0, 0.0, 0.0, 0.0 } };
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            std::array<double, 4> g{};
+            for (int k = 0; k < 4; ++k) g[k] = J[i][k] - colMean[k];
+            const double f = rho[i] - r;
+            for (int k = 0; k < 4; ++k) {
+                b[k] -= g[k] * f;
+                for (int l = 0; l < 4; ++l) A[k][l] += g[k] * g[l];
+            }
+        }
+
+        bool stepped = false;
+        for (int trial = 0; trial < 8 && !stepped; ++trial) {
+            std::array<std::array<double, 5>, 4> M{};
+            for (int k = 0; k < 4; ++k) {
+                for (int l = 0; l < 4; ++l) M[k][l] = A[k][l];
+                M[k][k] *= (1.0 + lambda);
+                M[k][k] += lambda;
+                M[k][4] = b[k];
+            }
+            // Gaussian elimination, partial pivot. 4x4; no allocation, no library.
+            bool singular = false;
+            for (int col = 0; col < 4 && !singular; ++col) {
+                int piv = col;
+                for (int row = col + 1; row < 4; ++row)
+                    if (std::abs(M[row][col]) > std::abs(M[piv][col])) piv = row;
+                if (std::abs(M[piv][col]) < kEps) { singular = true; break; }
+                if (piv != col) std::swap(M[piv], M[col]);
+                for (int row = col + 1; row < 4; ++row) {
+                    const double fac = M[row][col] / M[col][col];
+                    for (int l = col; l < 5; ++l) M[row][l] -= fac * M[col][l];
+                }
+            }
+            if (singular) break;
+            std::array<double, 4> dx{};
+            for (int row = 3; row >= 0; --row) {
+                double acc = M[row][4];
+                for (int l = row + 1; l < 4; ++l) acc -= M[row][l] * dx[l];
+                dx[row] = acc / M[row][row];
+            }
+            bool bad = false;
+            for (int k = 0; k < 4; ++k)
+                if (!std::isfinite(dx[k])) bad = true;
+            if (bad) break;
+
+            gp_XYZ Wn = W + U * dx[0] + V * dx[1];
+            const double wm = Wn.Modulus();
+            if (wm < kEps) break;
+            Wn.Divide(wm);
+            const gp_XYZ Cn = C + U * dx[2] + V * dx[3];
+            double rn = 0.0, En = 0.0;
+            if (evaluate(Wn, Cn, rn, En) && En <= E) {
+                W = Wn;
+                C = Cn;
+                r = rn;
+                E = En;
+                lambda = std::max(1e-12, lambda / 3.0);
+                stepped = true;
+            } else {
+                lambda *= 5.0;
+                if (lambda > 1e6) break;
+            }
+        }
+        if (!stepped) break;
+    }
+
+    // Re-evaluate on the accepted state so rho[] matches what is reported.
+    if (!evaluate(W, C, r, E)) return false;
+    if (!(r > 0.0) || !std::isfinite(r)) return false;
+
+    // A direction and its negation describe the same cylinder; keep the seed's
+    // hemisphere so vMin/vMax and outwardNormal downstream do not flip.
+    if (W.Dot(Wseed) < 0.0) W.Reverse();
+    // Canonical axis point: the one nearest the vertex mean (eberlyCenterRadius's
+    // own convention), so the axial component is not left wherever LM drifted it.
+    C = C + W * ((mean - C).Dot(W));
+    if (!finite3(C.X(), C.Y(), C.Z()) || !finite3(W.X(), W.Y(), W.Z())) return false;
+
+    double maxResid = 0.0;
+    for (std::size_t i = 0; i < P.size(); ++i)
+        maxResid = std::max(maxResid, std::abs(rho[i] - r));
+    if (!std::isfinite(maxResid)) return false;
+
+    axisOut = gp_Dir(W.X(), W.Y(), W.Z());
+    centerOut = gp_Pnt(C.X(), C.Y(), C.Z());
+    radiusOut = r;
+    maxResidOut = maxResid;
+    return true;
+}
+
 bool prattCircleFit(const gp_Pnt* points, std::size_t n, double spanRad, gp_Pnt& center,
                     double& radius) {
     if (!points || n < 3) return false;
