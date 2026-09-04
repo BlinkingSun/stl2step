@@ -150,15 +150,37 @@ def _entity_name(body: str) -> str:
 def shared_tier2_edges(step_text: str) -> Tuple[List[str], List[str]]:
     """D-130-2 tier 2, structurally on the STEP file.
 
-    Returns (shared, unshared): the EDGE_CURVEs whose 3D curve is a degree-1
-    B_SPLINE_CURVE_WITH_KNOTS (the mesh polyline) and that are referenced by
-    the loops of exactly two faces whose surfaces are both CYLINDRICAL_SURFACE
-    (or CONICAL_SURFACE), versus such polyline edges that only ONE analytic
-    face references. A tier-2 seam is honest only when it is one TShape on
-    both faces; a polyline each face carries alone is the shell opening.
+    Returns (shared, unshared): the EDGE_CURVEs whose underlying 3D curve is
+    a degree-1 B_SPLINE_CURVE_WITH_KNOTS (the mesh polyline) and that are
+    referenced by the loops of exactly two faces whose surfaces are both
+    CYLINDRICAL_SURFACE (or CONICAL_SURFACE), versus such polyline edges that
+    only ONE analytic face references. D-130-19: sharing is the EDGE_CURVE
+    entity id on both faces' loops (EDGE_LOOP → ORIENTED_EDGE → EDGE_CURVE),
+    whether that EDGE_CURVE's curve is the B-spline itself or a SURFACE_CURVE
+    / SEAM_CURVE / INTERSECTION_CURVE pcurve pair whose 3D curve is the
+    B-spline. Degree 1 is required of the underlying 3D curve, not of the
+    wrapper. A tier-2 seam is honest only when it is one TShape on both
+    faces; a polyline each face carries alone is the shell opening.
     """
     ents = _step_entities(step_text)
     name = {k: _entity_name(v) for k, v in ents.items()}
+
+    # SURFACE_CURVE('', #3d, (#pcurve, ...), .PCURVE_S1.) — first ref is 3D.
+    curve_wrappers = ("SURFACE_CURVE", "SEAM_CURVE", "INTERSECTION_CURVE")
+
+    def underlying_3d(curve_id: int) -> int:
+        seen: set = set()
+        cid = curve_id
+        while cid not in seen:
+            seen.add(cid)
+            if name.get(cid, "") not in curve_wrappers:
+                return cid
+            refs = [int(x) for x in REF_RE.findall(ents.get(cid, ""))]
+            if not refs:
+                return cid
+            cid = refs[0]
+        return cid
+
     # face -> surface entity, face -> set of edge_curve ids
     face_surface: Dict[int, int] = {}
     face_edges: Dict[int, set] = {}
@@ -202,7 +224,7 @@ def shared_tier2_edges(step_text: str) -> Tuple[List[str], List[str]]:
         crefs = [int(x) for x in REF_RE.findall(eb)]
         if len(crefs) < 3:
             continue
-        curve = crefs[2]
+        curve = underlying_3d(crefs[2])
         cb = ents.get(curve, "")
         if name.get(curve, "") != "B_SPLINE_CURVE_WITH_KNOTS":
             continue
