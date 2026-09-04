@@ -9932,6 +9932,52 @@ void dumpDiagPlateWireSense(const Region& r, const Handle(Geom_Plane)& gpl, cons
                  r.outwardNormal ? 1 : 0, faceFwd, faceOut);
 }
 
+// DECISION-130 tripwire. An analytic edge on a plate -- one born at
+// bindAllVariants, i.e. enrolled in gSeamTShapes -- must name the chain it came
+// from. An edge that cannot be resolved to a collapsed chain is an edge no other
+// face can reference: it is the makeFaceKeep-seam / ci=-1 failure mode, and it
+// opens the shell silently. Never a fallback: the count is always reported and
+// the face is refused, so the region explodes to facets that ARE shared.
+// STL2STEP_130_TRIPWIRE_ABORT=1 turns it into a hard stop for investigation.
+int plateAnalyticEdgesWithoutChain(const Region& r, const TopoDS_Face& f,
+                                   const std::vector<ChainGeom>& geom,
+                                   TopoDS_Edge* firstBad = nullptr) {
+    if (f.IsNull()) return 0;
+    int n = 0;
+    std::unordered_set<const void*> seen;
+    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+        const void* ts = diagTShapePtr(e);
+        if (!ts || !gSeamTShapes.count(ts) || !seen.insert(ts).second) continue;
+        bool named = false;
+        for (size_t ci = 0; ci < geom.size() && !named; ci++)
+            for (const TopoDS_Edge& ge : geom[ci].edges)
+                if (!ge.IsNull() && diagTShapePtr(ge) == ts) {
+                    named = true;
+                    break;
+                }
+        if (named) continue;
+        if (n == 0 && firstBad) *firstBad = e;
+        n++;
+    }
+    if (n > 0) {
+        gp_Pnt p0, p1;
+        if (firstBad && !firstBad->IsNull()) {
+            TopoDS_Vertex v0, v1;
+            TopExp::Vertices(*firstBad, v0, v1, Standard_True);
+            if (!v0.IsNull()) p0 = BRep_Tool::Pnt(v0);
+            if (!v1.IsNull()) p1 = BRep_Tool::Pnt(v1);
+        }
+        std::fprintf(stderr,
+                     "DIAG_130_TRIPWIRE rid=%d unnamedAnalyticEdges=%d verdict=refused "
+                     "first=(%.4f,%.4f,%.4f)-(%.4f,%.4f,%.4f)\n",
+                     r.id, n, p0.X(), p0.Y(), p0.Z(), p1.X(), p1.Y(), p1.Z());
+        if (const char* v = std::getenv("STL2STEP_130_TRIPWIRE_ABORT"); v && v[0] && v[0] != '0')
+            std::abort();
+    }
+    return n;
+}
+
 bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                      const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                      const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
@@ -10017,6 +10063,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                     dumpPcurveFrames(r, ow);
                     dumpDiagPlateLine(r.id, outF);
                 }
+                if (plateAnalyticEdgesWithoutChain(r, outF, geom) > 0) return false;
                 return !outF.IsNull();
             }
             diagPlateMakeFaceFail(r.id, outF, ow, rs, mv, geom, collapsed, meshE, mv.sewTol);
@@ -10129,6 +10176,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             dumpPcurveFrames(r, ow);
             dumpDiagPlateLine(r.id, outF);
         }
+        if (plateAnalyticEdgesWithoutChain(r, outF, geom) > 0) return false;
         return !outF.IsNull();
     } catch (const Standard_Failure&) {
         return false;
