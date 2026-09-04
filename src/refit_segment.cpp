@@ -66,6 +66,22 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     if (!commitPlanesA3(mv, p, tol, work)) return false;
     if (!buildTopologyD(mv, p, tol, work, out)) return false;
 
+    // D-130-11(1) cross-check: the same floor measured on the plane regions that
+    // actually reached the RegionSet, so the stage-L number (taken from the A2
+    // provisionals, which is where the absorb needs it) can be compared with the
+    // set the decision names rather than assumed equal to it.
+    if (const char* lb = std::getenv("STL2STEP_LAWBAND_DIAG"); lb && lb[0] && lb[0] != '0') {
+        std::vector<double> devs;
+        for (const Region& r : out.regions)
+            if (r.type == SurfType::Plane && std::isfinite(r.maxVertexDev))
+                devs.push_back(r.maxVertexDev);
+        std::sort(devs.begin(), devs.end());
+        std::fprintf(stderr,
+                     "DIAG_NOISEFLOOR_ACCEPTED nTri=%zu planes=%zu floor=%.6g median=%.6g\n",
+                     mv.nTri, devs.size(), devs.empty() ? 0.0 : devs.back(),
+                     devs.empty() ? 0.0 : devs[devs.size() / 2]);
+    }
+
     if (const char* d130 = std::getenv("STL2STEP_DIAG_130"); d130 && d130[0] && d130[0] != '0') {
         int nNgon = 0, nCone = 0, nCyl = 0, nPl = 0, nFil = 0, nTorus = 0;
         for (const Region& r : out.regions) {

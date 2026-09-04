@@ -2065,6 +2065,48 @@ bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols&
     return true;
 }
 
+// D-130-11(1) -- the mesh's OWN planar noise floor, measured.
+//
+// The decision replaces the absorb's part-scale admission budget
+// (max(5e-5, 4*weldTol, 1e-6*diag) -- a number the bounding box produces)
+// with a measurement: "the max vertex-to-plane residual over the accepted
+// plane regions of the SAME mesh". This is that measurement.
+//
+// A2 has already grown every plane provisional and measured maxVertexDev
+// against its own fitted plane; A3 commits those provisionals into Plane
+// regions with both fields verbatim, so at stage L -- where the absorb needs
+// it -- the set and its residuals are already known. Provisionals A3 would drop
+// as islands (<= 2 triangles under the area floor) are excluded here for the
+// same reason A3 drops them: they are not regions. The median and the p90 are
+// carried out alongside the max because on both measured meshes the max is an
+// outlier by ten or more orders of magnitude and the difference is the whole
+// finding (see _team/reports/130-absorb-2.md).
+double meshPlaneNoiseFloor(const MeshView& mv, const SegmentWork& work, const DerivedTols& tol,
+                           int& nPlanesOut, double& medianOut, double& p90Out, int& worstTriOut) {
+    const double areaMin = tol.epsPlane * mv.diag;
+    std::vector<std::pair<double, int>> devs;
+    devs.reserve(work.provisionals.size());
+    for (const Provisional& p : work.provisionals) {
+        if (p.claim != ProvClaim::Unclaimed) continue;
+        if (p.tris.empty()) continue;
+        if (p.tris.size() <= 2 && p.area <= areaMin) continue;
+        if (!std::isfinite(p.maxVertexDev)) continue;
+        devs.emplace_back(p.maxVertexDev, static_cast<int>(p.tris.size()));
+    }
+    nPlanesOut = static_cast<int>(devs.size());
+    if (devs.empty()) {
+        medianOut = 0.0;
+        p90Out = 0.0;
+        worstTriOut = 0;
+        return 0.0;
+    }
+    std::sort(devs.begin(), devs.end());
+    medianOut = devs[devs.size() / 2].first;
+    p90Out = devs[(devs.size() * 9) / 10].first;
+    worstTriOut = devs.back().second;
+    return devs.back().first;
+}
+
 bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols& tol,
                     SegmentWork& work) {
     if (!archChainBand(mv)) {
@@ -2077,6 +2119,18 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
         return true;
     }
     if (mv.nTri == 0 || !mv.triEdges) return true;
+
+    if (lawbandDiagOn()) {
+        int nPlaneReg = 0;
+        double planeMed = 0.0, planeP90 = 0.0;
+        int worstTri = 0;
+        const double noiseFloor =
+            meshPlaneNoiseFloor(mv, work, tol, nPlaneReg, planeMed, planeP90, worstTri);
+        std::fprintf(stderr,
+                     "DIAG_NOISEFLOOR nTri=%zu diag=%.6g planes=%d floor=%.6g p90=%.6g "
+                     "median=%.6g worstNTri=%d\n",
+                     mv.nTri, mv.diag, nPlaneReg, noiseFloor, planeP90, planeMed, worstTri);
+    }
 
     const int nCharts = work.nCharts > 0 ? work.nCharts : 1;
     std::vector<std::vector<int>> perChart(static_cast<size_t>(nCharts));
