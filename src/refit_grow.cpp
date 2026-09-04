@@ -3234,6 +3234,12 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                     }
                 }
             }
+            // D-130-16: a surface component that is made of SEVERAL
+            // edge-connected pieces is a PINCHED domain -- its pieces meet only
+            // at isolated mesh vertices, and the face's boundary must pass
+            // through each of those vertices twice. That is the number the
+            // union's face path lives or dies on, so it is measured here and
+            // not inferred: pieces=[k1,k2,...], one entry per surface face.
             std::fprintf(stderr,
                          "  DIAG_LAWUNION rid=%d R=%.6f nTri=%zu edgePieces=%zu "
                          "surfaceFaces=%zu sizes=[",
@@ -3241,6 +3247,33 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                          surfComps.size());
             for (size_t k = 0; k < surfComps.size(); k++)
                 std::fprintf(stderr, "%s%zu", k ? "," : "", surfComps[k].size());
+            std::fprintf(stderr, "] pieces=[");
+            for (size_t k = 0; k < surfComps.size(); k++) {
+                std::vector<char> inc(static_cast<size_t>(mv.nTri), 0);
+                for (int t : surfComps[k]) inc[static_cast<size_t>(t)] = 1;
+                std::vector<char> sn(static_cast<size_t>(mv.nTri), 0);
+                size_t nP = 0;
+                for (int t : surfComps[k]) {
+                    if (sn[static_cast<size_t>(t)]) continue;
+                    ++nP;
+                    std::vector<int> stk{t};
+                    sn[static_cast<size_t>(t)] = 1;
+                    while (!stk.empty()) {
+                        const int x = stk.back();
+                        stk.pop_back();
+                        for (int sIdx = 0; sIdx < 3 && mv.triEdges; sIdx++) {
+                            const int e2 = mv.triEdges[x][sIdx];
+                            const int u3 = (eaP.tri[e2][0] == x) ? eaP.tri[e2][1] : eaP.tri[e2][0];
+                            if (u3 < 0 || !inc[static_cast<size_t>(u3)] ||
+                                sn[static_cast<size_t>(u3)])
+                                continue;
+                            sn[static_cast<size_t>(u3)] = 1;
+                            stk.push_back(u3);
+                        }
+                    }
+                }
+                std::fprintf(stderr, "%s%zu", k ? "," : "", nP);
+            }
             std::fprintf(stderr, "]\n");
         }
         const std::vector<int> whole = b.tris;
