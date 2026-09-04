@@ -65,6 +65,7 @@ using stl2step::refit::coneLineBindSup;
 using stl2step::refit::conePCurveForCircle;
 using stl2step::refit::conePCurveForLine;
 using stl2step::refit::coneRadiusAt;
+using stl2step::refit::coneVAtRadius;
 using stl2step::refit::coneVAtZ;
 
 static const double kPi = 3.14159265358979323846264338327950288;
@@ -519,6 +520,115 @@ static void testLocation() {
     checkNear(sup, 0.0, 1e-11, "located face: binds at 0");
 }
 
+// ---------------------------------------------------------------------------
+// 8. BOTH TAPER SIGNS IN ONE FRAME  (130-CONE-ARCS)
+//
+// A chamfer frustum's radius may grow either way along the axis its neighbour
+// cylinder carries (that axis has been through canonicalizeDir and says nothing
+// about the taper). Detector C carries that sign in a SIGNED HEIGHT and never
+// flips the axis. This group asserts both halves of that: the signed height
+// describes either taper exactly, and flipping the axis instead does not.
+// ---------------------------------------------------------------------------
+
+static void testTaperSigns() {
+    const gp_Ax3 P = obliquePlacement();  // Location = the R_lo rim, Direction = the cylinder's
+    const double rLo = 8.5, rHi = 9.5;    // the plate's chamfer
+
+    for (int sgn = 0; sgn < 2; ++sgn) {
+        // +1: the R_hi rim is one unit along +Direction (the plate's UPPER
+        // chamfer). -1: it is one unit along -Direction (the LOWER chamfer,
+        // whose taper runs against the canonical axis).
+        const double h = (sgn == 0) ? 1.0 : -1.0;
+        const std::string nm = (sgn == 0) ? "taper +h" : "taper -h";
+        gp_Cone cone;
+        const bool built = coneFromRims(P, rLo, rHi, h, cone);
+        check(built, (nm + ": coneFromRims builds").c_str());
+        if (!built) continue;
+        checkNear(cone.SemiAngle(), (h > 0.0 ? 1.0 : -1.0) * kPi / 4.0, 1e-12,
+                  (nm + ": SemiAngle carries the sign").c_str());
+        checkNear(cone.RefRadius(), rLo, 1e-12, (nm + ": RefRadius is R_lo").c_str());
+        // ONE FRAME: Direction, XDirection and YDirection are the neighbour
+        // cylinder's for both signs, so every circle either side builds in it.
+        check(cone.Position().Direction().IsEqual(P.Direction(), 1e-12) &&
+                  cone.Position().XDirection().IsEqual(P.XDirection(), 1e-12) &&
+                  cone.Position().YDirection().IsEqual(P.YDirection(), 1e-12),
+              (nm + ": frame is the neighbour cylinder's, unchanged").c_str());
+
+        for (int k = 0; k < 2; ++k) {
+            // Exactly what coneIsoCircle builds: the axial offset is a fraction
+            // of the SIGNED height and the circle takes the region's own
+            // Direction and XDirection.
+            const double vAx = (k == 0) ? 0.0 : h;
+            const double R = rLo + (vAx / h) * (rHi - rLo);
+            const std::string rn = nm + (k == 0 ? " R_lo rim" : " R_hi rim");
+            checkNear(R, k == 0 ? rLo : rHi, 1e-12, (rn + ": radius").c_str());
+            const gp_Pnt ctr = P.Location().Translated(gp_Vec(P.Direction()) * vAx);
+            const gp_Circ rim(gp_Ax2(ctr, P.Direction(), P.XDirection()), R);
+            // 130-CONE-MATH: the rim is ON the surface, both signs.
+            ConeDevClass mc = ConeDevClass::Unhandled;
+            checkNear(circleOnConeMax(cone, rim, &mc), 0.0, 1e-12,
+                      (rn + ": circleOnConeMax = 0").c_str());
+            // and it binds at 0 through the certified class.
+            Handle(Geom_Surface) S = surfOf(cone);
+            Handle(Geom2d_Curve) pc = conePCurveForCircle(cone, rim);
+            check(!pc.IsNull(), (rn + ": certified pcurve exists").c_str());
+            if (pc.IsNull()) continue;
+            Handle(Geom_Curve) c3 = new Geom_Circle(rim);
+            const char* cls = nullptr;
+            const double sup =
+                coneCircleBindSup(c3, 0.0, 2.0 * kPi, S, pc, TopLoc_Location(), &cls);
+            checkStr(cls, "circle-on-cone", (rn + ": class").c_str());
+            checkNear(sup, 0.0, 1e-11, (rn + ": binds at 0").c_str());
+            const GridStat g = sampleGap(c3, 0.0, 2.0 * kPi, S, pc);
+            checkNear(g.maxGap, 0.0, 1e-11, (rn + ": oracle grid max = 0").c_str());
+            // u sweeps FORWARD in this frame for both taper signs -- which is
+            // what lets the face builder write a slope +1 rim pcurve at all.
+            const gp_Pnt2d a2 = pc->Value(0.0), b2 = pc->Value(1.0);
+            check(b2.X() - a2.X() > 0.0, (rn + ": u sweeps forward").c_str());
+        }
+
+        // The seam generator runs from the R_lo rim TOWARD the R_hi rim. Built
+        // from the frustum's own two numbers it is right for either sign;
+        // sin(Ang)*X + cos(Ang)*Z is the surface's +v and points AWAY from the
+        // R_hi rim when Ang < 0.
+        const gp_Dir gen(gp_Vec(P.XDirection()) * (rHi - rLo) + gp_Vec(P.Direction()) * h);
+        const gp_Pnt pLo = P.Location().Translated(gp_Vec(P.XDirection()) * rLo);
+        const gp_Pnt pHi = P.Location()
+                               .Translated(gp_Vec(P.Direction()) * h)
+                               .Translated(gp_Vec(P.XDirection()) * rHi);
+        const double len = std::fabs(coneVAtRadius(cone, rHi));
+        checkNear(pLo.Translated(gp_Vec(gen) * len).Distance(pHi), 0.0, 1e-12,
+                  (nm + ": generator reaches the R_hi seam vertex").c_str());
+    }
+
+    // The defect the signed height replaces. Flipping Direction and keeping
+    // XDirection gives a RIGHT-handed frame with YDirection negated, so the
+    // cone's u runs the other way round the rim circle the neighbour cylinder
+    // built -- and a slope +1 rim pcurve there is off by the full diameter.
+    {
+        const gp_Ax3 F(P.Location(), P.Direction().Reversed(), P.XDirection());
+        gp_Cone flipped;
+        check(coneFromRims(F, rLo, rHi, 1.0, flipped), "flipped axis: coneFromRims builds");
+        check(flipped.Position().YDirection().IsOpposite(P.YDirection(), 1e-9),
+              "flipped axis: YDirection is negated (gp_Ax3 is right-handed)");
+        const gp_Circ rim(gp_Ax2(P.Location(), P.Direction(), P.XDirection()), rLo);
+        Handle(Geom_Surface) S = surfOf(flipped);
+        Handle(Geom2d_Curve) pc = conePCurveForCircle(flipped, rim);
+        check(!pc.IsNull(), "flipped axis: certified pcurve exists");
+        if (!pc.IsNull()) {
+            const gp_Pnt2d a2 = pc->Value(0.0), b2 = pc->Value(1.0);
+            check(b2.X() - a2.X() < 0.0,
+                  "flipped axis: the certified pcurve must sweep u BACKWARD");
+        }
+        Handle(Geom_Curve) c3 = new Geom_Circle(rim);
+        Handle(Geom2d_Curve) slopePlus1 =
+            new Geom2d_Line(gp_Pnt2d(0.0, coneVAtZ(flipped, 0.0)), gp_Dir2d(1.0, 0.0));
+        const GridStat g = sampleGap(c3, 0.0, 2.0 * kPi, S, slopePlus1);
+        checkNear(g.maxGap, 2.0 * rLo, 1e-9,
+                  "flipped axis + slope +1 rim pcurve: gap is the full diameter");
+    }
+}
+
 int main() {
     testExactRim();
     testParametrisationTerm();
@@ -527,6 +637,7 @@ int main() {
     testSeamLine();
     testTrimmedForms();
     testLocation();
+    testTaperSigns();
     std::fprintf(stderr, "cone_bind_unit: %d/%d PASS\n", gPass, gPass + gFail);
     return gFail ? 1 : 0;
 }

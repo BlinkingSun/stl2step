@@ -38,7 +38,11 @@
 //   chordSagitta  chordSagitta(R_lo, N)
 //   filletNbrA    work.accepted index of the neighbour cylinder (pre-D)
 //   outwardNormal cylinder-style σ (material on the axis side)
-//   maxVertexSnap frustum height along the axis (mm)
+//   maxVertexSnap frustum height along the axis (mm), SIGNED: the axial offset
+//                 from the R_lo rim to the R_hi rim measured along +Direction,
+//                 so it is negative when the taper runs against the canonical
+//                 axis. The axis itself is never flipped -- see the comment at
+//                 the axOut/hSigned site below.
 //
 // SPDX-License-Identifier: MIT
 
@@ -752,20 +756,42 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     sigma += a * n.Dot(rho);
                 }
 
-                // Orient the region axis so the radius GROWS along +Direction.
-                // The cylinder axis this cone inherits has been through
-                // canonicalizeDir, so it carries no information about which way
-                // the taper runs, while every consumer evaluates the frustum as
+                // ONE FRAME FOR BOTH TAPER SIGNS. The cylinder axis this cone
+                // inherits has been through canonicalizeDir and carries no
+                // information about which way the taper runs, while every
+                // consumer evaluates the frustum as
                 // rho(v) = R_lo + (v/h)*(R_hi - R_lo) from Location along
-                // +Direction. Measured on the plate: the LOWER chamfer has its
-                // large rim at z = -45 and its small rim at z = -44, i.e. the
-                // radius grows along -Z while the canonical axis is +Z, and the
-                // plane|cone rim circle came out at R 7.5 instead of 9.5 -- 2.0
-                // mm out, ratioSew 1114 -- which opened the shell by 93 free
-                // edges. The upper chamfer, whose taper runs the same way as the
-                // canonical axis, was correct. This is the sign the detector
-                // already knows (loAtVmin) and was dropping.
-                const gp_XYZ axOut = loAtVmin ? axis : (axis * -1.0);
+                // +Direction. That sign is loAtVmin, and it is carried HERE, in
+                // the SIGNED height, never by flipping the axis.
+                //
+                // Flipping the axis was measured to be wrong twice over. It
+                // fixes the radius (the plane|cone rim came out at R 7.5 instead
+                // of 9.5, 2.0 mm out, ratioSew 1114, 93 free edges) but it puts
+                // the cone's frame ANTI-PARALLEL to the neighbour cylinder's:
+                // gp_Ax2/gp_Ax3 are right-handed, so negating Direction while
+                // keeping XDirection negates YDirection too, and the cone's u
+                // then sweeps the opposite way round the shared rim circle --
+                // which is built in the cylinder's frame. The cone's rim pcurve
+                // is a 2d line of slope +1 in u either way, so on the flipped
+                // copy it disagrees with the 3d circle by up to 2R = 17 mm.
+                // BRepLib::SameParameter then cannot set the flag on an edge
+                // whose OTHER pcurve is exact, and the neighbour cylinder reads
+                // as invalid with no status of its own:
+                //   DIAG_R2SUB rid=18 type=EDGE own=[] ctx=[InvalidSameParameterFlag]
+                //              dev=0 sameP=0 p=(144.50000,-7.50000,-44.00000)
+                // (the plate's LOWER chamfer rim, the copy whose taper runs
+                // against +Z). Measured: with the axis flipped, cone rid 30
+                // reaches faceSt=[27:UnorientableShape] and the component
+                // reverts; with the signed height it reaches valid=1.
+                //
+                // The signed height is exact: gp_Cone accepts a negative
+                // SemiAngle (its guard is on |Ang|), so
+                // Ang = atan((R_hi - R_lo)/h) < 0 describes a frustum whose
+                // radius SHRINKS along +Direction with no change of frame, and
+                // rho(v) = R_lo + (v/h)*(R_hi - R_lo) is unchanged for both
+                // signs of h.
+                const gp_XYZ axOut = axis;
+                const double hSigned = loAtVmin ? height : -height;
 
                 Region r;
                 r.id = 0;
@@ -785,7 +811,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 r.chordSagitta = chordSagitta(R1, nSides);
                 r.nSides = nSides;
                 r.dVolPredicted = 0.0;
-                r.maxVertexSnap = height;
+                r.maxVertexSnap = hSigned;
                 r.reject = Reject::None;
                 r.builtAs = BuiltAs::NotBuilt;
                 r.filletNbrA = cylI;

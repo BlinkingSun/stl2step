@@ -1290,20 +1290,26 @@ bool isChamferConeR(const Region& r) {
     return r.type == SurfType::Cone && r.origin == Origin::ChamferCone;
 }
 
+// SIGNED axial offset from the R_lo rim (the region's Location) to the R_hi rim,
+// measured along +Direction. Negative when the taper runs against the canonical
+// axis; detector C never flips the axis, it carries the sign here, so a cone and
+// the cylinder it meets always share one frame (refit_chamfer_cone.cpp).
 double chamferHeightOf(const Region& r) {
-    if (r.maxVertexSnap > Precision::Confusion()) return r.maxVertexSnap;
+    if (std::fabs(r.maxVertexSnap) > Precision::Confusion()) return r.maxVertexSnap;
     return std::fabs(r.vMax - r.vMin);
 }
 
 double chamferRhiOf(const Region& r) {
     if (r.vMax > r.radius + Precision::Confusion()) return r.vMax;
-    return r.radius + chamferHeightOf(r);
+    return r.radius + std::fabs(chamferHeightOf(r));
 }
 
 gp_Circ coneIsoCircle(const Region& cone, double vAxial) {
     const double h = chamferHeightOf(cone);
     const double Rhi = chamferRhiOf(cone);
-    const double t = (h > Precision::Confusion()) ? (vAxial / h) : 0.0;
+    // t is a fraction of the SIGNED height, so t = 1 is the R_hi rim for either
+    // taper sign and rho(v) = R_lo + t*(R_hi - R_lo) needs no case analysis.
+    const double t = (std::fabs(h) > Precision::Confusion()) ? (vAxial / h) : 0.0;
     double R = cone.radius + t * (Rhi - cone.radius);
     if (!(R > Precision::Confusion())) R = cone.radius;
     gp_Pnt loc = cone.ax.Location().Translated(gp_Vec(cone.ax.Direction()) * vAxial);
@@ -12910,8 +12916,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     const double Rhi = chamferRhiOf(r);
                     const double h = chamferHeightOf(r);
                     const double dR = Rhi - Rlo;
-                    if (!(h > Precision::Confusion()) || !(Rlo > Precision::Confusion()) ||
-                        dR <= Precision::Confusion())
+                    if (!(std::fabs(h) > Precision::Confusion()) ||
+                        !(Rlo > Precision::Confusion()) || dR <= Precision::Confusion())
                         return coneFail("degenerate-frustum", h, dR);
                     const double ang = csurf->SemiAngle();
                     // Which cap loop carries the R_lo rim is decided by
@@ -12964,9 +12970,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     try {
                         const gp_Pnt pSeamLo =
                             circLo.Location().Translated(gp_Vec(circLo.XAxis().Direction()) * Rlo);
-                        const gp_Dir genDir(
-                            gp_Vec(circLo.XAxis().Direction()) * std::sin(ang) +
-                            gp_Vec(r.ax.Direction()) * std::cos(ang));
+                        // From the R_lo rim TOWARD the R_hi rim, built from the
+                        // frustum's own two numbers so it is right for either
+                        // taper sign. Writing it as sin(Ang)*X + cos(Ang)*Z is
+                        // the surface's +v direction, which points AWAY from the
+                        // R_hi rim when Ang < 0 (h < 0) and gives a seam whose
+                        // parameter range runs backwards.
+                        const gp_Dir genDir(gp_Vec(circLo.XAxis().Direction()) * dR +
+                                            gp_Vec(r.ax.Direction()) * h);
                         const gp_Lin gen(pSeamLo, genDir);
                         AnalyticCurve acs;
                         acs.kind = AnalyticCurve::Lin;
@@ -13020,10 +13031,18 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             BRep_Builder Bs;
                             Standard_Real fs = 0, ls = 0;
                             Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
+                            // The seam edge is parametrised by arc length from
+                            // the R_lo rim toward the R_hi rim (genDir above), so
+                            // its 3d parameter increases while the surface's v
+                            // DECREASES whenever the frustum sits at negative v
+                            // (Ang < 0). vSgn is that sign, taken from the
+                            // surface itself, not assumed.
+                            const double vHiParam = coneVAtRadius(csurf->Cone(), Rhi);
+                            const double vSgn = (vHiParam >= 0.0) ? 1.0 : -1.0;
                             Handle(Geom2d_Line) pcS0 =
-                                new Geom2d_Line(gp_Pnt2d(u0, 0.0), gp_Dir2d(0.0, 1.0));
+                                new Geom2d_Line(gp_Pnt2d(u0, 0.0), gp_Dir2d(0.0, vSgn));
                             Handle(Geom2d_Line) pcS1 = new Geom2d_Line(
-                                gp_Pnt2d(u0 + 2.0 * kPi, 0.0), gp_Dir2d(0.0, 1.0));
+                                gp_Pnt2d(u0 + 2.0 * kPi, 0.0), gp_Dir2d(0.0, vSgn));
                             Bs.UpdateEdge(eSeam, pcS0, pcS1, csurf, TopLoc_Location(), sewTol);
                             if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
                             eSeam.Closed(Standard_False);
