@@ -266,6 +266,7 @@ struct Converter {
         r.exitCode = 1;
         r.error = err;
         r.warnings = warnings;
+        std::sort(r.warnings.begin(), r.warnings.end());  // D-130-10(2)
         if (log) log(Severity::Error, err);
         return r;
     }
@@ -952,17 +953,23 @@ Result Converter::run() {
             }
         }
 
-        int builtPl = 0, builtCy = 0, builtFi = 0, builtCo = 0, revCo = 0;
+        int builtPl = 0, builtCy = 0, builtCn = 0, builtFi = 0, builtCo = 0, revCo = 0;
         if (smooth) {
             size_t pi = 0;
             for (size_t ci = 0; ci < order.size(); ++ci) {
                 const CompOut& o = outs[ci];
-                int cyls = 0;
+                int cyls = 0, cones = 0;
                 for (size_t k = 0; k < o.parts.size(); ++k) {
-                    for (TopExp_Explorer ex(parts[pi], TopAbs_FACE); ex.More(); ex.Next())
-                        if (BRepAdaptor_Surface(TopoDS::Face(ex.Current()), Standard_False)
-                                .GetType() == GeomAbs_Cylinder)
-                            cyls++;
+                    for (TopExp_Explorer ex(parts[pi], TopAbs_FACE); ex.More(); ex.Next()) {
+                        // D-130-10(1): the shipped cone faces are counted the
+                        // same way the shipped cylinders are -- off the written
+                        // shape, not off a construction counter.
+                        const GeomAbs_SurfaceType t =
+                            BRepAdaptor_Surface(TopoDS::Face(ex.Current()), Standard_False)
+                                .GetType();
+                        if (t == GeomAbs_Cylinder) cyls++;
+                        else if (t == GeomAbs_Cone) cones++;
+                    }
                     ++pi;
                 }
                 if (!refitPlans.count(order[ci])) continue;
@@ -971,6 +978,7 @@ Result Converter::run() {
                     builtCo++;
                     builtPl += st.planes;
                     builtCy += cyls;
+                    builtCn += cones;
                     builtFi += st.fillets;
                 } else
                     revCo++;
@@ -1134,7 +1142,12 @@ Result Converter::run() {
         r.stepVolumeMM3 = stepVolume;
         r.volumeDeltaPct = volDeltaPct;
         r.watertight = watertight;
+        // D-130-10(2): component builds run on a thread pool, so the arrival
+        // order of warnings is scheduler state, not a property of the mesh
+        // (S03 was measured emitting the same 34 strings in six orders with
+        // identical STEP). Sorting makes RESULT deterministic by construction.
         r.warnings = warnings;
+        std::sort(r.warnings.begin(), r.warnings.end());
         if (smooth) {
             r.smoothPlanes = refitTotals.planes;
             r.smoothCylinders = refitTotals.cylinders;
@@ -1149,6 +1162,7 @@ Result Converter::run() {
             r.smoothVolPredictedMM3 = dVolPredSigned;
             r.smoothBuiltPlanes = builtPl;
             r.smoothBuiltCylinders = builtCy;
+            r.smoothBuiltCones = builtCn;
             r.smoothBuiltFillets = builtFi;
             r.smoothBuiltComponents = builtCo;
             r.smoothRevertedComponents = revCo;
@@ -1217,7 +1231,8 @@ std::string Result::toJson() const {
         "\"facesAfterSmooth\":%d,\"smoothSkippedComponents\":%d,"
         "\"smoothMaxDevMM\":%.6f,\"smoothMaxEdgeTolMM\":%.6f,"
         "\"smoothVolPredictedMM3\":%.6f,"
-        "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltFillets\":%d,"
+        "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltCones\":%d,"
+        "\"smoothBuiltFillets\":%d,"
         "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d}";
     std::string ei = jsonEscape(input), eo = jsonEscape(output);
     const bool emitSmooth = facesAfterSmooth != 0 || smoothSkippedComponents != 0
@@ -1232,7 +1247,8 @@ std::string Result::toJson() const {
                           smoothRejected, smoothFacetFaces, facesAfterSmooth,
                           smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
                           smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
-                          smoothBuiltFillets, smoothBuiltComponents, smoothRevertedComponents);
+                          smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
+                          smoothRevertedComponents);
     } else {
         n = std::snprintf(nullptr, 0, fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                           components, solids, openShells, facesBeforeUnify, facesAfterUnify,
@@ -1249,7 +1265,8 @@ std::string Result::toJson() const {
                       smoothRejected, smoothFacetFaces, facesAfterSmooth,
                       smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
                       smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
-                      smoothBuiltFillets, smoothBuiltComponents, smoothRevertedComponents);
+                      smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
+                      smoothRevertedComponents);
     } else {
         std::snprintf(&s[0], s.size(), fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                       components, solids, openShells, facesBeforeUnify, facesAfterUnify,

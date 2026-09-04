@@ -174,7 +174,11 @@ struct Result {
 
     double seconds = 0.0;         // wall-clock time of the whole conversion
 
-    std::vector<std::string> warnings;  // every Warning emitted, in order
+    // D-130-10(2): warnings are emitted from parallel component builds, so
+    // arrival order is not a property of the mesh. The list is sorted before
+    // it is handed back, which makes the RESULT line deterministic; the live
+    // log callback still sees each warning at the moment it is raised.
+    std::vector<std::string> warnings;  // every Warning emitted, sorted
 
     // These C++ members are always present and default to zero, so host code can
     // read them unconditionally and ABI does not shift with a flag. The RESULT
@@ -198,6 +202,10 @@ struct Result {
 
     int smoothBuiltPlanes = 0;
     int smoothBuiltCylinders = 0;
+    // D-130-10(1): conical faces actually shipped on built components. Reads 0
+    // on every part with no chamfer frustum; a new RESULT key, so an audit
+    // comparing RESULT identity across this commit compares modulo it.
+    int smoothBuiltCones = 0;
     int smoothBuiltFillets = 0;
     int smoothBuiltComponents = 0;
     int smoothRevertedComponents = 0;
