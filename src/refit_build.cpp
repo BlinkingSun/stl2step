@@ -11076,7 +11076,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             TopoDS_Wire iw;
             if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk, nullptr)) return false;
             inners.push_back(std::move(iw));
-            if (unionBuildOn()) {
+            {
                 for (int ci : lp.chainIdx) {
                     if (ci < 0 || (size_t)ci >= rs.chains.size()) continue;
                     for (int lv : rs.chains[(size_t)ci].meshVerts)
@@ -11086,6 +11086,25 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         }
     }
     if (!capL || !capH || capL->chainIdx.empty() || capH->chainIdx.empty()) return false;
+
+    // CYLCYL: a closed360 face whose boundary is not two analytic caps -- it
+    // carries an inner wire (a bore breaking through this wall: cross_bores'
+    // R8 wall with the R5 bore's two windows) or a cap that is a tier-2
+    // polyline loop (the R5 bore's end on the R8 wall, the skew cyl|cyl
+    // quartic). D-130-14/16 built this path behind the union stage, which
+    // D-130-17 keeps disabled; the stage was the landing door, the geometry is
+    // the condition. TwoHalves cannot represent either case (it draws both
+    // caps as arcs of the iso-circle), so these faces take the seamed path
+    // with the seam placed by measurement. Every region with two collapsed
+    // analytic caps and no inner wire is on exactly the path it had.
+    bool capHasPolyline = false;
+    for (const Loop* cp : {capL, capH}) {
+        for (int ci : cp->chainIdx) {
+            if (ci < 0 || (size_t)ci >= geom.size() || !geom[(size_t)ci].collapsed)
+                capHasPolyline = true;
+        }
+    }
+    const bool composite360 = !inners.empty() || capHasPolyline;
 
     // D-130-14: a union face carries the enclosed interruptions as inner wires,
     // and the seam is a generator of the SAME face -- it may not run through
@@ -11164,6 +11183,16 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         return !e.IsNull();
     };
 
+    // The seam names the face's parameter domain [u0, u0+2pi] (D-130-16); every
+    // wire the face carries has to be written on that branch. Declared here so
+    // the simple (two full circles) path can publish it too: an inner wire's
+    // pcurves are birthed later by addPcurvesOnFace, on whatever branch the
+    // projector chose, and without this the R8 wall of cross_bores -- two
+    // analytic caps, two polyline windows -- was UnorientableShape with every
+    // wire clean.
+    TopoDS_Edge gSeamE;
+    double gSeamU0 = 0.0;
+    bool gSeamSet = false;
     auto bindIsoPCurves = [&](TopoDS_Edge& eCap, double vIso, double u0, TopoDS_Edge& eSeam,
                              bool writeSeam) {
         BRep_Builder B;
@@ -11188,6 +11217,11 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         B.UpdateEdge(eSeam, pcS0, pcS1, surf, TopLoc_Location(), sewTol);
         if (!cs.IsNull()) B.Range(eSeam, fs, ls);
         eSeam.Closed(Standard_False);
+        if (!inners.empty()) {
+            gSeamE = eSeam;
+            gSeamU0 = f;
+            gSeamSet = true;
+        }
     };
 
     // D-130-16: the face's parameter domain is [u0, u0+2pi] and the SEAM names
@@ -11199,9 +11233,6 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // UnorientableShape on the face. Shifting a pcurve by a WHOLE PERIOD is
     // exact -- no tolerance is spent, no geometry moves, and the 3d edge and
     // its neighbour face's pcurve are untouched.
-    TopoDS_Edge gSeamE;
-    double gSeamU0 = 0.0;
-    bool gSeamSet = false;
     auto rebranchEdges = [&](const TopoDS_Shape& w, double u0, const TopoDS_Edge& skip) {
         BRep_Builder B;
         for (TopExp_Explorer it(w, TopAbs_EDGE); it.More(); it.Next()) {
@@ -11379,7 +11410,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // monotone cap branch this face is assembled on. A union face carries
         // an inner wire and cannot survive that, so it takes makeFaceKeep
         // first; faces without an inner wire keep the order they had.
-        const bool keepFirst = unionBuildOn() && !inners.empty();
+        const bool keepFirst = composite360;
         if (keepFirst) {
             if (!makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2) &&
                 !makeFaceCopy(surf, ow2, inners, r.outwardNormal, out2))
@@ -11388,7 +11419,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                    !makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2)) {
             return false;
         }
-        if (!unionBuildOn() || inners.empty()) return true;
+        if (!composite360) return true;
         // D-130-16: an inner wire's sense on the FACE is opposite the outer's,
         // and the wire P1 hands over is oriented for the REGION boundary. Which
         // sense is right cannot be judged on the bare face: the inner wire's
@@ -11446,7 +11477,11 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     TopoDS_Edge eL, eH;
     const int ciL0 = capL->chainIdx.front();
     const int ciH0 = capH->chainIdx.front();
+    // A cap that is ONE chain but a tier-2 polyline loop (the R5 bore's end on
+    // the R8 wall) is not a circle and takeFullCap would construct one in its
+    // place; it takes the composite path with its own mesh edges.
     const bool simple =
+        !capHasPolyline &&
         capL->chainIdx.size() == 1 && capH->chainIdx.size() == 1 &&
         takeFullCap(ciL0, circL, verts[(size_t)vL], eL) &&
         takeFullCap(ciH0, circH, verts[(size_t)vH], eH);
@@ -11486,10 +11521,10 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             emit(warn, "seamed360: composite cap wire failed — try TwoHalves");
             return false;
         }
-        if ((unionBuildOn() && !inners.empty()) ||
+        if (composite360 ||
             !rotateEdgesToVertex(pathH, verts[(size_t)vH]) ||
             !rotateEdgesToVertex(pathL, verts[(size_t)vL])) {
-            if (!unionBuildOn()) {
+            if (!composite360) {
                 emit(warn, "seamed360: cap wire does not pass seam vertex — try TwoHalves");
                 return false;
             }
@@ -11577,7 +11612,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             // face cannot: TwoHalves has no inner wire to give the enclosed
             // interruption. Bind the pair here exactly as the single-circle
             // path does, at the seam generator's own azimuth.
-            if (unionBuildOn()) {
+            if (composite360) {
                 BRep_Builder Bs;
                 const double u0 = azimuthOf(r, BRep_Tool::Pnt(seamVL));
                 Standard_Real fs = 0, ls = 0;

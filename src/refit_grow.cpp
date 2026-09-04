@@ -1128,7 +1128,14 @@ void mergeCoaxialCylinders(const MeshView& mv, const DerivedTols& tol, SegmentWo
                 if (B.lawBand) continue;
                 const bool adjacent = regionsShareMeshEdge(mv, A, B);
                 if (!coaxialCylinderMergeable(A, B, tol, adjacent)) continue;
-                if (!adjacent && axisLineSeparation(A.ax, B.ax) > tol.epsPlane) continue;
+                // D-130-17: only edge-connected pieces of a surface are faces.
+                // Two coaxial regions that share no mesh edge are two pieces
+                // of one surface severed by another feature (cross_bores' R5
+                // bore, cut in two by the R8 bore); merged, the region carried
+                // two cap pairs and no face could be built from it (seamed360
+                // failed on rid 4 and the whole part reverted). They stay two
+                // regions; the census counts them as one surface.
+                if (!adjacent) continue;
                 std::vector<int> mergedTris = A.tris;
                 mergedTris.insert(mergedTris.end(), B.tris.begin(), B.tris.end());
                 std::sort(mergedTris.begin(), mergedTris.end());
@@ -1536,6 +1543,125 @@ bool growProvisionalA2(const MeshView& mv, const SegmentParams&, const DerivedTo
             computeProvDeviations(mv, prov);
             work.provisionals.push_back(prov);
         }
+    }
+
+    // CYLCYL -- a sliver filed into the wrong facet's patch.
+    //
+    // A2 admits a candidate on two tests: its normal within thetaPlane of the
+    // patch plane and its vertices within epsPlane of it. A THIN triangle
+    // passes the second test against any plane that contains its long edge,
+    // whatever its normal says: over a 0.05 mm extent a 7.5 deg fold is a
+    // 0.006 mm residual, under epsPlane's 0.02. In the coarse band, where the
+    // normal gate is widened to 15 deg for noisy exports, such a sliver is
+    // therefore taken by whichever patch floods it first. On cross_bores the
+    // R8 wall's notched facets triangulate into slivers along the generator
+    // lines and each is filed into the NEIGHBOURING facet's patch; every mesh
+    // edge two adjacent facets then share is a coplanar edge inside the
+    // misfiled sliver, the 7.5 deg fold edge is internal to one patch, and B1
+    // reads a 0 deg fold between two facets that meet at 7.5 deg -- the
+    // notched pieces are refused as flat and the wall ships in three pieces.
+    //
+    // A triangle lies on the facet whose plane its own normal matches. The
+    // refile is decided by two measurements and no threshold: (1) the triangle
+    // is exactly coplanar with an edge-neighbour in another patch of the same
+    // chart -- each one's far vertex lies on the other's plane within the mesh
+    // FILE's own quantization q (D-130-12), the resolution below which the
+    // mesh cannot state a fold at all; (2) its normal is strictly closer to
+    // that patch's plane than to its own. A resolved fold between two patches
+    // fails (1); a planar face floods whole so its triangles never meet (1)
+    // across a patch boundary. Prints under STL2STEP_DIAG_A2.
+    {
+        const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0)
+                             ? mv.quantFloor : 0.0;
+        int movedTotal = 0, rounds = 0;
+        if (q > 0.0 && !work.provisionals.empty()) {
+            std::vector<int> triToProv(mv.nTri, -1);
+            for (size_t pi = 0; pi < work.provisionals.size(); pi++)
+                for (int t : work.provisionals[pi].tris) triToProv[(size_t)t] = (int)pi;
+            auto farVertexOffPlane = [&](int t, int u) {
+                // max distance of t's vertices from the plane of u (u's own
+                // vertices, u's own normal): the two shared vertices read 0,
+                // the far one reads the fold the mesh resolves at this edge.
+                const gp_Dir nu = triNormalLocal(mv, u);
+                const gp_XYZ pu = localTriVert(mv, u, 0);
+                double m = 0.0;
+                for (int k = 0; k < 3; k++)
+                    m = std::max(m, std::abs((localTriVert(mv, t, k) - pu).Dot(nu.XYZ())));
+                return m;
+            };
+            // The fold at an edge is read on the plane of the LARGER of its
+            // two triangles: a sliver's own plane is set by vertices a few
+            // ulps apart across its width and extrapolates that rounding
+            // twenty-fold at its neighbour's far vertex, so a resolved fold
+            // and an exactly coplanar pair would both read "off". The large
+            // triangle's plane carries its vertices' rounding, q, and no more;
+            // the sliver's far vertex is within its own width of that
+            // triangle's edge, so nothing is extrapolated. A fold the mesh
+            // resolves puts that vertex w*sin(phi) off -- 0.0065 mm for the
+            // 0.05 mm slivers on cross_bores' R8 wall at 7.5 deg, 2000 q.
+            auto coplanarAtEdge = [&](int t0, int t1) {
+                const int big = triAreaLocal(mv, t0) >= triAreaLocal(mv, t1) ? t0 : t1;
+                const int small = big == t0 ? t1 : t0;
+                return farVertexOffPlane(small, big) <= q;
+            };
+            auto angleToPlane = [&](int t, const Provisional& P) {
+                const double c = std::min(1.0, std::abs(triNormalLocal(mv, t).Dot(
+                                                    P.plane.Direction())));
+                return std::acos(c);
+            };
+            for (rounds = 0; rounds < 8; rounds++) {
+                int moved = 0;
+                std::vector<char> dirty(work.provisionals.size(), 0);
+                for (int e = 0; e < static_cast<int>(mv.nEdge); e++) {
+                    const int t0 = ea.tri[e][0];
+                    const int t1 = ea.tri[e][1];
+                    if (t0 < 0 || t1 < 0) continue;
+                    const int p0 = triToProv[(size_t)t0];
+                    const int p1 = triToProv[(size_t)t1];
+                    if (p0 < 0 || p1 < 0 || p0 == p1) continue;
+                    if (work.provisionals[(size_t)p0].chartId !=
+                        work.provisionals[(size_t)p1].chartId)
+                        continue;
+                    if (!coplanarAtEdge(t0, t1)) continue;  // a resolved fold, not a split facet
+                    for (int side = 0; side < 2; side++) {
+                        const int t = side == 0 ? t0 : t1;
+                        const int from = side == 0 ? p0 : p1;
+                        const int to = side == 0 ? p1 : p0;
+                        if (triToProv[(size_t)t] != from) continue;
+                        Provisional& P = work.provisionals[(size_t)from];
+                        Provisional& Q = work.provisionals[(size_t)to];
+                        const double aOwn = angleToPlane(t, P);
+                        const double aOther = angleToPlane(t, Q);
+                        if (!(aOther < aOwn)) continue;
+                        if (a2Diag)
+                            std::fprintf(stderr,
+                                         "DIAG_A2_REFILE t=%d from=%d to=%d aOwn=%.9g "
+                                         "aOther=%.9g q=%.3g\n",
+                                         t, from, to, aOwn, aOther, q);
+                        P.tris.erase(std::remove(P.tris.begin(), P.tris.end(), t),
+                                     P.tris.end());
+                        Q.tris.insert(std::upper_bound(Q.tris.begin(), Q.tris.end(), t), t);
+                        triToProv[(size_t)t] = to;
+                        dirty[(size_t)from] = dirty[(size_t)to] = 1;
+                        moved++;
+                    }
+                }
+                for (size_t pi = 0; pi < work.provisionals.size(); pi++) {
+                    if (!dirty[pi]) continue;
+                    Provisional& P = work.provisionals[pi];
+                    P.area = 0.0;
+                    for (int lt : P.tris) P.area += triAreaLocal(mv, lt);
+                    gp_Ax3 fit;
+                    if (!P.tris.empty() && pcaPlane(mv, P.tris, fit)) P.plane = fit;
+                    computeProvDeviations(mv, P);
+                }
+                movedTotal += moved;
+                if (moved == 0) break;
+            }
+        }
+        if (a2Diag)
+            std::fprintf(stderr, "DIAG_A2_REFILE_SUM moved=%d rounds=%d q=%.3g\n",
+                         movedTotal, rounds, q);
     }
 
     sortProvisionals(work.provisionals);
