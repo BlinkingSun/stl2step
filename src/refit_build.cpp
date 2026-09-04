@@ -12587,8 +12587,21 @@ int analyticRidOfFace(const TopoDS_Face& f) {
 }
 
 void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape& sh,
-                     RefitStats& stats) {
+                     const std::vector<TopoDS_Edge>& meshE, RefitStats& stats) {
     if (sh.IsNull()) return;
+    // The mesh-edge set is built HERE, from the live `meshE` array, and not read
+    // out of `gMeshTShapes`. That global stores raw TShape POINTERS and is only
+    // refilled at a canon-clear transition, so a mesh edge replaced during a
+    // rebuild pass can leave a dangling address behind -- and a later allocation
+    // landing on it makes an unrelated edge test positive. Measured: S04 split
+    // the same 150 census edges 70/80 and 79/71 across two runs of the same
+    // binary on the same input, with the STEP byte-identical. Pointers into a
+    // live array cannot alias a freed object, so this set is a function of the
+    // component and the count is reproducible.
+    std::unordered_set<const void*> meshTs;
+    for (const TopoDS_Edge& me : meshE)
+        if (!me.IsNull())
+            if (const void* p = diagTShapePtr(me)) meshTs.insert(p);
     const bool closedShell = (sh.ShapeType() == TopAbs_SHELL) && BRep_Tool::IsClosed(sh);
     // The identity assumption this census rests on -- a shipped analytic face
     // still carries the interned region surface -- is measured, not assumed.
@@ -12760,7 +12773,7 @@ void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape
         // edge it came from. So tier 2 is a mesh edge that was never bound as a
         // seam AND still carries the straight segment the tessellator drew.
         const void* ets = diagTShapePtr(e);
-        const bool meshBorn = ets && gMeshTShapes.count(ets) && !gSeamTShapes.count(ets);
+        const bool meshBorn = ets && meshTs.count(ets);
         if (edgeCurveIsMeshPolyline(c3) ||
             (meshBorn && std::strcmp(row.curve, "line") == 0)) {
             row.tier = "polylineTier2";
@@ -12800,11 +12813,10 @@ void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape
     std::fprintf(stderr,
                  "DIAG_EDGECLASS_SUM analytic=%d polylineTier2=%d unhandled=%d overTol=%d "
                  "overCap=%d closedShell=%d analyticFaces=%d/%d seams=%d mixedAnalyticFacet=%d "
-                 "unsharedSeam=%d devOverCap=%d locatedFaces=%d meshTShapes=%zu "
-                 "seamTShapes=%zu\n",
+                 "unsharedSeam=%d devOverCap=%d locatedFaces=%d meshEdges=%zu\n",
                  nAnalytic, nPoly, nUnhandled, nOverTol, nOverCap, closedShell ? 1 : 0,
                  nFaceAnalytic, nFaceAll, nSeam, nMixed, nUnshared, nDevOverCap, nLocated,
-                 gMeshTShapes.size(), gSeamTShapes.size());
+                 meshTs.size());
 }
 
 void dumpTolBindSummary() {
@@ -15145,7 +15157,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         fitAnalyticTolerances(sh);
 
         // D-130-2: certify the shipped edges, after the last tolerance writer.
-        edgeClassCensus(mv, rs, sh, rs.stats);
+        edgeClassCensus(mv, rs, sh, meshE, rs.stats);
 
         dumpShippedInContext(built, builtRid, rs);
         dumpTolBindSummary();
