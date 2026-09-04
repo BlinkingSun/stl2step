@@ -857,8 +857,39 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
     ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
     const double rBeforeRefine = ev.radius;
     bool archChainApplied = false;
+    // CYLCYL (130-cylcyl.md 3.3, D-130-1): an interrupted counted N-gon wall
+    // carries vertices that are not its corners -- the points where another
+    // bore's generator edges pierce its facets, on the facet PLANE up to one
+    // sagitta inside the circle. The vertex fit that weighs them reads the
+    // R8 wall of cross_bores at 7.9959 and the coarse-band chord lift then
+    // takes the R5 halves to 5.065 on a mesh whose corners sit on R = 5 to
+    // 1e-6. The corners alone are the N-gon; when every one of them lies on
+    // the corner fit within the file's quantization q, that fit IS the
+    // geometry and no lift applies. A wall without interior vertices is on
+    // exactly the path it had.
+    bool cornerCertified = false;
+    if (!lawBand && coarseFusionBand(mv) && ev.d2.nSides >= 6) {
+        gp_Pnt cC;
+        double rC = 0.0, resid = 0.0;
+        int nC = 0, nI = 0;
+        const bool ok =
+            cornerCertifiedRadius(mv, tris, axis, ev.d2.nSides, cC, rC, nC, nI, resid);
+        if (p1DiagOn())
+            std::fprintf(stderr,
+                         "DIAG_130_CORNERFIT n=%zu nSides=%d nCorner=%d nInterior=%d "
+                         "rEberly=%.6f rCorner=%.6f resid=%.3g q=%.3g certified=%d\n",
+                         tris.size(), ev.d2.nSides, nC, nI, ev.radius, rC, resid,
+                         mv.quantFloor, ok ? 1 : 0);
+        if (ok) {
+            ev.center = cC;
+            ev.radius = rC;
+            ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);
+            cornerCertified = true;
+        }
+    }
     // RULE 4.1d: do not sec-lift an already-inscribed lawBand.
-    if (!lawBand && coarseFusionBand(mv) && ev.d2.nSides >= 3 && !ev.d2.spanReject) {
+    if (!cornerCertified && !lawBand && coarseFusionBand(mv) && ev.d2.nSides >= 3 &&
+        !ev.d2.spanReject) {
         refineCylinderRadius(mv, tris, axis, ev.center, ev.radius, ev.d2.nSides, ev.d2.span,
                              rHint);
         ev.d2 = computeD2(mv, tris, axis, ev.center, ev.radius, tol);

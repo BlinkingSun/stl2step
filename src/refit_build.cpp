@@ -64,6 +64,10 @@
 #include <Geom2d_Circle.hxx>
 #include <Geom2d_Ellipse.hxx>
 #include <Geom2d_BSplineCurve.hxx>
+#include <TColgp_Array1OfPnt.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColStd_Array1OfInteger.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
@@ -794,6 +798,18 @@ double azimuthOf(const Region& r, const gp_Pnt& p) {
     return u;
 }
 
+// Angular distance on the circle: |a - b| reduced modulo 2pi. The seam target
+// trySeamed360 measures is normalised to [-pi, pi]; against an azimuth in
+// [0, 2pi) the plain min(|a-b|, 2pi-|a-b|) goes NEGATIVE once |a-b| > 2pi and
+// then "wins" -- measured on cross_bores' R8 wall (130-cylcyl.md 3.1): target
+// -2.487 picked the vertex at 2pi, 0.24 rad from a window's edge, instead of
+// the vertex at 3.796. For targets in [0, pi] (every other caller) the two
+// forms are identical.
+double angularDistance(double a, double b) {
+    double d = std::fmod(std::fabs(a - b), 2.0 * kPi);
+    return std::min(d, 2.0 * kPi - d);
+}
+
 int seamVertexOf(const MeshView& mv, const Region& cyl, const BoundaryChain& ch) {
     // Vertex whose azimuth is closest to 0 (XDirection is already a mesh-vertex azimuth).
     int best = ch.meshVerts.empty() ? -1 : ch.meshVerts.front();
@@ -815,8 +831,7 @@ int vertexClosestToU(const MeshView& mv, const Region& cyl, const BoundaryChain&
     for (int lv : ch.meshVerts) {
         if (lv < 0 || (size_t)lv >= mv.nVtx) continue;
         double u = azimuthOf(cyl, pntOf(mv, lv));
-        double d = std::fabs(u - target);
-        d = std::min(d, 2.0 * kPi - d);
+        const double d = angularDistance(u, target);
         if (d < bestD) {
             bestD = d;
             best = lv;
@@ -834,8 +849,7 @@ int vertexClosestToUOnLoop(const MeshView& mv, const Region& cyl, const Loop& lp
         int v = vertexClosestToU(mv, cyl, rs.chains[(size_t)ci], target);
         if (v < 0) continue;
         double u = azimuthOf(cyl, pntOf(mv, v));
-        double d = std::fabs(u - target);
-        d = std::min(d, 2.0 * kPi - d);
+        const double d = angularDistance(u, target);
         if (d < bestD) {
             bestD = d;
             best = v;
@@ -1057,6 +1071,7 @@ struct ChainGeom {
     gp_Pnt midHint;
     int regA = -1, regB = -1;
     double chainSnapCap = 0;
+    bool tier2Polyline = false;       // D-130-2 tier 2: ONE degree-1 B-spline through the mesh vertices
 };
 
 double curveResidual(const AnalyticCurve& c, const gp_Pnt& p) {
@@ -1501,7 +1516,10 @@ bool diagP2Enabled() {
 // rim (then the collapse is the single arc it has always been).
 int rimSplitVertex(const RegionSet& rs, const MeshView& mv, const BoundaryChain& ch, int ci,
                    const Region* A, const Region* B, double snapCap, const AnalyticCurve& curve) {
-    if (ch.closedLoop || ch.meshVerts.size() < 3) return -1;
+    // A closed rim chain (a plane's whole hole, cross_bores' R8 rims) splits
+    // too: its one terminal is the u = 0 vertex the full circle already
+    // carries, and every other vertex is a candidate.
+    if (ch.meshVerts.size() < 3) return -1;
     if (curve.kind != AnalyticCurve::Circ) return -1;
     for (const Region* R : {A, B}) {
         if (!R || R->type != SurfType::Cylinder || !R->closed360) continue;
@@ -1539,7 +1557,8 @@ int rimSplitVertex(const RegionSet& rs, const MeshView& mv, const BoundaryChain&
         const double target = 0.5 * (gLo + gHi);
         int best = -1;
         double bestD = 1e300;
-        for (size_t i = 1; i + 1 < ch.meshVerts.size(); i++) {  // interior vertices only
+        const size_t iEnd = ch.closedLoop ? ch.meshVerts.size() : ch.meshVerts.size() - 1;
+        for (size_t i = 1; i < iEnd; i++) {  // interior vertices only (never a terminal)
             const int lv = ch.meshVerts[i];
             const gp_Pnt p = pntOf(mv, lv);
             if (curveResidual(curve, p) > snapCap) continue;  // not on this rim's own circle
@@ -3881,6 +3900,7 @@ bool rotateEdgesToVertex(std::vector<TopoDS_Edge>& edges, const TopoDS_Vertex& V
 }
 
 void setFaceOutward(TopoDS_Face& f, bool outwardNormal);
+void dumpTier2PolesOfFace(const TopoDS_Face& f, int rid, const char* tag);
 
 bool diagPlatesEnabled() {
     static int cached = -1;
@@ -4600,6 +4620,35 @@ void formatStatusList(const Handle(BRepCheck_Result)& res, char* buf, size_t n) 
         if (w < 0 || (size_t)w >= n - used) break;
         used += (size_t)w;
         any = true;
+    }
+    if (used + 2 < n) {
+        buf[used++] = ']';
+        buf[used] = '\0';
+    }
+}
+
+// The statuses BRepCheck records for a sub-shape IN THE CONTEXT of a shape
+// (a wire's Closed2d / Orientation on its face, an edge's pcurve checks on
+// that face): res->Status() alone is the context-free list and reads "[]" on
+// a wire whose only fault is on the face.
+void formatStatusInContext(const Handle(BRepCheck_Result)& res, const TopoDS_Shape& ctx,
+                           char* buf, size_t n) {
+    buf[0] = '\0';
+    if (res.IsNull() || n < 4) return;
+    size_t used = 0;
+    buf[used++] = '[';
+    buf[used] = '\0';
+    bool any = false;
+    for (res->InitContextIterator(); res->MoreShapeInContext(); res->NextShapeInContext()) {
+        if (!res->ContextualShape().IsSame(ctx)) continue;
+        for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More(); it.Next()) {
+            const int st = (int)it.Value();
+            if (st == (int)BRepCheck_NoError) continue;
+            int w = std::snprintf(buf + used, n - used, "%s%d", any ? "," : "", st);
+            if (w < 0 || (size_t)w >= n - used) break;
+            used += (size_t)w;
+            any = true;
+        }
     }
     if (used + 2 < n) {
         buf[used++] = ']';
@@ -6126,6 +6175,12 @@ Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Rea
 thread_local std::unordered_set<const void*> gSeamTShapes;
 thread_local int lastCanonClearPass = -1;
 thread_local int gCompNTri = 0;
+// D-130-2 tier-2 polyline edges (ONE degree-1 B-spline per skew cyl|cyl loop):
+// their pcurves are pole-linear by construction and their tolerance is the
+// certified chord bound; the forced SameParameter pass must leave them alone
+// (measured: it re-approximated a 69-pole loop as a degree-11, 419-pole 2d
+// curve that self-intersects at the window tip -- R2 probe invalid).
+thread_local std::unordered_set<const void*> gTier2TShapes;
 
 int countSeamEdgesOnWire(const TopoDS_Wire& w) {
     int n = 0;
@@ -7048,6 +7103,44 @@ Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Rea
                 return c2dLin;
             return GeomProjLib::Curve2d(c3, f, l, srf);
         }
+        // D-130-2 tier 2: the skew cyl|cyl loop as ONE degree-1 B-spline
+        // through its mesh vertices. Its pcurve is the degree-1 2d B-spline
+        // through the poles' own (u, v), SAME knots, u unwrapped by continuity
+        // -- linear in (u, v) between corresponding poles at the same
+        // parameter, which is exactly what exactMaxAtBind's chord bound
+        // certifies. Only the edges this lane builds ask for it ("tier2poly");
+        // every other B-spline keeps the projector it had.
+        if (kind && std::strcmp(kind, "tier2poly") == 0) {
+            Handle(Geom_BSplineCurve) bs = Handle(Geom_BSplineCurve)::DownCast(src);
+            if (bs.IsNull() || bs->Degree() != 1) return {};
+            const int n = bs->NbPoles();
+            if (n < 2) return {};
+            TColgp_Array1OfPnt2d poles2(1, n);
+            double uPrev = 0.0;
+            for (int i = 1; i <= n; i++) {
+                const gp_Pnt P = bs->Pole(i);
+                gp_Vec rho(pos.Location(), P);
+                const double v = rho.Dot(pos.Direction());
+                gp_Vec rad = rho - gp_Vec(pos.Direction()) * v;
+                double u = 0.0;
+                if (rad.Magnitude() > Precision::Confusion())
+                    u = std::atan2(rad.Dot(pos.YDirection()), rad.Dot(pos.XDirection()));
+                if (u < 0.0) u += 2.0 * kPi;
+                if (i > 1) {
+                    double du = u - uPrev;
+                    while (du > kPi) du -= 2.0 * kPi;
+                    while (du < -kPi) du += 2.0 * kPi;
+                    u = uPrev + du;
+                }
+                poles2.SetValue(i, gp_Pnt2d(u, v));
+                uPrev = u;
+            }
+            TColStd_Array1OfReal knots(1, bs->NbKnots());
+            TColStd_Array1OfInteger mults(1, bs->NbKnots());
+            bs->Knots(knots);
+            bs->Multiplicities(mults);
+            return new Geom2d_BSplineCurve(poles2, knots, mults, 1);
+        }
         if (isElips || !src.IsNull()) {
             return GeomProjLib::Curve2d(c3, f, l, srf);
         }
@@ -7338,8 +7431,57 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
             return m;
         }
         if (!gcyl.IsNull()) {
-            if (clsOut) *clsOut = "unhandled-polyline-cyl";
-            return -1.0;
+            // D-130-2 tier 2, polyline-on-cylinder: certified only for the
+            // pcurve makePCurveOnSurf("tier2poly") writes -- degree 1, one 2d
+            // pole per 3d pole, same knots -- so that at every parameter the
+            // 3d point is the chord point at fraction t between two poles and
+            // the surface point is S(u0 + t du, v0 + t dv) between the same
+            // poles' (u, v). Per segment, with e_i = | |radial_i| - R | the
+            // endpoints' own residuals, h = half the segment's azimuth span:
+            //   |chord(t) - S(t)| <= max(e_i, e_i+1)          (endpoints off R)
+            //                      + R (1 - cos h)             (the chord's sag)
+            //                      + R g(h),  g(h) = max_s |atan(tan h . s) - h s|
+            //                                       (a chord's azimuth is not
+            //                                        linear in t; s* closed form)
+            // The axial parts agree exactly (both linear in t). Triangle
+            // inequality throughout, the same species as circle-on-plane
+            // (D-S3-111). Any other pcurve on this curve stays unhandled.
+            Handle(Geom2d_BSplineCurve) pc2 = Handle(Geom2d_BSplineCurve)::DownCast(c2d);
+            if (pc2.IsNull() || pc2->Degree() != 1 || pc2->NbPoles() != bs->NbPoles() ||
+                bs->NbPoles() < 2) {
+                if (clsOut) *clsOut = "unhandled-polyline-cyl";
+                return -1.0;
+            }
+            gp_Ax3 pos = gcyl->Position();
+            if (!loc.IsIdentity()) pos.Transform(loc.Transformation());
+            const double R = gcyl->Radius();
+            const gp_Vec d(pos.Direction());
+            double m = std::max(curveSurfDevAtBind(c3, f, srf, c2d, loc),
+                                curveSurfDevAtBind(c3, l, srf, c2d, loc));
+            auto radial = [&](const gp_Pnt& P) {
+                gp_Vec rho(pos.Location(), P);
+                return rho - d * rho.Dot(d);
+            };
+            for (int i = 1; i < bs->NbPoles(); i++) {
+                const gp_Vec w0 = radial(bs->Pole(i)), w1 = radial(bs->Pole(i + 1));
+                const double r0 = w0.Magnitude(), r1 = w1.Magnitude();
+                const double e = std::max(std::fabs(r0 - R), std::fabs(r1 - R));
+                double h = 0.0;
+                if (r0 > Precision::Confusion() && r1 > Precision::Confusion()) {
+                    const double cs = std::max(-1.0, std::min(1.0, w0.Dot(w1) / (r0 * r1)));
+                    h = 0.5 * std::acos(cs);
+                }
+                double g = 0.0;
+                if (h > 1e-9 && h < 0.5 * kPi) {
+                    const double th = std::tan(h);
+                    const double q2 = th / h - 1.0;
+                    const double sStar = q2 > 0.0 ? std::sqrt(q2) / th : 0.0;
+                    g = std::fabs(std::atan(th * sStar) - h * sStar);
+                }
+                m = std::max(m, e + R * (1.0 - std::cos(h)) + R * g);
+            }
+            if (clsOut) *clsOut = "polyline-on-cylinder";
+            return m;
         }
     }
     if (clsOut) *clsOut = "unhandled-other";
@@ -11069,6 +11211,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     const Loop *capL = nullptr, *capH = nullptr;
     std::vector<TopoDS_Wire> inners;
     std::vector<double> innerU;
+    std::vector<std::vector<double>> innerLoopU;  // per inner loop, for the seam-crossing check
     for (const Loop& lp : r.loops) {
         if (lp.role == LoopRole::CapLow) capL = &lp;
         else if (lp.role == LoopRole::CapHigh) capH = &lp;
@@ -11077,11 +11220,16 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk, nullptr)) return false;
             inners.push_back(std::move(iw));
             {
+                std::vector<double> us;
                 for (int ci : lp.chainIdx) {
                     if (ci < 0 || (size_t)ci >= rs.chains.size()) continue;
-                    for (int lv : rs.chains[(size_t)ci].meshVerts)
-                        innerU.push_back(azimuthOf(r, pntOf(mv, lv)));
+                    for (int lv : rs.chains[(size_t)ci].meshVerts) {
+                        const double u = azimuthOf(r, pntOf(mv, lv));
+                        innerU.push_back(u);
+                        us.push_back(u);
+                    }
                 }
+                innerLoopU.push_back(std::move(us));
             }
         }
     }
@@ -11097,14 +11245,133 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // caps as arcs of the iso-circle), so these faces take the seamed path
     // with the seam placed by measurement. Every region with two collapsed
     // analytic caps and no inner wire is on exactly the path it had.
+    // The cap that sends a face down this path is a tier-2 polyline BETWEEN
+    // TWO ANALYTIC CYLINDERS (D-130-2: the skew cyl|cyl loop) -- the partner
+    // region across the chain is an accepted cylinder region. A polyline cap
+    // against a plane, an island or an exploded region keeps the path it
+    // always had: 312a729's broad form ("any non-collapsed cap chain") sent one
+    // Body11 bore here and changed its STEP (130-cylcyl.md 4).
     bool capHasPolyline = false;
     for (const Loop* cp : {capL, capH}) {
         for (int ci : cp->chainIdx) {
-            if (ci < 0 || (size_t)ci >= geom.size() || !geom[(size_t)ci].collapsed)
+            if (ci < 0 || (size_t)ci >= geom.size() || (size_t)ci >= rs.chains.size()) continue;
+            if (geom[(size_t)ci].tier2Polyline) {  // the loop published as ONE polyline edge
+                capHasPolyline = true;
+                continue;
+            }
+            if (geom[(size_t)ci].collapsed) continue;
+            const BoundaryChain& ch = rs.chains[(size_t)ci];
+            const int other = ch.regA == r.id ? ch.regB : ch.regA;
+            const Region* partner = regionById(rs, other);
+            // ... and that partner is itself a closed360 bore: the skew loop
+            // between two THROUGH-bores. A partial cylinder meeting a bore's
+            // rim is the torus-junction geometry (S04's boss top, D-130-7/9),
+            // which has its own path and is byte-identical only if it keeps it
+            // (measured: with any cylinder partner admitted, S04 109 -> 99
+            // faces).
+            if (partner && partner->type == SurfType::Cylinder && partner->closed360 &&
+                isAnalytic(partner) && !(exploded && regionExploded(*exploded, other)))
                 capHasPolyline = true;
         }
     }
     const bool composite360 = !inners.empty() || capHasPolyline;
+    if (diagP2Enabled() && composite360)
+        std::fprintf(stderr, "DIAG_130_COMPOSITE rid=%d R=%.4f inners=%zu capPolyline=%d\n",
+                     r.id, r.radius, inners.size(), capHasPolyline ? 1 : 0);
+
+    // D-130-16 / OCCT's rule for a periodic face: every inner wire must lie
+    // inside the chart [u0, u0 + 2pi] the seam names. Each inner loop is a
+    // window that does not wind round the axis, so its azimuths cover one arc
+    // and leave one gap; the seam must stand in that gap. Splitting a wire
+    // that crosses the seam would put a vertex the mesh does not have on an
+    // edge the partner face shares (refused for the rim by D-130-16), so a
+    // face whose seam has nowhere to stand is refused, not repaired.
+    auto vOf = [&](const gp_Pnt& P) {
+        return gp_Vec(r.ax.Location(), P).Dot(gp_Vec(r.ax.Direction()));
+    };
+    // The sense of a wire on this face, measured from its own 3d curves: each
+    // edge sampled in traversal order, mapped to (u, v) with u unwrapped by
+    // continuity (no wire here crosses the seam -- seamCrossesInner refuses
+    // that), and the shoelace sum taken. Positive = counter-clockwise in
+    // (u, v) relative to the surface normal. An inner wire must be clockwise;
+    // buildLoopWire hands each one over in the chain's own "regA-left" order,
+    // so the two windows of one wall can arrive with OPPOSITE senses (measured
+    // on cross_bores' R8 wall: reversing both together never made both
+    // clockwise, BadOrientationOfSubshape on either trial).
+    auto signedAreaUV = [&](const TopoDS_Shape& w) -> double {
+        double area = 0.0;
+        double uPrev = 0.0, vPrev = 0.0, uFirst = 0.0, vFirst = 0.0;
+        bool have = false;
+        try {
+            for (BRepTools_WireExplorer ex(TopoDS::Wire(w)); ex.More(); ex.Next()) {
+                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                Standard_Real f3 = 0, l3 = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+                if (c3.IsNull()) continue;
+                int nS = 9;
+                {
+                    Handle(Geom_BSplineCurve) bsS =
+                        Handle(Geom_BSplineCurve)::DownCast(basisCurveOf(c3));
+                    if (!bsS.IsNull()) nS = std::max(9, 8 * (bsS->NbKnots() - 1) + 1);
+                }
+                for (int i = 0; i < nS; i++) {
+                    const int k = e.Orientation() == TopAbs_REVERSED ? nS - 1 - i : i;
+                    const gp_Pnt P = c3->Value(f3 + (l3 - f3) * (double)k / (double)(nS - 1));
+                    double u = azimuthOf(r, P);
+                    const double vv = vOf(P);
+                    if (have) {
+                        double du = u - uPrev;
+                        while (du > kPi) du -= 2.0 * kPi;
+                        while (du < -kPi) du += 2.0 * kPi;
+                        u = uPrev + du;
+                        area += uPrev * vv - u * vPrev;
+                    } else {
+                        uFirst = u;
+                        vFirst = vv;
+                        have = true;
+                    }
+                    uPrev = u;
+                    vPrev = vv;
+                }
+            }
+        } catch (const Standard_Failure&) {
+            return 0.0;
+        }
+        if (have) area += uPrev * vFirst - uFirst * vPrev;
+        return 0.5 * area;
+    };
+    if (!inners.empty()) {
+        for (size_t i = 0; i < inners.size(); i++) {
+            const double a = signedAreaUV(inners[i]);
+            if (a > 0.0) inners[i] = TopoDS::Wire(inners[i].Reversed());
+            if (diagP2Enabled())
+                std::fprintf(stderr, "DIAG_INNERSENSE rid=%d w=%zu areaUV=%.5f reversed=%d\n",
+                             r.id, i, a, a > 0.0 ? 1 : 0);
+        }
+    }
+
+    auto seamCrossesInner = [&](double u0) -> bool {
+        for (const std::vector<double>& usIn : innerLoopU) {
+            if (usIn.size() < 2) continue;
+            std::vector<double> us = usIn;
+            std::sort(us.begin(), us.end());
+            double gap = us.front() + 2.0 * kPi - us.back();
+            double gLo = us.back(), gHi = us.front() + 2.0 * kPi;
+            for (size_t i = 1; i < us.size(); i++) {
+                const double g = us[i] - us[i - 1];
+                if (g > gap) {
+                    gap = g;
+                    gLo = us[i - 1];
+                    gHi = us[i];
+                }
+            }
+            double u = u0;
+            while (u < gLo) u += 2.0 * kPi;
+            while (u >= gLo + 2.0 * kPi) u -= 2.0 * kPi;
+            if (!(u > gLo && u < gHi)) return true;
+        }
+        return false;
+    };
 
     // D-130-14: a union face carries the enclosed interruptions as inner wires,
     // and the seam is a generator of the SAME face -- it may not run through
@@ -11192,7 +11459,38 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // wire clean.
     TopoDS_Edge gSeamE;
     double gSeamU0 = 0.0;
+    double gSeamV0 = r.vMin;  // v of the seam's parameter-0 vertex on the surface
     bool gSeamSet = false;
+    // The seam names the chart; it is written LAST. ShapeFix_Edge::FixAddPCurve
+    // (addPcurvesOnFace) rewrites an existing seam pair on a second pass --
+    // measured on cross_bores' R8 wall: after the inner wires were re-added
+    // reversed, the pair read (u0, u0 - 2pi) with every other wire on
+    // [u0, u0 + 2pi]. Re-asserting the pair at (u0, u0 + 2pi) with the seam
+    // vertex's own v is exact: the same two numbers, written again.
+    //
+    // Which end of the chart the FORWARD copy stands on follows from the
+    // wire's sense. The composite path builds its outer wire COUNTER-
+    // clockwise in (u, v) relative to the surface normal -- the only sense
+    // BRepCheck accepts for an outer wire whatever the face's own
+    // orientation flag says (a clockwise loop reads BadOrientationOfSubshape,
+    // measured on the R5 halves) -- so the seam goes UP at the chart's high
+    // end u0 (forward copy) and DOWN at u0 - 2pi (reversed copy). The simple
+    // path keeps its pair at (f, f + 2pi): its face is made by
+    // BRepBuilderAPI_MakeFace, which orients the wire itself (D-S3-43a).
+    bool gSeamFwdHigh = false;
+    auto assertSeamPair = [&]() {
+        if (!gSeamSet || gSeamE.IsNull()) return;
+        BRep_Builder B;
+        Standard_Real fs = 0, ls = 0;
+        Handle(Geom_Curve) cs = BRep_Tool::Curve(gSeamE, fs, ls);
+        const double uF = gSeamFwdHigh ? gSeamU0 + 2.0 * kPi : gSeamU0;
+        const double uR = gSeamFwdHigh ? gSeamU0 : gSeamU0 + 2.0 * kPi;
+        Handle(Geom2d_Line) p0 = new Geom2d_Line(gp_Pnt2d(uF, gSeamV0), gp_Dir2d(0.0, 1.0));
+        Handle(Geom2d_Line) p1 = new Geom2d_Line(gp_Pnt2d(uR, gSeamV0), gp_Dir2d(0.0, 1.0));
+        const double tol = std::max(BRep_Tool::Tolerance(gSeamE), sewTol);
+        B.UpdateEdge(gSeamE, p0, p1, surf, TopLoc_Location(), tol);
+        if (!cs.IsNull()) B.Range(gSeamE, fs, ls);
+    };
     auto bindIsoPCurves = [&](TopoDS_Edge& eCap, double vIso, double u0, TopoDS_Edge& eSeam,
                              bool writeSeam) {
         BRep_Builder B;
@@ -11220,6 +11518,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         if (!inners.empty()) {
             gSeamE = eSeam;
             gSeamU0 = f;
+            gSeamV0 = r.vMin;
             gSeamSet = true;
         }
     };
@@ -11261,6 +11560,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         if (got.IsNull()) return false;
         setFaceOutward(got, r.outwardNormal);
         addPcurvesOnFace(got, sewTol, true);
+        assertSeamPair();
         // D-130-16: addPcurvesOnFace is what BIRTHS the inner wire's pcurves,
         // so the branch pass has to run after it too -- an inner loop written
         // on [0, 2pi] under a seam that named [2pi, 4pi] is outside its own
@@ -11324,7 +11624,11 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             }
             setFaceOutward(got, r.outwardNormal);
             addPcurvesOnFace(got, sewTol, true);
+            assertSeamPair();
             if (gSeamSet) rebranchEdges(got, gSeamU0, gSeamE);
+            if (diagP2Enabled())
+                std::fprintf(stderr, "DIAG_SEAM360_SHAPEFIX rid=%d valid=%d\n", r.id,
+                             faceIsValid(got) ? 1 : 0);
         }
         if (!faceIsValid(got) && !ensureFaceValid(got, meshTolCap(mv, &r))) {
             if (diagP2Enabled()) {
@@ -11387,6 +11691,43 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             emit(warn, "seamed360: BRepCheck invalid on seamed face");
             return false;
         }
+        if (diagP2Enabled() && composite360) {
+            try {
+                // The same face, checked standalone and inside a one-face shell
+                // (the R2 probe's context); per-wire in-context statuses and
+                // the 2d poles of every tier-2 polyline wire.
+                TopoDS_Shell sh1;
+                BRep_Builder bsh;
+                bsh.MakeShell(sh1);
+                bsh.Add(sh1, got);
+                BRepCheck_Analyzer anF(got, Standard_True);
+                BRepCheck_Analyzer anS(sh1, Standard_True, Standard_True);
+                TopLoc_Location L;
+                Handle(Geom_Surface) sF = BRep_Tool::Surface(got, L);
+                int wi = 0;
+                for (TopExp_Explorer wx(got, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                    char a[96] = "[]", b[96] = "[]";
+                    formatStatusInContext(anF.Result(wx.Current()), got, a, sizeof(a));
+                    formatStatusInContext(anS.Result(wx.Current()), got, b, sizeof(b));
+                    std::fprintf(stderr, "DIAG_FINISH_WIRE rid=%d w=%d standalone=%s inShell=%s\n",
+                                 r.id, wi, a, b);
+                    for (BRepTools_WireExplorer ex(TopoDS::Wire(wx.Current())); ex.More(); ex.Next()) {
+                        const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                        Standard_Real a2 = 0, b2 = 0;
+                        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(ee, sF, L, a2, b2);
+                        Handle(Geom2d_BSplineCurve) pb = Handle(Geom2d_BSplineCurve)::DownCast(pc);
+                        if (pb.IsNull() || pb->Degree() != 1) continue;
+                        (void)pb;
+                    }
+                }
+                char fs[96] = "[]", ss[96] = "[]";
+                formatStatusList(anF.Result(got), fs, sizeof(fs));
+                formatStatusList(anS.Result(got), ss, sizeof(ss));
+                std::fprintf(stderr, "DIAG_FINISH_FACE rid=%d standalone=%s inShell=%s\n", r.id, fs, ss);
+                dumpTier2PolesOfFace(got, r.id, "finish");
+            } catch (const Standard_Failure&) {
+            }
+        }
         if (publishSimple && ciL >= 0 && ciH >= 0 && (size_t)ciL < geom.size() &&
             (size_t)ciH < geom.size()) {
             geom[(size_t)ciL].collapsed = true;
@@ -11431,8 +11772,54 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             if (f.IsNull()) return false;
             setFaceOutward(f, r.outwardNormal);
             addPcurvesOnFace(f, sewTol, true);
+            assertSeamPair();
             if (gSeamSet) rebranchEdges(f, gSeamU0, gSeamE);
-            return faceIsValid(f);
+            const bool ok = faceIsValid(f);
+            if (!ok && diagP2Enabled()) {
+                try {
+                    BRepCheck_Analyzer an(f, Standard_True);
+                    char st[128] = "[]";
+                    formatStatusList(an.Result(f), st, sizeof(st));
+                    std::fprintf(stderr, "DIAG_PREPARE_FAIL rid=%d st=%s faceOri=%s\n", r.id, st,
+                                 f.Orientation() == TopAbs_FORWARD ? "F" : "R");
+                    TopLoc_Location L;
+                    Handle(Geom_Surface) sF = BRep_Tool::Surface(f, L);
+                    int wi = 0;
+                    for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                        char wst[128] = "[]", wctx[128] = "[]";
+                        formatStatusList(an.Result(wx.Current()), wst, sizeof(wst));
+                        formatStatusInContext(an.Result(wx.Current()), f, wctx, sizeof(wctx));
+                        std::fprintf(stderr, "DIAG_PREPWIRE rid=%d w=%d ori=%s st=%s inFace=%s\n",
+                                     r.id, wi,
+                                     wx.Current().Orientation() == TopAbs_FORWARD ? "F" : "R",
+                                     wst, wctx);
+                        int ei = 0;
+                        for (BRepTools_WireExplorer ex(TopoDS::Wire(wx.Current())); ex.More();
+                             ex.Next(), ++ei) {
+                            const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                            char est[96] = "[]", ectx[96] = "[]";
+                            formatStatusList(an.Result(ee), est, sizeof(est));
+                            formatStatusInContext(an.Result(ee), f, ectx, sizeof(ectx));
+                            Standard_Real a2 = 0, b2 = 0;
+                            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(ee, sF, L, a2, b2);
+                            if (pc.IsNull()) {
+                                std::fprintf(stderr, "DIAG_PREPUV rid=%d w=%d e=%d NOPC st=%s inFace=%s\n",
+                                             r.id, wi, ei, est, ectx);
+                                continue;
+                            }
+                            const gp_Pnt2d q0 = pc->Value(a2), q1 = pc->Value(b2);
+                            std::fprintf(stderr,
+                                         "DIAG_PREPUV rid=%d w=%d e=%d ori=%s uv0=(%.5f,%.5f) "
+                                         "uv1=(%.5f,%.5f) st=%s inFace=%s tol=%.3g\n",
+                                         r.id, wi, ei,
+                                         ee.Orientation() == TopAbs_FORWARD ? "F" : "R", q0.X(),
+                                         q0.Y(), q1.X(), q1.Y(), est, ectx, BRep_Tool::Tolerance(ee));
+                        }
+                    }
+                } catch (const Standard_Failure&) {
+                }
+            }
+            return ok;
         };
         if (prepare(out2)) return true;
         std::vector<TopoDS_Wire> rev;
@@ -11489,6 +11876,10 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     try {
         if (simple) {
             const double u0 = azimuthOf(r, BRep_Tool::Pnt(verts[(size_t)vL]));
+            if (!inners.empty() && seamCrossesInner(u0)) {
+                emit(warn, "seamed360: seam crosses an inner wire -- no generator clear of every window");
+                return false;
+            }
             bindIsoPCurves(eL, r.vMin, u0, eSeam, true);
             bindIsoPCurves(eH, r.vMax, u0, eSeam, false);
             BRep_Builder B;
@@ -11543,8 +11934,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                     for (const TopoDS_Vertex* V : {&v1, &v2}) {
                         if (V->IsNull()) continue;
                         double u = azimuthOf(r, BRep_Tool::Pnt(*V));
-                        double d = std::fabs(u - seamU);
-                        d = std::min(d, 2.0 * kPi - d);
+                        const double d = angularDistance(u, seamU);
                         if (d < bestD) {
                             bestD = d;
                             best = *V;
@@ -11579,6 +11969,64 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 emit(warn, "seamed360: cap wire does not pass seam vertex — try TwoHalves");
                 return false;
             }
+            // D-130-16: the outer wire must close in UV AND run counter-
+            // clockwise relative to the surface normal (BRepCheck's rule for
+            // an outer wire; a closed clockwise loop reads
+            // BadOrientationOfSubshape, measured on the R5 halves). The wire
+            // is seam UP at u0, high cap, seam DOWN, low cap: counter-
+            // clockwise means the high cap runs -u from u0 to u0 - 2pi and the
+            // low cap, added reversed below, runs +u back -- so both paths AS
+            // BUILT must run -u. P1 orients each loop for the REGION boundary
+            // and a closed360 wall's two caps arrive with OPPOSITE azimuthal
+            // senses (measured on cross_bores' R8 wall: the UV wire jumped a
+            // whole period at each cap, UnorientableShape with every wire
+            // clean). Each path's sense is read off its own 3d curves, sampled
+            // at start / middle / end so an arc up to a full turn reads its
+            // true sign; the path that runs +u is reversed. Nothing moves: an
+            // edge sequence and its reversal are the same closed loop through
+            // the same seam vertex.
+            auto sweepU = [&](const std::vector<TopoDS_Edge>& path) -> double {
+                double sweep = 0.0;
+                for (const TopoDS_Edge& e : path) {
+                    Standard_Real f3 = 0, l3 = 0;
+                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+                    if (c3.IsNull()) continue;
+                    // Nine samples: a full circle read at three gives two
+                    // exact half turns whose wrapped signs cancel (measured:
+                    // sweep 0.0000 on an R5 rim). A polyline B-spline is read
+                    // at eight per span.
+                    int nS = 9;
+                    {
+                        Handle(Geom_BSplineCurve) bsS =
+                            Handle(Geom_BSplineCurve)::DownCast(basisCurveOf(c3));
+                        if (!bsS.IsNull()) nS = std::max(9, 8 * (bsS->NbKnots() - 1) + 1);
+                    }
+                    double prev = 0.0;
+                    for (int i = 0; i < nS; i++) {
+                        const int k = e.Orientation() == TopAbs_REVERSED ? nS - 1 - i : i;
+                        const double tk = f3 + (l3 - f3) * (double)k / (double)(nS - 1);
+                        const double u = azimuthOf(r, c3->Value(tk));
+                        if (i > 0) {
+                            double du = u - prev;
+                            while (du > kPi) du -= 2.0 * kPi;
+                            while (du < -kPi) du += 2.0 * kPi;
+                            sweep += du;
+                        }
+                        prev = u;
+                    }
+                }
+                return sweep;
+            };
+            auto reversePath = [](std::vector<TopoDS_Edge>& path) {
+                std::reverse(path.begin(), path.end());
+                for (TopoDS_Edge& e : path) e.Reverse();
+            };
+            const double sweepH = sweepU(pathH), sweepL = sweepU(pathL);
+            if (sweepH > 0.0) reversePath(pathH);
+            if (sweepL > 0.0) reversePath(pathL);
+            if (diagP2Enabled())
+                std::fprintf(stderr, "DIAG_SEAMSENSE rid=%d sweepH=%.4f sweepL=%.4f nH=%zu nL=%zu\n",
+                             r.id, sweepH, sweepL, pathH.size(), pathL.size());
             try {
                 gp_Lin lin2(BRep_Tool::Pnt(VL), r.ax.Direction());
                 AnalyticCurve acs2;
@@ -11615,21 +12063,38 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             if (composite360) {
                 BRep_Builder Bs;
                 const double u0 = azimuthOf(r, BRep_Tool::Pnt(seamVL));
+                if (!inners.empty() && seamCrossesInner(u0)) {
+                    emit(warn, "seamed360: seam crosses an inner wire -- no generator clear of every window");
+                    return false;
+                }
+                // The seam line's parameter 0 is at seamVL, so its pcurve
+                // starts at THAT vertex's v -- r.vMin only when the low cap is
+                // the vMin rim. On the R5 half whose rim is its vMax cap the
+                // low cap is the quartic loop and seamVL sits on it.
+                const double v0 = vOf(BRep_Tool::Pnt(seamVL));
+                // Counter-clockwise outer wire (see assertSeamPair): the
+                // forward seam copy stands at the chart's HIGH end u0, the
+                // reversed copy at u0 - 2pi; the chart is [u0 - 2pi, u0].
                 Standard_Real fs = 0, ls = 0;
                 Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
                 Handle(Geom2d_Line) pcS0 =
-                    new Geom2d_Line(gp_Pnt2d(u0, r.vMin), gp_Dir2d(0.0, 1.0));
+                    new Geom2d_Line(gp_Pnt2d(u0, v0), gp_Dir2d(0.0, 1.0));
                 Handle(Geom2d_Line) pcS1 =
-                    new Geom2d_Line(gp_Pnt2d(u0 + 2.0 * kPi, r.vMin), gp_Dir2d(0.0, 1.0));
+                    new Geom2d_Line(gp_Pnt2d(u0 - 2.0 * kPi, v0), gp_Dir2d(0.0, 1.0));
                 Bs.UpdateEdge(eSeam, pcS0, pcS1, surf, TopLoc_Location(), sewTol);
                 if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
                 eSeam.Closed(Standard_False);
                 gSeamE = eSeam;
-                gSeamU0 = u0;
+                gSeamU0 = u0 - 2.0 * kPi;
+                gSeamV0 = v0;
+                gSeamFwdHigh = true;
                 gSeamSet = true;
-                rebranchEdges(ow, u0, eSeam);
-                for (TopoDS_Wire& iw : inners) rebranchEdges(iw, u0, eSeam);
+                rebranchEdges(ow, gSeamU0, eSeam);
+                for (TopoDS_Wire& iw : inners) rebranchEdges(iw, gSeamU0, eSeam);
             }
+            if (diagP2Enabled())
+                std::fprintf(stderr, "DIAG_OUTERSENSE rid=%d areaUV=%.5f\n", r.id,
+                             signedAreaUV(ow));
             bindCylPCurves(ow, surf, r, sewTol);
             TopoDS_Face got;
             if (!buildWithInners(ow, got)) {
@@ -12511,6 +12976,48 @@ int hopCylCount(const RegionSet& rs, int rid) {
     return hop;
 }
 
+// Tier-2 polyline wires of a face: the 2d poles on the face's own surface,
+// the edge tolerance and the 3d curve type, printed at any stage.
+void dumpTier2PolesOfFace(const TopoDS_Face& f, int rid, const char* tag) {
+    if (!diagP2Enabled() || f.IsNull()) return;
+    try {
+        TopLoc_Location L;
+        Handle(Geom_Surface) sF = BRep_Tool::Surface(f, L);
+        int wi = 0;
+        for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+            for (BRepTools_WireExplorer ex(TopoDS::Wire(wx.Current())); ex.More(); ex.Next()) {
+                const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                Standard_Real a2 = 0, b2 = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(ee, sF, L, a2, b2);
+                Handle(Geom2d_BSplineCurve) pb = Handle(Geom2d_BSplineCurve)::DownCast(pc);
+                Standard_Real f3 = 0, l3 = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(ee, f3, l3);
+                if (pb.IsNull() || pb->Degree() != 1) {
+                    if (!c3.IsNull() && c3->DynamicType() == STANDARD_TYPE(Geom_BSplineCurve))
+                        std::fprintf(stderr,
+                                     "DIAG_TIER2_PC tag=%s rid=%d w=%d pc=%s deg=%d npoles=%d tol=%.6f "
+                                     "sameParam=%d sameRange=%d\n",
+                                     tag, rid, wi, pc.IsNull() ? "null" : pc->DynamicType()->Name(),
+                                     pb.IsNull() ? -1 : pb->Degree(), pb.IsNull() ? -1 : pb->NbPoles(),
+                                     BRep_Tool::Tolerance(ee), BRep_Tool::SameParameter(ee) ? 1 : 0,
+                                     BRep_Tool::SameRange(ee) ? 1 : 0);
+                    continue;
+                }
+                std::fprintf(stderr,
+                             "DIAG_TIER2_POLES tag=%s rid=%d w=%d ori=%s n=%d tol=%.6f c3=%s "
+                             "rng=[%.3f,%.3f] pcrng=[%.3f,%.3f] :",
+                             tag, rid, wi, ee.Orientation() == TopAbs_FORWARD ? "F" : "R",
+                             pb->NbPoles(), BRep_Tool::Tolerance(ee),
+                             c3.IsNull() ? "null" : c3->DynamicType()->Name(), f3, l3, a2, b2);
+                for (int i = 1; i <= pb->NbPoles(); i++)
+                    std::fprintf(stderr, " %.6f,%.6f", pb->Pole(i).X(), pb->Pole(i).Y());
+                std::fprintf(stderr, "\n");
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+}
+
 void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<TopoDS_Face>& built,
                  const std::vector<int>& builtRid, const std::vector<char>& eprimeFill,
                  const std::vector<char>& exploded, double sewTol);
@@ -13156,6 +13663,7 @@ void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<Topo
                          "nE=%d pcurveMissing=%d\n",
                          rid, kind, bas, faceSt, wireSt, edgeSt, countFaceEdges(f),
                          pcurveMissingOnFace(f));
+            dumpTier2PolesOfFace(f, rid, "r2");
             // Name the sub-shape that made this face invalid, and separate a
             // WRONG GEOMETRY from a WRONG FLAG. `an.Result(edge)` above carries
             // only the context-free status list; an edge that is invalid ONLY in
@@ -13492,6 +14000,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gRegionSurf.clear();
                     gSurfIdent.clear();
                     gSeamTShapes.clear();
+                    gTier2TShapes.clear();
                     gMeshTShapes.clear();
                     gWirePopCi.clear();
                     gWirePopSite.clear();
@@ -13564,6 +14073,86 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (plc && curve.kind == AnalyticCurve::None) {
                     curve.kind = AnalyticCurve::Circ;
                     curve.circ = gp_Circ(plcAx, plcR);
+                }
+                // D-130-2 tier 2 (SPEC-130-cylcyl addendum: "the MESH POLYLINE as
+                // ONE edge shared by the two analytic faces"): the skew cyl|cyl
+                // loop between two through-bores -- IntAna has no curve, both
+                // regions are closed360 cylinders, the chain is a closed loop --
+                // is published as ONE degree-1 B-spline edge through its own
+                // mesh vertices, one TShape both faces carry. Its single vertex
+                // is the loop's mesh vertex nearest azimuth 0 of the region
+                // that carries it as a CAP (the R5 half), so that region's seam
+                // generator -- through its rim's u = 0 vertex -- ends on it;
+                // for the region that carries it as an inner wire (the R8 wall)
+                // the vertex is immaterial. Tolerance: exactMaxAtBind's
+                // polyline-on-cylinder class, closed form, counted.
+                if (curve.kind == AnalyticCurve::None && anaPair && bothCyl && ch.closedLoop &&
+                    A->closed360 && B->closed360 && ch.meshVerts.size() >= 3) {
+                    const Region* capOwner = nullptr;
+                    for (const Region* R : {A, B}) {
+                        for (const Loop& lp : R->loops) {
+                            if (lp.role != LoopRole::CapLow && lp.role != LoopRole::CapHigh) continue;
+                            for (int k : lp.chainIdx)
+                                if (k == (int)ci) capOwner = R;
+                        }
+                        if (capOwner) break;
+                    }
+                    int lvSeam = ch.meshVerts.front();
+                    if (capOwner) lvSeam = vertexClosestToU(mv, *capOwner, ch, 0.0);
+                    std::vector<int> seq = ch.meshVerts;
+                    {
+                        size_t k = 0;
+                        while (k < seq.size() && seq[k] != lvSeam) k++;
+                        if (k < seq.size()) std::rotate(seq.begin(), seq.begin() + (long)k, seq.end());
+                        else lvSeam = seq.front();
+                    }
+                    const int n = (int)seq.size();
+                    TopoDS_Edge ePoly;
+                    if (lvSeam >= 0 && (size_t)lvSeam < verts.size() && !verts[(size_t)lvSeam].IsNull()) {
+                        try {
+                            TColgp_Array1OfPnt poles(1, n + 1);
+                            TColStd_Array1OfReal knots(1, n + 1);
+                            TColStd_Array1OfInteger mults(1, n + 1);
+                            for (int i = 0; i <= n; i++) {
+                                poles.SetValue(i + 1, pntOf(mv, seq[(size_t)(i % n)]));
+                                knots.SetValue(i + 1, (double)i);
+                                mults.SetValue(i + 1, (i == 0 || i == n) ? 2 : 1);
+                            }
+                            Handle(Geom_BSplineCurve) bsp = new Geom_BSplineCurve(poles, knots, mults, 1);
+                            BRepBuilderAPI_MakeEdge me(bsp, verts[(size_t)lvSeam], verts[(size_t)lvSeam],
+                                                       0.0, (double)n);
+                            if (me.IsDone()) ePoly = me.Edge();
+                        } catch (const Standard_Failure&) {
+                            ePoly.Nullify();
+                        }
+                    }
+                    if (!ePoly.IsNull()) {
+                        const Region* ownerR = A->id <= B->id ? A : B;
+                        const Region* consumerR = ownerR == A ? B : A;
+                        SeamBindCounts acc;
+                        bindAllVariants(ePoly, *ownerR, "tier2poly", mv, (int)ci, acc);
+                        bindAllVariants(ePoly, *consumerR, "tier2poly", mv, (int)ci, acc);
+                        geom[ci] = ChainGeom{};
+                        geom[ci].collapsed = true;
+                        geom[ci].edges = {ePoly};
+                        geom[ci].ia = lvSeam;
+                        geom[ci].ib = lvSeam;
+                        geom[ci].regA = A->id;
+                        geom[ci].regB = B->id;
+                        geom[ci].chainSnapCap = analyticSnapCap(mv, A, B);
+                        geom[ci].tier2Polyline = true;
+                        if (const void* ts2 = diagTShapePtr(ePoly)) gTier2TShapes.insert(ts2);
+                        noteWirePop(ePoly, "rebuildCollapsed", (int)ci);
+                        collapsed[ci] = 1;
+                        nOk++;
+                        if (diagP2Enabled() || diag130Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_130_TIER2 ci=%d regA=%d regB=%d nSeg=%d seamLv=%d "
+                                         "capOwner=%d tol=%.6f\n",
+                                         (int)ci, A->id, B->id, n, lvSeam,
+                                         capOwner ? capOwner->id : -1, BRep_Tool::Tolerance(ePoly));
+                        continue;
+                    }
                 }
                 // IntAna none: cyl|cyl is legal polyline (IA_CYLCYL_NOGEOM).
                 // plane|plane and plane|cyl misses are post-fit edge failures.
@@ -13950,25 +14539,32 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // cylinder that carries an inner wire and the single arc would
                 // otherwise leave the seam nowhere outside that wire to stand.
                 std::vector<TopoDS_Edge> chainEdges{e};
-                if (unionBuildOn() && !full && curve.kind == AnalyticCurve::Circ) {
+                // CYLCYL: the stage was the landing door (D-130-17 keeps the
+                // union disabled); the geometry is the condition, and
+                // rimSplitVertex asks it -- a closed360 cylinder carrying an
+                // inner wire, this chain on one of its rims. Nothing else has
+                // such a region, so nothing else moves. A FULL circle (one
+                // closed rim chain, cross_bores' R8 rims) splits the same way:
+                // arc from the terminal to the split vertex, arc back.
+                if (curve.kind == AnalyticCurve::Circ) {
                     const int lvSplit = rimSplitVertex(rs, mv, ch, (int)ci, A, B,
                                                        geom[ci].chainSnapCap, curve);
                     if (lvSplit >= 0 && (size_t)lvSplit < verts.size() &&
                         !verts[(size_t)lvSplit].IsNull()) {
+                        std::vector<int> seq = ch.meshVerts;
+                        if (ch.closedLoop && !seq.empty()) seq.push_back(seq.front());
                         size_t k = 0;
-                        while (k < ch.meshVerts.size() && ch.meshVerts[k] != lvSplit) k++;
+                        while (k < seq.size() && seq[k] != lvSplit) k++;
                         auto halfMid = [&](size_t i0, size_t i1) -> gp_Pnt {
-                            if (i1 - i0 >= 2) return pntOf(mv, ch.meshVerts[(i0 + i1) / 2]);
-                            const double p1 =
-                                ElCLib::Parameter(curve.circ, pntOf(mv, ch.meshVerts[i0]));
-                            const double p2 =
-                                ElCLib::Parameter(curve.circ, pntOf(mv, ch.meshVerts[i1]));
+                            if (i1 - i0 >= 2) return pntOf(mv, seq[(i0 + i1) / 2]);
+                            const double p1 = ElCLib::Parameter(curve.circ, pntOf(mv, seq[i0]));
+                            const double p2 = ElCLib::Parameter(curve.circ, pntOf(mv, seq[i1]));
                             double df = p2 - p1;
                             while (df <= 0.0) df += 2.0 * kPi;
                             if (df > kPi) df -= 2.0 * kPi;
                             return ElCLib::Value(p1 + 0.5 * df, curve.circ);
                         };
-                        if (k > 0 && k + 1 < ch.meshVerts.size()) {
+                        if (k > 0 && k + 1 < seq.size()) {
                             snapVertexToCurve(verts[(size_t)lvSplit], curve,
                                               geom[ci].chainSnapCap);
                             const TopoDS_Edge e0 =
@@ -13976,8 +14572,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                         halfMid(0, k));
                             const TopoDS_Edge e1 =
                                 makeArc(curve.circ, verts[(size_t)lvSplit], verts[(size_t)ib],
-                                        halfMid(k, ch.meshVerts.size() - 1));
+                                        halfMid(k, seq.size() - 1));
                             if (!e0.IsNull() && !e1.IsNull()) chainEdges = {e0, e1};
+                            if (diagP2Enabled())
+                                std::fprintf(stderr,
+                                             "DIAG_RIMSPLIT_EDGES ci=%d full=%d closedLoop=%d "
+                                             "k=%zu n=%zu ok=%d\n",
+                                             (int)ci, full ? 1 : 0, ch.closedLoop ? 1 : 0, k,
+                                             seq.size(),
+                                             (!e0.IsNull() && !e1.IsNull()) ? 1 : 0);
                         }
                     }
                 }
@@ -15065,8 +15668,25 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             } catch (const Standard_Failure&) {
             }
         }
+        // Forced SameParameter on every edge but the tier-2 polylines (see
+        // gTier2TShapes). With no such edge in the shell this is the very same
+        // whole-shell call as before.
+        auto sameParameterKeepingTier2 = [&](const TopoDS_Shape& shp, double tolSP) {
+            if (gTier2TShapes.empty()) {
+                BRepLib::SameParameter(shp, tolSP, /*forced=*/Standard_True);
+                return;
+            }
+            std::unordered_set<const void*> done;
+            for (TopExp_Explorer ex(shp, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                const void* ts = diagTShapePtr(e);
+                if (!ts || !done.insert(ts).second) continue;
+                if (gTier2TShapes.count(ts)) continue;
+                BRepLib::SameParameter(e, tolSP, /*forced=*/Standard_True);
+            }
+        };
         try {
-            BRepLib::SameParameter(sh, std::min(sewTol, spCap), /*forced=*/Standard_True);
+            sameParameterKeepingTier2(sh, std::min(sewTol, spCap));
             bool needRelax = false;
             for (const Region& rg : rs.regions) {
                 if (rg.type == SurfType::Cylinder && !regionExploded(exploded, rg.id))
@@ -15087,8 +15707,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     fireTolRewriteEdge(bb, e, fat, "sameParamRelax", spCap);
                 }
                 if (any)
-                    BRepLib::SameParameter(sh, std::min(sewTol * 10.0, spCap),
-                                           /*forced=*/Standard_True);
+                    sameParameterKeepingTier2(sh, std::min(sewTol * 10.0, spCap));
             }
         } catch (const Standard_Failure&) {
             return false;

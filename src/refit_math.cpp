@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <mutex>
 #include <thread>
+#include <map>
 #include <vector>
 
 #ifndef STL2STEP_ARCHCHAIN_BAND_MAX
@@ -420,6 +421,122 @@ bool eberlyCenterRadius(const MeshView& mv, const std::vector<int>& tris,
     // Closed-form is a single 2×2 solve (signature has no maxRefineIters).
     const gp_XYZ c = cx * u + cy * v + (mean.Dot(a) * a);
     if (!finite3(c.X(), c.Y(), c.Z()) || !(R > 0.0) || !std::isfinite(R)) return false;
+    center = gp_Pnt(c.X(), c.Y(), c.Z());
+    radius = R;
+    return true;
+}
+
+bool cornerCertifiedRadius(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axis,
+                           int nSides, gp_Pnt& center, double& radius, int& nCorner,
+                           int& nInterior, double& maxResid) {
+    nCorner = nInterior = 0;
+    maxResid = 0.0;
+    const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+    if (q <= 0.0) return false;
+    std::vector<int> ids;
+    sortedUniqueTris(tris, ids);
+    if (ids.size() < 3 || !mv.pts || !mv.tris || !mv.compTris) return false;
+
+    gp_XYZ a(axis.XYZ());
+    const double am = a.Modulus();
+    if (am < 1e-15) return false;
+    a.Divide(am);
+    gp_XYZ u, v;
+    if (!axisFrame(a, u, v)) return false;
+
+    // global vertex -> incident wall triangles (local ids), ascending (I5)
+    std::map<int, std::vector<int>> inc;
+    for (int t : ids) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        const int g = mv.compTris[t];
+        for (int k = 0; k < 3; ++k) inc[mv.tris[g][k]].push_back(t);
+    }
+    auto triArea = [&](int t) {
+        const int g = mv.compTris[t];
+        const gp_XYZ p0 = mv.pts[mv.tris[g][0]], p1 = mv.pts[mv.tris[g][1]],
+                     p2 = mv.pts[mv.tris[g][2]];
+        return 0.5 * ((p1 - p0) ^ (p2 - p0)).Modulus();
+    };
+    // The fold at a pair is read on the plane of the LARGER triangle (the A2
+    // refile's measurement, 312a729). What the file can state: each of the
+    // four points carries its own rounding, at most q; a point p that lay on
+    // the plane of a, b, c before rounding is p = b0 a + b1 b + b2 c (+ an
+    // in-plane offset) with b0 + b1 + b2 = 1, so after rounding its distance
+    // from the plane through the rounded a, b, c is at most
+    // q (1 + |b0| + |b1| + |b2|) -- the exact first-order propagation, no
+    // constant. For a sliver against a large triangle that is ~2q (the refile's
+    // case); for the two halves of one facet quad, whose far vertex projects
+    // across the shared diagonal, it is ~4q. Reading such a pair at q calls
+    // every second facet-interior vertex of cross_bores' R8 wall a corner and
+    // the certificate fails on a 0.016 mm sagitta point (measured). A resolved
+    // 7.5 deg fold reads 0.0065 mm on a 0.05 mm sliver and 1.3 mm across a
+    // facet -- three orders above either budget.
+    auto coplanar = [&](int t0, int t1) {
+        const int big = triArea(t0) >= triArea(t1) ? t0 : t1;
+        const int small = big == t0 ? t1 : t0;
+        const int gb = mv.compTris[big], gs = mv.compTris[small];
+        const gp_XYZ a = mv.pts[mv.tris[gb][0]], b = mv.pts[mv.tris[gb][1]],
+                     c = mv.pts[mv.tris[gb][2]];
+        const gp_XYZ v0 = b - a, v1 = c - a;
+        gp_XYZ n = v0 ^ v1;
+        const double nm = n.Modulus();
+        if (nm < 1e-300) return true;
+        n.Divide(nm);
+        const double d00 = v0.Dot(v0), d01 = v0.Dot(v1), d11 = v1.Dot(v1);
+        const double den = d00 * d11 - d01 * d01;
+        if (!(den > 0.0)) return true;
+        for (int k = 0; k < 3; ++k) {
+            const gp_XYZ p = mv.pts[mv.tris[gs][k]];
+            const gp_XYZ w = p - a;
+            const double dist = std::abs(w.Dot(n));
+            const gp_XYZ wp = w - n * w.Dot(n);
+            const double d20 = wp.Dot(v0), d21 = wp.Dot(v1);
+            const double b1 = (d11 * d20 - d01 * d21) / den;
+            const double b2 = (d00 * d21 - d01 * d20) / den;
+            const double b0 = 1.0 - b1 - b2;
+            const double budget = q * (1.0 + std::abs(b0) + std::abs(b1) + std::abs(b2));
+            if (dist > budget) return false;
+        }
+        return true;
+    };
+    std::vector<int> corners;
+    for (const auto& kv : inc) {
+        const std::vector<int>& ts = kv.second;
+        if (ts.size() < 2) continue;  // one triangle states no fold: not a sample
+        bool fold = false;
+        for (size_t i = 0; i < ts.size() && !fold; ++i)
+            for (size_t j = i + 1; j < ts.size() && !fold; ++j)
+                if (!coplanar(ts[i], ts[j])) fold = true;
+        if (fold) {
+            corners.push_back(kv.first);
+            nCorner++;
+        } else {
+            nInterior++;
+        }
+    }
+    // A counted N-gon wall has N corners on each rim: fewer corners than sides
+    // is not the polygon the count named (a 4-triangle fillet patch on S04
+    // reads 2 corners against 32 sides), and the fit is refused.
+    if (nInterior == 0 || corners.size() < 3) return false;
+    if (nSides >= 3 && static_cast<int>(corners.size()) < nSides) return false;
+
+    std::vector<double> xs(corners.size()), ys(corners.size());
+    gp_XYZ mean(0.0, 0.0, 0.0);
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+        const gp_XYZ p = mv.pts[corners[i]];
+        mean += p;
+        xs[i] = p.Dot(u);
+        ys[i] = p.Dot(v);
+    }
+    mean.Divide(static_cast<double>(corners.size()));
+    double cx = 0.0, cy = 0.0, R = 0.0;
+    if (!kasaFit2(xs.data(), ys.data(), corners.size(), cx, cy, R)) return false;
+    if (!(R > 0.0) || !std::isfinite(R)) return false;
+    for (std::size_t i = 0; i < corners.size(); ++i)
+        maxResid = std::max(maxResid, std::abs(std::hypot(xs[i] - cx, ys[i] - cy) - R));
+    if (!(maxResid <= q)) return false;
+    const gp_XYZ c = cx * u + cy * v + (mean.Dot(a) * a);
+    if (!finite3(c.X(), c.Y(), c.Z())) return false;
     center = gp_Pnt(c.X(), c.Y(), c.Z());
     radius = R;
     return true;

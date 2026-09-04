@@ -160,6 +160,19 @@ bool jacobiEigenSymmetric3(const std::array<std::array<double, 3>, 3>& m,
 
 bool pcaPlane(const MeshView& mv, const std::vector<int>& tris, gp_Ax3& plane);
 
+// D-130-1 on an INTERRUPTED counted N-gon wall (130-cylcyl.md 3.3): the radius
+// of a counted N-gon wall is the circumradius through its CORNERS. A vertex
+// is a corner when the wall's own triangles resolve a fold at it; a vertex at
+// which every incident wall triangle is coplanar within the file's
+// quantization q lies on a facet PLANE (another bore's generator piercing this
+// wall) and must not weigh on the fit. Returns true only when the wall HAS
+// such interior vertices and every corner sits on the corner fit within q --
+// then the fit is the geometry and no chord lift applies. Walls without
+// interior vertices (every plain tessellated cylinder) are untouched.
+bool cornerCertifiedRadius(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axis,
+                           int nSides, gp_Pnt& center, double& radius, int& nCorner,
+                           int& nInterior, double& maxResid);
+
 bool eberlyCenterRadius(const MeshView& mv, const std::vector<int>& tris,
                         const gp_Dir& axis, gp_Pnt& center, double& radius);
 
