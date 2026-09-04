@@ -9525,6 +9525,136 @@ void dumpDiagWireOri2AtKeepTry(int rid, const TopoDS_Face& face, const TopoDS_Wi
     }
 }
 
+// D-130 measurement: per-wire sense of a plate face at the instant makeFaceKeep is
+// chosen. One line per wire (outer first, then each inner in build order) plus a
+// face-level line: BRepCheck_Face needs exactly one wire whose own face classifies
+// the infinite point OUT. Diag-only; touches no live shape (probe faces are fresh).
+void dumpDiagPlateWireSense(const Region& r, const Handle(Geom_Plane)& gpl, const TopoDS_Wire& ow,
+                            const std::vector<TopoDS_Wire>& innerW,
+                            const std::vector<char>& innerWireRev, const char* stage) {
+    if (!diagP2Enabled() || gpl.IsNull()) return;
+    int nOuterLike = 0;
+    auto oneWire = [&](const TopoDS_Wire& w, const char* role, int iw, int wireRev) {
+        if (w.IsNull()) return;
+        int nE = 0;
+        TopoDS_Edge only;
+        for (TopoDS_Iterator it(w); it.More(); it.Next()) {
+            if (it.Value().ShapeType() != TopAbs_EDGE) continue;
+            if (nE == 0) only = TopoDS::Edge(it.Value());
+            nE++;
+        }
+        const int single = (nE == 1 && !only.IsNull() && edgeSpansFullCircle(only)) ? 1 : 0;
+        const char* eOri = only.IsNull() ? "-" : topAbsOriName(only.Orientation());
+        const double ca = wireCurveSignedAreaUV(w, r);
+        const double pa = wireSignedAreaUV(w, r);
+        const char* soloInf = "?";
+        try {
+            BRep_Builder B;
+            TopoDS_Face probe;
+            B.MakeFace(probe, gpl, Precision::Confusion());
+            B.Add(probe, w);
+            BRepTopAdaptor_FClass2d cl(probe, Precision::PConfusion());
+            const TopAbs_State st = cl.PerformInfinitePoint();
+            soloInf = topAbsStateName(st);
+            if (st == TopAbs_OUT) nOuterLike++;
+        } catch (const Standard_Failure&) {
+        }
+        std::fprintf(stderr,
+                     "DIAG_OP2L_WIRE rid=%d stage=%s role=%s iw=%d nE=%d closed=%d wireOri=%s "
+                     "edgeOri=%s singleClosedCircle=%d curveArea=%.6f polyArea=%.6f "
+                     "wireRevApplied=%d soloInfPt=%s\n",
+                     r.id, stage ? stage : "?", role, iw, nE, w.Closed() ? 1 : 0,
+                     topAbsOriName(w.Orientation()), eOri, single, ca, pa, wireRev, soloInf);
+    };
+    oneWire(ow, "outer", -1, 0);
+    for (size_t i = 0; i < innerW.size(); i++)
+        oneWire(innerW[i], "inner", (int)i,
+                i < innerWireRev.size() ? (int)innerWireRev[i] : 0);
+    const char* oriW = "?";
+    const char* clsW = "?";
+    try {
+        BRep_Builder B;
+        TopoDS_Face probe;
+        B.MakeFace(probe, gpl, Precision::Confusion());
+        B.Add(probe, ow);
+        for (const auto& iw : innerW)
+            if (!iw.IsNull()) B.Add(probe, iw);
+        BRepCheck_Face fc(probe);
+        fc.GeometricControls(Standard_True);
+        oriW = brepCheckName((int)fc.OrientationOfWires(Standard_False));
+        clsW = brepCheckName((int)fc.ClassifyWires(Standard_False));
+    } catch (const Standard_Failure&) {
+    }
+    // Subset probe: which wire combination is the one BRepCheck refuses.
+    {
+        auto probeSubset = [&](const std::vector<int>& useInner, const char* label) {
+            const char* verdict = "?";
+            std::string own;
+            try {
+                BRep_Builder B;
+                TopoDS_Face probe;
+                B.MakeFace(probe, gpl, Precision::Confusion());
+                B.Add(probe, ow);
+                for (int k : useInner)
+                    if (k >= 0 && (size_t)k < innerW.size() && !innerW[(size_t)k].IsNull())
+                        B.Add(probe, innerW[(size_t)k]);
+                BRepCheck_Analyzer an(probe);
+                verdict = an.IsValid() ? "valid" : "invalid";
+                const Handle(BRepCheck_Result) res = analyzerResultOf(an, probe);
+                own = analyzerStatusOwn(res);
+                BRepCheck_Face fc(probe);
+                fc.GeometricControls(Standard_True);
+                const BRepCheck_Status sInt = fc.IntersectWires(Standard_False);
+                const BRepCheck_Status sCls = fc.ClassifyWires(Standard_False);
+                const BRepCheck_Status sOri = fc.OrientationOfWires(Standard_False);
+                BRepCheck_Wire wc(ow);
+                wc.GeometricControls(Standard_True);
+                TopoDS_Edge xe1, xe2;
+                const BRepCheck_Status wSelf = wc.SelfIntersect(probe, xe1, xe2, Standard_False);
+                const BRepCheck_Status wCl2 = wc.Closed2d(probe, Standard_False);
+                const BRepCheck_Status wOri = wc.Orientation(probe, Standard_False);
+                std::fprintf(stderr,
+                             "DIAG_OP2L_SUBDET rid=%d subset=%s intersect=%s classify=%s "
+                             "orient=%s wSelfX=%s wClosed2d=%s wOrient=%s\n",
+                             r.id, label, brepCheckName((int)sInt), brepCheckName((int)sCls),
+                             brepCheckName((int)sOri), brepCheckName((int)wSelf),
+                             brepCheckName((int)wCl2), brepCheckName((int)wOri));
+            } catch (const Standard_Failure&) {
+            }
+            std::fprintf(stderr, "DIAG_OP2L_SUBSET rid=%d subset=%s verdict=%s own=%s\n", r.id,
+                         label, verdict, own.empty() ? "-" : own.c_str());
+        };
+        probeSubset({}, "outer");
+        for (size_t k = 0; k < innerW.size(); k++) {
+            char lbl[32];
+            std::snprintf(lbl, sizeof(lbl), "outer+inner%zu", k);
+            probeSubset({(int)k}, lbl);
+        }
+    }
+    const char* faceFwd = "?";
+    const char* faceOut = "?";
+    try {
+        BRep_Builder B;
+        TopoDS_Face probe;
+        B.MakeFace(probe, gpl, Precision::Confusion());
+        B.Add(probe, ow);
+        for (const auto& iw : innerW)
+            if (!iw.IsNull()) B.Add(probe, iw);
+        BRepCheck_Analyzer anF(probe);
+        faceFwd = anF.IsValid() ? "valid" : "invalid";
+        TopoDS_Face probe2 = probe;
+        setFaceOutward(probe2, r.outwardNormal);
+        BRepCheck_Analyzer anO(probe2);
+        faceOut = anO.IsValid() ? "valid" : "invalid";
+    } catch (const Standard_Failure&) {
+    }
+    std::fprintf(stderr,
+                 "DIAG_OP2L_FACE rid=%d stage=%s nWires=%zu nSoloOut=%d orientationOfWires=%s "
+                 "classifyWires=%s outward=%d probeFwd=%s probeOutward=%s\n",
+                 r.id, stage ? stage : "?", innerW.size() + 1, nOuterLike, oriW, clsW,
+                 r.outwardNormal ? 1 : 0, faceFwd, faceOut);
+}
+
 bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                      const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                      const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
@@ -9542,6 +9672,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
     try {
         Handle(Geom_Plane) gpl = Handle(Geom_Plane)::DownCast(regionSurf(r, SurfVar::Plane));
         std::vector<TopoDS_Wire> innerW;
+        std::vector<char> innerRev;
         bool innersOk = true;
         for (const Loop* ip : inners) {
             TopoDS_Wire iw;
@@ -9549,15 +9680,32 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                 innersOk = false;
                 break;
             }
-            if (ip->chainIdx.size() == 1) {
+            // D-130 step 1: a single closed edge realises its loop sense as that
+            // EDGE's own orientation flag (buildLoopWire, D-S3-171 case (c)).
+            // Reversing the WIRE on top of that double-negates the sense: the hole
+            // then classifies its own infinite point OUT and BRepCheck_Face sees two
+            // outer wires (BadOrientationOfSubshape / UnorientableShape). Multi-edge
+            // loops keep the existing behaviour. Diag-only assertion: the wire-level
+            // reversal must never be the thing that fixes a single-closed-edge loop.
+            if (diagP2Enabled() && ip->chainIdx.size() == 1) {
                 const int ci = ip->chainIdx[0];
                 if (ci >= 0 && (size_t)ci < collapsed.size() && collapsed[(size_t)ci] &&
                     (size_t)ci < geom.size() && geom[(size_t)ci].collapsed &&
                     geom[(size_t)ci].edges.size() == 1 &&
-                    edgeSpansFullCircle(geom[(size_t)ci].edges[0]))
-                    iw = TopoDS::Wire(iw.Reversed());
+                    edgeSpansFullCircle(geom[(size_t)ci].edges[0])) {
+                    const gp_Dir z = r.ax.Direction();
+                    const gp_Dir outw = r.outwardNormal ? z : gp_Dir(z.Reversed());
+                    const int wantedInner = (z.Dot(outw) >= 0.0) ? -1 : 1;
+                    const double ca = wireCurveSignedAreaUV(iw, r);
+                    std::fprintf(stderr,
+                                 "DIAG_OP2L_SINGLE rid=%d ci=%d wireOri=%s curveArea=%.6f "
+                                 "wanted=%+d wireLevelReversalNeeded=%d\n",
+                                 r.id, ci, topAbsOriName(iw.Orientation()), ca, wantedInner,
+                                 ((ca > 0.0) != (wantedInner > 0)) ? 1 : 0);
+                }
             }
             innerW.push_back(iw);
+            innerRev.push_back(0);
         }
         if (innersOk) {
             int nBound = 0, nSkippedHasPc = 0, nSkippedNoCurve = 0;
@@ -9572,6 +9720,7 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                 std::fprintf(stderr,
                              "DIAG_PLANEPCBIND rid=%d nBound=%d nSkippedHasPc=%d nSkippedNoCurve=%d\n",
                              r.id, nBound, nSkippedHasPc, nSkippedNoCurve);
+            dumpDiagPlateWireSense(r, gpl, ow, innerW, innerRev, "keep-try");
         }
         if (innersOk && makeFaceKeep(gpl, ow, innerW, r.outwardNormal, outF)) {
             if (r.id >= 0 && (diagPlatesEnabled() || diagP2Enabled())) {
