@@ -249,11 +249,17 @@ struct LawBand {
     bool    closed360 = false;
     double  cvTheta = 0.0, cvR = 0.0, maxVertResid = 0.0;  // Tier-1 residuals
     bool    lowConfidence = false;      // RULE 4.2d: N == 2
+    bool    virtualGen = false;        // D-130-8: chain built on the facet-plane
+                                       // intersection lines, not on mesh edges
 };
 
 // Tier 1 -- parameter-free. No d, no alpha, no degree threshold.
 bool lawChainAccept(const MeshView& mv, const std::vector<int>& tris,
                     const DerivedTols& tol, LawBand& out);
+
+// D-130-8 seed bootstrap: folds the mesh resolves, and how many are parallel.
+void lawVirtualFoldCount(const MeshView& mv, const std::vector<int>& tris,
+                         const DerivedTols& tol, int& nFolds, int& nParallel);
 
 // Tier 2 -- constraint intersection over accepted bands. Never gates Tier 1.
 TessLawInterval lawCalibrate(const std::vector<LawBand>& bands);

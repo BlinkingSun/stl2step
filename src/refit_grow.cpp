@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -2224,6 +2225,19 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
     std::sort(triples.begin(), triples.end());
     triples.erase(std::unique(triples.begin(), triples.end()), triples.end());
 
+    // D-130-8: a SINGLE strip is a seed once the generators are virtual. The
+    // triple above exists only because "a single facet cannot recover the axis
+    // (shared edge is the diagonal)" -- true of a mesh-edge chain, false of the
+    // facet-plane intersection lines, which are parallel to the axis whether or
+    // not the mesh drew a ridge. Without it the plate's four R=3 slot ends are
+    // unreachable: each half-wall is ONE strip, so every triple that contains it
+    // also drags in a flat slot wall and is refused on the union. Appended after
+    // the triples; a strip that carries no chain is refused in the same call
+    // the triples use, and the accept ORDER is by (N, size, minTri), not by
+    // seed index.
+    const size_t nTriples = triples.size();
+    for (int i = 0; i < nS; i++) triples.push_back({i, i, i});
+
     struct Grown {
         LawBand band;
         bool ok = false;
@@ -2233,14 +2247,54 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
 
     lawParallelFor(triples.size(), [&](size_t ti) {
         const auto trip = triples[ti];
-        std::vector<int> members = {trip[0], trip[1], trip[2]};
-        LawBand seedB;
-        if (!lawChainAccept(mv, unionStripTris(members), tol, seedB)) return;
-
+        std::vector<int> members;
+        for (int m : trip) {
+            if (std::find(members.begin(), members.end(), m) == members.end()) members.push_back(m);
+        }
         std::vector<char> in(static_cast<size_t>(nS), 0);
-        in[static_cast<size_t>(trip[0])] = 1;
-        in[static_cast<size_t>(trip[1])] = 1;
-        in[static_cast<size_t>(trip[2])] = 1;
+        for (int m : members) in[static_cast<size_t>(m)] = 1;
+        LawBand seedB;
+        if (!lawChainAccept(mv, unionStripTris(members), tol, seedB)) {
+            if (ti < nTriples) return;
+            // BOOTSTRAP (D-130-8), single-strip seeds only. A virtual-generator
+            // chain needs three generators, i.e. FOUR facet planes; a LawStrip
+            // is a maximal run of facets within kLawStripNormalCos (2 deg), so
+            // on a wall whose folds exceed that -- the plate's R=3 slot ends
+            // fold 6.43 deg -- a strip is one facet and four strips are the
+            // fewest that can carry three folds. Grow to four in ascending
+            // minTri and certify there; never further, and never past a strip
+            // the chain refuses.
+            bool got = false;
+            int folds = 0, parallel = 0;
+            lawVirtualFoldCount(mv, unionStripTris(members), tol, folds, parallel);
+            while (parallel < 3) {
+                int best = -1;
+                for (int m : members) {
+                    for (int nb : adj[static_cast<size_t>(m)]) {
+                        if (in[static_cast<size_t>(nb)]) continue;
+                        if (best < 0 || strips[static_cast<size_t>(nb)].minTri <
+                                            strips[static_cast<size_t>(best)].minTri)
+                            best = nb;
+                    }
+                }
+                if (best < 0) break;
+                members.push_back(best);
+                in[static_cast<size_t>(best)] = 1;
+                int f2 = 0, p2 = 0;
+                lawVirtualFoldCount(mv, unionStripTris(members), tol, f2, p2);
+                if (f2 <= folds) break;  // the strip added no fold: flat that way
+                folds = f2;
+                parallel = p2;
+                if (lawChainAccept(mv, unionStripTris(members), tol, seedB)) {
+                    got = true;
+                    break;
+                }
+            }
+            if (!got && parallel >= 3)
+                got = lawChainAccept(mv, unionStripTris(members), tol, seedB);
+            if (!got) return;
+        }
+
         bool changed = true;
         while (changed) {
             changed = false;
@@ -2261,6 +2315,12 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 trial.push_back(nb);
                 LawBand tb;
                 if (!lawChainAccept(mv, unionStripTris(trial), tol, tb)) continue;
+                // A band grows by the SAME law it was certified under. The
+                // virtual chain exists to seed a staggered strip the mesh-edge
+                // chain cannot pair on; letting it also extend a band the
+                // mesh-edge chain already certified merges handle-lock's
+                // stacked R=5 and R=10 walls into one band and costs 44 faces.
+                if (tb.virtualGen != seedB.virtualGen) continue;
                 members.push_back(nb);
                 in[static_cast<size_t>(nb)] = 1;
                 seedB = std::move(tb);
@@ -2320,6 +2380,15 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
     std::sort(order.begin(), order.end(), [&](int a, int b) {
         const LawBand& A = grown[static_cast<size_t>(a)].band;
         const LawBand& B = grown[static_cast<size_t>(b)].band;
+        // D-130-8: a chain the MESH drew outranks a virtual one. The mesh-edge
+        // chain carries equal-theta at every generator the mesh itself put
+        // there; the virtual chain infers its generators from facet planes and
+        // tolerates the ones the mesh omitted. Where both can claim the same
+        // triangles the drawn chain is the stronger certificate and takes them
+        // first -- the virtual chain exists for what it leaves unclaimed, not
+        // to pre-empt it (handle-lock: three R=5/R=10 walls otherwise merge
+        // into bigger virtual bands and 44 faces stop building).
+        if (A.virtualGen != B.virtualGen) return !A.virtualGen;
         if (A.N != B.N) return A.N > B.N;
         if (A.tris.size() != B.tris.size()) return A.tris.size() > B.tris.size();
         const int ma = A.tris.empty() ? 0 : A.tris.front();
@@ -2415,6 +2484,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                         trial.push_back(nb);
                         LawBand tb;
                         if (!lawChainAccept(mv, unionLeft(trial), tol, tb)) continue;
+                        if (tb.virtualGen != sb.virtualGen) continue;
                         mem.push_back(nb);
                         in[static_cast<size_t>(nb)] = 1;
                         sb = std::move(tb);
@@ -2466,6 +2536,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                     trial.push_back(tAdd);
                     LawBand nb;
                     if (!lawChainAccept(mv, trial, tol, nb)) continue;
+                    if (nb.virtualGen != b.virtualGen) continue;
                     taken[static_cast<size_t>(tAdd)] = 1;
                     b = std::move(nb);
                     grew = true;
@@ -2513,6 +2584,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 trial.insert(trial.end(), extra.begin(), extra.end());
                 LawBand nb;
                 if (!lawChainAccept(mv, trial, tol, nb)) continue;
+                if (nb.virtualGen != b.virtualGen) continue;
                 for (int t : extra) taken[static_cast<size_t>(t)] = 1;
                 b = std::move(nb);
                 grew = true;
