@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
 - Gate fixture `linkage_bores_chamfer` (`linkage_bores_chamfer.stl`, `.expected.json`, `gates/linkage_chamfer_gate.py`) for the Mastercam linkage plate: N-gon bores plus the hole-mouth 45° chamfer.
 
 ### Changed
-- **G2 sagitta in `archChainBand`**: on 500–8000-tri meshes, cylinder vertex residual uses chord-sagitta slack (`max(epsCylAccept(R), chordSagitta(R,N))`) rather than 1%R. The 3222-tri N-gon dead zone no longer fails G2 solely because sagitta exceeds 1%R. `coarseFusionBand` is not widened.
+- **G2 sagitta in `archChainBand`**: outside coarse, G2 accepts a cylinder commit only when the max vertex residual is within the exact deviation a correct fit of a **counted** N-gon can produce (`N = ev.d2.nSides`, and only when `N >= 6`); the gate is never loosened for a region whose N was not counted (no `tris.size()` substitute, no literal floor of 6). Otherwise `g2Tol = epsCylAccept(R)`. `coarseFusionBand` is not widened (D-130-1).
 
 ## [1.2.0] - 2026-09-03
 

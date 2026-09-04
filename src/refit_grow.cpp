@@ -955,11 +955,12 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
             return ev;
         }
     } else if (archChainBand(mv)) {
-        // 3222-tri N-gons sit in archChainBand (500–8000), outside coarse:
-        // same chord-sagitta g2Tol as coarse, not 1%R.
+        // D-130-1: G2 may use chord-sagitta slack only for a counted N-gon
+        // (N = ev.d2.nSides, N >= 6). No tris.size() substitute, no literal
+        // floor. Otherwise g2Tol is epsCylAccept(R). Coarse branch untouched.
         double g2Tol = tol.epsCylAccept(ev.radius);
-        const int nEstSides = std::max(ev.d2.nSides, std::max(6, (int)tris.size()));
-        g2Tol = std::max(g2Tol, chordSagitta(ev.radius, nEstSides));
+        if (ev.d2.nSides >= 6)
+            g2Tol = std::max(g2Tol, chordSagitta(ev.radius, ev.d2.nSides));
         if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol) {
             ev.failGate = Gate::G2;
             return ev;
