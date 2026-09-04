@@ -2419,6 +2419,31 @@ TopoDS_Edge makeArc(const gp_Circ& circ, const TopoDS_Vertex& vA, const TopoDS_V
     return TopoDS_Edge();
 }
 
+// True when the increasing-parameter arc vA -> vB is the one the mesh mid
+// vertex sits on. Same selector as makeEllipseArc's own branch, factored out so
+// the fallback cannot answer with the complement.
+bool midHintOnForwardArc(const gp_Elips& el, const TopoDS_Vertex& vA, const TopoDS_Vertex& vB,
+                         const gp_Pnt& midHint) {
+    const double twopi = 2.0 * kPi;
+    auto wrap = [&](double t) {
+        while (t < 0.0) t += twopi;
+        while (t >= twopi) t -= twopi;
+        return t;
+    };
+    try {
+        const double p1 = wrap(ElCLib::Parameter(el, BRep_Tool::Pnt(vA)));
+        const double p2 = wrap(ElCLib::Parameter(el, BRep_Tool::Pnt(vB)));
+        const double pm = wrap(ElCLib::Parameter(el, midHint));
+        double df = p2 - p1;
+        while (df <= 0.0) df += twopi;
+        double dm = pm - p1;
+        while (dm < 0.0) dm += twopi;
+        return dm <= df + 1e-9;
+    } catch (const Standard_Failure&) {
+    }
+    return true;
+}
+
 // ME_CYLPLN_ELLIPSE_PROJ: same mid-vertex selector as makeArc, on the IntAna
 // ellipse. Open arcs keep the chain as the selector.
 TopoDS_Edge makeEllipseArc(const gp_Elips& el, const TopoDS_Vertex& vA, const TopoDS_Vertex& vB,
@@ -2442,12 +2467,27 @@ TopoDS_Edge makeEllipseArc(const gp_Elips& el, const TopoDS_Vertex& vA, const To
             TopoDS_Edge pe = bindEdgeByParam(ge, vA, vB, p1, p1 + df);
             if (!pe.IsNull()) return pe;
         } else {
+            // Complementary arc: the mid vertex says the sweep runs the other
+            // way round, so vB owns p1 - db, not p1 + db. Naming p1 + db binds
+            // vB to a point it does not occupy (90 deg away on S11-b), which
+            // BRepBuilderAPI_MakeEdge refuses -- and the arc-blind fallback
+            // below then hands back the MAJOR arc. Bind vB -> vA over its own
+            // range and reverse, exactly as makeArc does for a circle.
             const double db = twopi - df;
-            TopoDS_Edge pe = bindEdgeByParam(ge, vA, vB, p1, p1 + db);
-            if (!pe.IsNull()) return pe;
+            const double t0 = wrap(p1 - db);
+            TopoDS_Edge pe = bindEdgeByParam(ge, vB, vA, t0, t0 + db);
+            if (!pe.IsNull()) {
+                pe.Reverse();
+                return pe;
+            }
         }
     } catch (const Standard_Failure&) {
     }
+    // ME_ELLIPSE_FALLBACK: this edge is the increasing-parameter arc from vA to
+    // vB, so it is only the arc the mesh asked for when the mid vertex lies on
+    // it. Handing back the complement instead is a silent geometry swap; the
+    // chain must demote to its mesh polyline, which every neighbour can share.
+    if (!midHintOnForwardArc(el, vA, vB, midHint)) return TopoDS_Edge();
     try {
         BRepBuilderAPI_MakeEdge me(el, vA, vB);
         if (me.IsDone()) return me.Edge();
@@ -9935,10 +9975,17 @@ void dumpDiagPlateWireSense(const Region& r, const Handle(Geom_Plane)& gpl, cons
 // DECISION-130 tripwire. An analytic edge on a plate -- one born at
 // bindAllVariants, i.e. enrolled in gSeamTShapes -- must name the chain it came
 // from. An edge that cannot be resolved to a collapsed chain is an edge no other
-// face can reference: it is the makeFaceKeep-seam / ci=-1 failure mode, and it
-// opens the shell silently. Never a fallback: the count is always reported and
-// the face is refused, so the region explodes to facets that ARE shared.
-// STL2STEP_130_TRIPWIRE_ABORT=1 turns it into a hard stop for investigation.
+// face can reference: the makeFaceKeep-seam / ci=-1 failure mode, which opens
+// the shell silently.
+//
+// It REPORTS, it does not refuse. Refusing cost the two canonical P2 build
+// fixtures whose expected builtAs is single/single/single --
+// p2buildtest_fillet_strip_2tri and p2buildtest_quarter_round_1tri both explode
+// region 1 to facets on an unnamedAnalyticEdges=1 verdict, with openE unchanged
+// at 8 either way: the edge those two name IS shared, so the resolver, not the
+// face, is what is wrong. Until the resolver is sound a refusal here would be
+// the same silent substitution DECISION-130 forbids, only in the other
+// direction. STL2STEP_130_TRIPWIRE_ABORT=1 is the hard stop for investigation.
 int plateAnalyticEdgesWithoutChain(const Region& r, const TopoDS_Face& f,
                                    const std::vector<ChainGeom>& geom,
                                    TopoDS_Edge* firstBad = nullptr) {
@@ -9969,7 +10016,7 @@ int plateAnalyticEdgesWithoutChain(const Region& r, const TopoDS_Face& f,
             if (!v1.IsNull()) p1 = BRep_Tool::Pnt(v1);
         }
         std::fprintf(stderr,
-                     "DIAG_130_TRIPWIRE rid=%d unnamedAnalyticEdges=%d verdict=refused "
+                     "DIAG_130_TRIPWIRE rid=%d unnamedAnalyticEdges=%d verdict=reported "
                      "first=(%.4f,%.4f,%.4f)-(%.4f,%.4f,%.4f)\n",
                      r.id, n, p0.X(), p0.Y(), p0.Z(), p1.X(), p1.Y(), p1.Z());
         if (const char* v = std::getenv("STL2STEP_130_TRIPWIRE_ABORT"); v && v[0] && v[0] != '0')
@@ -10063,7 +10110,8 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
                     dumpPcurveFrames(r, ow);
                     dumpDiagPlateLine(r.id, outF);
                 }
-                if (plateAnalyticEdgesWithoutChain(r, outF, geom) > 0) return false;
+                TopoDS_Edge tripBad;
+                (void)plateAnalyticEdgesWithoutChain(r, outF, geom, &tripBad);
                 return !outF.IsNull();
             }
             diagPlateMakeFaceFail(r.id, outF, ow, rs, mv, geom, collapsed, meshE, mv.sewTol);
@@ -10176,7 +10224,8 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
             dumpPcurveFrames(r, ow);
             dumpDiagPlateLine(r.id, outF);
         }
-        if (plateAnalyticEdgesWithoutChain(r, outF, geom) > 0) return false;
+        TopoDS_Edge tripBad;
+        (void)plateAnalyticEdgesWithoutChain(r, outF, geom, &tripBad);
         return !outF.IsNull();
     } catch (const Standard_Failure&) {
         return false;
