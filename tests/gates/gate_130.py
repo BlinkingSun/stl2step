@@ -5,9 +5,12 @@ For every corpus sidecar with `"battery": "130"`: convert with `--smooth
 --no-verify`, assert ok / solids=1 / openShells=0 / reverted=0, built
 cylinders == GT, cones == GT (DIAG_130_CENSUS ChamferCone; RESULT has no
 cone field), volume delta ≤ 0.01% (census B-Rep volume vs mesh), and when
-the sidecar lists intersections, intersection edges are not a mesh polyline
-of > 4 segments (print actual EDGE_CURVE types until the representation
-decision lands).
+the sidecar lists intersections, each is represented by its D-130-2 tier:
+tier 1 (`cylplane`, `coneplane`, `conecyl-coaxial`, `cylcyl-coaxial`) ships
+a CIRCLE / ELLIPSE / LINE; tier 2 (`cylcyl`, the general skew quartic, and
+`conecyl`) ships the MESH POLYLINE as ONE edge shared by the two analytic
+faces, counted by the 130-BIND census under `edgeClasses.polylineTier2`,
+with no `unhandled`, `overTol` or `overCap` on any analytic|analytic edge.
 
 CTest invert: LABELS gates;expected-red + PASS_REGULAR_EXPRESSION
 GATE_130_EXPECTED_RED. Flip protocol: remove PASS_REGULAR_EXPRESSION when
@@ -121,17 +124,99 @@ def discover_battery(corpus: Path) -> List[Tuple[str, Path, Path, Dict[str, Any]
     return ordered
 
 
-def polyline_over_4(step_text: str) -> List[str]:
-    hits: List[str] = []
-    for m in POLYLINE_RE.finditer(step_text):
-        n = len(re.findall(r"#\d+", m.group(1)))
-        if n > 4:
-            hits.append(f"POLYLINE n={n}")
-    for m in COMPOSITE_SEGS_RE.finditer(step_text):
-        n = len(re.findall(r"#\d+", m.group(1)))
-        if n > 4:
-            hits.append(f"COMPOSITE_CURVE n={n}")
-    return hits
+TIER1_KINDS = ("cylplane", "coneplane", "conecyl-coaxial", "cylcyl-coaxial")
+TIER2_KINDS = ("cylcyl", "conecyl")
+
+ENTITY_RE = re.compile(r"^#(\d+)\s*=\s*(.*?);\s*$", re.MULTILINE | re.DOTALL)
+REF_RE = re.compile(r"#(\d+)")
+
+
+def _step_entities(step_text: str) -> Dict[int, str]:
+    """#id -> entity body (name + args), one entry per STEP instance."""
+    out: Dict[int, str] = {}
+    for m in ENTITY_RE.finditer(step_text):
+        out[int(m.group(1))] = " ".join(m.group(2).split())
+    return out
+
+
+def _entity_name(body: str) -> str:
+    return body.split("(", 1)[0].strip().upper()
+
+
+def shared_tier2_edges(step_text: str) -> Tuple[List[str], List[str]]:
+    """D-130-2 tier 2, structurally on the STEP file.
+
+    Returns (shared, unshared): the EDGE_CURVEs whose 3D curve is a degree-1
+    B_SPLINE_CURVE_WITH_KNOTS (the mesh polyline) and that are referenced by
+    the loops of exactly two faces whose surfaces are both CYLINDRICAL_SURFACE
+    (or CONICAL_SURFACE), versus such polyline edges that only ONE analytic
+    face references. A tier-2 seam is honest only when it is one TShape on
+    both faces; a polyline each face carries alone is the shell opening.
+    """
+    ents = _step_entities(step_text)
+    name = {k: _entity_name(v) for k, v in ents.items()}
+    # face -> surface entity, face -> set of edge_curve ids
+    face_surface: Dict[int, int] = {}
+    face_edges: Dict[int, set] = {}
+    for fid, body in ents.items():
+        if name[fid] != "ADVANCED_FACE":
+            continue
+        refs = [int(x) for x in REF_RE.findall(body)]
+        if not refs:
+            continue
+        face_surface[fid] = refs[-1]  # ADVANCED_FACE('', (bounds), surface, sense)
+        edges = set()
+        for b in refs[:-1]:
+            bb = ents.get(b, "")
+            if name.get(b, "") not in ("FACE_BOUND", "FACE_OUTER_BOUND"):
+                continue
+            for loop in (int(x) for x in REF_RE.findall(bb)):
+                lb = ents.get(loop, "")
+                if name.get(loop, "") != "EDGE_LOOP":
+                    continue
+                for oe in (int(x) for x in REF_RE.findall(lb)):
+                    ob = ents.get(oe, "")
+                    if name.get(oe, "") != "ORIENTED_EDGE":
+                        continue
+                    ers = [int(x) for x in REF_RE.findall(ob)]
+                    if ers:
+                        edges.add(ers[-1])
+        face_edges[fid] = edges
+    analytic_surf = ("CYLINDRICAL_SURFACE", "CONICAL_SURFACE")
+    edge_faces: Dict[int, List[int]] = {}
+    for fid, edges in face_edges.items():
+        if name.get(face_surface.get(fid, -1), "") not in analytic_surf:
+            continue
+        for e in edges:
+            edge_faces.setdefault(e, []).append(fid)
+    shared: List[str] = []
+    unshared: List[str] = []
+    for e, faces in edge_faces.items():
+        eb = ents.get(e, "")
+        if name.get(e, "") != "EDGE_CURVE":
+            continue
+        crefs = [int(x) for x in REF_RE.findall(eb)]
+        if len(crefs) < 3:
+            continue
+        curve = crefs[2]
+        cb = ents.get(curve, "")
+        if name.get(curve, "") != "B_SPLINE_CURVE_WITH_KNOTS":
+            continue
+        m = re.search(r"B_SPLINE_CURVE_WITH_KNOTS\s*\(\s*'[^']*'\s*,\s*(\d+)", cb)
+        if not m or int(m.group(1)) != 1:
+            continue
+        nseg = len(REF_RE.findall(cb.split(",", 2)[2].split(")")[0])) - 1
+        tag = f"#{e} polyline segments={nseg} faces={sorted(faces)}"
+        if len(faces) == 2:
+            shared.append(tag)
+        else:
+            unshared.append(tag)
+    return shared, unshared
+
+
+def tier1_curves_present(census: Optional[Dict[str, Any]]) -> bool:
+    curves = (census or {}).get("curves") or {}
+    return int(curves.get("circle", 0)) + int(curves.get("ellipse", 0)) > 0
 
 
 def run_convert(binary: Path, stl: Path, step: Path) -> Tuple[int, Dict[str, Any], str, str]:
@@ -258,18 +343,44 @@ def evaluate_one(
             row["infra"].append(f"STEP read: {exc}")
             text = ""
         if text:
-            poly = polyline_over_4(text)
-            if poly:
+            # D-130-2 tier rule (SPEC-130-cylcyl addendum 2026-09-03 23:40).
+            kinds = [str(x.get("kind") or "") for x in intersections]
+            shared, unshared = shared_tier2_edges(text)
+            ec = result.get("edgeClasses") if isinstance(result.get("edgeClasses"), dict) else None
+            if any(k in TIER2_KINDS for k in kinds):
+                if not shared:
+                    row["fails"].append(
+                        "tier-2 intersection: no polyline edge shared by two analytic faces"
+                        + (f" (unshared: {', '.join(unshared)})" if unshared else "")
+                    )
+                if unshared:
+                    row["fails"].append(
+                        "tier-2 polyline carried by ONE analytic face only: "
+                        + ", ".join(unshared)
+                    )
+                if ec is None:
+                    row["fails"].append(
+                        "edgeClasses census absent from RESULT (130-BIND, D-130-2)"
+                    )
+                else:
+                    if int(ec.get("polylineTier2") or 0) < 1:
+                        row["fails"].append(
+                            f"edgeClasses.polylineTier2={ec.get('polylineTier2')} < 1"
+                        )
+                    for red in ("unhandled", "overTol", "overCap"):
+                        if int(ec.get(red) or 0) != 0:
+                            row["fails"].append(f"edgeClasses.{red}={ec.get(red)} != 0")
+            if any(k in TIER1_KINDS for k in kinds) and not tier1_curves_present(census):
                 row["fails"].append(
-                    "intersection edges are a mesh polyline of > 4 segments: "
-                    + ", ".join(poly)
+                    "tier-1 intersection but no CIRCLE/ELLIPSE in the STEP census"
                 )
             if not row["curves"]:
                 row["curves"] = "STEP curves not censused"
-            kinds = ", ".join(
+            kinds_s = ", ".join(
                 f"{x.get('a')}∩{x.get('b')}={x.get('kind')}" for x in intersections
             )
-            row["curves"] = f"{row['curves']}  intersections[{kinds}]"
+            tier2 = f" tier2 shared={len(shared)} unshared={len(unshared)}"
+            row["curves"] = f"{row['curves']}  intersections[{kinds_s}]{tier2}"
 
     return row
 
