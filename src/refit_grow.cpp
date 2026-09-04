@@ -2725,7 +2725,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
             // "rollback" = a round's refit left the certificate and was undone;
             // "fitfail" = the least-squares cylinder did not resolve.
             const char* stopWhy = "nocand";
-            int nRounds = 0, nLatSkip = 0, nOffCyl = 0, nIslands = 0;
+            int nRounds = 0, nLatSkip = 0, nOffCyl = 0;
             bool grewB = true;
             while (grewB) {
                 grewB = false;
@@ -2789,105 +2789,6 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 curR = fitR;
                 grewB = true;
             }
-            // D-130-13(2) -- SAME-SURFACE ISLANDS.
-            //
-            // A band that has certified a cylinder owns every OTHER
-            // edge-connected component of triangles that lies on that same
-            // cylinder within the same certificate, not only the ones its own
-            // adjacency can walk to. The plate's R=10 cross bore is the case
-            // the ruling was written from: eight mesh vertices sit 7.08e-04 mm
-            // INSIDE the exact bore (54 x q, a property of the mesh), their 24
-            // triangles are refused, and those 24 cut the other 255 into six
-            // edge-connected pieces (108/106/12/11/9/9) that the seed's own
-            // component cannot reach through triangles it must refuse. The R=3
-            // slot ends are cut the same way by their ragged top edge.
-            //
-            // Nothing here is widened: a component is claimed only if every
-            // vertex of every triangle is within tau of the band's own fitted
-            // cylinder, and only if the least-squares refit over the enlarged
-            // set still lies inside tau -- the same admission and the same
-            // rollback the adjacency rounds use. The junction triangles stay
-            // facets; their rims are tier-2 polylines (D-130-2).
-            if (std::strcmp(stopWhy, "nocand") == 0) {
-                bool grewIsl = true;
-                while (grewIsl) {
-                    grewIsl = false;
-                    std::vector<int> onCylUnowned;
-                    for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
-                        if (owned[static_cast<size_t>(t)]) continue;
-                        const gp_Dir nd = triNormalLocal(mv, t);
-                        if (std::abs(gp_XYZ(nd.X(), nd.Y(), nd.Z()).Dot(curAx)) >= latBound)
-                            continue;
-                        bool on = true;
-                        for (int c = 0; c < 3; c++) {
-                            const gp_XYZ pv = localTriVert(mv, t, c);
-                            const gp_XYZ d = pv - curLoc;
-                            if (std::abs((d - curAx * d.Dot(curAx)).Modulus() - curR) > tau) {
-                                on = false;
-                                break;
-                            }
-                        }
-                        if (on) onCylUnowned.push_back(t);
-                    }
-                    if (onCylUnowned.empty()) break;
-                    // Edge-connected components of that set, in ascending
-                    // minimum triangle id (I5).
-                    std::vector<char> cand(static_cast<size_t>(mv.nTri), 0);
-                    for (int t : onCylUnowned) cand[static_cast<size_t>(t)] = 1;
-                    std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
-                    std::vector<std::vector<int>> comps;
-                    for (int t : onCylUnowned) {
-                        if (seen[static_cast<size_t>(t)]) continue;
-                        std::vector<int> comp, stk{t};
-                        seen[static_cast<size_t>(t)] = 1;
-                        while (!stk.empty()) {
-                            const int x = stk.back();
-                            stk.pop_back();
-                            comp.push_back(x);
-                            for (int sIdx = 0; sIdx < 3 && mv.triEdges; sIdx++) {
-                                const int e = mv.triEdges[x][sIdx];
-                                const int u2 = (eaA.tri[e][0] == x) ? eaA.tri[e][1] : eaA.tri[e][0];
-                                if (u2 < 0 || !cand[static_cast<size_t>(u2)] ||
-                                    seen[static_cast<size_t>(u2)])
-                                    continue;
-                                seen[static_cast<size_t>(u2)] = 1;
-                                stk.push_back(u2);
-                            }
-                        }
-                        std::sort(comp.begin(), comp.end());
-                        comps.push_back(std::move(comp));
-                    }
-                    std::sort(comps.begin(), comps.end(),
-                              [](const std::vector<int>& a, const std::vector<int>& b) {
-                                  return a.front() < b.front();
-                              });
-                    for (const std::vector<int>& comp : comps) {
-                        std::vector<int> trial = claimTris[bi];
-                        trial.insert(trial.end(), comp.begin(), comp.end());
-                        std::sort(trial.begin(), trial.end());
-                        trial.erase(std::unique(trial.begin(), trial.end()), trial.end());
-                        gp_Dir fitAx;
-                        gp_Pnt fitC;
-                        double fitR = 0.0, resid = 0.0;
-                        if (!cylinderFitLS(mv, trial, gp_Dir(curAx.X(), curAx.Y(), curAx.Z()),
-                                           fitAx, fitC, fitR, resid) ||
-                            !(fitR > 0.0) || resid > tau)
-                            continue;  // rollback: this island is not on this surface
-                        for (int t : comp) {
-                            inB[static_cast<size_t>(t)] = 1;
-                            owned[static_cast<size_t>(t)] = 1;
-                            nAbsorb++;
-                        }
-                        ++nIslands;
-                        claimTris[bi] = std::move(trial);
-                        curLoc = gp_XYZ(fitC.X(), fitC.Y(), fitC.Z());
-                        curAx = fitAx.XYZ();
-                        curR = fitR;
-                        grewIsl = true;
-                    }
-                    if (grewIsl) stopWhy = "islands";
-                }
-            }
             if (lawbandDiagOn()) {
                 // The deviation the ABSORBED triangles actually exhibit against
                 // the band's final fitted cylinder -- measured, never inferred
@@ -2910,14 +2811,13 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 std::fprintf(stderr,
                              "  DIAG_LAWABS rid=%d R=%.6f nTri %zu -> %zu absorbedMaxDev=%.6g "
                              "q=%.6g bandResid=%.6g tau=%.6g axisTiltRad=%.6g stop=%s "
-                             "rounds=%d islands=%d latSkip=%d offCyl=%d "
+                             "rounds=%d latSkip=%d offCyl=%d "
                              "loc=(%.9g,%.9g,%.9g) dir=(%.9g,%.9g,%.9g)\n",
                              b.tris.empty() ? -1 : b.tris.front(), curR,
                              accepted[bi].tris.size(), claimTris[bi].size(), addDev, q,
                              b.maxVertResid, tau,
                              std::acos(std::min(1.0, std::abs(curAx.Dot(ax0)))), stopWhy,
-                             nRounds, nIslands, nLatSkip, nOffCyl, curLoc.X(), curLoc.Y(),
-                             curLoc.Z(),
+                             nRounds, nLatSkip, nOffCyl, curLoc.X(), curLoc.Y(), curLoc.Z(),
                              curAx.X(), curAx.Y(), curAx.Z());
             }
             if (claimTris[bi].size() != accepted[bi].tris.size()) {
@@ -2934,167 +2834,25 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                          std::max({5e-5, 4.0 * mv.weldTol, 1e-6 * mv.diag}));
     }
 
-    // D-130-13(2), second half: two BANDS that certified the same cylinder are
-    // one surface even when no edge joins them. The seed sweep finds each
-    // edge-connected piece of a cut wall separately (the cross bore's 108 and
-    // 106; each R=3 slot end's two runs), and each fits its own cylinder to
-    // 1e-7 -- but they are the same wall, and D-130-13(2) ships them as partial
-    // faces of ONE surface, not as two surfaces 2e-07 apart. Merged only when
-    // every vertex of each lies on the OTHER's certified cylinder within the
-    // pair's own certificate, and only when the least-squares refit over the
-    // union still lies inside it.
-    {
-        const double qm = std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0 ? mv.quantFloor : 0.0;
-        auto bandAx = [&](size_t i) {
-            return bandR[i] > 0.0
-                       ? gp_Ax1(gp_Pnt(bandLoc[i].X(), bandLoc[i].Y(), bandLoc[i].Z()), bandDir[i])
-                       : accepted[i].axis;
-        };
-        auto bandRad = [&](size_t i) { return bandR[i] > 0.0 ? bandR[i] : accepted[i].R; };
-        auto axialSpan = [&](const std::vector<int>& ts, const gp_Ax1& ax, double& lo, double& hi) {
-            const gp_XYZ o = ax.Location().XYZ();
-            const gp_XYZ a = ax.Direction().XYZ();
-            lo = 1e300;
-            hi = -1e300;
-            for (int t : ts) {
-                for (int c = 0; c < 3; c++) {
-                    const double x = (localTriVert(mv, t, c) - o).Dot(a);
-                    lo = std::min(lo, x);
-                    hi = std::max(hi, x);
-                }
-            }
-        };
-        auto axialOverlap = [&](const std::vector<int>& a, const std::vector<int>& b,
-                                const gp_Ax1& ax) {
-            double la = 0, ha = 0, lb = 0, hb = 0;
-            axialSpan(a, ax, la, ha);
-            axialSpan(b, ax, lb, hb);
-            return la < hb && lb < ha;
-        };
-        auto allOn = [&](const std::vector<int>& ts, const gp_Ax1& ax, double R, double tau) {
-            const gp_XYZ o = ax.Location().XYZ();
-            const gp_XYZ a = ax.Direction().XYZ();
-            for (int t : ts) {
-                for (int c = 0; c < 3; c++) {
-                    const gp_XYZ d = localTriVert(mv, t, c) - o;
-                    if (std::abs((d - a * d.Dot(a)).Modulus() - R) > tau) return false;
-                }
-            }
-            return true;
-        };
-        bool m2 = true;
-        while (m2) {
-            m2 = false;
-            for (size_t i = 0; i < accepted.size() && !m2; i++) {
-                if (claimTris[i].size() < 3 || !(bandRad(i) > 0.0)) continue;
-                for (size_t j = i + 1; j < accepted.size(); j++) {
-                    if (claimTris[j].size() < 3 || !(bandRad(j) > 0.0)) continue;
-                    const double ti = std::max(accepted[i].maxVertResid, qm);
-                    const double tj = std::max(accepted[j].maxVertResid, qm);
-                    if (!allOn(claimTris[j], bandAx(i), bandRad(i), ti)) continue;
-                    if (!allOn(claimTris[i], bandAx(j), bandRad(j), tj)) continue;
-                    // Same SURFACE is not enough: two coaxial walls of equal
-                    // radius in two stacked plates are two features, and
-                    // D-130-13(2) is about the pieces ONE wall was cut into.
-                    // The pieces of one wall interleave along the axis; stacked
-                    // features do not. So the two claims' axial extents must
-                    // overlap.
-                    if (!axialOverlap(claimTris[i], claimTris[j], bandAx(i))) continue;
-                    std::vector<int> trial = claimTris[i];
-                    trial.insert(trial.end(), claimTris[j].begin(), claimTris[j].end());
-                    std::sort(trial.begin(), trial.end());
-                    trial.erase(std::unique(trial.begin(), trial.end()), trial.end());
-                    gp_Dir fitAx;
-                    gp_Pnt fitC;
-                    double fitR = 0.0, resid = 0.0;
-                    const gp_XYZ ai = bandAx(i).Direction().XYZ();
-                    if (!cylinderFitLS(mv, trial, gp_Dir(ai.X(), ai.Y(), ai.Z()), fitAx, fitC,
-                                       fitR, resid) ||
-                        !(fitR > 0.0) || resid > std::max(ti, tj))
-                        continue;
-                    claimTris[i] = std::move(trial);
-                    claimTris[j].clear();
-                    bandLoc[i] = gp_XYZ(fitC.X(), fitC.Y(), fitC.Z());
-                    bandDir[i] = fitAx;
-                    bandR[i] = fitR;
-                    if (lawbandDiagOn())
-                        std::fprintf(stderr,
-                                     "DIAG_LAWSAMESURF into=%zu from=%zu n=%zu R=%.9f "
-                                     "resid=%.6g tau=%.6g\n",
-                                     i, j, claimTris[i].size(), fitR, resid, std::max(ti, tj));
-                    m2 = true;
-                    break;
-                }
-            }
-        }
-    }
-
     for (size_t bi = 0; bi < accepted.size(); bi++) {
         LawBand b = accepted[bi];
         if (b.tris.size() < 3 || !(b.R > 0.0) || b.N < 2) continue;
-        if (claimTris[bi].empty()) continue;  // merged into an earlier band
         b.tris = claimTris[bi];
         if (bandR[bi] > 0.0) {
             b.R = bandR[bi];
             b.axis = gp_Ax1(gp_Pnt(bandLoc[bi].X(), bandLoc[bi].Y(), bandLoc[bi].Z()),
                             bandDir[bi]);
         }
-        // One REGION per edge-connected component of the claim, every one of
-        // them carrying the band's single certified cylinder: D-130-13(2)'s
-        // "each shipped as a partial face of the one surface". A band whose
-        // claim is connected -- every band before the islands landed -- emits
-        // exactly one region, unchanged.
-        std::vector<std::vector<int>> pieces;
-        {
-            const EdgeAdj eaP = buildEdgeAdj(mv);
-            std::vector<char> inb(static_cast<size_t>(mv.nTri), 0);
-            for (int t : b.tris)
-                if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inb[static_cast<size_t>(t)] = 1;
-            std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
-            for (int t : b.tris) {
-                if (t < 0 || static_cast<size_t>(t) >= mv.nTri || seen[static_cast<size_t>(t)])
-                    continue;
-                std::vector<int> comp, stk{t};
-                seen[static_cast<size_t>(t)] = 1;
-                while (!stk.empty()) {
-                    const int x = stk.back();
-                    stk.pop_back();
-                    comp.push_back(x);
-                    for (int sIdx = 0; sIdx < 3 && mv.triEdges; sIdx++) {
-                        const int e = mv.triEdges[x][sIdx];
-                        const int u2 = (eaP.tri[e][0] == x) ? eaP.tri[e][1] : eaP.tri[e][0];
-                        if (u2 < 0 || !inb[static_cast<size_t>(u2)] ||
-                            seen[static_cast<size_t>(u2)])
-                            continue;
-                        seen[static_cast<size_t>(u2)] = 1;
-                        stk.push_back(u2);
-                    }
-                }
-                std::sort(comp.begin(), comp.end());
-                pieces.push_back(std::move(comp));
-            }
-            std::sort(pieces.begin(), pieces.end(),
-                      [](const std::vector<int>& a, const std::vector<int>& c) {
-                          return a.front() < c.front();
-                      });
+        Region reg;
+        fillLawBandRegion(mv, tol, b, reg);
+        const int rid = reg.tris.empty() ? -1 : reg.tris.front();
+        if (lawbandDiagOn()) {
+            std::fprintf(stderr,
+                         "DIAG_LAWCLAIM rid=%d n=%zu N=%d R=%.6f lawBand=1 merged=%d split=%d\n",
+                         rid, reg.tris.size(), b.N, b.R, nMerged, nSplit);
         }
-        const std::vector<int> whole = b.tris;
-        for (const std::vector<int>& piece : pieces) {
-            if (piece.size() < 1) continue;
-            LawBand pb = b;
-            pb.tris = piece;
-            Region reg;
-            fillLawBandRegion(mv, tol, pb, reg);
-            const int rid = reg.tris.empty() ? -1 : reg.tris.front();
-            if (lawbandDiagOn()) {
-                std::fprintf(stderr,
-                             "DIAG_LAWCLAIM rid=%d n=%zu N=%d R=%.6f lawBand=1 merged=%d "
-                             "split=%d pieces=%zu\n",
-                             rid, reg.tris.size(), pb.N, pb.R, nMerged, nSplit, pieces.size());
-            }
-            work.accepted.push_back(std::move(reg));
-        }
-        peelLawBandFromProvisionals(mv, whole, work);
+        work.accepted.push_back(std::move(reg));
+        peelLawBandFromProvisionals(mv, b.tris, work);
     }
 
     if (lawbandDiagOn())
