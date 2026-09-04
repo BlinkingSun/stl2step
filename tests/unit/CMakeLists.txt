@@ -137,6 +137,53 @@ set_tests_properties(prism_build_unit PROPERTIES
     LABELS "unit;prism-build"
     TIMEOUT 180)
 
+# 130-CONE-MATH (SPEC-130-cone-math) — the closed-form cone math in
+# src/refit_math.cpp, certified against the OCCT parametric equation,
+# GeomAPI_ProjectPointOnSurf and IntAna_QuadQuadGeo.
+#
+# This target deliberately COMPILES src/refit_math.cpp instead of linking
+# stl2step::core: the math under test is pure gp_ geometry (refit_math.hpp
+# pulls in no engine header), and `--target cone_math_unit` must not drag in
+# refit_build.cpp, which another lane owns. Nothing else in the tree changes
+# how it builds.
+# `OpenCASCADE::OpenCASCADE` is an IMPORTED target and therefore DIRECTORY
+# scoped: the sibling targets only see it transitively through stl2step::core.
+# When this file is configured standalone (the `NOT TARGET stl2step::core`
+# branch at the top) the engine's find_package ran in a child scope and the name
+# does not exist here, so naming it directly fails at generate time. Re-find it
+# in this scope — the module path and the cache are already primed, so it costs
+# nothing — rather than linking stl2step::core, which carries its own
+# refit_math.cpp and would duplicate every symbol in this executable.
+if(NOT TARGET OpenCASCADE::OpenCASCADE)
+    list(APPEND CMAKE_MODULE_PATH "${_stl2step_root}/cmake")
+    find_package(OpenCASCADE REQUIRED)
+endif()
+
+add_executable(cone_math_unit
+    cone_math_test.cpp
+    "${_stl2step_root}/src/refit_math.cpp")
+target_compile_features(cone_math_unit PRIVATE cxx_std_17)
+set_target_properties(cone_math_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_include_directories(cone_math_unit PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/include")
+target_link_libraries(cone_math_unit PRIVATE OpenCASCADE::OpenCASCADE)
+if(MSVC)
+    target_compile_definitions(cone_math_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(cone_math_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(cone_math_unit)
+endif()
+
+add_test(NAME cone_math_unit COMMAND cone_math_unit)
+set_tests_properties(cone_math_unit PROPERTIES
+    LABELS "unit;cone-math"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

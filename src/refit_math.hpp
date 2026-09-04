@@ -92,6 +92,10 @@ double coneRadialCoord(const gp_Cone& cone, const gp_Pnt& p);
 // 3. frustum helpers  (SPEC item 3 — CONE-BUILD excludes the apex with these)
 // ---------------------------------------------------------------------------
 
+// The five scalar helpers below return NaN — never a plausible-looking 0 or
+// inf — for a cone that could not have come from a legal gp_Cone (non-finite
+// parameters, negative reference radius, semi-angle outside ]-PI/2, PI/2[).
+
 // SIGNED cone radius at axial height z:  rho_cone(z) = R + z*tan(Ang).
 // Zero exactly at the apex, negative beyond it.
 double coneRadiusAt(const gp_Cone& cone, double z);
@@ -163,13 +167,23 @@ double pointConeDist(const gp_Cone& cone, const gp_Pnt& p);
 //   (b) any other circle (tilted and/or off-axis): a PROVABLE UPPER BOUND,
 //       never an approximation.  Interval evaluation of the same exact formula:
 //       z is confined to [z0 -+ r*sin(beta)] (tight, beta = axis/normal angle)
-//       and rho to [max(0, d0 - r), d0 + r] (rho is 1-Lipschitz in the point),
-//       and the maximum of |rho - xi| over that box is taken at a corner.
+//       and rho to [max(0, r*cos(beta) - d0, d0 - r), d0 + r] (the circle
+//       projects onto the plane perpendicular to the axis as an ellipse of
+//       semi-axes r and r*cos(beta), so the projected offset has modulus in
+//       [r*cos(beta), r] and the triangle inequality gives both ends), and the
+//       maximum of |rho - xi| over that box is taken at a corner.  The
+//       perpendicular case is the same expression with sin(beta) = 0 and
+//       cos(beta) = 1, which is why one evaluator serves both regimes.
 //
 // Returns -1.0 with clsOut = Unhandled only for degenerate input (non-finite
 // values, negative radii, a semi-angle outside ]-PI/2, PI/2[ \ {0}).
 // `angTol` decides "plane perpendicular to the axis"; `linTol` decides
 // "centre on the axis".  clsOut may be null.
+//
+// The class is INVARIANT under rigid placement: a circle whose normal is the
+// cone's own axis direction classes CoaxialRim/PerpPlane for every orientation
+// of that cone in world space, never GeneralBound.  (That is not automatic —
+// sin(beta) must come from the cross product; see the note at the definition.)
 double circleOnConeMax(const gp_Cone& cone, const gp_Circ& circ, ConeDevClass* clsOut = nullptr,
                        double angTol = Precision::Angular(),
                        double linTol = Precision::Confusion());
@@ -212,8 +226,12 @@ bool coneIntCylCircle(const gp_Cone& cone, const gp_Cylinder& cyl, gp_Circ& out,
 // Two COAXIAL cones: the circle at the height where their signed radii agree,
 // after cone `b` is re-expressed in cone `a`'s frame.  false unless the axes
 // are parallel within `angTol` and coincident within `linTol`, the generators
-// are not parallel, or the crossing radius is not strictly positive (a crossing
-// at or behind the apex is not a shippable circle).
+// are not parallel, or the crossing radius is not strictly positive.  The
+// branch solved is rho_a(z) == rho_b(z) with both SIGNED radii positive; the
+// two double cones also meet where the signed radii are equal and NEGATIVE (a
+// real circle, but on the far nappe of both) and where rho_a == -rho_b (one
+// nappe each).  Neither can lie in the v-range of a frustum, whose rims are
+// both positive, so neither is returned.
 bool coneIntConeCircle(const gp_Cone& a, const gp_Cone& b, gp_Circ& out,
                        double angTol = Precision::Angular(),
                        double linTol = Precision::Confusion());
