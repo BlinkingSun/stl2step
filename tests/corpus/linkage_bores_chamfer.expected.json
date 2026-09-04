@@ -1,6 +1,6 @@
 {
   "id": "linkage_bores_chamfer",
-  "description": "Mastercam linkage plate (3222 tris) — 1.3.0 N-gon bores + hole-mouth chamfer cone. Floors not exact census: cylinders>=2, cones>=1 (ChamferCone), watertight, reverted=0.",
+  "description": "Mastercam linkage plate (3222 tris) — 1.3.0 ground truth measured on the mesh (130-arcs): 17 cylindrical walls on 9 distinct axis/radius pairs and 2 conical chamfer frustums; no counterbore (the coaxial larger cylinders are the outer profile arcs R30/R17). Every radius below is the least-squares fit to the mesh, max vertex residual <= 7.5e-6 mm.",
   "realExport": true,
   "provenance": {
     "sourcePath": "test.stl",
@@ -18,7 +18,18 @@
   "expectedOpenShells": 0,
   "battery": "130",
   "smoothExpectedExit": -1,
-  "recoverable": [],
+  "recoverable": [
+    {"type": "cylinder", "radius": 12.625, "axis": {"loc": [80.0, -40.0, 0.0], "dir": [0, 0, 1]}, "count": 2, "nSides": 56, "closed360": true, "note": "hole A through-hole wall, one per plate; 112 tris each, maxVertexDev 1.70e-6"},
+    {"type": "cylinder", "radius": 8.5, "axis": {"loc": [136.0, -7.5, 0.0], "dir": [0, 0, 1]}, "count": 2, "nSides": 137, "closed360": true, "note": "hole B through-hole wall, one per plate; 139 tris each, maxVertexDev 6.77e-6; staggered strip, 47 of 139 interior edges parallel to the axis"},
+    {"type": "cylinder", "radius": 30.0, "axis": {"loc": [80.0, -40.0, 0.0], "dir": [0, 0, 1]}, "count": 2, "closed360": false, "note": "outer profile arc, one per plate; maxVertexDev 3.94e-6"},
+    {"type": "cylinder", "radius": 17.0, "axis": {"loc": [136.0, -7.5, 0.0], "dir": [0, 0, 1]}, "count": 2, "nSides": 33, "closed360": false, "note": "outer profile arc, span 180.00 deg, one per plate; 66 tris each, maxVertexDev 7.44e-6"},
+    {"type": "cylinder", "radius": 10.0, "axis": {"loc": [0.0, -20.0, -25.0], "dir": [1, 0, 0]}, "count": 1, "closed360": false, "note": "cross bore through the block end, axis +X, 279 tris over 356.4 deg; maxVertexDev 2.02e-6"},
+    {"type": "cylinder", "radius": 3.0, "axis": {"loc": [15.5, -20.0, 0.0], "dir": [0, 0, 1]}, "count": 2, "closed360": false, "note": "slot end, one per plate; maxVertexDev 9.49e-7"},
+    {"type": "cylinder", "radius": 3.0, "axis": {"loc": [23.0, -20.0, 0.0], "dir": [0, 0, 1]}, "count": 2, "closed360": false, "note": "slot end, one per plate; maxVertexDev 1.01e-6"},
+    {"type": "cylinder", "radius": 4.99999434, "axis": {"loc": [114.860489447, -43.121866013, 0.0], "dir": [0, 0, 1]}, "count": 2, "closed360": false, "note": "waist profile arc, span 57.65 deg, one per plate; 12 tris each, maxVertexDev 1.24e-6"},
+    {"type": "cylinder", "radius": 4.999972624, "axis": {"loc": [92.780895455, -5.000027346, 0.0], "dir": [0, 0, 1]}, "count": 2, "closed360": false, "note": "waist profile arc, span 27.23 deg, one per plate; 6 tris each, maxVertexDev 4.41e-8"},
+    {"type": "cone", "semiAngleDeg": 45.000004, "radiusLo": 8.5, "radiusHi": 9.5, "axis": {"loc": [136.0, -7.5, 0.0], "dir": [0, 0, 1]}, "count": 2, "note": "hole B mouth chamfer frustum, one per plate; 184 tris each, z=[-45,-44] and z=[-6,-5]. Semi-angle is the vertex fit: rims 8.499999994 and 9.500000125 exactly 1.0 mm apart in z, maxVertexDev 6.78e-6. The 45.017 deg in 130-arcs is the FACET-NORMAL angle of the 92-sided inscribed tessellation, atan(1/cos(pi/92)) = 45.0167059 deg, not the surface semi-angle."}
+  ],
   "mustRemainFaceted": [],
   "expectedRejects": [],
   "components": [
@@ -28,13 +39,13 @@
     {
       "component": 0,
       "disposition": "PARTIAL",
-      "partialReason": "1.3.0 floors (not exact census): builtCylinders>=2, builtCones>=1 ChamferCone, watertight, smoothRevertedComponents=0. smoothExpectedExit=-1 is the sidecar skip-sentinel so corpus_engine_convert does not expected-red the glob; linkage_chamfer_gate owns the contract.",
-      "builtCylindersFloor": 2,
-      "builtConesFloor": 1,
+      "partialReason": "1.3.0 floors from the mesh ground truth (130-arcs): 17 cylindrical walls (2x R12.625 closed360, 2x R8.5 closed360, 2x R30, 2x R17, 1x R10 axis +X, 2+2x R3 slot ends, 2+2x R5 waist arcs) and 2 ChamferCone frustums, watertight, smoothRevertedComponents=0. smoothExpectedExit=-1 is the sidecar skip-sentinel so corpus_engine_convert does not expected-red the glob; gate_130 owns the contract.",
+      "builtCylindersFloor": 17,
+      "builtConesFloor": 2,
       "builtPlanesFloor": 0,
       "smoothRevertedComponents": 0,
-      "faceCount": 3,
-      "surfaceCensus": {"plane": 0, "cylinder": 2, "cone": 1, "planar_facets": 0},
+      "faceCount": 19,
+      "surfaceCensus": {"plane": 0, "cylinder": 17, "cone": 2, "planar_facets": 0},
       "volumeBudgetMM3": 15.869926708675873
     }
   ]
