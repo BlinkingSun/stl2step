@@ -48,6 +48,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -73,6 +75,32 @@ constexpr double kTurnDot = 0.7;                 // |(n×n)·axis| / |n×n| for 
 int minTriOf(const std::vector<int>& tris) {
     if (tris.empty()) return std::numeric_limits<int>::max();
     return *std::min_element(tris.begin(), tris.end());
+}
+
+// Median of samples weighted by how much of the measured quantity each one
+// actually carries. The turning-axis test reads the DIRECTION of n_i x n_j; for
+// unit normals |n_i x n_j| is the sine of the fold, so a pair with a small
+// modulus has measured almost nothing and its direction is correspondingly
+// uncertain (the relative error of that direction goes as normal-noise/modulus).
+// Weighting each sample by its own modulus is therefore weighting by inverse
+// angular uncertainty -- a measurement statement, not a threshold. No sample is
+// discarded and there is no cut-off to tune.
+double weightedMedianInPlace(std::vector<std::pair<double, double>>& vw) {
+    if (vw.empty()) return 0.0;
+    std::sort(vw.begin(), vw.end(),
+              [](const std::pair<double, double>& a, const std::pair<double, double>& b) {
+                  if (a.second != b.second) return a.second < b.second;
+                  return a.first < b.first;
+              });
+    double total = 0.0;
+    for (const auto& e : vw) total += e.first;
+    if (!(total > 0.0)) return vw[vw.size() / 2].second;
+    double acc = 0.0;
+    for (const auto& e : vw) {
+        acc += e.first;
+        if (acc >= 0.5 * total) return e.second;
+    }
+    return vw.back().second;
 }
 
 double medianInPlace(std::vector<double>& v) {
@@ -225,7 +253,24 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
         for (int i = 0; i < (int)work.accepted.size(); ++i) {
             if (isClosedCyl(work.accepted[(std::size_t)i])) cylIds.push_back(i);
         }
-        if (cylIds.empty()) return true;
+        // Diag only (STL2STEP_DIAG_130): NAME the predicate that refuses each
+        // candidate ring. Prints nothing and decides nothing when off; no
+        // threshold, window or predicate is changed by any of it.
+        const char* d130 = std::getenv("STL2STEP_DIAG_130");
+        const bool cDiag = d130 && d130[0] && d130[0] != '0';
+        if (cDiag) {
+            int nClosed = 0;
+            for (const Region& a : work.accepted)
+                if (isClosedCyl(a)) nClosed++;
+            std::fprintf(stderr,
+                         "DIAG_C_ENTRY nProv=%d nAcc=%d closed360Cyls=%d\n",
+                         (int)work.provisionals.size(), (int)work.accepted.size(), nClosed);
+        }
+        if (cylIds.empty()) {
+            if (cDiag)
+                std::fprintf(stderr, "DIAG_C_NONE why=no-closed360-cylinder-neighbour\n");
+            return true;
+        }
         std::sort(cylIds.begin(), cylIds.end(), [&](int a, int b) {
             const int ma = minTriOf(work.accepted[(std::size_t)a].tris);
             const int mb = minTriOf(work.accepted[(std::size_t)b].tris);
@@ -352,6 +397,19 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
 
             std::vector<char> used((std::size_t)nProv, 0);
 
+            // Diag only: name which predicate refused a candidate ring.
+            auto crej = [&](int sd, const char* why, double a, double b) {
+                if (cDiag)
+                    std::fprintf(stderr,
+                                 "DIAG_C_RING cyl=%d cylR=%.4f closed=%d seed=%d why=%s "
+                                 "a=%.6g b=%.6g\n",
+                                 cylI, cyl.radius, cyl.closed360 ? 1 : 0, sd, why, a, b);
+            };
+            if (cDiag)
+                std::fprintf(stderr, "DIAG_C_CYL cyl=%d R=%.4f nTri=%d nSides=%d seeds=%d\n",
+                             cylI, cyl.radius, (int)cyl.tris.size(), cyl.nSides,
+                             (int)seeds.size());
+
             for (int seed : seeds) {
                 if (used[(std::size_t)seed]) continue;
                 if (work.provisionals[(std::size_t)seed].claim != ProvClaim::Unclaimed)
@@ -376,7 +434,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 }
                 std::sort(mem.begin(), mem.end());
                 mem.erase(std::unique(mem.begin(), mem.end()), mem.end());
-                if (mem.empty()) continue;
+                if (mem.empty()) { crej(seed, "empty-flood", 0, 0); continue; }
 
                 std::vector<char> inMem((std::size_t)nProv, 0);
                 for (int m : mem) inMem[(std::size_t)m] = 1;
@@ -388,7 +446,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 }
                 std::sort(sTris.begin(), sTris.end());
                 sTris.erase(std::unique(sTris.begin(), sTris.end()), sTris.end());
-                if (sTris.size() < 2) continue;
+                if (sTris.size() < 2) { crej(seed, "under-2-triangles", (double)sTris.size(), 0); continue; }
 
                 // Shared-edge vertices with the cylinder → N.
                 std::vector<int> juncVerts;
@@ -413,7 +471,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                         }
                     }
                 }
-                if (!touchesThisCyl) continue;
+                if (!touchesThisCyl) { crej(seed, "no-shared-edge-with-this-cylinder", (double)sTris.size(), 0); continue; }
                 std::sort(juncVerts.begin(), juncVerts.end());
                 juncVerts.erase(std::unique(juncVerts.begin(), juncVerts.end()),
                                 juncVerts.end());
@@ -454,7 +512,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     }
                     if (hasCap) break;
                 }
-                if (!hasCap) continue;
+                if (!hasCap) { crej(seed, "no-cap-plane-neighbour", (double)sTris.size(), kCapDot); continue; }
 
                 // Unique verts, ascending local id (I5).
                 std::vector<std::pair<int, gp_XYZ>> uniq;
@@ -472,7 +530,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                                            return a.first == b.first;
                                        }),
                            uniq.end());
-                if (uniq.size() < 6) continue;
+                if (uniq.size() < 6) { crej(seed, "under-6-unique-vertices", (double)uniq.size(), 0); continue; }
 
                 // N: junction verts preferred, else azimuth clusters, else |mem|.
                 std::vector<double> chi;
@@ -495,17 +553,17 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 int nSides = (int)juncVerts.size();
                 if (nSides < DerivedTols::kG5NSidesMin) nSides = nAz;
                 if (nSides < DerivedTols::kG5NSidesMin) nSides = (int)mem.size();
-                if (nSides < DerivedTols::kG5NSidesMin) continue;
+                if (nSides < DerivedTols::kG5NSidesMin) { crej(seed, "nSides-under-floor", (double)nSides, (double)DerivedTols::kG5NSidesMin); continue; }
 
                 // Closed ring: largest azimuth gap vs 2π/N. chi is sorted.
-                if (chi.size() < 3) continue;
+                if (chi.size() < 3) { crej(seed, "under-3-azimuths", (double)chi.size(), 0); continue; }
                 {
                     double maxGap = 0.0;
                     for (std::size_t i = 0; i + 1 < chi.size(); ++i)
                         maxGap = std::max(maxGap, chi[i + 1] - chi[i]);
                     maxGap = std::max(maxGap, (chi.front() + kTwoPi) - chi.back());
                     const double bandArc = kTwoPi / (double)std::max(nSides, 3);
-                    if (maxGap > 1.5 * bandArc + 1e-12) continue;
+                    if (maxGap > 1.5 * bandArc + 1e-12) { crej(seed, "ring-not-closed", maxGap, 1.5 * bandArc); continue; }
                 }
 
                 const double sagTol = sagTolOf(cyl, nSides, tol, mv);
@@ -523,8 +581,8 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     slopeMax = std::max(slopeMax, s);
                 }
                 const double slopeMed = medianInPlace(slopes);
-                if (!inSlopeWindow(slopeMed)) continue;
-                if (slopeMax - slopeMin > 0.12) continue;  // not constant (torus / round)
+                if (!inSlopeWindow(slopeMed)) { crej(seed, "slope-outside-25-65deg-window", slopeMed, 0); continue; }
+                if (slopeMax - slopeMin > 0.12) { crej(seed, "slope-not-constant", slopeMax - slopeMin, 0.12); continue; }  // torus / round
 
                 // Dihedral to cylinder neighbour is not a round.
                 // Acute crease φ < thetaCylLo: G1 seed-band round.
@@ -547,19 +605,32 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                             localPhi.push_back(phi);
                         }
                     }
-                    if (localPhi.empty()) continue;
+                    if (localPhi.empty()) { crej(seed, "no-dihedral-to-cylinder", 0, 0); continue; }
                     const double phiMed = medianInPlace(localPhi);
                     const double loEps = std::max(1e-12, 8.0 * std::numeric_limits<double>::epsilon()
                                                              * std::max(1.0, tol.thetaCylLo));
-                    if (phiMed < tol.thetaCylLo - loEps) continue;  // tangent round
+                    if (phiMed < tol.thetaCylLo - loEps) { crej(seed, "crease-below-thetaCylLo-tangent-round", phiMed, tol.thetaCylLo); continue; }
                     const double lat = std::max(tol.gaussAxisTiltSin(),
                                                 std::sin(tol.thetaCylLo));
-                    if (slopeMed <= lat + 1e-12) continue;  // cylinder-like band
+                    if (slopeMed <= lat + 1e-12) { crej(seed, "slope-inside-B1-lateral-band", slopeMed, lat); continue; }
                 }
 
                 // Turning-axis round: in-ring n_i×n_j must be ∥ cylinder axis.
                 {
-                    std::vector<double> align;
+                    // Each in-ring pair contributes its alignment WEIGHTED by
+                    // |n_i x n_j|, the sine of the fold it realises. Half the
+                    // adjacent pairs of a quad-tessellated ring are the two
+                    // triangles of ONE planar quad: they measure no fold at all
+                    // and their cross product is float32 round-off with an
+                    // arbitrary direction. Measured on the plate's chamfer ring
+                    // the two populations do not overlap -- 92 real folds at
+                    // |cross| = 0.0483 with alignment 0.7071026..0.7071100 (the
+                    // exact 1/sqrt(2) a 45 deg cone must give), and 92 round-off
+                    // pairs at |cross| in [3.7e-8, 2.7e-5] carrying 1.0e-4 of the
+                    // total weight and an arbitrary 0.649. An unweighted median
+                    // of the two is 0.6779 and refuses a perfect cone; the
+                    // weighted median is 0.707106781. kTurnDot is NOT touched.
+                    std::vector<std::pair<double, double>> align;
                     for (int t : sTris) {
                         gp_XYZ nA;
                         triAreaNormal(mv, t, nA);
@@ -575,12 +646,12 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                             const gp_XYZ cr = nA.Crossed(nB);
                             const double cm = cr.Modulus();
                             if (cm < 1e-8) continue;
-                            align.push_back(std::abs(cr.Dot(axis)) / cm);
+                            align.emplace_back(cm, std::abs(cr.Dot(axis)) / cm);
                         }
                     }
                     if (!align.empty()) {
-                        const double al = medianInPlace(align);
-                        if (al < kTurnDot) continue;  // meridional turning axis
+                        const double al = weightedMedianInPlace(align);
+                        if (al < kTurnDot) { crej(seed, "turning-axis-round", al, kTurnDot); continue; }
                     }
                 }
 
@@ -599,7 +670,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     sumVR += v * r;
                 }
                 const double det = (double)nU * sumVV - sumV * sumV;
-                if (!(std::abs(det) > 1e-18) || !(vMax > vMin + 1e-15)) continue;
+                if (!(std::abs(det) > 1e-18) || !(vMax > vMin + 1e-15)) { crej(seed, "degenerate-Rv-system", det, vMax - vMin); continue; }
                 const double kSlope = ((double)nU * sumVR - sumV * sumR) / det;
                 const double r0 = (sumR - kSlope * sumV) / (double)nU;
                 double maxLin = 0.0, sumSq = 0.0;
@@ -611,19 +682,19 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     maxLin = std::max(maxLin, d);
                     sumSq += d * d;
                 }
-                if (maxLin > sagTol + 1e-12) continue;  // circular R(v) = round
+                if (maxLin > sagTol + 1e-12) { crej(seed, "Rv-not-linear", maxLin, sagTol); continue; }  // circular R(v) = round
 
                 double R1 = r0 + kSlope * vMin;
                 double R2 = r0 + kSlope * vMax;
-                if (!(R1 > 0.0) || !(R2 > 0.0)) continue;
+                if (!(R1 > 0.0) || !(R2 > 0.0)) { crej(seed, "non-positive-end-radius", R1, R2); continue; }
                 if (R1 > R2) std::swap(R1, R2);
-                if (!(R2 - R1 > std::max(4.0 * sagTol, 3.0 * tol.epsPlane))) continue;
+                if (!(R2 - R1 > std::max(4.0 * sagTol, 3.0 * tol.epsPlane))) { crej(seed, "end-radii-not-distinct", R2 - R1, std::max(4.0 * sagTol, 3.0 * tol.epsPlane)); continue; }
 
                 const double d1 = std::abs(R1 - cyl.radius);
                 const double d2 = std::abs(R2 - cyl.radius);
-                if (std::min(d1, d2) > sagTol + 1e-12) continue;
+                if (std::min(d1, d2) > sagTol + 1e-12) { crej(seed, "neither-end-matches-cylinder-R", std::min(d1, d2), sagTol); continue; }
 
-                if (!(2.0 * tol.epsPlane < R1 && R2 < 2.0 * mv.diag)) continue;
+                if (!(2.0 * tol.epsPlane < R1 && R2 < 2.0 * mv.diag)) { crej(seed, "radii-out-of-scale", R1, R2); continue; }
 
                 // Place Location at the R_lo ring; XDir = lowest-id vertex.
                 const bool loAtVmin = std::abs((r0 + kSlope * vMin) - R1)
@@ -640,14 +711,31 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                         ps = uv.second;
                     }
                 }
-                gp_XYZ xDir = (ps - loc) - axis * (ps - loc).Dot(axis);
+                // XDirection is INHERITED from the neighbour cylinder, not taken
+                // from this ring's own lowest-id vertex. A frustum's seam edge has
+                // to join a vertex on each rim, and the two rims' seam vertices
+                // are chosen (seamVertexOf) in the frame of whichever region the
+                // chain machinery names as the axis region -- the CYLINDER for
+                // the rim they share, the CONE for the rim that meets a cap
+                // plane. Two different frames put the two seam vertices at two
+                // different azimuths and the seam is then not a generator at all:
+                // measured on the plate, the low rim's vertex sat at azimuth 0
+                // (the cylinder's XDirection) and the high rim's at 3.913 deg
+                // (this ring's own lowest-id vertex), the wire came apart
+                // (NotConnected / UnorientableShape) and the component reverted.
+                // Sharing the cylinder's XDirection makes the two frames one, and
+                // it is just as deterministic -- it is the cylinder's own.
+                gp_XYZ xDir = cyl.ax.XDirection().XYZ();
+                xDir -= axis * xDir.Dot(axis);
+                if (xDir.Modulus() < 1e-12)
+                    xDir = (ps - loc) - axis * (ps - loc).Dot(axis);
                 if (xDir.Modulus() < 1e-12) {
                     const gp_XYZ tmp =
                         (std::abs(axis.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
                     xDir = axis.Crossed(tmp);
                 }
                 const double xdm = xDir.Modulus();
-                if (xdm < 1e-15) continue;
+                if (xdm < 1e-15) { crej(seed, "degenerate-xdir", xdm, 0); continue; }
                 xDir /= xdm;
 
                 double sigma = 0.0;
@@ -664,11 +752,26 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     sigma += a * n.Dot(rho);
                 }
 
+                // Orient the region axis so the radius GROWS along +Direction.
+                // The cylinder axis this cone inherits has been through
+                // canonicalizeDir, so it carries no information about which way
+                // the taper runs, while every consumer evaluates the frustum as
+                // rho(v) = R_lo + (v/h)*(R_hi - R_lo) from Location along
+                // +Direction. Measured on the plate: the LOWER chamfer has its
+                // large rim at z = -45 and its small rim at z = -44, i.e. the
+                // radius grows along -Z while the canonical axis is +Z, and the
+                // plane|cone rim circle came out at R 7.5 instead of 9.5 -- 2.0
+                // mm out, ratioSew 1114 -- which opened the shell by 93 free
+                // edges. The upper chamfer, whose taper runs the same way as the
+                // canonical axis, was correct. This is the sign the detector
+                // already knows (loAtVmin) and was dropping.
+                const gp_XYZ axOut = loAtVmin ? axis : (axis * -1.0);
+
                 Region r;
                 r.id = 0;
                 r.type = SurfType::Cone;
                 r.origin = Origin::ChamferCone;
-                r.ax = gp_Ax3(gp_Pnt(loc), gp_Dir(axis), gp_Dir(xDir));
+                r.ax = gp_Ax3(gp_Pnt(loc), gp_Dir(axOut), gp_Dir(xDir));
                 r.radius = R1;
                 r.uMin = 0.0;
                 r.uMax = kTwoPi;
@@ -692,6 +795,12 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 for (int m : mem)
                     work.provisionals[(std::size_t)m].claim = ProvClaim::ConsumedCylinder;
 
+                if (cDiag)
+                    std::fprintf(stderr,
+                                 "DIAG_C_ACCEPT cyl=%d cylR=%.4f seed=%d R1=%.6f R2=%.6f "
+                                 "nSides=%d nTri=%d maxLin=%.3g height=%.6f\n",
+                                 cylI, cyl.radius, seed, R1, R2, nSides, (int)sTris.size(),
+                                 maxLin, height);
                 work.accepted.push_back(std::move(r));
                 anyCommit = true;
             }

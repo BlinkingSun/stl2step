@@ -1459,6 +1459,15 @@ bool diagP2Enabled() {
     return cached != 0;
 }
 
+bool diag130Enabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_DIAG_130");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
 // Isolated TShape copy for print-only try-B / BRepCheck. Never fall back to live.
 TopoDS_Shape diagIsolatedCopy(const TopoDS_Shape& s) {
     if (s.IsNull()) return {};
@@ -6110,7 +6119,8 @@ enum class SurfVar : int {
     CylRotAx = 2,
     CylRotU1 = 3,
     CylRectTrim = 4,
-    CylRotTrim = 5
+    CylRotTrim = 5,
+    ConeBase = 6
 };
 
 const char* surfVarName(SurfVar v) {
@@ -6121,6 +6131,7 @@ const char* surfVarName(SurfVar v) {
     case SurfVar::CylRotU1: return "CylRotU1";
     case SurfVar::CylRectTrim: return "CylRectTrim";
     case SurfVar::CylRotTrim: return "CylRotTrim";
+    case SurfVar::ConeBase: return "ConeBase";
     }
     return "?";
 }
@@ -6145,6 +6156,16 @@ Handle(Geom_Surface) regionSurf(const Region& r, SurfVar v) {
     try {
         if (v == SurfVar::Plane) {
             if (r.type == SurfType::Plane) s = new Geom_Plane(asPlane(r));
+        } else if (isChamferConeR(r) && v == SurfVar::ConeBase) {
+            // The frustum's surface comes from the REGION's own fitted numbers
+            // (Location on the R_lo rim, Direction toward R_hi, RefRadius R_lo,
+            // semi-angle from the two rim radii and the height) so that the
+            // shared rim circles -- which coneIsoCircle builds from the same
+            // fields -- lie on it exactly. One handle serves the face and the
+            // bind site, exactly as SurfVar::CylBase does for a cylinder.
+            gp_Cone cone;
+            if (coneFromRims(r.ax, r.radius, chamferRhiOf(r), chamferHeightOf(r), cone))
+                s = new Geom_ConicalSurface(cone);
         } else if (r.type == SurfType::Cylinder) {
             double u0 = r.uMin, u1 = r.uMax;
             if (u1 < u0) u1 += 2.0 * kPi;
@@ -6183,6 +6204,10 @@ void variantsForRegion(const Region& r, SurfVar* out, int& n) {
     n = 0;
     if (r.type == SurfType::Plane) {
         out[n++] = SurfVar::Plane;
+        return;
+    }
+    if (isChamferConeR(r)) {
+        out[n++] = SurfVar::ConeBase;
         return;
     }
     if (r.type != SurfType::Cylinder) return;
@@ -12748,6 +12773,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // ChamferCone: Geom_ConicalSurface from axis + two radii
                 // (radius / v range), MakeFace like cylinder Single.
                 if (r.type == SurfType::Cone && r.origin == Origin::ChamferCone) {
+                    // Diag only: name the step that refuses a chamfer frustum.
+                    auto coneFail = [&](const char* why, double a, double b) {
+                        if (diagP2Enabled() || diag130Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_CONEFACE rid=%d R=%.4f nTri=%zu why=%s "
+                                         "a=%.6g b=%.6g\n",
+                                         r.id, r.radius, r.tris.size(), why, a, b);
+                        return false;
+                    };
                     const Loop *capL = nullptr, *capH = nullptr;
                     std::vector<TopoDS_Wire> inners;
                     for (const Loop& lp : r.loops) {
@@ -12757,12 +12791,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             TopoDS_Wire iw;
                             if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk,
                                                nullptr))
-                                return false;
+                                return coneFail("inner-loop-wire", 0, 0);
                             inners.push_back(iw);
                         }
                     }
                     if (!capL || !capH || capL->chainIdx.empty() || capH->chainIdx.empty())
-                        return false;
+                        return coneFail("missing-cap-loop", capL ? (double)capL->chainIdx.size() : -1,
+                                        capH ? (double)capH->chainIdx.size() : -1);
 
                     auto circFromLoop = [&](const Loop& lp) -> gp_Circ {
                         double sumV = 0.0, sumR = 0.0;
@@ -12789,45 +12824,48 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             gp_Ax2(loc, r.ax.Direction(), r.ax.XDirection()), Rm);
                     };
 
-                    gp_Circ circL = circFromLoop(*capL);
-                    gp_Circ circH = circFromLoop(*capH);
-                    gp_Pnt locLo = circL.Location(), locHi = circH.Location();
-                    double Rlo = circL.Radius(), Rhi = circH.Radius();
-                    gp_Dir zdir = r.ax.Direction();
-                    gp_Vec axisVec(locLo, locHi);
-                    if (axisVec.Magnitude() > Precision::Confusion()) zdir = gp_Dir(axisVec);
-                    if (Rhi < Rlo) {
-                        std::swap(Rlo, Rhi);
-                        std::swap(locLo, locHi);
-                        std::swap(circL, circH);
-                    }
-                    const double h = locLo.Distance(locHi);
+                    // ONE surface for the face and the bind site: the region's
+                    // own SurfVar::ConeBase. The rim circles the neighbouring
+                    // plane and cylinder share are coneIsoCircle() of the same
+                    // region fields, so they lie on this surface exactly -- which
+                    // is what lets exactMaxAtBind certify them circle-on-cone
+                    // rather than record a gap. Re-deriving the surface from the
+                    // mesh loops here would put the shared rim off the face.
+                    Handle(Geom_ConicalSurface) csurf =
+                        Handle(Geom_ConicalSurface)::DownCast(regionSurf(r, SurfVar::ConeBase));
+                    if (csurf.IsNull())
+                        return coneFail("regionSurf-ConeBase-null", r.radius, chamferRhiOf(r));
+                    const double Rlo = r.radius;
+                    const double Rhi = chamferRhiOf(r);
+                    const double h = chamferHeightOf(r);
                     const double dR = Rhi - Rlo;
                     if (!(h > Precision::Confusion()) || !(Rlo > Precision::Confusion()) ||
                         dR <= Precision::Confusion())
-                        return false;
-                    const double ang = std::atan2(dR, h);
-                    if (ang <= Precision::Angular() || ang >= 0.5 * kPi - Precision::Angular())
-                        return false;
-                    Handle(Geom_ConicalSurface) csurf;
-                    try {
-                        gp_Ax3 ax3(locLo, zdir, r.ax.XDirection());
-                        csurf = new Geom_ConicalSurface(ax3, ang, Rlo);
-                    } catch (const Standard_Failure&) {
-                        return false;
-                    }
-                    if (csurf.IsNull()) return false;
+                        return coneFail("degenerate-frustum", h, dR);
+                    const double ang = csurf->SemiAngle();
+                    // Which cap loop carries the R_lo rim is decided by
+                    // measurement, not by LoopRole: the roles are assigned from a
+                    // v ordering a cone region does not carry (vMin/vMax hold the
+                    // two RADII).
+                    const gp_Circ mL = circFromLoop(*capL);
+                    const gp_Circ mH = circFromLoop(*capH);
+                    const bool loIsCapL =
+                        std::fabs(mL.Radius() - Rlo) <= std::fabs(mH.Radius() - Rlo);
+                    const Loop* loopLo = loIsCapL ? capL : capH;
+                    const Loop* loopHi = loIsCapL ? capH : capL;
+                    const gp_Circ circLo = coneIsoCircle(r, 0.0);
+                    const gp_Circ circHi = coneIsoCircle(r, h);
 
-                    int vL = vertexClosestToUOnLoop(mv, r, *capL, rs, 0.0);
-                    int vH = vertexClosestToUOnLoop(mv, r, *capH, rs, 0.0);
+                    int vL = vertexClosestToUOnLoop(mv, r, *loopLo, rs, 0.0);
+                    int vH = vertexClosestToUOnLoop(mv, r, *loopHi, rs, 0.0);
                     if (vL < 0 || vH < 0 || (size_t)vL >= verts.size() ||
                         (size_t)vH >= verts.size())
-                        return false;
+                        return coneFail("no-seam-vertex", (double)vL, (double)vH);
                     AnalyticCurve acL, acH;
                     acL.kind = AnalyticCurve::Circ;
-                    acL.circ = circFromLoop(*capL);
+                    acL.circ = circLo;
                     acH.kind = AnalyticCurve::Circ;
-                    acH.circ = circFromLoop(*capH);
+                    acH.circ = circHi;
                     const double snapCap = meshTolCap(mv, &r);
                     snapVertexToCurve(verts[(size_t)vL], acL, snapCap);
                     snapVertexToCurve(verts[(size_t)vH], acH, snapCap);
@@ -12843,26 +12881,82 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         return !e.IsNull();
                     };
 
+                    // The seam is the frustum's GENERATOR, given explicitly, the
+                    // way trySeamed360 gives the cylinder's: an edge built from
+                    // two vertices alone carries whatever line those two mesh
+                    // points happen to define, and its 3d length then disagrees
+                    // with the surface's own unit-speed v by the mesh residual
+                    // (measured 8.4e-6 here), which is a UV gap at the rim.
+                    // Snapping both seam vertices to that generator is the same
+                    // snapVertexToCurve the cylinder seam uses.
                     TopoDS_Edge eSeam;
                     try {
-                        BRepBuilderAPI_MakeEdge ms(verts[(size_t)vL], verts[(size_t)vH]);
-                        if (!ms.IsDone()) return false;
+                        const gp_Pnt pSeamLo =
+                            circLo.Location().Translated(gp_Vec(circLo.XAxis().Direction()) * Rlo);
+                        const gp_Dir genDir(
+                            gp_Vec(circLo.XAxis().Direction()) * std::sin(ang) +
+                            gp_Vec(r.ax.Direction()) * std::cos(ang));
+                        const gp_Lin gen(pSeamLo, genDir);
+                        AnalyticCurve acs;
+                        acs.kind = AnalyticCurve::Lin;
+                        acs.lin = gen;
+                        snapVertexToCurve(verts[(size_t)vL], acs, snapCap);
+                        snapVertexToCurve(verts[(size_t)vH], acs, snapCap);
+                        BRepBuilderAPI_MakeEdge ms(gen, verts[(size_t)vL], verts[(size_t)vH]);
+                        if (!ms.IsDone()) return coneFail("seam-MakeEdge-failed", 0, 0);
                         eSeam = ms.Edge();
                     } catch (const Standard_Failure&) {
-                        return false;
+                        return coneFail("seam-MakeEdge-threw", 0, 0);
                     }
 
                     TopoDS_Edge eL, eH;
-                    const int ciL0 = capL->chainIdx.front();
-                    const int ciH0 = capH->chainIdx.front();
+                    const int ciL0 = loopLo->chainIdx.front();
+                    const int ciH0 = loopHi->chainIdx.front();
                     const bool simple =
-                        capL->chainIdx.size() == 1 && capH->chainIdx.size() == 1 &&
+                        loopLo->chainIdx.size() == 1 && loopHi->chainIdx.size() == 1 &&
                         takeFullCap(ciL0, acL.circ, verts[(size_t)vL], eL) &&
                         takeFullCap(ciH0, acH.circ, verts[(size_t)vH], eH);
+
+                    // The cone's own pcurves, written where the cylinder path
+                    // writes its iso pcurves (trySeamed360::bindIsoPCurves) and
+                    // for the same reason: a rim is u-iso and the seam is u-const,
+                    // and the seam needs TWO -- one at u0 and one at u0 + 2pi --
+                    // which no single-pcurve projection can supply. OCCT's cone is
+                    // unit speed in v, so a generator's 3d parameter and its v
+                    // agree and the pcurve is a straight 2d line. The tolerance
+                    // those edges carry is written by the certified circle-on-cone
+                    // / line-on-cone classes at bindAllVariants, not here.
+                    auto bindConePCurves = [&](TopoDS_Edge& eCap, double vIso, double& u0Out,
+                                               bool writeU0) {
+                        BRep_Builder B;
+                        Standard_Real cf = 0, cl = 0;
+                        Handle(Geom_Curve) cc = BRep_Tool::Curve(eCap, cf, cl);
+                        if (cc.IsNull()) cf = 0.0;
+                        if (writeU0) u0Out = cf;
+                        Handle(Geom2d_Line) pc = new Geom2d_Line(gp_Pnt2d(cf, vIso),
+                                                                 gp_Dir2d(1.0, 0.0));
+                        B.UpdateEdge(eCap, pc, csurf, TopLoc_Location(), sewTol);
+                    };
 
                     TopoDS_Face f;
                     bool got = false;
                     if (simple) {
+                        double u0 = 0.0;
+                        bindConePCurves(eL, 0.0, u0, true);
+                        double uH = 0.0;
+                        bindConePCurves(eH, coneVAtRadius(csurf->Cone(), Rhi), uH, false);
+                        {
+                            BRep_Builder Bs;
+                            Standard_Real fs = 0, ls = 0;
+                            Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
+                            Handle(Geom2d_Line) pcS0 =
+                                new Geom2d_Line(gp_Pnt2d(u0, 0.0), gp_Dir2d(0.0, 1.0));
+                            Handle(Geom2d_Line) pcS1 = new Geom2d_Line(
+                                gp_Pnt2d(u0 + 2.0 * kPi, 0.0), gp_Dir2d(0.0, 1.0));
+                            Bs.UpdateEdge(eSeam, pcS0, pcS1, csurf, TopLoc_Location(), sewTol);
+                            if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
+                            eSeam.Closed(Standard_False);
+                        }
                         BRep_Builder B;
                         TopoDS_Wire w;
                         B.MakeWire(w);
@@ -12906,8 +13000,81 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                   makeFaceKeep(csurf, ow, inners, r.outwardNormal, f);
                         }
                     }
-                    if (!got || f.IsNull()) return false;
-                    (void)ensureFaceValid(f, meshTolCap(mv, &r));
+                    if (!got || f.IsNull()) return coneFail("makeFace-failed", simple ? 1 : 0, 0);
+                    // Same finish the cylinder Seamed360 face gets
+                    // (trySeamed360::finishFace): pcurves completed on the face,
+                    // then -- only if it is still invalid -- ShapeFix_Face for the
+                    // SEAM and the ORIENTATION and nothing else. Every
+                    // vertex-moving mode is pinned off: 130-CORE e7c00a8 measured
+                    // that ShapeFix_Wire displaces the shared verts[] and opens
+                    // the shell it was called to close (12.4 mm on this part).
+                    addPcurvesOnFace(f, sewTol, true);
+                    if (!faceIsValid(f)) {
+                        try {
+                            ShapeFix_Face sff(f);
+                            sff.FixMissingSeamMode() = 1;
+                            sff.FixAddNaturalBoundMode() = 0;
+                            sff.FixOrientationMode() = 1;
+                            sff.FixWireMode() = 0;
+                            sff.FixSmallAreaWireMode() = 0;
+                            sff.FixIntersectingWiresMode() = 0;
+                            sff.FixLoopWiresMode() = 0;
+                            sff.FixSplitFaceMode() = 0;
+                            sff.Perform();
+                            TopoDS_Shape res = sff.Result();
+                            if (res.IsNull()) res = sff.Face();
+                            int nF = 0;
+                            TopoDS_Face g2;
+                            for (TopExp_Explorer fx(res, TopAbs_FACE); fx.More(); fx.Next()) {
+                                nF++;
+                                g2 = TopoDS::Face(fx.Current());
+                            }
+                            if (nF == 1) f = g2;
+                        } catch (const Standard_Failure&) {
+                        }
+                        setFaceOutward(f, r.outwardNormal);
+                        addPcurvesOnFace(f, sewTol, true);
+                    }
+                    if (diagP2Enabled() || diag130Enabled()) {
+                        int ie = 0;
+                        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next(), ++ie) {
+                            const TopoDS_Edge ew = TopoDS::Edge(ex.Current());
+                            Standard_Real a = 0, b = 0;
+                            Handle(Geom2d_Curve) pc =
+                                BRep_Tool::CurveOnSurface(ew, csurf, TopLoc_Location(), a, b);
+                            const bool sm = BRep_Tool::IsClosed(ew, f);
+                            if (pc.IsNull()) {
+                                std::fprintf(stderr,
+                                             "DIAG_CONEUV rid=%d ie=%d ori=%s seam=%d pc=null\n",
+                                             r.id, ie,
+                                             ew.Orientation() == TopAbs_FORWARD ? "F" : "R",
+                                             sm ? 1 : 0);
+                                continue;
+                            }
+                            const gp_Pnt2d p0 = pc->Value(a), p1 = pc->Value(b);
+                            std::fprintf(stderr,
+                                         "DIAG_CONEUV rid=%d ie=%d ori=%s seam=%d rng=[%.6f,%.6f] "
+                                         "uv0=(%.6f,%.6f) uv1=(%.6f,%.6f)\n",
+                                         r.id, ie, ew.Orientation() == TopAbs_FORWARD ? "F" : "R",
+                                         sm ? 1 : 0, a, b, p0.X(), p0.Y(), p1.X(), p1.Y());
+                            TopoDS_Vertex va, vb;
+                            TopExp::Vertices(ew, va, vb, Standard_False);
+                            const gp_Pnt pa = va.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(va);
+                            const gp_Pnt pb = vb.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(vb);
+                            std::fprintf(stderr,
+                                         "DIAG_CONEUVV rid=%d ie=%d sameV=%d "
+                                         "pa=(%.5f,%.5f,%.5f) pb=(%.5f,%.5f,%.5f) tol=%.3g\n",
+                                         r.id, ie, va.IsSame(vb) ? 1 : 0, pa.X(), pa.Y(), pa.Z(),
+                                         pb.X(), pb.Y(), pb.Z(), BRep_Tool::Tolerance(ew));
+                        }
+                    }
+                    const bool fv = ensureFaceValid(f, meshTolCap(mv, &r));
+                    if (diagP2Enabled() || diag130Enabled())
+                        std::fprintf(stderr,
+                                     "DIAG_CONEFACE rid=%d R=%.4f nTri=%zu why=BUILT simple=%d "
+                                     "valid=%d Rlo=%.6f Rhi=%.6f ang=%.9f h=%.6f\n",
+                                     r.id, r.radius, r.tris.size(), simple ? 1 : 0, fv ? 1 : 0,
+                                     Rlo, Rhi, ang, h);
                     r.builtAs = BuiltAs::Seamed360;
                     acc.push_back(f);
                     return true;
