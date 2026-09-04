@@ -508,6 +508,7 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             vtxTris[lv[k]].push_back(t);
         }
     }
+    std::vector<int> nPartsAt((size_t)nVtx, 0);
     for (int v = 0; v < nVtx; ++v) {
         auto& ts = vtxTris[v];
         std::sort(ts.begin(), ts.end());
@@ -520,6 +521,7 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             for (const Part& q : parts) if (partEq(q, lab)) { seen = true; break; }
             if (!seen) parts.push_back(lab);
         }
+        nPartsAt[v] = (int)parts.size();
         if ((int)parts.size() >= 3) isSplit[v] = 1;
     }
 
@@ -576,6 +578,25 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
 
     std::vector<ChainWalk> walks;
 
+    // Slice a closed-form cycle (verts.size()==edges.size(), no duplicated
+    // terminal) into an open chain from vertex index i0 to i1 (i1 may wrap).
+    auto emitOpenSlice = [&](const ChainWalk& src, int i0, int i1) {
+        const int n = (int)src.verts.size();
+        if (n < 1 || (int)src.edges.size() != n || i0 < 0 || i1 < 0 || i0 >= n || i1 >= n)
+            return;
+        if (i0 == i1) return;
+        ChainWalk s;
+        s.closed = false;
+        int i = i0;
+        s.verts.push_back(src.verts[i]);
+        while (i != i1) {
+            s.edges.push_back(src.edges[i]);
+            i = (i + 1) % n;
+            s.verts.push_back(src.verts[i]);
+        }
+        if (!s.edges.empty()) walks.push_back(std::move(s));
+    };
+
     // Open chains: start at every unused boundary edge leaving a split vertex.
     std::vector<int> splitVerts;
     for (int v = 0; v < nVtx; ++v) if (isSplit[v]) splitVerts.push_back(v);
@@ -592,17 +613,72 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             // A walk that leaves a split vertex and comes back to THE SAME
             // vertex has traversed a complete cycle: walkFrom stops at the
             // first split vertex it reaches, so front == back can only mean it
-            // closed on itself. Emitting it as an open chain is what makes a
-            // region's whole outer loop one closedLoop=false chain when its
-            // only neighbour is an island (I7: loops are complete and closed).
-            // It is a cycle, so it is recorded as one; the closed branch then
-            // applies the same canonical form every other cycle gets (rotate
-            // to the min vertex, first step the lower-id edge). Nothing about
-            // the mesh changes -- only the chain's own description of itself.
-            w.closed = (w.edges.size() >= 3 && w.verts.size() == w.edges.size() + 1 &&
-                        w.verts.front() == w.verts.back());
-            if (w.closed) w.verts.pop_back();
-            if (!w.edges.empty()) walks.push_back(std::move(w));
+            // closed on itself.
+            const bool ring = (w.edges.size() >= 3 &&
+                               w.verts.size() == w.edges.size() + 1 &&
+                               w.verts.front() == w.verts.back());
+            if (ring) {
+                w.verts.pop_back();
+                const int jv = w.verts.empty() ? -1 : w.verts.front();
+                const bool junction = (jv >= 0 && jv < nVtx && nPartsAt[jv] >= 3);
+                if (junction) {
+                    // I8: a vertex incident to >=3 regions/islands is a chain
+                    // endpoint, not interior. Emitting the ring as one closed
+                    // chain would make the junction interior (every closed-chain
+                    // vertex is interior). Split at every such vertex.
+                    //
+                    // I7: a loop of one open chain is incomplete. A ring with
+                    // one junction is therefore two open chains, meeting at the
+                    // junction and at the ring's I5 origin (lowest vertex id --
+                    // the same vertex a closed chain would have started at).
+                    const int n = (int)w.verts.size();
+                    std::vector<int> cuts;
+                    for (int i = 0; i < n; ++i) {
+                        const int vv = w.verts[i];
+                        if (vv >= 0 && vv < nVtx && nPartsAt[vv] >= 3)
+                            cuts.push_back(i);
+                    }
+                    if ((int)cuts.size() < 2) {
+                        int minI = 0;
+                        for (int i = 1; i < n; ++i)
+                            if (w.verts[i] < w.verts[minI]) minI = i;
+                        bool minIsCut = false;
+                        for (int c : cuts) if (c == minI) minIsCut = true;
+                        if (!minIsCut) {
+                            cuts.push_back(minI);
+                        } else {
+                            int second = -1;
+                            for (int i = 0; i < n; ++i) {
+                                bool isCut = false;
+                                for (int c : cuts) if (c == i) isCut = true;
+                                if (isCut) continue;
+                                if (second < 0 || w.verts[i] < w.verts[second])
+                                    second = i;
+                            }
+                            if (second >= 0) cuts.push_back(second);
+                        }
+                    }
+                    std::sort(cuts.begin(), cuts.end());
+                    cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+                    if ((int)cuts.size() >= 2) {
+                        for (int k = 0; k < (int)cuts.size(); ++k)
+                            emitOpenSlice(w, cuts[k], cuts[(k + 1) % (int)cuts.size()]);
+                    } else {
+                        // Degenerate (n<2): keep the ring closed so I7 holds.
+                        w.closed = true;
+                        if (!w.edges.empty()) walks.push_back(std::move(w));
+                    }
+                } else {
+                    // Cycle through a split that is not a 3-region junction:
+                    // record it as closed (I7). The closed branch then applies
+                    // the same canonical form every other cycle gets.
+                    w.closed = true;
+                    if (!w.edges.empty()) walks.push_back(std::move(w));
+                }
+            } else {
+                w.closed = false;
+                if (!w.edges.empty()) walks.push_back(std::move(w));
+            }
         }
     }
 
