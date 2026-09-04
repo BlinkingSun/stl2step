@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -42,6 +44,27 @@ inline bool partLess(Part a, Part b) {
     if (a.reg >= 0) return a.reg < b.reg;
     if (a.isl >= 0) return a.isl < b.isl;
     return false;
+}
+
+bool unionDiagOn() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_LAWBAND_DIAG");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+// D-130-14 / D-130-16 -- the union's landing stage (see refit_grow.cpp).
+// With it off the loop stitch and the seam generator are exactly what the
+// branch tip produced.
+bool unionOn() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_UNION");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
 }
 
 inline int otherVert(const std::pair<int, int>& e, int v) {
@@ -812,6 +835,64 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         return true;
     };
 
+    // D-130-14 -- THE LOOP-LEVEL UNION, loop half.
+    //
+    // A region claimed on ONE certified surface may be cut by interruptions
+    // that it does not own (the junction facets round a crossing bore, the
+    // sawtooth of refused triangles at a mouth). Where two of its pieces meet a
+    // vertex from opposite sides, that vertex carries FOUR boundary edges, not
+    // two, so `isSplit` breaks the chains there and the stitch below has a
+    // choice to make. Picking the lowest chain id closes each piece off into
+    // its own loop -- the per-piece answer `partial_recovery_gate` refused.
+    //
+    // The right pairing is geometric and needs no tolerance: at that vertex the
+    // fan alternates the region's own sectors with the interruption's, and the
+    // two boundary edges that bound ONE interruption sector are the two ends of
+    // ONE wire of the face. Rotating from the incoming edge through the
+    // non-member triangles to the next boundary edge names it exactly. Every
+    // interruption enclosed by the region then becomes one inner wire, the
+    // outer/cap wires stay whole, and an interruption that actually cuts the
+    // region leaves the pieces in different regions upstream (they share no
+    // vertex) -- separate faces, as D-130-14 requires. At an ordinary boundary
+    // vertex (two boundary edges) this returns what the old rule returned.
+    auto pairAcrossInterruption = [&](int v, int eIn, const Region& reg) -> int {
+        if (v < 0 || v >= nVtx || eIn < 0 || eIn >= nEdge) return -1;
+        int t = -1;
+        for (int cand : edgeTris[eIn]) {
+            const Part lab = labelOfTri(cand, out.triRegion, out.triIsland);
+            if (lab.reg != reg.id) {
+                t = cand;
+                break;
+            }
+        }
+        if (t < 0) return -1;                       // open edge: nothing to rotate through
+        int e = eIn;
+        const int guard = (int)vtxEdges[v].size() + 2;
+        for (int step = 0; step < guard; ++step) {
+            int eNext = -1;
+            for (int k = 0; k < 3; ++k) {
+                const int ee = mv.triEdges[t][k];
+                if (ee == e) continue;
+                const auto& pe = mv.compEdges[ee];
+                if (pe.first == v || pe.second == v) {
+                    eNext = ee;
+                    break;
+                }
+            }
+            if (eNext < 0) return -1;
+            if (boundary[eNext]) return eNext;
+            if ((int)edgeTris[eNext].size() != 2) return -1;
+            t = (edgeTris[eNext][0] == t) ? edgeTris[eNext][1] : edgeTris[eNext][0];
+            e = eNext;
+        }
+        return -1;
+    };
+    auto chainEdgeAt = [&](const BoundaryChain& c, bool rev, bool atEnd) -> int {
+        if (c.meshEdges.empty()) return -1;
+        const bool back = (rev != atEnd);            // rev XOR atEnd == false => back
+        return back ? c.meshEdges.front() : c.meshEdges.back();
+    };
+
     for (Region& reg : out.regions) {
         std::vector<char> usedCh(out.chains.size(), 0);
         std::vector<Loop> loops;
@@ -870,12 +951,30 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                     if (startV == endV) { closedOk = true; break; }
                 }
                 // Find next unused chain of this region that starts at endV.
+                // When several do (a pinch vertex, D-130-14), the successor is
+                // the one whose first edge bounds the SAME interruption sector
+                // the incoming edge does.
+                const int eIn = chainEdgeAt(out.chains[ci], rv != 0, true);
+                const int eWant = unionOn() ? pairAcrossInterruption(endV, eIn, reg) : -1;
                 int next = -1, nextRev = -1;
                 for (int k = 0; k < (int)out.chains.size(); ++k) {
                     if (usedCh[k]) continue;
                     const int rvk = revFor(out.chains[k]);
                     if (rvk < 0) continue;
-                    if (chainStartVert(out.chains[k], rvk != 0) == endV) {
+                    if (chainStartVert(out.chains[k], rvk != 0) != endV) continue;
+                    if (eWant >= 0 && chainEdgeAt(out.chains[k], rvk != 0, false) != eWant)
+                        continue;
+                    if (next < 0 || k < next) {
+                        next = k;
+                        nextRev = rvk;
+                    }
+                }
+                if (next < 0 && eWant >= 0) {
+                    for (int k = 0; k < (int)out.chains.size(); ++k) {
+                        if (usedCh[k]) continue;
+                        const int rvk = revFor(out.chains[k]);
+                        if (rvk < 0) continue;
+                        if (chainStartVert(out.chains[k], rvk != 0) != endV) continue;
                         if (next < 0 || k < next) {
                             next = k;
                             nextRev = rvk;
@@ -907,6 +1006,107 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         }
 
         if (!classifyAndPush(reg, loops)) return false;
+
+        // D-130-14: a union face's SEAM is a generator of that same face, so it
+        // may not run through an interruption the face carries as an inner
+        // wire. The 360 deg seam sits at u = 0 by construction, so u = 0 is
+        // moved: XDirection becomes the region's own mesh-vertex generator
+        // nearest the middle of the widest azimuth gap between the inner wires.
+        // It stays a REAL MESH VERTEX azimuth (the existing rule -- the seam
+        // lands on a facet generator, never bisecting a facet); only the choice
+        // among them changes, and only for a region that HAS an inner wire, so
+        // every region built before this lane keeps the azimuth it had.
+        if (unionOn() && reg.closed360 && reg.type == SurfType::Cylinder) {
+            std::vector<double> innerU;
+            const gp_XYZ o = reg.ax.Location().XYZ();
+            const gp_XYZ a = reg.ax.Direction().XYZ();
+            const gp_XYZ xd = reg.ax.XDirection().XYZ();
+            const gp_XYZ yd = a.Crossed(xd);
+            auto azim = [&](const gp_XYZ& p) {
+                const gp_XYZ d = p - o;
+                return std::atan2(d.Dot(yd), d.Dot(xd));
+            };
+            for (const Loop& lp : reg.loops) {
+                if (lp.role != LoopRole::Inner) continue;
+                for (int ci : lp.chainIdx)
+                    for (int lv : out.chains[(size_t)ci].meshVerts)
+                        innerU.push_back(azim(localPnt(mv, lv)));
+            }
+            if (!innerU.empty()) {
+                std::sort(innerU.begin(), innerU.end());
+                double gap = innerU.front() + 2.0 * M_PI - innerU.back();
+                double mid = innerU.back() + 0.5 * gap;
+                for (size_t i = 1; i < innerU.size(); ++i) {
+                    const double g = innerU[i] - innerU[i - 1];
+                    if (g > gap) {
+                        gap = g;
+                        mid = innerU[i - 1] + 0.5 * g;
+                    }
+                }
+                int bestV = -1;
+                double bestD = 1e300;
+                for (int t : reg.tris) {
+                    int lv3[3];
+                    localVertsOfTri(mv, t, lv3);
+                    for (int k = 0; k < 3; ++k) {
+                        double d = std::fabs(azim(localPnt(mv, lv3[k])) - mid);
+                        while (d > M_PI) d = std::fabs(d - 2.0 * M_PI);
+                        if (d < bestD - 1e-15 || (std::fabs(d - bestD) <= 1e-15 &&
+                                                  (bestV < 0 || lv3[k] < bestV))) {
+                            bestD = d;
+                            bestV = lv3[k];
+                        }
+                    }
+                }
+                if (bestV >= 0) {
+                    const gp_XYZ d = localPnt(mv, bestV) - o;
+                    gp_XYZ rad = d - a * d.Dot(a);
+                    if (rad.Modulus() > 0.0) {
+                        rad.Normalize();
+                        reg.ax = gp_Ax3(reg.ax.Location(),
+                                        gp_Dir(a.X(), a.Y(), a.Z()),
+                                        gp_Dir(rad.X(), rad.Y(), rad.Z()));
+                    }
+                }
+            }
+        }
+
+        // D-130-14 loop census: what the union actually shipped, per region --
+        // one cap/outer set plus one inner wire per enclosed interruption.
+        if (unionDiagOn() && reg.type == SurfType::Cylinder) {
+            std::fprintf(stderr, "DIAG_130_LOOPS rid=%d R=%.6f nTri=%zu closed360=%d loops=%zu",
+                         reg.id, reg.radius, reg.tris.size(), reg.closed360 ? 1 : 0,
+                         reg.loops.size());
+            for (const Loop& lp : reg.loops) {
+                size_t nv = 0;
+                for (int ci : lp.chainIdx)
+                    nv += out.chains[(size_t)ci].meshVerts.size();
+                const char* rn = lp.role == LoopRole::Outer     ? "outer"
+                                 : lp.role == LoopRole::Inner   ? "inner"
+                                 : lp.role == LoopRole::CapLow  ? "capLo"
+                                                                : "capHi";
+                std::fprintf(stderr, " [%s ch=%zu v=%zu", rn, lp.chainIdx.size(), nv);
+                for (int ci : lp.chainIdx) {
+                    const BoundaryChain& c = out.chains[(size_t)ci];
+                    const gp_XYZ o2 = reg.ax.Location().XYZ();
+                    const gp_XYZ a2 = reg.ax.Direction().XYZ();
+                    const gp_XYZ x2 = reg.ax.XDirection().XYZ();
+                    const gp_XYZ y2 = a2.Crossed(x2);
+                    double lo = 1e300, hi = -1e300;
+                    for (int lv : c.meshVerts) {
+                        const gp_XYZ d2 = localPnt(mv, lv) - o2;
+                        const double uu = std::atan2(d2.Dot(y2), d2.Dot(x2));
+                        lo = std::min(lo, uu);
+                        hi = std::max(hi, uu);
+                    }
+                    std::fprintf(stderr, " (ci=%d nV=%zu u=[%.1f,%.1f] A=%d B=%d iA=%d iB=%d)", ci,
+                                 c.meshVerts.size(), lo * 180.0 / M_PI, hi * 180.0 / M_PI, c.regA,
+                                 c.regB, c.islandA, c.islandB);
+                }
+                std::fprintf(stderr, "]");
+            }
+            std::fprintf(stderr, "\n");
+        }
 
         if (reg.closed360) {
             int nLow = 0, nHigh = 0, nOuter = 0;
