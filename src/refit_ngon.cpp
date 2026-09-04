@@ -2,7 +2,10 @@
 // Unclaimed A2 planar walls, N>=6, prismatic generators. R = circumradius
 // (mean vertex distance to axis), not Eberly. Origin::NgonWall.
 // Commit only a through-hole or outer cylindrical boss: closed360, N in [6,256],
-// max|ρ−R| ≤ max(sewTol, chordSagitta). Extra reject tests (tryAcceptCycle):
+// max|ρ−R| ≤ sewTol -- R is the mean vertex distance, so the residual about it is
+// zero for any concyclic wall and chordSagitta would be unearned slack (S12-b).
+// Cycles come from a cap pair, from a single cap (chamfered hole), or from the
+// generator-ridge graph. Extra reject tests (tryAcceptCycle):
 //   N>256 noise; axis-turn blend (internal gens or shared outside ridge);
 //   zero cap-plane rims; N<=8 without both rims in cap planes (6-facet bump);
 //   one cap end without a chamfer ring on the other end.
@@ -533,6 +536,111 @@ void collectGeneratorCycles(const MeshView& mv, const std::vector<Provisional>& 
     }
 }
 
+// Eligible neighbours of a cap that are lateral to the cap normal and small
+// against the cap: the candidate wall ring of a hole or a boss.
+std::vector<int> wallsNextToCap(const std::vector<Provisional>& provs, const ProvAdj& adj,
+                                int cap, const gp_Dir& axis, double sinSharp) {
+    std::vector<int> w;
+    for (const ProvLink& L : adj[static_cast<size_t>(cap)]) {
+        if (!provEligible(provs[static_cast<size_t>(L.other)])) continue;
+        if (std::abs(provs[static_cast<size_t>(L.other)].plane.Direction().Dot(axis)) >= sinSharp)
+            continue;
+        if (provs[static_cast<size_t>(L.other)].area >=
+            provs[static_cast<size_t>(cap)].area / kCapAreaMul)
+            continue;
+        w.push_back(L.other);
+    }
+    std::sort(w.begin(), w.end());
+    w.erase(std::unique(w.begin(), w.end()), w.end());
+    return w;
+}
+
+// Split `walls` into adjacency components, order each by the azimuth of its
+// plane normal about `axis`, and emit the ones whose azimuth order is also an
+// adjacency ring. Ordering by normal azimuth needs no generator edge, so a wall
+// tessellated as a staggered strip rings up the same as a quad ladder.
+void emitAzimuthRings(const std::vector<Provisional>& provs, const ProvAdj& adj,
+                      const gp_Dir& axis, const std::vector<int>& walls, bool fromCapPair,
+                      std::vector<CycleCand>& out, std::set<std::vector<int>>& seen) {
+    if (static_cast<int>(walls.size()) < kNMin) return;
+    std::vector<char> isW(provs.size(), 0);
+    for (int w : walls) isW[static_cast<size_t>(w)] = 1;
+    std::vector<int> rest = walls;
+    std::vector<char> vis(provs.size(), 0);
+    while (!rest.empty()) {
+        std::sort(rest.begin(), rest.end(), [&](int a, int b) {
+            return minTriId(provs[static_cast<size_t>(a)]) <
+                   minTriId(provs[static_cast<size_t>(b)]);
+        });
+        int seed = -1;
+        for (int r : rest) {
+            if (!vis[static_cast<size_t>(r)]) {
+                seed = r;
+                break;
+            }
+        }
+        if (seed < 0) break;
+        std::vector<int> comp;
+        std::vector<int> st = { seed };
+        vis[static_cast<size_t>(seed)] = 1;
+        while (!st.empty()) {
+            const int u = st.back();
+            st.pop_back();
+            comp.push_back(u);
+            for (const ProvLink& L : adj[static_cast<size_t>(u)]) {
+                if (!isW[static_cast<size_t>(L.other)]) continue;
+                if (vis[static_cast<size_t>(L.other)]) continue;
+                vis[static_cast<size_t>(L.other)] = 1;
+                st.push_back(L.other);
+            }
+        }
+        rest.erase(std::remove_if(rest.begin(), rest.end(),
+                                  [&](int x) { return vis[static_cast<size_t>(x)] != 0; }),
+                   rest.end());
+        if (static_cast<int>(comp.size()) < kNMin) continue;
+
+        struct Az {
+            int idx;
+            double psi;
+            int minTri;
+        };
+        std::vector<Az> az;
+        az.reserve(comp.size());
+        gp_XYZ tmp = (std::abs(axis.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+        const gp_XYZ xD = axis.XYZ().Crossed(tmp);
+        const gp_Dir xDir = normalizeXYZ(xD);
+        const gp_XYZ yD = axis.XYZ().Crossed(xDir.XYZ());
+        const gp_Dir yDir = normalizeXYZ(yD);
+        for (int w : comp) {
+            const gp_XYZ n = provs[static_cast<size_t>(w)].plane.Direction().XYZ();
+            Az z;
+            z.idx = w;
+            z.psi = std::atan2(n.Dot(yDir.XYZ()), n.Dot(xDir.XYZ()));
+            z.minTri = minTriId(provs[static_cast<size_t>(w)]);
+            az.push_back(z);
+        }
+        std::sort(az.begin(), az.end(), [](const Az& a, const Az& b) {
+            if (a.psi != b.psi) return a.psi < b.psi;
+            return a.minTri < b.minTri;
+        });
+        bool ring = true;
+        for (size_t k = 0; k < az.size(); k++) {
+            const int a = az[k].idx;
+            const int b = az[(k + 1) % az.size()].idx;
+            if (!adjacent(adj, a, b)) {
+                ring = false;
+                break;
+            }
+        }
+        if (!ring) continue;
+        CycleCand cc;
+        cc.fromCapPair = fromCapPair;
+        cc.order.reserve(az.size());
+        for (const Az& z : az) cc.order.push_back(z.idx);
+        addCycle(out, seen, std::move(cc), provs);
+    }
+}
+
 // Through-hole: two large cap planes (area >> wall) with (anti)parallel
 // normals. Axis = cap normal. Walls = unclaimed laterals adjacent to a cap;
 // order by azimuth and require a closed dual cycle.
@@ -563,23 +671,6 @@ void collectCapPairCycles(const std::vector<Provisional>& provs, const ProvAdj& 
         return minTriId(provs[static_cast<size_t>(a)]) < minTriId(provs[static_cast<size_t>(b)]);
     });
 
-    auto wallsNextTo = [&](int cap, const gp_Dir& axis) {
-        std::vector<int> w;
-        for (const ProvLink& L : adj[static_cast<size_t>(cap)]) {
-            if (!provEligible(provs[static_cast<size_t>(L.other)])) continue;
-            if (std::abs(provs[static_cast<size_t>(L.other)].plane.Direction().Dot(axis)) >=
-                sinSharp)
-                continue;
-            if (provs[static_cast<size_t>(L.other)].area >=
-                provs[static_cast<size_t>(cap)].area / kCapAreaMul)
-                continue;
-            w.push_back(L.other);
-        }
-        std::sort(w.begin(), w.end());
-        w.erase(std::unique(w.begin(), w.end()), w.end());
-        return w;
-    };
-
     for (size_t i = 0; i < caps.size(); i++) {
         for (size_t j = i + 1; j < caps.size(); j++) {
             const gp_Dir n0 = provs[static_cast<size_t>(caps[i])].plane.Direction();
@@ -587,90 +678,25 @@ void collectCapPairCycles(const std::vector<Provisional>& provs, const ProvAdj& 
             if (std::abs(n0.Dot(n1)) < cosSharp) continue;
             const gp_Dir axis = canonicalAxis(n0.XYZ());
 
-            std::vector<int> wA = wallsNextTo(caps[i], axis);
-            std::vector<int> wB = wallsNextTo(caps[j], axis);
+            std::vector<int> wA = wallsNextToCap(provs, adj, caps[i], axis, sinSharp);
+            std::vector<int> wB = wallsNextToCap(provs, adj, caps[j], axis, sinSharp);
             std::vector<int> both;
             std::set_intersection(wA.begin(), wA.end(), wB.begin(), wB.end(),
                                   std::back_inserter(both));
-            if (static_cast<int>(both.size()) < kNMin) continue;
-
-            std::vector<char> isW(provs.size(), 0);
-            for (int w : both) isW[static_cast<size_t>(w)] = 1;
-            std::vector<int> rest = both;
-            std::vector<char> vis(provs.size(), 0);
-            while (!rest.empty()) {
-                std::sort(rest.begin(), rest.end(), [&](int a, int b) {
-                    return minTriId(provs[static_cast<size_t>(a)]) <
-                           minTriId(provs[static_cast<size_t>(b)]);
-                });
-                int seed = -1;
-                for (int r : rest) {
-                    if (!vis[static_cast<size_t>(r)]) {
-                        seed = r;
-                        break;
-                    }
-                }
-                if (seed < 0) break;
-                std::vector<int> comp;
-                std::vector<int> st = { seed };
-                vis[static_cast<size_t>(seed)] = 1;
-                while (!st.empty()) {
-                    const int u = st.back();
-                    st.pop_back();
-                    comp.push_back(u);
-                    for (const ProvLink& L : adj[static_cast<size_t>(u)]) {
-                        if (!isW[static_cast<size_t>(L.other)]) continue;
-                        if (vis[static_cast<size_t>(L.other)]) continue;
-                        vis[static_cast<size_t>(L.other)] = 1;
-                        st.push_back(L.other);
-                    }
-                }
-                rest.erase(std::remove_if(rest.begin(), rest.end(),
-                                          [&](int x) { return vis[static_cast<size_t>(x)] != 0; }),
-                           rest.end());
-                if (static_cast<int>(comp.size()) < kNMin) continue;
-
-                struct Az {
-                    int idx;
-                    double psi;
-                    int minTri;
-                };
-                std::vector<Az> az;
-                az.reserve(comp.size());
-                gp_XYZ tmp = (std::abs(axis.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
-                const gp_XYZ xD = axis.XYZ().Crossed(tmp);
-                const gp_Dir xDir = normalizeXYZ(xD);
-                const gp_XYZ yD = axis.XYZ().Crossed(xDir.XYZ());
-                const gp_Dir yDir = normalizeXYZ(yD);
-                for (int w : comp) {
-                    const gp_XYZ n = provs[static_cast<size_t>(w)].plane.Direction().XYZ();
-                    Az z;
-                    z.idx = w;
-                    z.psi = std::atan2(n.Dot(yDir.XYZ()), n.Dot(xDir.XYZ()));
-                    z.minTri = minTriId(provs[static_cast<size_t>(w)]);
-                    az.push_back(z);
-                }
-                std::sort(az.begin(), az.end(), [](const Az& a, const Az& b) {
-                    if (a.psi != b.psi) return a.psi < b.psi;
-                    return a.minTri < b.minTri;
-                });
-                bool ring = true;
-                for (size_t k = 0; k < az.size(); k++) {
-                    const int a = az[k].idx;
-                    const int b = az[(k + 1) % az.size()].idx;
-                    if (!adjacent(adj, a, b)) {
-                        ring = false;
-                        break;
-                    }
-                }
-                if (!ring) continue;
-                CycleCand cc;
-                cc.fromCapPair = true;
-                cc.order.reserve(az.size());
-                for (const Az& z : az) cc.order.push_back(z.idx);
-                addCycle(out, seen, std::move(cc), provs);
-            }
+            emitAzimuthRings(provs, adj, axis, both, /*fromCapPair=*/true, out, seen);
         }
+    }
+
+    // A chamfered through hole has ONE cap and a slope ring at the other end --
+    // the configuration isThroughHoleOrOuterBoss already admits (N > 8, one cap
+    // end, other end a chamfer) but that the cap-PAIR collector can never
+    // produce, because the far rim is not a cap. Ring the walls of each single
+    // cap the same way; classifyCycleEnds is what certifies the far end, and
+    // fromCapPair stays false so it is not skipped.
+    for (int cap : caps) {
+        const gp_Dir axis = canonicalAxis(provs[static_cast<size_t>(cap)].plane.Direction().XYZ());
+        emitAzimuthRings(provs, adj, axis, wallsNextToCap(provs, adj, cap, axis, sinSharp),
+                         /*fromCapPair=*/false, out, seen);
     }
 }
 
@@ -774,12 +800,37 @@ bool sharesAxisTurnBlend(const MeshView& mv, const std::vector<Provisional>& pro
             if (L.other < 0 || static_cast<size_t>(L.other) >= provs.size()) continue;
             if (inCyc[static_cast<size_t>(L.other)]) continue;
             if (!provEligible(provs[static_cast<size_t>(L.other)])) continue;
+            // Only a LATERAL neighbour can carry a turning axis. tryAcceptCycle
+            // admits a wall only when |n . axis| < sinSharp, so a neighbour that
+            // fails the same test is not a continuation of this cylinder at all:
+            // it is the cylinder's own END -- a cap plane (|n . axis| = 1) or a
+            // chamfer slope ring -- and classifyCycleEnds is what judges those.
+            // Without this every through hole is refused, because a link that
+            // shares exactly ONE mesh edge is vacuously a "generator ridge": that
+            // single edge lies in both planes and so IS their intersection line,
+            // and a bore wall shares exactly one edge with its cap.
+            if (std::abs(provs[static_cast<size_t>(L.other)].plane.Direction().Dot(
+                    gp_Dir(axyz.X(), axyz.Y(), axyz.Z()))) >= sinSharp)
+                continue;
             if (!isGeneratorRidge(mv, provs, L, w, sewTol)) continue;
             gp_XYZ p, d;
             if (!planePlaneIntersect(provs[static_cast<size_t>(w)].plane,
                                      provs[static_cast<size_t>(L.other)].plane, p, d))
                 continue;
-            if (!dirsParallel(d, axyz, sinSharp)) return true;
+            if (!dirsParallel(d, axyz, sinSharp)) {
+                if (ngonDiagOn()) {
+                    const gp_XYZ e0 = edgeDir(mv, L.edges.front());
+                    std::fprintf(stderr,
+                                 "  DIAG_A_BLEND w=%d other=%d nEdges=%zu wMinTri=%d "
+                                 "oMinTri=%d d=(%.4f,%.4f,%.4f) axis=(%.4f,%.4f,%.4f) "
+                                 "e0=(%.4f,%.4f,%.4f) |e0.a|=%.6g\n",
+                                 w, L.other, L.edges.size(), minTriId(provs[static_cast<size_t>(w)]),
+                                 minTriId(provs[static_cast<size_t>(L.other)]), d.X(), d.Y(), d.Z(),
+                                 axyz.X(), axyz.Y(), axyz.Z(), e0.X(), e0.Y(), e0.Z(),
+                                 std::abs(e0.Dot(axyz)));
+                }
+                return true;
+            }
         }
     }
     return false;
@@ -855,6 +906,10 @@ CycleEnds classifyCycleEnds(const MeshView& mv, const std::vector<Provisional>& 
     }
 
     const int need = (N + 1) / 2;
+    if (ngonDiagOn())
+        std::fprintf(stderr,
+                     "  DIAG_A_ENDCNT N=%d need=%d capLo=%d capHi=%d chamLo=%d chamHi=%d\n",
+                     N, need, capLo, capHi, chamLo, chamHi);
     const bool loCap = capLo >= need;
     const bool hiCap = capHi >= need;
     const bool loCham = chamLo >= need;
@@ -966,15 +1021,21 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
         if (std::abs(n.Dot(axis)) >= sinSharp) return no("wall-is-cone");
     }
 
-    // Lateral (shared wall-wall) edges ∥ axis within sewTol.
+    // Consecutive walls must actually touch. Their FOLD LINE is already required
+    // parallel to the axis (genDirs above); the mesh edge that realises the fold
+    // need not be a generator. A wall triangulated as a staggered strip -- the
+    // Mastercam plate's R=8.5 bore is one: 47 of its 139 interior edges run
+    // parallel to the axis, the rest are zig-zag diagonals -- has no generator
+    // edge at most azimuths, yet its vertices sit on the cylinder to 7e-6 mm.
+    // What certifies the surface is the radius test below (every vertex within
+    // max(sewTol, chordSagitta(R,N)) of one radius about one axis), which a cone
+    // or a turning blend fails by orders of magnitude: a 1° taper moves rho by
+    // 0.157 mm over a 9 mm wall against an accept budget of 5.4e-3 mm.
     for (int i = 0; i < N; i++) {
         const int a = cyc.order[static_cast<size_t>(i)];
         const int b = cyc.order[static_cast<size_t>((i + 1) % N)];
         const ProvLink* L = findLink(adj, a, b);
         if (!L || L->edges.empty()) return no("no-lateral-link");
-        for (int e : L->edges) {
-            if (!edgeParallelTo(mv, e, axyz, sewTol)) return no("lateral-edge-not-parallel");
-        }
     }
 
     const std::vector<int> tris = mergeCycleTris(provs, cyc.order);
@@ -1015,7 +1076,17 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
         const double rho = axyz.Crossed(p - locPerp).Modulus();
         maxDev = std::max(maxDev, std::abs(rho - R));
     }
-    const double acceptTol = std::max(sewTol, chordSagitta(R, N));
+    // R above is the MEAN VERTEX DISTANCE to the axis. Every vertex of a wall
+    // that tessellates a cylinder -- inscribed N-gon or circumscribed -- lies on
+    // one circle, so the residual about that mean is zero up to mesh noise, and
+    // the mesh-noise budget is sewTol. chordSagitta(R,N) is the facet-to-arc
+    // distance; it bounds a fit that landed anywhere in [inradius, circumradius]
+    // (D-130-1), which is a different estimator from this one. Admitting it here
+    // is unearned slack: S12-b is the corpus's own negative control -- a
+    // non-concyclic hex hole with alternating R/1.15R, expectedRejects
+    // ["vertexResidual"] -- and it passes with maxDev=0.750000 against
+    // chordSagitta(10.75, 6)=1.440230, 7% of R.
+    const double acceptTol = sewTol;
     if (devOut) *devOut = maxDev;
     if (tolOut) *tolOut = acceptTol;
     if (maxDev > acceptTol) return no("residual-over-accept-tol");
