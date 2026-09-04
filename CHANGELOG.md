@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **N-gon wall cylinders** (`Origin::NgonWall`): closed unclaimed A2 walls (N≥6, generators parallel) are claimed as right circular cylinders after law bands and before B1. Axis from successive plane intersections or the cap normal; radius is the circumradius, accepted when max |ρ−R| ≤ max(sewTol, chordSagitta(R,N)). Turning-axis blends and cones are skipped.
+- **Planar CIRCLE loops**: LS-fit CIRCLE edges on already-analytic plane loops (N≥6) instead of leaving plane|plane IntAna as polylines. The same circle handle is reused when a neighbor is already a cylinder or cone; stadium leftovers stay mixed; analytic|analytic is never forced back to polyline.
+- **Chamfer cones** (`Origin::ChamferCone`): after A+B1 and before C1, a ring adjacent to one closed-360 cylinder and one cap, sharing an axis, with two radii and constant α (`|n·axis|=sin α`), ships as `Geom_ConicalSurface`. Other cones, tori, and spheres stay NYI.
+- Gate fixture `linkage_bores_chamfer` (`linkage_bores_chamfer.stl`, `.expected.json`, `gates/linkage_chamfer_gate.py`) for the Mastercam linkage plate: N-gon bores plus the hole-mouth 45° chamfer.
+
+### Changed
+- **G2 sagitta in `archChainBand`**: on 500–8000-tri meshes, cylinder vertex residual uses chord-sagitta slack (`max(epsCylAccept(R), chordSagitta(R,N))`) rather than 1%R. The 3222-tri N-gon dead zone no longer fails G2 solely because sagitta exceeds 1%R. `coarseFusionBand` is not widened.
+
 ## [1.2.0] - 2026-09-03
 
 ### Changed

@@ -213,11 +213,18 @@ bool planeOfNbr(const Nbr& n, const SegmentWork& work, gp_Ax3& ax) {
 bool nbrIsCylinder(const Nbr& n, const SegmentWork& work) {
     if (n.kind == Nbr::Acc) {
         if (n.idx < 0 || n.idx >= (int)work.accepted.size()) return false;
-        return work.accepted[n.idx].type == SurfType::Cylinder;
+        const Region& r = work.accepted[n.idx];
+        // ChamferCone is not a FilletStrip and not a cylinder flank.
+        if (r.origin == Origin::ChamferCone) return false;
+        // NgonWall is a committed cylinder, same as CylGrow.
+        return r.type == SurfType::Cylinder;
     }
     if (n.kind == Nbr::Prov) {
         if (n.idx < 0 || n.idx >= (int)work.provisionals.size()) return false;
         const ProvClaim c = work.provisionals[n.idx].claim;
+        // ConsumedCylinder (B1 / NgonWall / ChamferCone) is ineligible as a
+        // C1 member (Unclaimed-only). As a neighbour it is cylinder-like, so
+        // the strip becomes TorusNYI rather than a stolen FilletStrip.
         return c == ProvClaim::ConsumedCylinder || c == ProvClaim::InCylinderClaim;
     }
     return false;
@@ -230,6 +237,9 @@ bool nbrIsPlaneLike(const Nbr& n, const SegmentWork& work) {
     }
     if (n.kind == Nbr::Acc) {
         if (n.idx < 0 || n.idx >= (int)work.accepted.size()) return false;
+        const Origin o = work.accepted[n.idx].origin;
+        if (o == Origin::NgonWall || o == Origin::CylGrow || o == Origin::ChamferCone)
+            return false;
         return work.accepted[n.idx].type == SurfType::Plane;
     }
     return false;
@@ -428,6 +438,10 @@ bool claimFilletsC1(const MeshView& mv, const SegmentParams& p,
         auto nbrOfTri = [&](int nt) -> Nbr {
             if (nt < 0 || nt >= nTri) return {};
             if (triAcc[nt] >= 0) {
+                const Origin o = work.accepted[triAcc[nt]].origin;
+                // ChamferCone is not a FilletStrip neighbour (ineligible).
+                // NgonWall falls through as Acc cylinder, same as CylGrow.
+                if (o == Origin::ChamferCone) return {};
                 Nbr n;
                 n.kind = Nbr::Acc;
                 n.idx = triAcc[nt];
@@ -437,7 +451,8 @@ bool claimFilletsC1(const MeshView& mv, const SegmentParams& p,
             if (pi < 0) return {};
             const ProvClaim cl = work.provisionals[pi].claim;
             if (cl == ProvClaim::ConsumedCylinder || cl == ProvClaim::InCylinderClaim) {
-                // B1 consumed this band but the accepted-region map missed it.
+                // B1 / NgonWall / ChamferCone consumed this band. Enough to
+                // keep it out of Unclaimed members; Acc-miss still a cyl nbr.
                 Nbr n;
                 n.kind = Nbr::Prov;
                 n.idx = pi;

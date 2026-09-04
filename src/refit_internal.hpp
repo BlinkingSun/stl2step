@@ -4,7 +4,10 @@
 // Pipeline (DECISION-p1-math D1 §1.2):
 //   A1 charts        refit_grow.cpp   — union-find over edges with |phi| <= theta_sharp
 //   A2 provisional   refit_grow.cpp   — running-PCA plane growth per chart; TOTAL partition
+//   L  law bands     refit_grow.cpp   — Stage L after A2, before A(ngon)
+//   A  ngon walls    (new TU)         — claimNgonWallsA; Origin::NgonWall
 //   B1 cyl claim     refit_grow.cpp   — merge whole provisional regions (never triangles)
+//   C  chamfer cone  (new TU)         — claimChamferConesC; Origin::ChamferCone
 //   C1 fillet claim  refit_fillet.cpp — strips of <= 3 unclaimed provisionals, D7 radius
 //   A3 plane commit  refit_grow.cpp   — every still-unclaimed provisional -> PlaneGrow plane
 //   D  topology      refit_chains.cpp — chains, I8, loops/LoopRole, ids, RefitStats
@@ -39,6 +42,7 @@
 #include <vector>
 
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
@@ -254,6 +258,29 @@ bool lawBandsMergeable(const LawBand& a, const LawBand& b, const DerivedTols& to
 // and commitPlanesA3. Gated to archChainBand(mv). RULE 4.1a.
 bool claimLawBandsL(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                     SegmentWork& work);
+
+bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work);
+bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                        SegmentWork& work);
+
+bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
+
+// Pratt / LS circle in the owning plane. N≥6 unique loop verts; accept iff
+// max vertex residual ≤ max(sewTol, chordSagitta(R,N)). Stadium/slot mixed
+// loops fail residual. Builder (agent 06) calls this during collapse to emit
+// Geom_Circle; do not force-polyline when this returns false if IntAna already
+// produced a curve.
+bool loopIsCircle(const RegionSet& rs, const Loop& loop, const MeshView& mv,
+                  gp_Ax2& ax, double& R, double sewTol);
+
+// Cache filled by tryPlaneLoopCircles (thread_local). loopIndex indexes
+// Region::loops. Returns false if that loop was not tagged.
+bool planeLoopCircleOf(int regionId, int loopIndex, gp_Ax2& ax, double& R);
+
+// Same cache, keyed by RegionSet::chains index. A multi-chain circular loop
+// shares one (ax,R); each chain is an arc of that circle, not a full circle.
+bool planeLoopCircleForChain(int chainIndex, gp_Ax2& ax, double& R);
 
 }}  // namespace stl2step::refit
 

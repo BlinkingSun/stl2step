@@ -954,6 +954,16 @@ CommitEval evaluateCommit(const MeshView& mv, const DerivedTols& tol,
             ev.failGate = Gate::G2;
             return ev;
         }
+    } else if (archChainBand(mv)) {
+        // 3222-tri N-gons sit in archChainBand (500–8000), outside coarse:
+        // same chord-sagitta g2Tol as coarse, not 1%R.
+        double g2Tol = tol.epsCylAccept(ev.radius);
+        const int nEstSides = std::max(ev.d2.nSides, std::max(6, (int)tris.size()));
+        g2Tol = std::max(g2Tol, chordSagitta(ev.radius, nEstSides));
+        if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius) > g2Tol) {
+            ev.failGate = Gate::G2;
+            return ev;
+        }
     } else if (maxVertexResidual(mv, tris, axis, ev.center, ev.radius)
                > tol.epsCylAccept(ev.radius)) {
         ev.failGate = Gate::G2;

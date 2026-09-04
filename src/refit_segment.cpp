@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "refit.hpp"
@@ -12,6 +14,14 @@
 
 namespace stl2step {
 namespace refit {
+
+// Landed by sibling agents; declared here so runStages can wire them without
+// touching refit_internal.hpp / grow / fillet.
+bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work);
+bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                        SegmentWork& work);
+
 namespace {
 
 constexpr double kDegToRad = M_PI / 180.0;
@@ -45,7 +55,9 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
 
     if (!growProvisionalA2(mv, p, tol, work)) return false;
     if (!claimLawBandsL(mv, p, tol, work)) return false;
+    if (!claimNgonWallsA(mv, p, tol, work)) return false;
     if (!claimCylindersB1(mv, p, tol, work)) return false;
+    if (!claimChamferConesC(mv, p, tol, work)) return false;
 
     if (p.doFillets) {
         if (!claimFilletsC1(mv, p, tol, work)) return false;
@@ -53,6 +65,30 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
 
     if (!commitPlanesA3(mv, p, tol, work)) return false;
     if (!buildTopologyD(mv, p, tol, work, out)) return false;
+
+    if (const char* d130 = std::getenv("STL2STEP_DIAG_130"); d130 && d130[0] && d130[0] != '0') {
+        int nNgon = 0, nCone = 0, nCyl = 0, nPl = 0, nFil = 0;
+        for (const Region& r : out.regions) {
+            if (r.origin == Origin::NgonWall) nNgon++;
+            if (r.origin == Origin::ChamferCone) nCone++;
+            if (r.type == SurfType::Cylinder) nCyl++;
+            if (r.type == SurfType::Plane) nPl++;
+            if (r.origin == Origin::FilletStrip) nFil++;
+        }
+        std::fprintf(stderr,
+                     "DIAG_130_CENSUS nTri=%zu nReg=%zu planes=%d cyl=%d ngon=%d "
+                     "cone=%d fillet=%d chains=%zu\n",
+                     mv.nTri, out.regions.size(), nPl, nCyl, nNgon, nCone, nFil,
+                     out.chains.size());
+        for (const Region& r : out.regions) {
+            if (r.type == SurfType::Cylinder || r.type == SurfType::Cone)
+                std::fprintf(stderr,
+                             "  DIAG_130_REG id=%d type=%d origin=%d R=%.4f nTri=%zu "
+                             "nSides=%d closed360=%d v=[%.4f,%.4f]\n",
+                             r.id, (int)r.type, (int)r.origin, r.radius, r.tris.size(),
+                             r.nSides, r.closed360 ? 1 : 0, r.vMin, r.vMax);
+        }
+    }
 
     return true;
 }

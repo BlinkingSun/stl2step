@@ -76,7 +76,7 @@ struct SegmentParams {
 };
 
 enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus };
-enum class Origin   : uint8_t { PlaneGrow, CylGrow, FilletStrip };
+enum class Origin   : uint8_t { PlaneGrow, CylGrow, FilletStrip, NgonWall, ChamferCone };
 enum class BuiltAs  : uint8_t { NotBuilt, Single, Seamed360, TwoHalves, ExplodedToFacets };
 enum class Reject   : uint8_t { None, GaussPlanarity, VertexResidual, ChordConsistency,
                                 RadiusSanity, Span, FilletConsensus, NeighborNotAnalytic,

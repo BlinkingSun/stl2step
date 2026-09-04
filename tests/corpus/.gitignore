@@ -19,3 +19,6 @@ corpus.stamp
 !nonprismatic-control.stl
 !nonprismatic-control.expected.json
 !nonprismatic-control.PROVENANCE.md
+# Mastercam linkage plate (1.3.0 N-gon bores + chamfer cone) — not generator output.
+!linkage_bores_chamfer.stl
+!linkage_bores_chamfer.expected.json

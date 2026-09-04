@@ -993,17 +993,40 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
 
     std::vector<double> radii;
     for (const Region& r : out.regions) {
-        if (r.origin == Origin::FilletStrip) ++st.fillets;
-        else if (r.type == SurfType::Plane) ++st.planes;
-        else if (r.type == SurfType::Cylinder) ++st.cylinders;
+        switch (r.origin) {
+            case Origin::FilletStrip:
+                ++st.fillets;
+                break;
+            case Origin::CylGrow:
+            case Origin::NgonWall:
+                if (r.type == SurfType::Plane) ++st.planes;
+                else if (r.type == SurfType::Cylinder) ++st.cylinders;
+                break;
+            case Origin::ChamferCone:
+                break;  // not a FilletStrip
+            case Origin::PlaneGrow:
+                if (r.type == SurfType::Plane) ++st.planes;
+                else if (r.type == SurfType::Cylinder) ++st.cylinders;
+                break;
+        }
 
         if (r.maxVertexDev > st.maxVertexDev) st.maxVertexDev = r.maxVertexDev;
         st.dVolPredicted += r.dVolPredicted;                    // signed
 
-        if ((r.type == SurfType::Cylinder || r.origin == Origin::FilletStrip)
-            && r.radius > 0) {
-            radii.push_back(r.radius);
+        bool takeR = false;
+        switch (r.origin) {
+            case Origin::ChamferCone:
+                break;  // two-radius cone, not a fillet/cyl sample
+            case Origin::FilletStrip:
+            case Origin::CylGrow:
+            case Origin::NgonWall:
+                takeR = r.radius > 0;
+                break;
+            case Origin::PlaneGrow:
+                takeR = r.type == SurfType::Cylinder && r.radius > 0;
+                break;
         }
+        if (takeR) radii.push_back(r.radius);
     }
     std::sort(radii.begin(), radii.end());
     if (!radii.empty()) {
