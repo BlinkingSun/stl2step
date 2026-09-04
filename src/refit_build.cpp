@@ -12033,7 +12033,31 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             rs.stats.maxEdgeTol = std::max(rs.stats.maxEdgeTol, d);
                         }
                     }
-                    if (!plc) continue;
+                    // D-130: a plane-loop CIRCLE may only replace the polyline
+                    // when the OTHER side of the chain is a region that can own
+                    // the same edge. Against an island (regB < 0) or a region
+                    // already demoted to facets, the circle is an edge nothing
+                    // else references: the plate gets one CIRCLE, the facets keep
+                    // the N mesh edges under it, and the shell opens by N + 1.
+                    // Tier 2 (mesh polyline) is the correct answer there, and it
+                    // is shared by construction.
+                    const bool filledA =
+                        ch.regA >= 0 && (size_t)ch.regA < eprimeFill.size() &&
+                        eprimeFill[(size_t)ch.regA];
+                    const bool filledB =
+                        ch.regB >= 0 && (size_t)ch.regB < eprimeFill.size() &&
+                        eprimeFill[(size_t)ch.regB];
+                    const bool plcShareable =
+                        plc && ch.regA >= 0 && ch.regB >= 0 && !filledA && !filledB &&
+                        !regionExploded(exploded, ch.regA) &&
+                        !regionExploded(exploded, ch.regB);
+                    if (plc && !plcShareable && diagP2Enabled())
+                        std::fprintf(stderr,
+                                     "DIAG_130_PLCTIER2 ci=%d regA=%d regB=%d filledA=%d "
+                                     "filledB=%d R=%.6f\n",
+                                     (int)ci, ch.regA, ch.regB, filledA ? 1 : 0, filledB ? 1 : 0,
+                                     plcR);
+                    if (!plcShareable) continue;
                 }
                 // analytic | analytic (or mixed plane-loop CIRCLE)
                 if (anaPair && recoverPass != lastCanonClearPass) {
