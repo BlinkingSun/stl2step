@@ -36,6 +36,7 @@
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
+#include <stdexcept>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -43,6 +44,8 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopoDS_Wire.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <BRepCheck_Analyzer.hxx>
@@ -78,16 +81,58 @@ Recoverable planeRec(const Vec3& normal, int count = 1) {
     return r;
 }
 
-TopoDS_Shape makeNGonPrism(double R, double H, int N, const gp_Ax2& ax) {
+Recoverable coneRec(double R0, double R1, double halfAngleDeg, const Vec3& loc, const Vec3& dir,
+                    int count, int nSides) {
+    Recoverable r;
+    r.type = "cone";
+    r.radius = R0;
+    r.radius2 = R1;
+    r.halfAngleDeg = halfAngleDeg;
+    r.axis = {loc, normalize(dir)};
+    r.count = count;
+    r.nSides = nSides;
+    r.closed360 = true;
+    return r;
+}
+
+// Battery 130 synthetic fixtures: ≥48-side regular polylines (SPEC-130-fixtures).
+constexpr int kTessN = 48;
+
+TopoDS_Wire nGonWire(double R, int N, const gp_Ax2& ax, double zAlong = 0.0) {
     BRepBuilderAPI_MakePolygon poly;
+    const gp_Pnt loc = ax.Location().Translated(gp_Vec(ax.Direction()) * zAlong);
     for (int i = 0; i < N; ++i) {
         const double ang = 2.0 * M_PI * i / N;
-        poly.Add(ax.Location().Translated(gp_Vec(ax.XDirection()) * (R * std::cos(ang)) +
-                                         gp_Vec(ax.YDirection()) * (R * std::sin(ang))));
+        poly.Add(loc.Translated(gp_Vec(ax.XDirection()) * (R * std::cos(ang)) +
+                                gp_Vec(ax.YDirection()) * (R * std::sin(ang))));
     }
     poly.Close();
-    TopoDS_Face face = BRepBuilderAPI_MakeFace(poly.Wire());
+    return poly.Wire();
+}
+
+TopoDS_Shape makeNGonPrism(double R, double H, int N, const gp_Ax2& ax) {
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(nGonWire(R, N, ax, 0.0));
     return BRepPrimAPI_MakePrism(face, gp_Vec(ax.Direction()) * H);
+}
+
+// Ruled solid frustum (planar N-gon caps + planar trapezoid sides).
+TopoDS_Shape makeNGonFrustum(double R0, double R1, double H, int N, const gp_Ax2& ax) {
+    BRepOffsetAPI_ThruSections loft(Standard_True, Standard_True);
+    loft.AddWire(nGonWire(R0, N, ax, 0.0));
+    loft.AddWire(nGonWire(R1, N, ax, H));
+    loft.Build();
+    return loft.Shape();
+}
+
+TopoDS_Shape cutThroughNGon(const TopoDS_Shape& stock, const gp_Pnt& faceCenter, const gp_Dir& dir,
+                            double R, double span, int N) {
+    gp_Ax2 ax(faceCenter.Translated(gp_Vec(dir) * (-1.0)), dir);
+    return BRepAlgoAPI_Cut(stock, makeNGonPrism(R, span + 2.0, N, ax));
+}
+
+std::vector<Recoverable> boxSixPlanes() {
+    return {planeRec({0, 0, 1}, 1),  planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
+            planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1),  planeRec({0, -1, 0}, 1)};
 }
 
 TopoDS_Shape makePlateWithHole(double W, double D, double T, double holeR, int holeN,
@@ -234,11 +279,12 @@ void fillMeshSidecar(FixtureResult& out) {
     fillLiveExpectations(out);
 }
 
-void sumRecoverableCensus(const Sidecar& sc, int& planes, int& cylinders) {
-    planes = cylinders = 0;
+void sumRecoverableCensus(const Sidecar& sc, int& planes, int& cylinders, int& cones) {
+    planes = cylinders = cones = 0;
     for (const auto& r : sc.recoverable) {
         if (r.type == "plane") planes += r.count;
         else if (r.type == "cylinder") cylinders += r.count;
+        else if (r.type == "cone") cones += r.count;
     }
 }
 
@@ -246,8 +292,8 @@ void fillLiveExpectations(FixtureResult& out) {
     Sidecar& sc = out.sidecar;
     sc.live.clear();
     if (sc.components.empty()) return;
-    int recPlanes = 0, recCyl = 0;
-    sumRecoverableCensus(sc, recPlanes, recCyl);
+    int recPlanes = 0, recCyl = 0, recCone = 0;
+    sumRecoverableCensus(sc, recPlanes, recCyl, recCone);
     const bool hasFreeform =
         std::any_of(sc.mustRemainFaceted.begin(), sc.mustRemainFaceted.end(),
                     [](const FacetedRegion& f) { return f.type == "freeform"; });
@@ -301,10 +347,15 @@ void fillLiveExpectations(FixtureResult& out) {
             live.surfaceCensus = {0, 0, comp.triangleCount};
             live.faceCount = comp.triangleCount;
         } else {
-            live.surfaceCensus = {recPlanes, recCyl, 0};
-            live.faceCount = recPlanes + recCyl;
+            live.surfaceCensus = {recPlanes, recCyl, 0, recCone};
+            live.faceCount = recPlanes + recCyl + recCone;
+            if (!sc.battery.empty()) {
+                live.builtCylindersFloor = recCyl;
+                live.builtPlanesFloor = recPlanes;
+                live.builtConesFloor = recCone;
+            }
             if (sc.components.size() == 1) {
-                // Single-body fixtures: planes + cylinders is the recoverable census.
+                // Single-body fixtures: planes + cylinders (+ cones) is the recoverable census.
             } else if (sc.id == "S12") {
                 live.surfaceCensus = {6, 0, 0};
                 live.faceCount = 6;
@@ -763,6 +814,159 @@ FixtureResult buildS16R2() {
     return fx;
 }
 
+// ---- 130 battery B2–B6 (synthetic; N=48 regular polylines) -------------------
+
+TopoDS_Edge findBoxEdgeAlongXAtYZ(const TopoDS_Shape& box, double y, double z) {
+    TopExp_Explorer exp(box, TopAbs_EDGE);
+    for (; exp.More(); exp.Next()) {
+        const TopoDS_Edge e = TopoDS::Edge(exp.Current());
+        TopoDS_Vertex v1, v2;
+        TopExp::Vertices(e, v1, v2);
+        const gp_Pnt p1 = BRep_Tool::Pnt(v1);
+        const gp_Pnt p2 = BRep_Tool::Pnt(v2);
+        const bool atY = std::fabs(p1.Y() - y) < 1e-7 && std::fabs(p2.Y() - y) < 1e-7;
+        const bool atZ = std::fabs(p1.Z() - z) < 1e-7 && std::fabs(p2.Z() - z) < 1e-7;
+        const bool alongX = std::fabs(p1.X() - p2.X()) > 1.0;
+        if (atY && atZ && alongX) return e;
+    }
+    return {};
+}
+
+// External boss: N-gon cylinder then 45° conical chamfer (ruled frustum).
+TopoDS_Shape makeNGonBossChamfer(double R, double Hcyl, double chamfer, int N, const gp_Ax2& ax) {
+    BRepOffsetAPI_ThruSections loft(Standard_True, Standard_True);
+    loft.AddWire(nGonWire(R, N, ax, 0.0));
+    loft.AddWire(nGonWire(R, N, ax, Hcyl));
+    loft.AddWire(nGonWire(R - chamfer, N, ax, Hcyl + chamfer));
+    loft.Build();
+    return loft.Shape();
+}
+
+void tagBattery130(Sidecar& sc) {
+    sc.battery = "130";
+    sc.expectedExit = 0;
+    sc.expectedSolids = 1;
+    sc.expectedOpenShells = 0;
+    sc.smoothExpectedExit = -1;  // gate_130 owns the smooth contract
+}
+
+// B2: 60×40×30 block, R=8 through Z and R=5 through X, crossing at the centre.
+FixtureResult buildCrossBores() {
+    TopoDS_Shape block = BRepPrimAPI_MakeBox(60, 40, 30);
+    block = cutThroughNGon(block, gp_Pnt(30, 20, 0), gp_Dir(0, 0, 1), 8.0, 30.0, kTessN);
+    block = cutThroughNGon(block, gp_Pnt(0, 20, 15), gp_Dir(1, 0, 0), 5.0, 60.0, kTessN);
+    Sidecar sc;
+    tagBattery130(sc);
+    sc.recoverable = boxSixPlanes();
+    sc.recoverable.push_back(cylRec(8.0, {30, 20, 0}, {0, 0, 1}, 1, 0, true));
+    sc.recoverable.push_back(cylRec(5.0, {0, 20, 15}, {1, 0, 0}, 1, 0, true));
+    sc.intersections = {{"cyl R8", "cyl R5", "cylcyl"}};
+    return emitShape("cross_bores",
+                     "60x40x30 block, through-bore R=8 along Z × R=5 along X at centre (cyl∩cyl)",
+                     block, 0.2, 0.5, sc);
+}
+
+// B3: 60×60×10 plate, R=10 hole with 45°×2 mm conical entry chamfer, plus
+// one straight 45°×3 mm bevel. Straight bevel is a plane (7 planes total).
+FixtureResult buildChamferStraightRing() {
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(60, 60, 10);
+    const TopoDS_Edge bevelEdge = findBoxEdgeAlongXAtYZ(plate, 0.0, 10.0);
+    if (bevelEdge.IsNull())
+        throw std::runtime_error("chamfer_straight_ring: top-front edge not found");
+    BRepFilletAPI_MakeChamfer chamfer(plate);
+    chamfer.Add(3.0, bevelEdge);
+    chamfer.Build();
+    if (!chamfer.IsDone())
+        throw std::runtime_error("chamfer_straight_ring: MakeChamfer failed");
+    plate = chamfer.Shape();
+    plate = cutThroughNGon(plate, gp_Pnt(30, 30, 0), gp_Dir(0, 0, 1), 10.0, 10.0, kTessN);
+    // 45° conical entry: R 10 at z=8 → R 12 at z=10. Overshoot the top 0.1 mm.
+    gp_Ax2 coneAx(gp_Pnt(30, 30, 8), gp_Dir(0, 0, 1));
+    plate = BRepAlgoAPI_Cut(plate, makeNGonFrustum(10.0, 12.1, 2.1, kTessN, coneAx));
+    Sidecar sc;
+    tagBattery130(sc);
+    sc.recoverable = boxSixPlanes();
+    sc.recoverable.push_back(planeRec(normalize(Vec3(0, -1, 1)), 1));  // 45° straight bevel
+    sc.recoverable.push_back(cylRec(10.0, {30, 30, 0}, {0, 0, 1}, 1, 0, true));
+    sc.recoverable.push_back(
+        coneRec(10.0, 12.0, 45.0, {30, 30, 8}, {0, 0, 1}, 1, kTessN));
+    FixtureResult fx = emitShape(
+        "chamfer_straight_ring",
+        "60x60x10 plate, R=10 hole with 45deg x 2mm conical chamfer + straight 45deg x 3mm bevel",
+        plate, 0.2, 0.5, sc);
+    // SPEC: write the exact plane count the generator produces (expect 7).
+    int planes = 0, cyls = 0, cones = 0;
+    sumRecoverableCensus(fx.sidecar, planes, cyls, cones);
+    fx.sidecar.description += " (planes=" + std::to_string(planes) + ")";
+    return fx;
+}
+
+// B4: 60×60×10 plate + external boss R=12 H=15 with 45°×2 mm top chamfer (R 12→10).
+FixtureResult buildBossConeChamfer() {
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(60, 60, 10);
+    gp_Ax2 ax(gp_Pnt(30, 30, 10), gp_Dir(0, 0, 1));
+    TopoDS_Shape boss = makeNGonBossChamfer(12.0, 13.0, 2.0, kTessN, ax);
+    TopoDS_Shape part = BRepAlgoAPI_Fuse(plate, boss);
+    Sidecar sc;
+    tagBattery130(sc);
+    // SPEC GT: plate 6 + boss top 1 = 7 (two +Z patches: plate annulus + boss cap).
+    sc.recoverable = {planeRec({0, 0, 1}, 2),  planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
+                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1),  planeRec({0, -1, 0}, 1),
+                      cylRec(12.0, {30, 30, 10}, {0, 0, 1}, 1, 0, true),
+                      coneRec(12.0, 10.0, 45.0, {30, 30, 23}, {0, 0, 1}, 1, kTessN)};
+    return emitShape("boss_cone_chamfer",
+                     "60x60x10 plate + external boss R=12 H=15 with 45deg x 2mm conical top chamfer "
+                     "(R 12→10)",
+                     part, 0.2, 0.5, sc);
+}
+
+// B5: 60×60×20 plate, through R=6, counterbore R=10 depth 6, 45°×1.5 mm entry chamfer.
+FixtureResult buildCounterboreChamfer() {
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(60, 60, 20);
+    plate = cutThroughNGon(plate, gp_Pnt(30, 30, 0), gp_Dir(0, 0, 1), 6.0, 20.0, kTessN);
+    // Counterbore from z=14 to above the top.
+    gp_Ax2 cbAx(gp_Pnt(30, 30, 14), gp_Dir(0, 0, 1));
+    plate = BRepAlgoAPI_Cut(plate, makeNGonPrism(10.0, 7.0, kTessN, cbAx));
+    gp_Ax2 coneAx(gp_Pnt(30, 30, 18.5), gp_Dir(0, 0, 1));
+    plate = BRepAlgoAPI_Cut(plate, makeNGonFrustum(10.0, 11.6, 1.6, kTessN, coneAx));
+    Sidecar sc;
+    tagBattery130(sc);
+    sc.recoverable = {planeRec({0, 0, 1}, 2),  planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
+                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1),  planeRec({0, -1, 0}, 1),
+                      cylRec(6.0, {30, 30, 0}, {0, 0, 1}, 1, 0, true),
+                      cylRec(10.0, {30, 30, 14}, {0, 0, 1}, 1, 0, true),
+                      coneRec(10.0, 11.5, 45.0, {30, 30, 18.5}, {0, 0, 1}, 1, kTessN)};
+    return emitShape("counterbore_chamfer",
+                     "60x60x20 plate, through R=6, counterbore R=10 depth 6, 45deg x 1.5mm "
+                     "conical entry (R 10→11.5)",
+                     plate, 0.2, 0.5, sc);
+}
+
+// B6: B5 plus a through-bore R=4 along X at z=17 (cuts counterbore wall + chamfer cone).
+FixtureResult buildCylMeetsChamfer() {
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(60, 60, 20);
+    plate = cutThroughNGon(plate, gp_Pnt(30, 30, 0), gp_Dir(0, 0, 1), 6.0, 20.0, kTessN);
+    gp_Ax2 cbAx(gp_Pnt(30, 30, 14), gp_Dir(0, 0, 1));
+    plate = BRepAlgoAPI_Cut(plate, makeNGonPrism(10.0, 7.0, kTessN, cbAx));
+    gp_Ax2 coneAx(gp_Pnt(30, 30, 18.5), gp_Dir(0, 0, 1));
+    plate = BRepAlgoAPI_Cut(plate, makeNGonFrustum(10.0, 11.6, 1.6, kTessN, coneAx));
+    plate = cutThroughNGon(plate, gp_Pnt(0, 30, 17), gp_Dir(1, 0, 0), 4.0, 60.0, kTessN);
+    Sidecar sc;
+    tagBattery130(sc);
+    sc.recoverable = {planeRec({0, 0, 1}, 2),  planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
+                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1),  planeRec({0, -1, 0}, 1),
+                      cylRec(6.0, {30, 30, 0}, {0, 0, 1}, 1, 0, true),
+                      cylRec(10.0, {30, 30, 14}, {0, 0, 1}, 1, 0, true),
+                      cylRec(4.0, {0, 30, 17}, {1, 0, 0}, 1, 0, true),
+                      coneRec(10.0, 11.5, 45.0, {30, 30, 18.5}, {0, 0, 1}, 1, kTessN)};
+    sc.intersections = {{"cyl R10", "cyl R4", "cylcyl"},
+                        {"cyl R6", "cyl R4", "cylcyl"},
+                        {"cone R10-11.5", "cyl R4", "conecyl"}};
+    return emitShape("cyl_meets_chamfer",
+                     "counterbore_chamfer + through-bore R=4 along X at z=17 (cyl∩cyl and cone∩cyl)",
+                     plate, 0.2, 0.5, sc);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -806,6 +1010,11 @@ int main(int argc, char** argv) {
     run("S16-R1-explode-success", [] { return buildS16R1Explode(); });
     run("S16-R1-round-2", [] { return buildS16R1Round2(); });
     run("S16-R2-ChainUnstable", [] { return buildS16R2(); });
+    run("cross_bores", [] { return buildCrossBores(); });
+    run("chamfer_straight_ring", [] { return buildChamferStraightRing(); });
+    run("boss_cone_chamfer", [] { return buildBossConeChamfer(); });
+    run("counterbore_chamfer", [] { return buildCounterboreChamfer(); });
+    run("cyl_meets_chamfer", [] { return buildCylMeetsChamfer(); });
 
     for (const auto& fx : fixtures) {
         if (isPinnedCorpusFixture(fx.sidecar.id)

@@ -16,6 +16,7 @@
   "expectedExit": 0,
   "expectedSolids": 1,
   "expectedOpenShells": 0,
+  "battery": "130",
   "smoothExpectedExit": -1,
   "recoverable": [],
   "mustRemainFaceted": [],

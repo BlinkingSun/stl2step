@@ -50,8 +50,10 @@ struct AxisSpec {
 };
 
 struct Recoverable {
-    std::string type;   // "plane" | "cylinder"
+    std::string type;   // "plane" | "cylinder" | "cone"
     double radius = 0;
+    double radius2 = 0;       // cones: second radius (R_top or R_max)
+    double halfAngleDeg = 0;  // cones: semi-vertical angle
     AxisSpec axis;
     int count = 1;
     int nSides = 0;
@@ -61,6 +63,12 @@ struct Recoverable {
     // the strip, not the adjacent spherical blends. NaN => no window.
     double vMin = std::numeric_limits<double>::quiet_NaN();
     double vMax = std::numeric_limits<double>::quiet_NaN();
+};
+
+struct Intersection {
+    std::string a;
+    std::string b;
+    std::string kind;  // "cylcyl" | "conecyl" | "coneplane" | ...
 };
 
 struct FacetedRegion {
@@ -85,6 +93,7 @@ struct SurfaceCensus {
     int plane = 0;
     int cylinder = 0;
     int planar_facets = 0;
+    int cone = 0;
     int totalPlanes() const { return plane + planar_facets; }
 };
 
@@ -96,6 +105,7 @@ struct LiveExpectation {
     int recognisedCylinders = -1;   // P1 recognition count (-1 = omit)
     int builtCylindersFloor = -1;   // ratchet: built >= floor (-1 = omit)
     int builtPlanesFloor = -1;
+    int builtConesFloor = -1;
     int faceCount = 0;
     SurfaceCensus surfaceCensus;
     double volumeBudgetMM3 = 0;
@@ -115,6 +125,8 @@ struct Sidecar {
     double deflection = 0;
     int triangleCount = 0;
     double meshVolume = 0;
+    std::string battery;  // e.g. "130" — 1.3.0 battery fixtures; empty = omit
+    std::vector<Intersection> intersections;
     std::vector<Recoverable> recoverable;
     std::vector<FacetedRegion> mustRemainFaceted;
     std::vector<std::string> expectedRejects;
@@ -435,6 +447,8 @@ inline std::string writeSidecarJson(const Sidecar& s) {
     os << "  \"expectedExit\": " << s.expectedExit << ",\n";
     os << "  \"expectedSolids\": " << s.expectedSolids << ",\n";
     os << "  \"expectedOpenShells\": " << s.expectedOpenShells << ",\n";
+    if (!s.battery.empty())
+        os << "  \"battery\": \"" << s.battery << "\",\n";
     if (s.smoothExpectedExit >= 0)
         os << "  \"smoothExpectedExit\": " << s.smoothExpectedExit << ",\n";
     if (s.smoothWarningCountMax >= 0)
@@ -461,6 +475,15 @@ inline std::string writeSidecarJson(const Sidecar& s) {
             } else {
                 os << "\n";
             }
+        } else if (r.type == "cone") {
+            os << "      \"radius\": " << r.radius << ",\n";
+            os << "      \"radius2\": " << r.radius2 << ",\n";
+            os << "      \"halfAngleDeg\": " << r.halfAngleDeg << ",\n";
+            os << "      \"axis\": {\"loc\": " << jsonVec3(r.axis.loc)
+               << ", \"dir\": " << jsonVec3(r.axis.dir) << "},\n";
+            os << "      \"count\": " << r.count << ",\n";
+            os << "      \"nSides\": " << r.nSides << ",\n";
+            os << "      \"closed360\": " << (r.closed360 ? "true" : "false") << "\n";
         } else {
             os << "      \"count\": " << r.count << ",\n";
             os << "      \"normal\": " << jsonVec3(r.normal) << ",\n";
@@ -483,6 +506,16 @@ inline std::string writeSidecarJson(const Sidecar& s) {
         os << "\"" << s.expectedRejects[i] << "\"";
     }
     os << "],\n";
+    if (!s.intersections.empty()) {
+        os << "  \"intersections\": [\n";
+        for (size_t i = 0; i < s.intersections.size(); ++i) {
+            const auto& x = s.intersections[i];
+            os << "    {\"a\": \"" << x.a << "\", \"b\": \"" << x.b
+               << "\", \"kind\": \"" << x.kind << "\"}"
+               << (i + 1 < s.intersections.size() ? "," : "") << "\n";
+        }
+        os << "  ],\n";
+    }
     os << "  \"components\": [\n";
     for (size_t i = 0; i < s.components.size(); ++i) {
         const auto& c = s.components[i];
@@ -510,11 +543,15 @@ inline std::string writeSidecarJson(const Sidecar& s) {
             os << "      \"builtCylindersFloor\": " << l.builtCylindersFloor << ",\n";
         if (l.builtPlanesFloor >= 0)
             os << "      \"builtPlanesFloor\": " << l.builtPlanesFloor << ",\n";
+        if (l.builtConesFloor >= 0)
+            os << "      \"builtConesFloor\": " << l.builtConesFloor << ",\n";
         if (!l.buildFaces) os << "      \"buildFaces\": false,\n";
         os << "      \"faceCount\": " << l.faceCount << ",\n";
         os << "      \"surfaceCensus\": {\"plane\": " << l.surfaceCensus.plane
-           << ", \"cylinder\": " << l.surfaceCensus.cylinder << ", \"planar_facets\": "
-           << l.surfaceCensus.planar_facets << "},\n";
+           << ", \"cylinder\": " << l.surfaceCensus.cylinder;
+        if (l.surfaceCensus.cone != 0)
+            os << ", \"cone\": " << l.surfaceCensus.cone;
+        os << ", \"planar_facets\": " << l.surfaceCensus.planar_facets << "},\n";
         os << "      \"volumeBudgetMM3\": " << l.volumeBudgetMM3 << "\n";
         os << "    }" << (i + 1 < s.live.size() ? "," : "") << "\n";
     }
