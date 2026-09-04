@@ -6,6 +6,8 @@
 
 #include "mesh_harness.hpp"
 
+#include "../../src/stl_quant.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -224,6 +226,9 @@ bool loadMesh(const std::string& stlPath, double scale, double weldTolArg,
         out.diag = diag;
         out.weldTol = weldTol;
         out.sewTol = sewTol;
+        // D-130-12: same measurement the engine makes at read time, so a gate
+        // tool driving segment() through this harness carries the same q.
+        out.quantFloor = stl2step::stlQuantFloor(stlPath).q * std::fabs(scale);
 
         // Gate-tool order: ascending UnionFind root id. The engine then sorts
         // by triangle-count desc for build scheduling; that is not the contract.

@@ -41,6 +41,7 @@ find_package(OpenCASCADE REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(stl2step_core
     src/stl2step.cpp
+    src/stl_quant.cpp
     src/mesh.cpp
     src/refit_math.cpp
     src/refit_cone_math.cpp

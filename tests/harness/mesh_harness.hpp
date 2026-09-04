@@ -38,6 +38,7 @@ struct HarnessMesh {
     std::vector<gp_XYZ>            pts;    // welded, scaled
     std::vector<std::array<int,3>> tris;   // global triangles, post-remap, degenerates dropped
     double diag = 0, weldTol = 0, sewTol = 0;
+    double quantFloor = 0;                 // D-130-12, mm (post-scale); see src/stl_quant.hpp
     std::vector<HarnessComponent> comps;
 };
 

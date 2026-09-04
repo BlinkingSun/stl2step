@@ -23,6 +23,7 @@
 
 #include "stl2step/stl2step.hpp"
 #include "refit.hpp"
+#include "stl_quant.hpp"
 
 #include <algorithm>
 #include <array>
@@ -362,6 +363,19 @@ Result Converter::run() {
         double sewTol = sewTolArg > 0 ? sewTolArg
                                       : std::min(std::max(1e-6, diag * 1e-5), 0.5);
 
+        // D-130-12: the mesh file's own coordinate quantization, read from the
+        // FILE (the loaded points are doubles and no longer say what format they
+        // arrived in), then carried into the same mm the welded points live in.
+        const StlQuantFloor qf = stlQuantFloor(inPath);
+        const double quantFloor = qf.q * std::fabs(scale);
+        if (const char* e = std::getenv("STL2STEP_LAWBAND_DIAG"); e && e[0] && e[0] != '0')
+            std::fprintf(stderr,
+                         "DIAG_QUANTFLOOR %s maxAbs=%.9g q=%.9g fmt=%s res=%.9g "
+                         "sig=%d scale=%.9g ok=%d\n",
+                         inPath.c_str(), qf.maxAbs * std::fabs(scale), quantFloor,
+                         qf.ascii ? "ascii" : "binary", qf.res * std::fabs(scale),
+                         qf.sigDigits, scale, qf.ok ? 1 : 0);
+
         note("  read      %s triangles, %s vertices (%s welded), bbox %.2f x %.2f x %.2f mm  [%.2fs]\n",
              fmtInt(nTri).c_str(), fmtInt(nVert).c_str(), fmtInt(rawVerts - nVert).c_str(),
              bbMax.X() - bbMin.X(), bbMax.Y() - bbMin.Y(), bbMax.Z() - bbMin.Z(), timer.lap());
@@ -542,6 +556,7 @@ Result Converter::run() {
             mv.diag = diag;
             mv.weldTol = weldTol;
             mv.sewTol = sewTol;
+            mv.quantFloor = quantFloor;
         };
 
         std::unordered_map<int, refit::RegionSet> refitPlans;

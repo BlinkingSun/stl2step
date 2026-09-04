@@ -218,6 +218,31 @@ set_tests_properties(cone_bind_unit PROPERTIES
     LABELS "unit;cone-math"
     TIMEOUT 60)
 
+# 130-ABSORB-3 (D-130-12) — the mesh file's own coordinate quantization.
+# Compiles src/stl_quant.cpp directly rather than linking stl2step::core: the TU
+# is pure <cstdio>/<cmath> with no OCCT and no engine header, so the test needs
+# no OpenCASCADE at all and `--target quant_floor_unit` drags in nothing else.
+add_executable(quant_floor_unit
+    quant_floor_test.cpp
+    "${_stl2step_root}/src/stl_quant.cpp")
+target_compile_features(quant_floor_unit PRIVATE cxx_std_17)
+set_target_properties(quant_floor_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_include_directories(quant_floor_unit PRIVATE "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(quant_floor_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(quant_floor_unit)
+endif()
+
+add_test(NAME quant_floor_unit COMMAND quant_floor_unit "${CMAKE_BINARY_DIR}")
+set_tests_properties(quant_floor_unit PROPERTIES
+    LABELS "unit;quant"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

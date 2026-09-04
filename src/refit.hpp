@@ -101,6 +101,12 @@ struct MeshView {
     const uint8_t*                       triDirs;    // local tri -> direction bits
     size_t nTri, nVtx, nEdge;
     double diag, weldTol, sewTol;                    // derived tolerance inputs
+    // D-130-12: the mesh FILE's coordinate quantization, in the same mm as pts[]
+    // (radial half-ulp bound at the mesh's own largest |coordinate|, times the
+    // unit scale). 0 when it could not be measured -- then it certifies nothing
+    // and max(bandResid, quantFloor) is the band's own residual. Measured by
+    // stl2step::stlQuantFloor(); never derived from the bounding box.
+    double quantFloor = 0;
 };
 
 struct Loop {                       // a face boundary loop, in order

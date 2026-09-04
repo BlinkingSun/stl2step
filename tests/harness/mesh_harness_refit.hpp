@@ -34,6 +34,7 @@ inline void toMeshView(const HarnessMesh& m, const HarnessComponent& c,
     mv.diag      = m.diag;
     mv.weldTol   = m.weldTol;
     mv.sewTol    = m.sewTol;
+    mv.quantFloor = m.quantFloor;
 }
 
 }  // namespace harness
