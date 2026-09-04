@@ -10,11 +10,17 @@
 //              `circle-on-cone` is a certified `exactMaxAtBind` class — this
 //              header publishes that class and its supremum.
 //
-// Why a second header for `refit_math.cpp` (whose cross-TU signatures are frozen
-// in `refit_internal.hpp`): every declaration below is pure `gp_` geometry with
-// no `MeshView`, no `Region`, no engine state, so `tests/unit/cone_math_test.cpp`
-// can compile `src/refit_math.cpp` on its own and certify this math without
-// linking — or waiting for — the engine.  Nothing in `refit_internal.hpp` moves.
+// Why its own translation unit (`src/refit_cone_math.cpp`) rather than the P1
+// math TU: `src/refit_math.cpp` is one of the five P1 sources the D5.3 include
+// allowlist covers, and that allowlist — a gate instrument, not a style rule —
+// admits `refit.hpp` and `refit_internal.hpp` as the only project headers and no
+// bare `gp.hxx`.  The cone math needs both, so it lives outside the allowlist by
+// construction; the gate stays untouched and P1 stays exactly as narrow as it
+// was.  Nothing else changes: every declaration below is pure `gp_` geometry
+// with no `MeshView`, no `Region`, no engine state, so
+// `tests/unit/cone_math_test.cpp` still compiles `src/refit_cone_math.cpp` on
+// its own and certifies this math without linking — or waiting for — the
+// engine, and `refit_internal.hpp` still does not move.
 //
 // FRAME AND PARAMETRISATION (OCCT, `Geom_ConicalSurface` / `gp_Cone`):
 //
@@ -36,8 +42,8 @@
 //
 // SPDX-License-Identifier: MIT
 
-#ifndef STL2STEP_REFIT_MATH_HPP
-#define STL2STEP_REFIT_MATH_HPP
+#ifndef STL2STEP_REFIT_CONE_MATH_HPP
+#define STL2STEP_REFIT_CONE_MATH_HPP
 
 #include <cstdint>
 
@@ -239,4 +245,4 @@ bool coneIntConeCircle(const gp_Cone& a, const gp_Cone& b, gp_Circ& out,
 }  // namespace refit
 }  // namespace stl2step
 
-#endif  // STL2STEP_REFIT_MATH_HPP
+#endif  // STL2STEP_REFIT_CONE_MATH_HPP

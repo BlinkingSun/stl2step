@@ -138,14 +138,16 @@ set_tests_properties(prism_build_unit PROPERTIES
     TIMEOUT 180)
 
 # 130-CONE-MATH (SPEC-130-cone-math) — the closed-form cone math in
-# src/refit_math.cpp, certified against the OCCT parametric equation,
+# src/refit_cone_math.cpp, certified against the OCCT parametric equation,
 # GeomAPI_ProjectPointOnSurf and IntAna_QuadQuadGeo.
 #
-# This target deliberately COMPILES src/refit_math.cpp instead of linking
-# stl2step::core: the math under test is pure gp_ geometry (refit_math.hpp
+# This target deliberately COMPILES src/refit_cone_math.cpp instead of linking
+# stl2step::core: the math under test is pure gp_ geometry (refit_cone_math.hpp
 # pulls in no engine header), and `--target cone_math_unit` must not drag in
-# refit_build.cpp, which another lane owns. Nothing else in the tree changes
-# how it builds.
+# refit_build.cpp, which another lane owns. That one file is the whole TU — the
+# cone math sits outside src/refit_math.cpp precisely because the D5.3 include
+# allowlist covers the P1 sources and admits neither gp.hxx nor a third project
+# header. Nothing else in the tree changes how it builds.
 # `OpenCASCADE::OpenCASCADE` is an IMPORTED target and therefore DIRECTORY
 # scoped: the sibling targets only see it transitively through stl2step::core.
 # When this file is configured standalone (the `NOT TARGET stl2step::core`
@@ -153,7 +155,7 @@ set_tests_properties(prism_build_unit PROPERTIES
 # does not exist here, so naming it directly fails at generate time. Re-find it
 # in this scope — the module path and the cache are already primed, so it costs
 # nothing — rather than linking stl2step::core, which carries its own
-# refit_math.cpp and would duplicate every symbol in this executable.
+# refit_cone_math.cpp and would duplicate every symbol in this executable.
 if(NOT TARGET OpenCASCADE::OpenCASCADE)
     list(APPEND CMAKE_MODULE_PATH "${_stl2step_root}/cmake")
     find_package(OpenCASCADE REQUIRED)
@@ -161,7 +163,7 @@ endif()
 
 add_executable(cone_math_unit
     cone_math_test.cpp
-    "${_stl2step_root}/src/refit_math.cpp")
+    "${_stl2step_root}/src/refit_cone_math.cpp")
 target_compile_features(cone_math_unit PRIVATE cxx_std_17)
 set_target_properties(cone_math_unit PROPERTIES
     CXX_STANDARD_REQUIRED ON

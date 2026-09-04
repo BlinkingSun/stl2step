@@ -1,4 +1,4 @@
-// 130-CONE-MATH — certifies the closed-form cone math in src/refit_math.cpp
+// 130-CONE-MATH — certifies the closed-form cone math in src/refit_cone_math.cpp
 // against independent ground truth (SPEC-130-cone-math, D-130-2, D-130-3).
 //
 // Two independent oracles, neither of which shares a line of derivation with
@@ -16,7 +16,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-#include "refit_math.hpp"
+#include "refit_cone_math.hpp"
 
 #include <algorithm>
 #include <cmath>
