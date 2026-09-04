@@ -11531,6 +11531,70 @@ void collectShellCulprits(const TopoDS_Shape& sh, const std::vector<TopoDS_Face>
     }
 }
 
+// D-130-9(b) cascade containment. A face that is NOT an analytic region -- an
+// island facet or an E' fill triangle, builtRid < 0 -- has no region to
+// explode, so `collectFaceCulprits` and `collectShellCulprits` both skip it and
+// the culprit set comes back EMPTY. An invalid shell with an empty culprit set
+// falls through U0 and U1 in one decide and lands on the U2 blanket, which
+// explodes every non-closed360 analytic region on the component: on the plate
+// one unorientable facet took out 9 partial cylinders (the R10 cross bore,
+// R30 x2, R17 x2, R5 x4) that had each built VALID. That is the escalation this
+// function removes. The exploded set for such a face is its own NEIGHBOURHOOD --
+// the regions whose built faces share an edge with it -- and nothing else.
+// RULE 1.5's 50 % test is NOT changed: it still runs, on this set.
+void collectNonRegionNeighbourhood(const TopoDS_Shape& sh, const std::vector<TopoDS_Face>& built,
+                                   const std::vector<int>& builtRid,
+                                   const std::vector<char>& exploded,
+                                   std::vector<CascadeHit>& hits) {
+    if (sh.IsNull()) return;
+    try {
+        BRepCheck_Analyzer an(sh, Standard_True);
+        TopTools_IndexedMapOfShape faceMap;
+        TopExp::MapShapes(sh, TopAbs_FACE, faceMap);
+        std::vector<int> faceRid((size_t)faceMap.Extent() + 1, -1);
+        for (size_t i = 0; i < built.size(); i++) {
+            const int idx = faceMap.FindIndex(built[i]);
+            if (idx <= 0 || i >= builtRid.size()) continue;
+            faceRid[(size_t)idx] = builtRid[i];
+        }
+        TopTools_IndexedDataMapOfShapeListOfShape eanc;
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, eanc);
+        for (int i = 1; i <= faceMap.Extent(); i++) {
+            if (faceRid[(size_t)i] >= 0) continue;  // an analytic region: normal path
+            const TopoDS_Face fs = TopoDS::Face(faceMap(i));
+            bool bad = brepStatusBad(an.Result(fs));
+            if (!bad) {
+                BRepCheck_Analyzer fa(fs, Standard_True);
+                bad = !fa.IsValid();
+            }
+            if (!bad) continue;
+            std::vector<int> nbr;
+            for (TopExp_Explorer ex(fs, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const int ei = eanc.FindIndex(ex.Current());
+                if (ei <= 0) continue;
+                for (TopTools_ListOfShape::Iterator it(eanc(ei)); it.More(); it.Next()) {
+                    const int oi = faceMap.FindIndex(it.Value());
+                    if (oi <= 0 || oi == i) continue;
+                    const int orid = faceRid[(size_t)oi];
+                    if (orid < 0 || regionExploded(exploded, orid)) continue;
+                    if (std::find(nbr.begin(), nbr.end(), orid) == nbr.end()) nbr.push_back(orid);
+                }
+            }
+            std::sort(nbr.begin(), nbr.end());
+            nbr.erase(std::unique(nbr.begin(), nbr.end()), nbr.end());
+            if (collapseDiagEnabled()) {
+                std::fprintf(stderr, "DIAG_CASCADE nonregion face=%d nNbr=%zu nbrs=[", i,
+                             nbr.size());
+                for (size_t j = 0; j < nbr.size(); j++)
+                    std::fprintf(stderr, "%s%d", j ? "," : "", nbr[j]);
+                std::fprintf(stderr, "]\n");
+            }
+            for (int id : nbr) addCascadeHit(hits, id, "nonregion", true);
+        }
+    } catch (const Standard_Failure&) {
+    }
+}
+
 template <typename Fn>
 void cascadeParallelFor(size_t n, Fn fn) {
     if (n == 0) return;
@@ -14221,6 +14285,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             std::vector<CascadeHit> culprits;
             collectFaceCulprits(built, builtRid, exploded, culprits);
             collectShellCulprits(sh, built, builtRid, rs, exploded, culprits);
+            // D-130-9(b): a non-region face contributes its NEIGHBOURHOOD, not
+            // the whole component. Without this the culprit set is empty and
+            // RULE 1.4 escalates straight to the U2 blanket.
+            collectNonRegionNeighbourhood(sh, built, builtRid, exploded, culprits);
             diagCascadeCulprits(culprits);
             // RULE 1.4: empty culprit set + invalid shell ⇒ escalate, never ship.
             CascadePlan plan = cascadeLadderPlan(cascadeSt, culprits, rs, exploded, false);
