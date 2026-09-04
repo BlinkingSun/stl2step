@@ -46,14 +46,7 @@ PARKED_GATES: Dict[str, str] = {
 }
 
 # Per-(gate, fixture) parking — synthetic fixtures stay LIVE; real-CAD only.
-ICHECKER_REAL_CAD_PARK_REASON = (
-    "I7 loop completeness on large real-part dumps (regions 547/783) — recognition v-next"
-)
-PARKED_GATE_FIXTURES: Dict[Tuple[str, str], str] = {
-    ("I-checker", "Body11"): ICHECKER_REAL_CAD_PARK_REASON,
-    ("I-checker", "Body28"): ICHECKER_REAL_CAD_PARK_REASON,
-    ("I-checker", "handle-pickup"): ICHECKER_REAL_CAD_PARK_REASON,
-}
+PARKED_GATE_FIXTURES: Dict[Tuple[str, str], str] = {}
 
 
 @dataclass
