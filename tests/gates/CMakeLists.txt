@@ -457,3 +457,34 @@ if(EXISTS "${_nwcyl_script}")
 endif()
 unset(_nwcyl_script)
 unset(_nwcyl_baseline)
+
+# --- 130-FIXTURES battery gate (expected-red until Wave 2 detectors land) ---
+# STRICT default ON, PASS_REGULAR_EXPRESSION invert, UNEXPECTED stays loud.
+# Flip: remove PASS_REGULAR_EXPRESSION; keep GATE_130_STRICT=1.
+set(_g130 "${CMAKE_CURRENT_SOURCE_DIR}/gate_130.py")
+if(EXISTS "${_g130}")
+    if(TARGET stl2step)
+        set(_g130_cmd
+            "${Python3_EXECUTABLE}" "${_g130}"
+            --binary "$<TARGET_FILE:stl2step>"
+            --corpus "${CMAKE_CURRENT_SOURCE_DIR}/../corpus")
+        set(_g130_req "$<TARGET_FILE:stl2step>")
+        if(TARGET stl2step_census)
+            list(APPEND _g130_cmd --census "$<TARGET_FILE:stl2step_census>")
+            set(_g130_req "${_g130_req};$<TARGET_FILE:stl2step_census>")
+        endif()
+        add_test(NAME gate_130 COMMAND ${_g130_cmd})
+        set_tests_properties(gate_130 PROPERTIES
+            LABELS "gates;expected-red"
+            TIMEOUT 600
+            ENVIRONMENT "GATE_130_STRICT=1"
+            PASS_REGULAR_EXPRESSION "GATE_130_EXPECTED_RED"
+            REQUIRED_FILES "${_g130_req}")
+        if(TARGET stl2step_corpus_gen)
+            set_tests_properties(gate_130 PROPERTIES DEPENDS corpus_generate)
+        endif()
+        unset(_g130_cmd)
+        unset(_g130_req)
+    endif()
+endif()
+unset(_g130)
