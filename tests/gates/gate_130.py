@@ -2,10 +2,12 @@
 """gate_130 — 1.3.0 battery (B1–B6). Expected-red until Wave 2 detectors land.
 
 For every corpus sidecar with `"battery": "130"`: convert with `--smooth
---no-verify`, assert ok / solids=1 / openShells=0 / reverted=0, built
-cylinders == GT, cones == GT (DIAG_130_CENSUS ChamferCone; RESULT has no
-cone field), volume delta ≤ 0.01% (census B-Rep volume vs mesh), (exactVolume where the sidecar records it, D-130-15(1)), and when
-the sidecar lists intersections, each is represented by its D-130-2 tier:
+--no-verify`, assert ok / solids=1 / openShells=0 / reverted=0, distinct
+cylindrical surfaces (D-130-20) == GT wall count, distinct conical surfaces
+== GT cone count (DIAG_130_CENSUS ChamferCone is diagnostic only), volume
+delta ≤ 0.01% (census B-Rep volume vs mesh), (exactVolume where the sidecar
+records it, D-130-15(1)), and when the sidecar lists intersections, each is
+represented by its D-130-2 tier:
 tier 1 (`cylplane`, `coneplane`, `conecyl-coaxial`, `cylcyl-coaxial`) ships
 a CIRCLE / ELLIPSE / LINE; tier 2 (`cylcyl`, the general skew quartic, and
 `conecyl`) ships the MESH POLYLINE as ONE edge shared by the two analytic
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -133,6 +136,12 @@ TIER2_KINDS = ("cylcyl", "conecyl")
 
 ENTITY_RE = re.compile(r"^#(\d+)\s*=\s*(.*?);\s*$", re.MULTILINE | re.DOTALL)
 REF_RE = re.compile(r"#(\d+)")
+NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[Ee][-+]?\d+)?")
+# D-130-20: axis line and placement within 1e-5 mm; radius within 1e-5 mm on
+# the fitted value (adjacent face pieces of one wall can differ by ~1.1e-5 on
+# B1 slot ends — still one surface).
+SURFACE_Q_MM = 1e-5
+SURFACE_RAD_TOL_MM = 1.2e-5
 
 
 def _step_entities(step_text: str) -> Dict[int, str]:
@@ -145,6 +154,255 @@ def _step_entities(step_text: str) -> Dict[int, str]:
 
 def _entity_name(body: str) -> str:
     return body.split("(", 1)[0].strip().upper()
+
+
+def _split_step_args(args: str) -> List[str]:
+    out: List[str] = []
+    depth = 0
+    in_str = False
+    start = 0
+    for i, c in enumerate(args):
+        if in_str:
+            if c == "'" and i + 1 < len(args) and args[i + 1] == "'":
+                continue
+            if c == "'":
+                in_str = False
+            continue
+        if c == "'":
+            in_str = True
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif c == "," and depth == 0:
+            out.append(args[start:i].strip())
+            start = i + 1
+    tail = args[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
+
+
+def _parse_cartesian_point(body: str) -> Optional[Tuple[float, float, float]]:
+    m = re.search(r"CARTESIAN_POINT\s*\([^,]*,\(([^)]*)\)", body)
+    if not m:
+        return None
+    vals = [float(x.strip()) for x in m.group(1).split(",") if x.strip()]
+    if len(vals) != 3:
+        return None
+    return vals[0], vals[1], vals[2]
+
+
+def _parse_direction(body: str) -> Optional[Tuple[float, float, float]]:
+    m = re.search(r"DIRECTION\s*\([^,]*,\(([^)]*)\)", body)
+    if not m:
+        return None
+    vals = [float(x.strip()) for x in m.group(1).split(",") if x.strip()]
+    if len(vals) != 3:
+        return None
+    return vals[0], vals[1], vals[2]
+
+
+def _parse_axis2_placement(
+    ents: Dict[int, str], ref: int
+) -> Tuple[Optional[Tuple[float, float, float]], Optional[Tuple[float, float, float]]]:
+    body = ents.get(ref, "")
+    refs = [int(x) for x in REF_RE.findall(body)]
+    if len(refs) < 2:
+        return None, None
+    loc = _parse_cartesian_point(ents.get(refs[0], ""))
+    direction = _parse_direction(ents.get(refs[1], ""))
+    return loc, direction
+
+
+def _canonical_direction(d: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    x, y, z = d
+    n = math.sqrt(x * x + y * y + z * z)
+    if n > 0:
+        x, y, z = x / n, y / n, z / n
+    ax, ay, az = abs(x), abs(y), abs(z)
+    if az >= ax and az >= ay:
+        if z < 0:
+            x, y, z = -x, -y, -z
+    elif ay >= ax:
+        if y < 0:
+            x, y, z = -x, -y, -z
+    else:
+        if x < 0:
+            x, y, z = -x, -y, -z
+    return x, y, z
+
+
+def _axis_line_distance(
+    a_loc: Tuple[float, float, float],
+    a_dir: Tuple[float, float, float],
+    b_loc: Tuple[float, float, float],
+    b_dir: Tuple[float, float, float],
+) -> float:
+    dx = a_loc[0] - b_loc[0]
+    dy = a_loc[1] - b_loc[1]
+    dz = a_loc[2] - b_loc[2]
+    cx = a_dir[1] * b_dir[2] - a_dir[2] * b_dir[1]
+    cy = a_dir[2] * b_dir[0] - a_dir[0] * b_dir[2]
+    cz = a_dir[0] * b_dir[1] - a_dir[1] * b_dir[0]
+    cn = math.sqrt(cx * cx + cy * cy + cz * cz)
+    if cn < 1e-12:
+        fx = b_loc[0] - a_loc[0]
+        fy = b_loc[1] - a_loc[1]
+        fz = b_loc[2] - a_loc[2]
+        px = fy * a_dir[2] - fz * a_dir[1]
+        py = fz * a_dir[0] - fx * a_dir[2]
+        pz = fx * a_dir[1] - fy * a_dir[0]
+        return math.sqrt(px * px + py * py + pz * pz)
+    return abs(dx * cx + dy * cy + dz * cz) / cn
+
+
+def _dirs_parallel(
+    a_dir: Tuple[float, float, float], b_dir: Tuple[float, float, float]
+) -> bool:
+    dot = a_dir[0] * b_dir[0] + a_dir[1] * b_dir[1] + a_dir[2] * b_dir[2]
+    return abs(abs(dot) - 1.0) < 1e-8
+
+
+def _along_axis_separation(
+    a_loc: Tuple[float, float, float],
+    b_loc: Tuple[float, float, float],
+    direction: Tuple[float, float, float],
+) -> float:
+    vx = b_loc[0] - a_loc[0]
+    vy = b_loc[1] - a_loc[1]
+    vz = b_loc[2] - a_loc[2]
+    t = vx * direction[0] + vy * direction[1] + vz * direction[2]
+    return abs(t)
+
+
+def _quantize_mm(v: float, q: float = SURFACE_Q_MM) -> float:
+    return round(v / q) * q
+
+
+def _radii_equal(r1: float, r2: float) -> bool:
+    return abs(r1 - r2) <= SURFACE_RAD_TOL_MM
+
+
+def _parse_surface_entity(
+    ents: Dict[int, str], eid: int, surface_type: str
+) -> Optional[Tuple[float, Tuple[float, float, float], Tuple[float, float, float], float]]:
+    body = ents.get(eid, "")
+    if _entity_name(body) != surface_type:
+        return None
+    open_paren = body.find("(")
+    if open_paren < 0:
+        return None
+    args = _split_step_args(body[open_paren + 1 : body.rfind(")")])
+    if len(args) < 3:
+        return None
+    pref = REF_RE.search(args[1])
+    if not pref:
+        return None
+    loc, direction = _parse_axis2_placement(ents, int(pref.group(1)))
+    if loc is None or direction is None:
+        return None
+    radius = float(NUM_RE.search(args[2]).group(0)) if NUM_RE.search(args[2]) else None
+    if radius is None:
+        return None
+    semi = 0.0
+    if surface_type == "CONICAL_SURFACE":
+        if len(args) < 4:
+            return None
+        semi_m = NUM_RE.search(args[3])
+        if not semi_m:
+            return None
+        semi = float(semi_m.group(0))
+    return radius, loc, direction, semi
+
+
+def count_distinct_cylinder_surfaces(step_text: str) -> Tuple[int, int]:
+    """Return (distinct cylindrical surfaces, CYLINDRICAL_SURFACE entity count).
+
+    D-130-20 / D-130-17: group CYLINDRICAL_SURFACE entities that share an axis
+    line (parallel directions, axis-line distance <= q) and radius (within q) and
+    are close along the axis (<= max(r)) — multi-face pieces of one wall. Do
+    not merge separate walls that happen to be coaxial (B2 R5 halves, two-plate
+    holes).
+    """
+    ents = _step_entities(step_text)
+    surfaces: List[Tuple[float, Tuple[float, float, float], Tuple[float, float, float]]] = []
+    for eid, body in ents.items():
+        if _entity_name(body) != "CYLINDRICAL_SURFACE":
+            continue
+        parsed = _parse_surface_entity(ents, eid, "CYLINDRICAL_SURFACE")
+        if parsed is None:
+            continue
+        radius, loc, direction, _semi = parsed
+        surfaces.append((radius, loc, _canonical_direction(direction)))
+
+    if not surfaces:
+        return 0, 0
+
+    parent = list(range(len(surfaces)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[rj] = ri
+
+    for i in range(len(surfaces)):
+        r1, loc1, dir1 = surfaces[i]
+        for j in range(i + 1, len(surfaces)):
+            r2, loc2, dir2 = surfaces[j]
+            if not _radii_equal(r1, r2):
+                continue
+            if not _dirs_parallel(dir1, dir2):
+                continue
+            if _axis_line_distance(loc1, dir1, loc2, dir2) > SURFACE_Q_MM:
+                continue
+            if _along_axis_separation(loc1, loc2, dir1) > max(r1, r2):
+                continue
+            union(i, j)
+
+    groups = {find(i) for i in range(len(surfaces))}
+    return len(groups), len(surfaces)
+
+
+def count_distinct_cone_surfaces(step_text: str) -> Tuple[int, int]:
+    """Return (distinct conical surfaces, CONICAL_SURFACE entity count).
+
+    Group by axis placement (position + direction, direction sign-insensitive),
+    reference radius, and semi-angle — each within q. Unlike cylinders, cones on
+    the same axis line but at different placements (B1 chamfer frustums) stay
+    distinct.
+    """
+    ents = _step_entities(step_text)
+    keys: set = set()
+    entities = 0
+    for eid, body in ents.items():
+        if _entity_name(body) != "CONICAL_SURFACE":
+            continue
+        parsed = _parse_surface_entity(ents, eid, "CONICAL_SURFACE")
+        if parsed is None:
+            continue
+        entities += 1
+        radius, loc, direction, semi = parsed
+        cd = _canonical_direction(direction)
+        key = (
+            _quantize_mm(loc[0]),
+            _quantize_mm(loc[1]),
+            _quantize_mm(loc[2]),
+            _quantize_mm(cd[0]),
+            _quantize_mm(cd[1]),
+            _quantize_mm(cd[2]),
+            _quantize_mm(radius),
+            _quantize_mm(semi),
+        )
+        keys.add(key)
+    return len(keys), entities
 
 
 def shared_tier2_edges(step_text: str) -> Tuple[List[str], List[str]]:
@@ -295,6 +553,9 @@ def evaluate_one(
         "openShells": -1,
         "reverted": -1,
         "builtCyl": -1,
+        "cylSurfaces": -1,
+        "cylFaces": -1,
+        "coneSurfaces": -1,
         "diagCone": -1,
         "stepCone": -1,
         "volPct": -1.0,
@@ -329,6 +590,7 @@ def evaluate_one(
 
     if census:
         row["stepCone"] = int((census.get("surfaces") or {}).get("cone") or 0)
+        row["cylFaces"] = int((census.get("surfaces") or {}).get("cylinder") or 0)
         curves = census.get("curves") or {}
         row["curves"] = (
             f"LINE={curves.get('line', 0)} CIRCLE={curves.get('circle', 0)} "
@@ -356,7 +618,23 @@ def evaluate_one(
         vd = float(result.get("volumeDeltaPct") or -1)
         row["volPct"] = vd
 
-    cone_got = row["diagCone"] if row["diagCone"] >= 0 else row["stepCone"]
+    step_text = ""
+    if step.is_file():
+        try:
+            step_text = step.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            row["infra"].append(f"STEP read: {exc}")
+    if step_text:
+        cyl_distinct, cyl_entities = count_distinct_cylinder_surfaces(step_text)
+        row["cylSurfaces"] = cyl_distinct
+        if row["cylFaces"] < 0:
+            row["cylFaces"] = cyl_entities
+        cone_distinct, _cone_entities = count_distinct_cone_surfaces(step_text)
+        row["coneSurfaces"] = cone_distinct
+
+    cone_got = row["coneSurfaces"] if row["coneSurfaces"] >= 0 else (
+        row["diagCone"] if row["diagCone"] >= 0 else row["stepCone"]
+    )
 
     if not row["ok"]:
         row["fails"].append(f"ok=false {result.get('error', '')}".strip())
@@ -366,20 +644,26 @@ def evaluate_one(
         row["fails"].append(f"openShells={row['openShells']} != 0")
     if row["reverted"] != 0:
         row["fails"].append(f"smoothRevertedComponents={row['reverted']} != 0")
-    if row["builtCyl"] != gt_cyl:
-        row["fails"].append(f"smoothBuiltCylinders={row['builtCyl']} != GT {gt_cyl}")
-    if cone_got != gt_cone:
-        row["fails"].append(f"cones={cone_got} != GT {gt_cone} ({row['coneSource']})")
+    if row["cylSurfaces"] < 0:
+        row["fails"].append("cylSurfaces unmeasured (STEP read/parse failed)")
+    elif row["cylSurfaces"] != gt_cyl:
+        faces = row["cylFaces"] if row["cylFaces"] >= 0 else row["builtCyl"]
+        row["fails"].append(
+            f"cylSurfaces={row['cylSurfaces']}/{gt_cyl} faces={faces} "
+            f"(smoothBuiltCylinders={row['builtCyl']})"
+        )
+    if cone_got < 0:
+        row["fails"].append("cones unmeasured (STEP read/parse failed)")
+    elif cone_got != gt_cone:
+        row["fails"].append(
+            f"cones={cone_got}/{gt_cone} ({row.get('coneSource', 'STEP CONICAL_SURFACE')})"
+        )
     if row["volPct"] < 0 or row["volPct"] > 0.01 + 1e-12:
         row["fails"].append(f"volumeDelta={row['volPct']}% > 0.01% (or unmeasured)")
 
     intersections = sc.get("intersections") or []
-    if intersections and step.is_file():
-        try:
-            text = step.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            row["infra"].append(f"STEP read: {exc}")
-            text = ""
+    if intersections and step_text:
+        text = step_text
         if text:
             # D-130-2 tier rule (SPEC-130-cylcyl addendum 2026-09-03 23:40).
             kinds = [str(x.get("kind") or "") for x in intersections]
@@ -430,14 +714,20 @@ def format_table(rows: List[Dict[str, Any]]) -> str:
         "solids",
         "open",
         "reverted",
-        "cyl got/GT",
-        "cone got/GT",
+        "cylSurfaces/GT faces",
+        "cones got/GT",
         "vol%",
         "curves / fails",
     )
     lines = ["gate_130 battery (expected-red until Wave 2):", "  " + "  ".join(headers)]
     for r in rows:
-        cone_got = r["diagCone"] if r["diagCone"] >= 0 else r["stepCone"]
+        cone_got = (
+            r["coneSurfaces"]
+            if r["coneSurfaces"] >= 0
+            else (r["diagCone"] if r["diagCone"] >= 0 else r["stepCone"])
+        )
+        cyl_faces = r["cylFaces"] if r["cylFaces"] >= 0 else r["builtCyl"]
+        cyl_s = r["cylSurfaces"] if r["cylSurfaces"] >= 0 else r["builtCyl"]
         status = "FAIL" if (r["fails"] or r["infra"]) else "PASS"
         tail_bits = []
         if r["curves"]:
@@ -448,8 +738,9 @@ def format_table(rows: List[Dict[str, Any]]) -> str:
         lines.append(
             f"  {r['label']:<3} {r['id']:<24} {status:<4} "
             f"ok={int(r['ok'])} sol={r['solids']} open={r['openShells']} "
-            f"rev={r['reverted']} cyl={r['builtCyl']}/{r['gt_cyl']} "
-            f"cone={cone_got}/{r['gt_cone']} vol={r['volPct']:.4g}({r['volRef']})  {tail}"
+            f"rev={r['reverted']} "
+            f"cylSurfaces={cyl_s}/{r['gt_cyl']} faces={cyl_faces} "
+            f"cones={cone_got}/{r['gt_cone']} vol={r['volPct']:.4g}({r['volRef']})  {tail}"
         )
     return "\n".join(lines)
 
@@ -462,8 +753,13 @@ def current_blob(rows: List[Dict[str, Any]]) -> str:
         if not r:
             parts.append(f"{label}=?/?/?")
             continue
-        cone_got = r["diagCone"] if r["diagCone"] >= 0 else r["stepCone"]
-        parts.append(f"{label}={r['builtCyl']}/{cone_got}/{r['reverted']}")
+        cone_got = (
+            r["coneSurfaces"]
+            if r["coneSurfaces"] >= 0
+            else (r["diagCone"] if r["diagCone"] >= 0 else r["stepCone"])
+        )
+        cyl_s = r["cylSurfaces"] if r["cylSurfaces"] >= 0 else r["builtCyl"]
+        parts.append(f"{label}={cyl_s}/{cone_got}/{r['reverted']}")
     return " ".join(parts)
 
 
