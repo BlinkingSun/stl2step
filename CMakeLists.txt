@@ -12,7 +12,7 @@ endfunction()
 
 
 project(stl2step
-    VERSION 1.2.0
+    VERSION 1.3.0
     DESCRIPTION "Universal STL (mesh) -> STEP (B-Rep solid) conversion engine"
     LANGUAGES CXX)
 
