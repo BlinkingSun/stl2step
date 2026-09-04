@@ -9,6 +9,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit.hpp"
+#include "refit_cone_bind.hpp"
+#include "refit_cone_math.hpp"
 #include "refit_internal.hpp"
 
 #include <algorithm>
@@ -6606,6 +6608,12 @@ Handle(Geom_Plane) basisPlaneOf(const Handle(Geom_Surface)& srf) {
     return Handle(Geom_Plane)::DownCast(untrimmedBasisOf(srf));
 }
 
+Handle(Geom_ConicalSurface) basisConeOf(const Handle(Geom_Surface)& srf) {
+    Handle(Geom_ConicalSurface) c = Handle(Geom_ConicalSurface)::DownCast(srf);
+    if (!c.IsNull()) return c;
+    return Handle(Geom_ConicalSurface)::DownCast(untrimmedBasisOf(srf));
+}
+
 Handle(Geom_Curve) basisCurveOf(const Handle(Geom_Curve)& c) {
     Handle(Geom_TrimmedCurve) tr = Handle(Geom_TrimmedCurve)::DownCast(c);
     if (!tr.IsNull() && !tr->BasisCurve().IsNull()) return tr->BasisCurve();
@@ -6658,6 +6666,28 @@ Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Rea
                        (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Line));
     const bool isElips = (kind && std::strcmp(kind, "elips") == 0) ||
                          (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Ellipse));
+    Handle(Geom_ConicalSurface) cone = basisConeOf(srf);
+    if (!cone.IsNull()) {
+        // Cone pcurves are exact by construction: OCCT's cone is unit speed in v
+        // and angular in u, so a rim circle and a generator are both straight 2d
+        // lines. refit_cone_bind builds them and exactMaxAtBind certifies them.
+        try {
+            const gp_Cone gcone = cone->Cone();
+            if (isCirc && !isElips) {
+                Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+                if (gc.IsNull()) return {};
+                return conePCurveForCircle(gcone, gc->Circ());
+            }
+            if (isLin) {
+                Handle(Geom_Line) gl = Handle(Geom_Line)::DownCast(src);
+                if (gl.IsNull()) return {};
+                return conePCurveForLine(gcone, gl->Lin(), 0.5 * (f + l));
+            }
+        } catch (const Standard_Failure&) {
+            return {};
+        }
+        return {};
+    }
     Handle(Geom_CylindricalSurface) cyl = basisCylOf(srf);
     if (cyl.IsNull()) return {};
     const gp_Ax3 pos = cyl->Position();
@@ -6936,6 +6966,12 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
     if (c3.IsNull() || srf.IsNull() || c2d.IsNull()) return -1.0;
     Handle(Geom_Plane) gpl = Handle(Geom_Plane)::DownCast(srf);
     Handle(Geom_CylindricalSurface) gcyl = basisCylOf(srf);
+    // D-130-3: a cone edge is certified by refit_cone_bind, which composes
+    // 130-CONE-MATH's surface supremum with the parametrisation term the bind
+    // site actually records. It certifies or it refuses; there is no third
+    // outcome, and a refusal is tier 2 (counted, per D-130-2).
+    if (!basisConeOf(srf).IsNull())
+        return coneBindSup(c3, f, l, srf, c2d, loc, clsOut);
     if (gpl.IsNull() && gcyl.IsNull()) {
         if (clsOut) *clsOut = "unhandled-surface";
         return -1.0;

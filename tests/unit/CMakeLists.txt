@@ -186,6 +186,38 @@ set_tests_properties(cone_math_unit PROPERTIES
     LABELS "unit;cone-math"
     TIMEOUT 60)
 
+# 130-CONE-BUILD — the certified `circle-on-cone` / `line-on-cone` BIND classes
+# in src/refit_cone_bind.cpp: the supremum of |C3d(t) - S(pcurve(t))|, which is
+# the surface supremum cone_math_unit certifies COMPOSED with the
+# parametrisation. Same construction as cone_math_unit for the same reason: it
+# compiles the two cone TUs rather than linking stl2step::core, so
+# `--target cone_bind_unit` never drags in refit_build.cpp.
+add_executable(cone_bind_unit
+    cone_bind_test.cpp
+    "${_stl2step_root}/src/refit_cone_bind.cpp"
+    "${_stl2step_root}/src/refit_cone_math.cpp")
+target_compile_features(cone_bind_unit PRIVATE cxx_std_17)
+set_target_properties(cone_bind_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_include_directories(cone_bind_unit PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/include")
+target_link_libraries(cone_bind_unit PRIVATE OpenCASCADE::OpenCASCADE)
+if(MSVC)
+    target_compile_definitions(cone_bind_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(cone_bind_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(cone_bind_unit)
+endif()
+
+add_test(NAME cone_bind_unit COMMAND cone_bind_unit)
+set_tests_properties(cone_bind_unit PROPERTIES
+    LABELS "unit;cone-math"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)
