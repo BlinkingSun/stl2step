@@ -76,6 +76,14 @@ Download: [SolidOut for macOS (Apple silicon)](https://github.com/BlinkingSun/st
 
 ---
 
+## Basilisk Step Studio: the desktop app (Windows)
+
+**Basilisk Step Studio** is a Windows interface over this engine, built by [Dominic Tursini](https://github.com/Dom-Tursini) of [Apex Invent](https://github.com/ApexInvent): drop STL files on the window, queue as many as you like, convert with Verbatim or TrueForm and check the result in a viewer that draws the engine's own B-Rep edges over the converted solid, which is the quickest way to see whether a face was really recovered or just re-triangulated. The command line stays on screen and works in both directions, so an existing stl2step invocation can be pasted in and the options fill from it. The engine and OpenCASCADE are bundled, so nothing else needs to be installed.
+
+Download: [Basilisk Step Studio for Windows](https://github.com/ApexInvent/Basilisk-Step-Studio/releases/latest) from its [releases page](https://github.com/ApexInvent/Basilisk-Step-Studio/releases). The engine is compiled from this repository at the pinned tag against OpenCASCADE 7.9.3 by a public workflow.
+
+---
+
 ## Dependencies
 
 - A **C++17** compiler (Clang, GCC, or MSVC).
