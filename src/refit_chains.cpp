@@ -589,7 +589,19 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         for (int e : leaves) {
             if (used[e]) continue;
             ChainWalk w = walkFrom(e, v);
-            w.closed = false;
+            // A walk that leaves a split vertex and comes back to THE SAME
+            // vertex has traversed a complete cycle: walkFrom stops at the
+            // first split vertex it reaches, so front == back can only mean it
+            // closed on itself. Emitting it as an open chain is what makes a
+            // region's whole outer loop one closedLoop=false chain when its
+            // only neighbour is an island (I7: loops are complete and closed).
+            // It is a cycle, so it is recorded as one; the closed branch then
+            // applies the same canonical form every other cycle gets (rotate
+            // to the min vertex, first step the lower-id edge). Nothing about
+            // the mesh changes -- only the chain's own description of itself.
+            w.closed = (w.edges.size() >= 3 && w.verts.size() == w.edges.size() + 1 &&
+                        w.verts.front() == w.verts.back());
+            if (w.closed) w.verts.pop_back();
             if (!w.edges.empty()) walks.push_back(std::move(w));
         }
     }
