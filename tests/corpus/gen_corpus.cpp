@@ -4,6 +4,7 @@
 #include "corpus_util.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -852,6 +853,142 @@ void tagBattery130(Sidecar& sc) {
     sc.smoothExpectedExit = -1;  // gate_130 owns the smooth contract
 }
 
+// ---- D-130-15(1): exact volumes from the generator's parameters -------------
+// gate_130's volume cell compares the STEP B-Rep volume against these, never
+// against the mesh (an inscribed N-gon tessellation is short of the analytic
+// solid by the sagitta volume by construction). Closed forms throughout; the
+// one term without an elementary antiderivative (a cylinder's common volume
+// with a perpendicular cylinder of another radius, B2 and B6) is a smooth 1-D
+// integral after the substitution y = r sin(theta), evaluated by Gauss-Legendre
+// whose error is checked below 1e-12 relative by doubling the node count.
+void gaussLegendre(int n, std::vector<double>& x, std::vector<double>& w) {
+    x.assign(static_cast<size_t>(n), 0.0);
+    w.assign(static_cast<size_t>(n), 0.0);
+    for (int i = 0; i < (n + 1) / 2; ++i) {
+        double z = std::cos(M_PI * (i + 0.75) / (n + 0.5));
+        double pp = 1.0;
+        for (int it = 0; it < 100; ++it) {
+            double p1 = 1.0, p2 = 0.0;
+            for (int j = 0; j < n; ++j) {
+                const double p3 = p2;
+                p2 = p1;
+                p1 = ((2.0 * j + 1.0) * z * p2 - j * p3) / (j + 1.0);
+            }
+            pp = n * (z * p1 - p2) / (z * z - 1.0);
+            const double z1 = z;
+            z = z1 - p1 / pp;
+            if (std::abs(z - z1) < 1e-15) break;
+        }
+        x[static_cast<size_t>(i)] = -z;
+        x[static_cast<size_t>(n - 1 - i)] = z;
+        w[static_cast<size_t>(i)] = 2.0 / ((1.0 - z * z) * pp * pp);
+        w[static_cast<size_t>(n - 1 - i)] = w[static_cast<size_t>(i)];
+    }
+}
+
+template <class F>
+double glIntegrate(F f, double a, double b, int n) {
+    std::vector<double> x, w;
+    gaussLegendre(n, x, w);
+    const double hm = 0.5 * (b - a), hp = 0.5 * (b + a);
+    double acc = 0.0;
+    for (int i = 0; i < n; ++i)
+        acc += w[static_cast<size_t>(i)] * f(hp + hm * x[static_cast<size_t>(i)]);
+    return hm * acc;
+}
+
+// Integrate with n and 2n nodes; the two must agree to 1e-12 relative or the
+// generator refuses to write a number it cannot certify.
+template <class F>
+double glCertified(F f, double a, double b, int n, const char* what) {
+    const double v1 = glIntegrate(f, a, b, n);
+    const double v2 = glIntegrate(f, a, b, 2 * n);
+    const double rel = std::abs(v2 - v1) / std::max(1e-300, std::abs(v2));
+    if (!(rel <= 1e-12))
+        throw std::runtime_error(std::string("exactVolume: GL not converged for ") + what);
+    return v2;
+}
+
+double frustumVolume(double r1, double r2, double h) {
+    return M_PI * h / 3.0 * (r1 * r1 + r1 * r2 + r2 * r2);
+}
+
+// Common volume of two right circular cylinders whose axes meet at right
+// angles: radius a along one axis, radius b (b <= a) along the other,
+// V = ∫_{-b}^{b} 2√(a²−y²) · 2√(b²−y²) dy,  y = b sin(t):
+//   = ∫_{-π/2}^{π/2} 4 b² cos²(t) √(a² − b² sin²(t)) dt   (analytic integrand).
+double perpendicularCylindersCommonVolume(double a, double b) {
+    auto f = [a, b](double t) {
+        const double s = std::sin(t), c = std::cos(t);
+        return 4.0 * b * b * c * c * std::sqrt(a * a - b * b * s * s);
+    };
+    return glCertified(f, -M_PI / 2.0, M_PI / 2.0, 64, "cyl-cyl common volume");
+}
+
+// B2: 60x40x30 block − R8 bore along Z (length 30) − R5 bore along X (length
+// 60) + their common volume (removed twice), axes meeting at (30,20,15).
+double exactVolumeCrossBores() {
+    return 60.0 * 40.0 * 30.0 - M_PI * 8.0 * 8.0 * 30.0 - M_PI * 5.0 * 5.0 * 60.0 +
+           perpendicularCylindersCommonVolume(8.0, 5.0);
+}
+
+// B3: 60x60x10 plate − straight 45°x3 bevel prism (½·3·3·60) − R10 through
+// hole − the conical chamfer's material beyond the R10 bore (frustum 10→12
+// over h=2, less the R10 cylinder of the same height).
+double exactVolumeChamferStraightRing() {
+    return 60.0 * 60.0 * 10.0 - 0.5 * 3.0 * 3.0 * 60.0 - M_PI * 100.0 * 10.0 -
+           (frustumVolume(10.0, 12.0, 2.0) - M_PI * 100.0 * 2.0);
+}
+
+// B4: 60x60x10 plate + R12 boss of height 13 + frustum 12→10 over h=2.
+double exactVolumeBossConeChamfer() {
+    return 60.0 * 60.0 * 10.0 + M_PI * 144.0 * 13.0 + frustumVolume(12.0, 10.0, 2.0);
+}
+
+// B5: 60x60x20 plate − R6 through − counterbore R10 depth 6 beyond R6 − the
+// entry chamfer's material beyond R10 (frustum 10→11.5 over h=1.5, less the
+// R10 cylinder of that height).
+double exactVolumeCounterboreChamfer() {
+    return 60.0 * 60.0 * 20.0 - M_PI * 36.0 * 20.0 - M_PI * (100.0 - 36.0) * 6.0 -
+           (frustumVolume(10.0, 11.5, 1.5) - M_PI * 100.0 * 1.5);
+}
+
+// B6: B5 − the material the R4 bore along X at (y=30, z=17) removes. The bore
+// occupies z ∈ [13, 21]; the plate ends at z = 20. At height z the bore is the
+// strip |y−30| ≤ w(z) = √(16 − (z−17)²) over the whole width, and the cavity it
+// crosses is the disk of radius ρ(z) about (30,30): ρ = 6 below z=14 (through
+// bore), 10 on [14, 18.5] (counterbore), 10 + (z − 18.5) on [18.5, 20] (cone).
+// Removed = ∫₁₃²⁰ 2w·60 dz − ∫₁₃²⁰ 2[ w√(ρ²−w²) + ρ² asin(w/ρ) ] dz, the second
+// integrand being the strip∩disk area in closed form. z = 17 + 4 sin(t) makes
+// both analytic; the three ρ pieces are integrated separately.
+double exactVolumeCylMeetsChamfer() {
+    auto w = [](double t) { return 4.0 * std::cos(t); };
+    auto dz = [](double t) { return 4.0 * std::cos(t); };
+    auto rho = [](double z) {
+        if (z < 14.0) return 6.0;
+        if (z < 18.5) return 10.0;
+        return 10.0 + (z - 18.5);
+    };
+    auto piece = [&](double t0, double t1, const char* what) {
+        auto f = [&](double t) {
+            const double z = 17.0 + 4.0 * std::sin(t);
+            const double ww = w(t), r = rho(z);
+            const double strip = 2.0 * ww * 60.0;
+            const double stripInDisk =
+                2.0 * (ww * std::sqrt(r * r - ww * ww) + r * r * std::asin(ww / r));
+            return (strip - stripInDisk) * dz(t);
+        };
+        return glCertified(f, t0, t1, 64, what);
+    };
+    const double tA = -M_PI / 2.0;            // z = 13
+    const double tB = std::asin(-3.0 / 4.0);  // z = 14
+    const double tC = std::asin(3.0 / 8.0);   // z = 18.5
+    const double tD = std::asin(3.0 / 4.0);   // z = 20
+    const double removed = piece(tA, tB, "B6 z in [13,14]") + piece(tB, tC, "B6 z in [14,18.5]") +
+                           piece(tC, tD, "B6 z in [18.5,20]");
+    return exactVolumeCounterboreChamfer() - removed;
+}
+
 // B2: 60×40×30 block, R=8 through Z and R=5 through X, crossing at the centre.
 FixtureResult buildCrossBores() {
     TopoDS_Shape block = BRepPrimAPI_MakeBox(60, 40, 30);
@@ -863,6 +1000,7 @@ FixtureResult buildCrossBores() {
     sc.recoverable.push_back(cylRec(8.0, {30, 20, 0}, {0, 0, 1}, 1, 0, true));
     sc.recoverable.push_back(cylRec(5.0, {0, 20, 15}, {1, 0, 0}, 1, 0, true));
     sc.intersections = {{"cyl R8", "cyl R5", "cylcyl"}};
+    sc.exactVolume = exactVolumeCrossBores();  // D-130-15(1)
     return emitShape("cross_bores",
                      "60x40x30 block, through-bore R=8 along Z × R=5 along X at centre (cyl∩cyl)",
                      block, 0.2, 0.5, sc);
@@ -892,6 +1030,7 @@ FixtureResult buildChamferStraightRing() {
     sc.recoverable.push_back(cylRec(10.0, {30, 30, 0}, {0, 0, 1}, 1, 0, true));
     sc.recoverable.push_back(
         coneRec(10.0, 12.0, 45.0, {30, 30, 8}, {0, 0, 1}, 1, kTessN));
+    sc.exactVolume = exactVolumeChamferStraightRing();  // D-130-15(1)
     FixtureResult fx = emitShape(
         "chamfer_straight_ring",
         "60x60x10 plate, R=10 hole with 45deg x 2mm conical chamfer + straight 45deg x 3mm bevel",
@@ -916,6 +1055,7 @@ FixtureResult buildBossConeChamfer() {
                       planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1),  planeRec({0, -1, 0}, 1),
                       cylRec(12.0, {30, 30, 10}, {0, 0, 1}, 1, 0, true),
                       coneRec(12.0, 10.0, 45.0, {30, 30, 23}, {0, 0, 1}, 1, kTessN)};
+    sc.exactVolume = exactVolumeBossConeChamfer();  // D-130-15(1)
     return emitShape("boss_cone_chamfer",
                      "60x60x10 plate + external boss R=12 H=15 with 45deg x 2mm conical top chamfer "
                      "(R 12→10)",
@@ -938,6 +1078,7 @@ FixtureResult buildCounterboreChamfer() {
                       cylRec(6.0, {30, 30, 0}, {0, 0, 1}, 1, 0, true),
                       cylRec(10.0, {30, 30, 14}, {0, 0, 1}, 1, 0, true),
                       coneRec(10.0, 11.5, 45.0, {30, 30, 18.5}, {0, 0, 1}, 1, kTessN)};
+    sc.exactVolume = exactVolumeCounterboreChamfer();  // D-130-15(1)
     return emitShape("counterbore_chamfer",
                      "60x60x20 plate, through R=6, counterbore R=10 depth 6, 45deg x 1.5mm "
                      "conical entry (R 10→11.5)",
@@ -964,6 +1105,7 @@ FixtureResult buildCylMeetsChamfer() {
     sc.intersections = {{"cyl R10", "cyl R4", "cylcyl"},
                         {"cyl R6", "cyl R4", "cylcyl"},
                         {"cone R10-11.5", "cyl R4", "conecyl"}};
+    sc.exactVolume = exactVolumeCylMeetsChamfer();  // D-130-15(1)
     return emitShape("cyl_meets_chamfer",
                      "counterbore_chamfer + through-bore R=4 along X at z=17 (cyl∩cyl and cone∩cyl)",
                      plate, 0.2, 0.5, sc);

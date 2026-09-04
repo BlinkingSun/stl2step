@@ -125,6 +125,9 @@ struct Sidecar {
     double deflection = 0;
     int triangleCount = 0;
     double meshVolume = 0;
+    // D-130-15(1): the exact analytic volume of the generator's own parameters
+    // (closed form; never from engine output). 0 = not recorded, key omitted.
+    double exactVolume = 0;
     std::string battery;  // e.g. "130" — 1.3.0 battery fixtures; empty = omit
     std::vector<Intersection> intersections;
     std::vector<Recoverable> recoverable;
@@ -438,6 +441,8 @@ inline std::string writeSidecarJson(const Sidecar& s) {
     os << "  \"deflection\": " << s.deflection << ",\n";
     os << "  \"triangleCount\": " << s.triangleCount << ",\n";
     os << "  \"meshVolume\": " << s.meshVolume << ",\n";
+    if (s.exactVolume > 0.0)
+        os << "  \"exactVolume\": " << s.exactVolume << ",\n";
     if (!s.rLadderRole.empty())
         os << "  \"rLadderRole\": \"" << s.rLadderRole << "\",\n";
     os << "  \"expectFillet\": " << (s.expectFillet ? "true" : "false") << ",\n";

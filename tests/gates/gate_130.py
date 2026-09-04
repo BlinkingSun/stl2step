@@ -4,13 +4,17 @@
 For every corpus sidecar with `"battery": "130"`: convert with `--smooth
 --no-verify`, assert ok / solids=1 / openShells=0 / reverted=0, built
 cylinders == GT, cones == GT (DIAG_130_CENSUS ChamferCone; RESULT has no
-cone field), volume delta ≤ 0.01% (census B-Rep volume vs mesh), and when
+cone field), volume delta ≤ 0.01% (census B-Rep volume vs mesh), (exactVolume where the sidecar records it, D-130-15(1)), and when
 the sidecar lists intersections, each is represented by its D-130-2 tier:
 tier 1 (`cylplane`, `coneplane`, `conecyl-coaxial`, `cylcyl-coaxial`) ships
 a CIRCLE / ELLIPSE / LINE; tier 2 (`cylcyl`, the general skew quartic, and
 `conecyl`) ships the MESH POLYLINE as ONE edge shared by the two analytic
 faces, counted by the 130-BIND census under `edgeClasses.polylineTier2`,
 with no `unhandled`, `overTol` or `overCap` on any analytic|analytic edge.
+
+Volume cell (D-130-15(1)): where the sidecar carries `exactVolume` (the
+generator's exact analytic volume, B2–B6) the STEP B-Rep volume is compared
+against it; otherwise against the mesh volume as before. Threshold unchanged.
 
 CTest invert: LABELS gates;expected-red + PASS_REGULAR_EXPRESSION
 GATE_130_EXPECTED_RED. Flip protocol: remove PASS_REGULAR_EXPRESSION when
@@ -272,6 +276,7 @@ def evaluate_one(
         "diagCone": -1,
         "stepCone": -1,
         "volPct": -1.0,
+        "volRef": "none",
         "curves": "",
         "fails": [],
         "infra": [],
@@ -310,10 +315,21 @@ def evaluate_one(
         )
         mesh_vol = float(result.get("meshVolumeMM3") or sc.get("meshVolume") or 0.0)
         step_vol = float(census.get("volume") or 0.0)
-        if mesh_vol > 0.0 and step_vol != 0.0:
+        # D-130-15(1): where the sidecar records the generator's exact analytic
+        # volume, the cell compares against THAT. An inscribed N-gon mesh is short
+        # of the analytic solid by the sagitta volume by construction, so a
+        # mesh-referenced cell is unreachable by a correct recovery (B3: 0.029 %,
+        # B4: 0.044 %, B5: 0.015 % measured) and passes only a faceted one.
+        exact_vol = float(sc.get("exactVolume") or 0.0)
+        if exact_vol > 0.0 and step_vol != 0.0:
+            row["volPct"] = abs(step_vol - exact_vol) / abs(exact_vol) * 100.0
+            row["volRef"] = "exact"
+        elif mesh_vol > 0.0 and step_vol != 0.0:
             row["volPct"] = abs(step_vol - mesh_vol) / abs(mesh_vol) * 100.0
+            row["volRef"] = "mesh"
         elif float(result.get("volumeDeltaPct") or -1) >= 0:
             row["volPct"] = float(result["volumeDeltaPct"])
+            row["volRef"] = "mesh"
     else:
         vd = float(result.get("volumeDeltaPct") or -1)
         row["volPct"] = vd
@@ -411,7 +427,7 @@ def format_table(rows: List[Dict[str, Any]]) -> str:
             f"  {r['label']:<3} {r['id']:<24} {status:<4} "
             f"ok={int(r['ok'])} sol={r['solids']} open={r['openShells']} "
             f"rev={r['reverted']} cyl={r['builtCyl']}/{r['gt_cyl']} "
-            f"cone={cone_got}/{r['gt_cone']} vol={r['volPct']:.4g}  {tail}"
+            f"cone={cone_got}/{r['gt_cone']} vol={r['volPct']:.4g}({r['volRef']})  {tail}"
         )
     return "\n".join(lines)
 
