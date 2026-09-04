@@ -190,7 +190,16 @@ int countShapes(const TopoDS_Shape& s, TopAbs_ShapeEnum what,
 
 double shapeVolume(const TopoDS_Shape& s) {
     GProp_GProps props;
-    BRepGProp::VolumeProperties(s, props);
+    // Adaptive 2D Gauss (Eps overload). The no-Eps VolumeProperties uses a
+    // fixed scheme that under-integrates a cylindrical face whose inner/cap
+    // wire is a many-span polyline: B2's R8 wall with two 68-segment windows
+    // reports 62410.25 mm³ against a true B-Rep volume of 62445.89 (37 mm³ /
+    // 0.0598 % artifact). Adaptive areas of those faces match the exact
+    // Steinmetz construction to 0.3 mm²; the residual 1.7 mm³ is the D-130-2
+    // tier-2 chord, counted not absorbed. Precision::Confusion() is OCCT's
+    // existing linear precision (the adaptive switch is Eps <= 0.001), not a
+    // new geometry threshold. (D-130-20(2))
+    BRepGProp::VolumeProperties(s, props, Precision::Confusion());
     return props.Mass();
 }
 

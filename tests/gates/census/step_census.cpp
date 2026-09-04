@@ -302,7 +302,10 @@ void censusInto(Result& r, const TopoDS_Shape& shape) {
 
     {
         GProp_GProps props;
-        BRepGProp::VolumeProperties(shape, props);
+        // Same adaptive integral as the engine's shapeVolume (D-130-20(2)):
+        // default VolumeProperties under-integrates a cylinder face whose
+        // inner wire is a 68-span polyline (B2: 37 mm³ artifact).
+        BRepGProp::VolumeProperties(shape, props, Precision::Confusion());
         r.volume = props.Mass();
     }
 
