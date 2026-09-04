@@ -332,5 +332,62 @@ bool coneIntConeCircle(const gp_Cone& a, const gp_Cone& b, gp_Circ& out, double 
     return true;
 }
 
+
+// ---------------------------------------------------------------------------
+// 7. facet-to-frustum volume  (D-130-11(2))
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Shared guard and the two factors both public entry points need:
+//   segFac = (gamma - sin gamma), the circular-segment shape factor,
+//   slant  = hypot(h, R2 - R1),   the length of one N-gon generator.
+// False on anything that could not describe a frustum, so neither entry point
+// can return a plausible-looking number for input that has no volume.
+bool frustumVolParams(double R1, double R2, double height, int nSides, double& gamma,
+                      double& segFac, double& slant) {
+    if (nSides < 3) return false;
+    if (!std::isfinite(R1) || !std::isfinite(R2) || !std::isfinite(height)) return false;
+    if (!(R1 > 0.0) || !(R2 > 0.0)) return false;
+    const double h = std::fabs(height);
+    if (!(h > 0.0)) return false;
+    gamma = 2.0 * kPi / static_cast<double>(nSides);
+    if (!(gamma < kPi)) return false;
+    segFac = gamma - std::sin(gamma);
+    // The facet's own height, NOT the generator's length. A facet is the
+    // trapezoid between the two parallel chords; its chords sit at axis
+    // distance rho*cos(gamma/2), so the perpendicular offset between them is
+    // hypot(h, dR*cos(gamma/2)). The generator hypot(h, dR) joins two rim
+    // VERTICES and is longer -- measured on the plate's frustum the difference
+    // is 3.1e-4 relative, which the unit test's triangulated skin sees.
+    slant = std::hypot(h, (R2 - R1) * std::cos(0.5 * gamma));
+    return std::isfinite(segFac) && std::isfinite(slant) && slant > 0.0;
+}
+
+}  // namespace
+
+double coneFrustumChordVolume(double R1, double R2, double height, int nSides) {
+    double gamma = 0.0, segFac = 0.0, slant = 0.0;
+    if (!frustumVolParams(R1, R2, height, nSides, gamma, segFac, slant)) return 0.0;
+    // integral of rho^2 dz over the frustum = |h| * (R1^2 + R1 R2 + R2^2)/3.
+    const double iRho2 = std::fabs(height) * (R1 * R1 + R1 * R2 + R2 * R2) / 3.0;
+    const double v = static_cast<double>(nSides) * 0.5 * segFac * iRho2;
+    return std::isfinite(v) ? v : 0.0;
+}
+
+double coneFrustumDVolDensity(double rho, double R1, double R2, double height, int nSides) {
+    double gamma = 0.0, segFac = 0.0, slant = 0.0;
+    if (!frustumVolParams(R1, R2, height, nSides, gamma, segFac, slant)) return 0.0;
+    if (!std::isfinite(rho)) return 0.0;
+    const double s = std::sin(0.5 * gamma);
+    if (!(std::fabs(s) > 1e-15)) return 0.0;
+    // The facet skin carries area w(z) * slant per unit of the axial parameter
+    // while the gap carries A_seg(z) per unit of z, so the density that makes
+    // the two integrals agree is A_seg / (w * slant / |h|)
+    //   = rho * segFac * |h| / (4 * sin(gamma/2) * slant).
+    const double k = rho * segFac * std::fabs(height) / (4.0 * s * slant);
+    return std::isfinite(k) ? k : 0.0;
+}
+
 }  // namespace refit
 }  // namespace stl2step

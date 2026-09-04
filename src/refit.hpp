@@ -168,6 +168,19 @@ struct Region {
                                     // Plane: -sum_t A_t * (h_a + h_b + h_c)/3, h along
                                     //   ax.Direction(). NOT pi*R^2*H*(delta/R) - that
                                     //   approximation is 0.75x low and is withdrawn.
+                                    // Cone (D-130-11(2), exact segment integral):
+                                    //   sigma * sum_t A_t * kappa(rho_cone(centroid_t)),
+                                    //   kappa(rho) = rho * (gamma - sin gamma) * |h|
+                                    //                / (4 * sin(gamma/2) * fh),
+                                    //   fh = hypot(h, (R_hi-R_lo)*cos(gamma/2)) is the
+                                    //   facet's own height (chord to chord), not the
+                                    //   generator. Over the complete
+                                    //   N-gon skin this is
+                                    //   N*(gamma - sin gamma)/2 * |h| *
+                                    //   (R_lo^2 + R_lo*R_hi + R_hi^2)/3, and it collapses
+                                    //   to the cylinder formula at R_lo == R_hi.
+                                    //   NEVER 0 on a built cone - the cascade budget and
+                                    //   the D4 guard read 0 as zero area.
     double maxVertexSnap = 0;       // max distance a shared vertex was moved (0 if none)
     // diagnostics
     Reject  reject  = Reject::None; // != None => never built; reported only

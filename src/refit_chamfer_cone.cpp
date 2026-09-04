@@ -46,6 +46,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+#include "refit_cone_math.hpp"
 #include "refit_internal.hpp"
 
 #include <algorithm>
@@ -793,6 +794,31 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 const gp_XYZ axOut = axis;
                 const double hSigned = loAtVmin ? height : -height;
 
+                // D-130-11(2): a cone predicts its facet-to-surface volume the
+                // way a cylinder does. dVolPredicted = 0 on a built ChamferCone
+                // made the cascade budget and D4's guard read the face as
+                // zero-area (I9 FAIL region30/31 on the plate).
+                //
+                // Closed form, summed over the triangles this region CLAIMS --
+                // not over the whole frustum -- because a detector-C ring may
+                // hold only part of the skin. The density is exact per triangle:
+                // kappa is affine in the axial coordinate and the axial
+                // coordinate is affine over a planar facet, so
+                // area(t) * kappa(rho at centroid(t)) IS the integral over t,
+                // and over the complete skin the sum reproduces
+                // coneFrustumChordVolume. The sign is I9's sigma, the same
+                // outwardNormal that signs dVolCylinderSector.
+                double dVolSum = 0.0;
+                for (int t : sTris) {
+                    gp_XYZ nT;
+                    const double a = triAreaNormal(mv, t, nT);
+                    if (!(a > 0.0)) continue;
+                    const double u = (triCentroid(mv, t) - loc).Dot(axis);
+                    const double rhoC = R1 + (u / hSigned) * (R2 - R1);
+                    dVolSum += a * coneFrustumDVolDensity(rhoC, R1, R2, hSigned, nSides);
+                }
+                if (!std::isfinite(dVolSum)) dVolSum = 0.0;
+
                 Region r;
                 r.id = 0;
                 r.type = SurfType::Cone;
@@ -810,7 +836,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 r.rmsVertexDev = std::sqrt(sumSq / (double)nU);
                 r.chordSagitta = chordSagitta(R1, nSides);
                 r.nSides = nSides;
-                r.dVolPredicted = 0.0;
+                r.dVolPredicted = (sigma > 0.0 ? 1.0 : -1.0) * dVolSum;
                 r.maxVertexSnap = hSigned;
                 r.reject = Reject::None;
                 r.builtAs = BuiltAs::NotBuilt;

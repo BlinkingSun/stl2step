@@ -242,6 +242,58 @@ bool coneIntConeCircle(const gp_Cone& a, const gp_Cone& b, gp_Circ& out,
                        double angTol = Precision::Angular(),
                        double linTol = Precision::Confusion());
 
+// ---------------------------------------------------------------------------
+// 7. facet-to-frustum volume  (D-130-11(2))
+// ---------------------------------------------------------------------------
+//
+// `Region::dVolPredicted` is the SIGNED mm^3 the analytic surface adds over the
+// chords it replaces (refit.hpp I9).  A cylinder has that in closed form
+// (`dVolCylinderSector`); a `ChamferCone` had 0, which made the cascade budget
+// and the D4 guard read a built cone as zero-area (I9 FAIL on the plate's
+// region30/31).  These two are the cone's closed form, derived the same way.
+//
+// THE DERIVATION.  Inscribe a regular N-gon frustum in the frustum of rims
+// R1, R2 (both > 0) separated by axial height h.  Its lateral facets are PLANAR
+// (the two rim vertices at one azimuth and the two at the next are coplanar),
+// so a facet's cross-section at axial height z is exactly the CHORD subtending
+// gamma = 2*pi/N on the circle of radius rho(z) = R1 + (z/h)*(R2 - R1).  The
+// gap between facet skin and surface at that height is therefore the circular
+// SEGMENT of angle gamma:  A_seg(z) = (rho(z)^2 / 2) * (gamma - sin gamma).
+// Integrating over the axial extent and summing the N facets:
+//
+//   V = N * (gamma - sin gamma)/2 * integral rho(z)^2 dz
+//     = N * (gamma - sin gamma)/2 * |h| * (R1^2 + R1*R2 + R2^2)/3.
+//
+// For R1 == R2 this is the cylinder's own segment prism, so the two formulas
+// agree in the limit rather than merely resembling one another.
+
+// The exact gap volume above, for the COMPLETE N-gon frustum.  This is the
+// quantity the unit test certifies against a numeric integral.  Returns 0 for
+// input that could not describe a frustum (N < 3, a non-positive rim radius, a
+// zero or non-finite height, gamma >= PI) — never a plausible-looking guess.
+double coneFrustumChordVolume(double R1, double R2, double height, int nSides);
+
+// The same volume, as a DENSITY on the facet skin, so a region that claims only
+// PART of the skin gets exactly its share and nothing more:
+//
+//   V = integral over the claimed facet area of kappa(rho) dA,
+//   kappa(rho) = rho * (gamma - sin gamma) * |h| / (4 * sin(gamma/2) * fh),
+//
+// with `fh` = hypot(h, (R2 - R1) * cos(gamma/2)) the facet's OWN height: a
+// facet is the trapezoid between two parallel chords, and those chords sit at
+// axis distance rho*cos(gamma/2), so this — not the generator hypot(h, R2 - R1)
+// joining two rim vertices — is the perpendicular offset between them.  kappa is
+// AFFINE in the axial coordinate, and the axial coordinate is affine over a
+// planar facet triangle, so summing `area(t) * kappa(rho at the centroid of t)`
+// over triangles is exact — not a midpoint rule — and over the complete skin it
+// reproduces `coneFrustumChordVolume` to the last bit the arithmetic carries.
+//
+// For R1 == R2 (no taper, fh == |h|) kappa collapses to
+// `R * (gamma - sin gamma) / (4 sin(gamma/2))`, which is exactly
+// `dVolCylinderSector`'s density: the cone predicts what the cylinder of the
+// same radius predicts.  Returns 0 on the same degenerate input as above.
+double coneFrustumDVolDensity(double rho, double R1, double R2, double height, int nSides);
+
 }  // namespace refit
 }  // namespace stl2step
 

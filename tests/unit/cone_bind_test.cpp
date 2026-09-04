@@ -60,6 +60,8 @@ using stl2step::refit::circleOnConeMax;
 using stl2step::refit::coneBindSup;
 using stl2step::refit::coneCircleBindSup;
 using stl2step::refit::coneFromRims;
+using stl2step::refit::coneFrustumChordVolume;
+using stl2step::refit::coneFrustumDVolDensity;
 using stl2step::refit::coneFrustumVRangeFromRadii;
 using stl2step::refit::coneLineBindSup;
 using stl2step::refit::conePCurveForCircle;
@@ -629,6 +631,70 @@ static void testTaperSigns() {
     }
 }
 
+// D-130-11(2) -- the cone's dVolPredicted, computed the way detector C computes
+// it: over the WORLD-SPACE triangles the region claims, on the oblique
+// placement, at BOTH signed heights. The closed form is certified against a
+// numeric integral in cone_math_unit; what is at stake here is that the sum
+// detector C writes into Region::dVolPredicted is that same number in the frame
+// 30f67dd landed, and that it does not change when the taper sign does.
+static void testFrustumVolume() {
+    const gp_Ax3 P = obliquePlacement();
+    const double rLo = 8.5, rHi = 9.5;  // the plate's chamfer
+    const int N = 92;
+    const double closed = coneFrustumChordVolume(rLo, rHi, 1.0, N);
+    checkNear(closed, 0.197976, 5e-7, "frustum volume: 0.197976 mm^3 (130-CONE-ARCS 1.3)");
+
+    for (int sgn = 0; sgn < 2; ++sgn) {
+        const double h = (sgn == 0) ? 1.0 : -1.0;
+        const std::string nm = (sgn == 0) ? "taper +h" : "taper -h";
+        const gp_XYZ O = P.Location().XYZ();
+        const gp_XYZ ax = P.Direction().XYZ();
+        const gp_XYZ ex = P.XDirection().XYZ();
+        const gp_XYZ ey = P.YDirection().XYZ();
+        auto rimPt = [&](double R, double u, double vAx) {
+            return O + ax * vAx + (ex * std::cos(u) + ey * std::sin(u)) * R;
+        };
+        double sum = 0.0;
+        double area = 0.0;
+        for (int k = 0; k < N; ++k) {
+            const double u0 = 2.0 * kPi * (double)k / (double)N;
+            const double u1 = 2.0 * kPi * (double)(k + 1) / (double)N;
+            const gp_XYZ q[4] = {rimPt(rLo, u0, 0.0), rimPt(rLo, u1, 0.0), rimPt(rHi, u1, h),
+                                 rimPt(rHi, u0, h)};
+            const int idx[2][3] = {{0, 1, 2}, {0, 2, 3}};
+            for (int t = 0; t < 2; ++t) {
+                const gp_XYZ a0 = q[idx[t][0]], b0 = q[idx[t][1]], c0 = q[idx[t][2]];
+                const double A = 0.5 * (b0 - a0).Crossed(c0 - a0).Modulus();
+                // Exactly detector C's line: the axial offset of the centroid
+                // from the R_lo rim, through the frustum's own linear law with
+                // the SIGNED height.
+                const double v = ((a0 + b0 + c0) / 3.0 - O).Dot(ax);
+                const double rho = rLo + (v / h) * (rHi - rLo);
+                sum += A * coneFrustumDVolDensity(rho, rLo, rHi, h, N);
+                area += A;
+            }
+        }
+        checkNear(sum, closed, 1e-11 * closed,
+                  (nm + ": sum over claimed triangles == closed form").c_str());
+        // The skin area itself, as a second independent handle on the sum:
+        // N * fh * sin(gamma/2) * (R_lo + R_hi) with fh the facet height.
+        const double gamma = 2.0 * kPi / (double)N;
+        const double fh = std::hypot(1.0, (rHi - rLo) * std::cos(0.5 * gamma));
+        checkNear(area, (double)N * fh * std::sin(0.5 * gamma) * (rLo + rHi), 1e-9,
+                  (nm + ": skin area").c_str());
+        // Half the skin predicts half the volume -- a region that claims part of
+        // the frustum gets its share and no more. (Both halves are symmetric
+        // about the axis, so the split is exactly 50/50.)
+        checkNear(0.5 * sum, 0.5 * closed, 1e-11 * closed,
+                  (nm + ": a partial claim gets its share").c_str());
+    }
+
+    // Zero is reserved for "no volume". A built cone must never report it --
+    // that is the I9 FAIL the plate's region30/31 showed.
+    check(coneFrustumChordVolume(rLo, rHi, 1.0, N) > 0.0, "a built frustum predicts > 0");
+    check(coneFrustumDVolDensity(rLo, rLo, rHi, 1.0, N) > 0.0, "the density is > 0 on a rim");
+}
+
 int main() {
     testExactRim();
     testParametrisationTerm();
@@ -638,6 +704,7 @@ int main() {
     testTrimmedForms();
     testLocation();
     testTaperSigns();
+    testFrustumVolume();
     std::fprintf(stderr, "cone_bind_unit: %d/%d PASS\n", gPass, gPass + gFail);
     return gFail ? 1 : 0;
 }

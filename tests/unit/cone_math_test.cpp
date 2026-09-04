@@ -51,6 +51,8 @@ using stl2step::refit::coneAxialCoord;
 using stl2step::refit::coneDevClassIsExact;
 using stl2step::refit::coneDevClassName;
 using stl2step::refit::coneFromRims;
+using stl2step::refit::coneFrustumChordVolume;
+using stl2step::refit::coneFrustumDVolDensity;
 using stl2step::refit::coneFrustumVRange;
 using stl2step::refit::coneFrustumVRangeFromRadii;
 using stl2step::refit::coneIntConeCircle;
@@ -856,6 +858,140 @@ static void testIntCone() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// oracle 4: the facet-to-frustum gap volume by numeric integration
+// ---------------------------------------------------------------------------
+//
+// D-130-11(2). Independent of the closed form under test: it slices the frustum
+// into nZ axial slabs, and in each slab it integrates the AREA BETWEEN the
+// inscribed N-gon and the circle by a 2D sweep -- polygon area from the
+// shoelace formula, circle area from pi r^2 -- then multiplies by the slab
+// height. Nothing here knows the circular-segment identity
+// (r^2/2)(gamma - sin gamma) that coneFrustumChordVolume is built on; it only
+// knows what a regular polygon inscribed in a circle looks like.
+static double numFrustumGapVolume(double R1, double R2, double height, int nSides, int nZ) {
+    const double h = std::fabs(height);
+    double v = 0.0;
+    for (int i = 0; i < nZ; ++i) {
+        // Midpoint in z of slab i. rho is linear in z, so the slab's exact
+        // contribution is integral rho^2 dz over the slab; the midpoint rule is
+        // NOT exact for rho^2 and Simpson is, so the slab uses Simpson in z and
+        // the polygon/circle difference in the plane.
+        const double z0 = h * (double)i / (double)nZ;
+        const double z1 = h * (double)(i + 1) / (double)nZ;
+        const auto gapAt = [&](double z) {
+            const double rho = R1 + (z / h) * (R2 - R1);
+            // Shoelace area of the regular N-gon inscribed in radius rho, built
+            // vertex by vertex, against the circle's pi rho^2.
+            double poly = 0.0;
+            for (int k = 0; k < nSides; ++k) {
+                const double a0 = 2.0 * kPi * (double)k / (double)nSides;
+                const double a1 = 2.0 * kPi * (double)(k + 1) / (double)nSides;
+                const double x0 = rho * std::cos(a0), y0 = rho * std::sin(a0);
+                const double x1 = rho * std::cos(a1), y1 = rho * std::sin(a1);
+                poly += x0 * y1 - x1 * y0;
+            }
+            poly *= 0.5;
+            return kPi * rho * rho - poly;
+        };
+        v += (z1 - z0) / 6.0 * (gapAt(z0) + 4.0 * gapAt(0.5 * (z0 + z1)) + gapAt(z1));
+    }
+    return v;
+}
+
+// The plate's frustum, triangulated the way the mesh is: N quad facets, each
+// split into two triangles by the rim-to-rim diagonal. Sums
+// area(t) * kappa(rho at centroid(t)) over the triangles -- exactly what
+// detector C does over the triangles a ChamferCone region claims.
+static double sumDensityOverSkin(double R1, double R2, double height, int nSides) {
+    const double h = std::fabs(height);
+    double sum = 0.0;
+    for (int k = 0; k < nSides; ++k) {
+        const double a0 = 2.0 * kPi * (double)k / (double)nSides;
+        const double a1 = 2.0 * kPi * (double)(k + 1) / (double)nSides;
+        const gp_XYZ p00(R1 * std::cos(a0), R1 * std::sin(a0), 0.0);
+        const gp_XYZ p10(R1 * std::cos(a1), R1 * std::sin(a1), 0.0);
+        const gp_XYZ p01(R2 * std::cos(a0), R2 * std::sin(a0), h);
+        const gp_XYZ p11(R2 * std::cos(a1), R2 * std::sin(a1), h);
+        const gp_XYZ tri[2][3] = {{p00, p10, p11}, {p00, p11, p01}};
+        for (int t = 0; t < 2; ++t) {
+            const gp_XYZ e1 = tri[t][1] - tri[t][0];
+            const gp_XYZ e2 = tri[t][2] - tri[t][0];
+            const double area = 0.5 * e1.Crossed(e2).Modulus();
+            const double zc = (tri[t][0].Z() + tri[t][1].Z() + tri[t][2].Z()) / 3.0;
+            const double rho = R1 + (zc / h) * (R2 - R1);
+            sum += area * coneFrustumDVolDensity(rho, R1, R2, h, nSides);
+        }
+    }
+    return sum;
+}
+
+static void testFrustumChordVolume() {
+    // D-130-11(2), the plate's own frustum: R 8.5 -> 9.5, 45 deg, 92 sides.
+    const double R1 = 8.5, R2 = 9.5, H = 1.0;
+    const int N = 92;
+    const double closed = coneFrustumChordVolume(R1, R2, H, N);
+    const double num = numFrustumGapVolume(R1, R2, H, N, 4096);
+    checkNear(closed, num, 1e-9 * std::fabs(num) + 1e-12,
+              "plate frustum: closed form == numeric integral (R 8.5->9.5, 45 deg, 92 sides)");
+    // 130-CONE-ARCS 1.3 attributed -0.197976 mm^3 per plate frustum in closed
+    // form, independently of this code. The two must be the same number.
+    checkNear(closed, 0.197976, 5e-7, "plate frustum: 0.197976 mm^3 (130-CONE-ARCS 1.3)");
+
+    // Summing the density over the triangulated skin IS the total, to the last
+    // bit the arithmetic carries: kappa is affine over a planar facet.
+    checkNear(sumDensityOverSkin(R1, R2, H, N), closed, 1e-12 * closed,
+              "plate frustum: sum over claimed triangles == closed form");
+
+    // The sign of the height must not change the volume -- the frame convention
+    // 30f67dd landed carries the taper sign in h, and a volume is not signed by
+    // a frame.
+    checkNear(coneFrustumChordVolume(R1, R2, -H, N), closed, 0.0,
+              "negative signed height gives the same volume");
+    checkNear(sumDensityOverSkin(R1, R2, -H, N), closed, 1e-12 * closed,
+              "negative signed height: density sum unchanged");
+
+    // The battery's synthetic frustums (B3/B4/B5), against the same oracle.
+    struct Case { double R1, R2, H; int N; const char* name; };
+    const Case cases[] = {
+        {10.0, 12.0, 2.0, 64, "B3 45 deg R 10->12"},
+        {10.0, 12.0, 2.0, 24, "coarse N=24 R 10->12"},
+        {12.0, 10.0, 2.0, 64, "B4 45 deg R 12->10 (taper reversed)"},
+        {10.0, 11.5, 1.5, 128, "B5 45 deg R 10->11.5"},
+        {0.75, 1.25, 0.5, 16, "small radii, N=16"},
+        {30.0, 30.5, 8.0, 360, "shallow taper, N=360"},
+    };
+    for (const Case& c : cases) {
+        const double cf = coneFrustumChordVolume(c.R1, c.R2, c.H, c.N);
+        const double nf = numFrustumGapVolume(c.R1, c.R2, c.H, c.N, 4096);
+        checkNear(cf, nf, 1e-9 * std::fabs(nf) + 1e-12, c.name);
+        checkNear(sumDensityOverSkin(c.R1, c.R2, c.H, c.N), cf, 1e-11 * cf + 1e-15,
+                  "density sum matches closed form");
+    }
+
+    // The cylinder limit: kappa collapses to dVolCylinderSector's density
+    // R*(gamma - sin gamma)/(4 sin(gamma/2)). Stated here as the independent
+    // expression, not by calling the engine (this TU does not link it).
+    for (int N2 : {6, 24, 92, 360}) {
+        const double R = 8.5;
+        const double g = 2.0 * kPi / (double)N2;
+        const double want = R * (g - std::sin(g)) / (4.0 * std::sin(0.5 * g));
+        // R1 != R2 is required by a frustum, so approach the limit: a taper of
+        // 1e-9 mm over a height of 1 mm.
+        const double got = coneFrustumDVolDensity(R, R, R + 1e-9, 1.0, N2);
+        checkNear(got, want, 1e-9 * want, "kappa -> dVolCylinderSector density");
+    }
+
+    // Degenerate input returns 0, never a plausible-looking number.
+    check(coneFrustumChordVolume(8.5, 9.5, 1.0, 2) == 0.0, "N < 3 -> 0");
+    check(coneFrustumChordVolume(-1.0, 9.5, 1.0, 92) == 0.0, "negative rim radius -> 0");
+    check(coneFrustumChordVolume(8.5, 9.5, 0.0, 92) == 0.0, "zero height -> 0");
+    check(coneFrustumDVolDensity(8.5, 8.5, 9.5, 0.0, 92) == 0.0, "density: zero height -> 0");
+    check(coneFrustumDVolDensity(std::numeric_limits<double>::quiet_NaN(), 8.5, 9.5, 1.0, 92)
+              == 0.0,
+          "density: non-finite rho -> 0");
+}
+
 int main() {
     testParametrisation();
     testApexAndVRange();
@@ -868,6 +1004,7 @@ int main() {
     testIntPlane();
     testIntCylinder();
     testIntCone();
+    testFrustumChordVolume();
 
     std::fprintf(stderr, "cone_math_unit: %d/%d PASS\n", gPass, gPass + gFail);
     return gFail ? 1 : 0;
