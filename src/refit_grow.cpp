@@ -2214,6 +2214,36 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 break;
             }
         }
+        if (lawbandDiagOn() && seedB.N >= 3) {
+            std::vector<int> cand;
+            for (int m : members) {
+                for (int nb : adj[static_cast<size_t>(m)]) {
+                    if (in[static_cast<size_t>(nb)]) continue;
+                    cand.push_back(nb);
+                }
+            }
+            std::sort(cand.begin(), cand.end());
+            cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+            std::vector<int> mt = unionStripTris(members);
+            std::fprintf(stderr,
+                         "DIAG_LAWSTALL rid=%d chart=%d members=%zu nTri=%zu N=%d R=%.6f "
+                         "nCand=%zu\n",
+                         mt.empty() ? -1 : mt.front(), strips[static_cast<size_t>(trip[0])].chartId,
+                         members.size(), mt.size(), seedB.N, seedB.R, cand.size());
+            for (int nb : cand) {
+                std::vector<int> trial = members;
+                trial.push_back(nb);
+                LawBand tb;
+                const bool okc = lawChainAccept(mv, unionStripTris(trial), tol, tb);
+                std::fprintf(stderr,
+                             "  DIAG_LAWSTALLC rid=%d cand=%d candMinTri=%d candTri=%zu "
+                             "trialN=%d trialR=%.6f cvT=%.3g resid=%.3g ok=%d\n",
+                             mt.empty() ? -1 : mt.front(), nb,
+                             strips[static_cast<size_t>(nb)].minTri,
+                             strips[static_cast<size_t>(nb)].tris.size(), tb.N, tb.R,
+                             tb.cvTheta, tb.maxVertResid, okc ? 1 : 0);
+            }
+        }
         grown[ti].band = std::move(seedB);
         grown[ti].ok = true;
     });

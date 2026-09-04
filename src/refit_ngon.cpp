@@ -17,6 +17,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
 #include <limits>
 #include <set>
@@ -41,6 +43,13 @@ constexpr double kCapAreaMul = 4.0;
 // Chamfer-cone α window (same as refit_chamfer_cone.cpp) for the other-end ring.
 constexpr double kSinChamLo = 0.42261826174069944;  // sin(25°)
 constexpr double kSinChamHi = 0.9063077870366499;   // sin(65°)
+
+// Measurement only (STL2STEP_DIAG_130): why a candidate cycle was refused.
+// Never changes a decision -- every caller passes the reason it already took.
+bool ngonDiagOn() {
+    const char* e = std::getenv("STL2STEP_DIAG_130");
+    return e && e[0] != '\0' && e[0] != '0';
+}
 
 gp_XYZ localTriVert(const MeshView& mv, int lt, int corner) {
     const int gt = mv.compTris[lt];
@@ -865,13 +874,22 @@ bool isThroughHoleOrOuterBoss(const CycleEnds& ends, int N, bool fromCapPair) {
 }
 
 bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& work,
-                    const ProvAdj& adj, const CycleCand& cyc, const std::vector<int>& g2l) {
+                    const ProvAdj& adj, const CycleCand& cyc, const std::vector<int>& g2l,
+                    const char** why = nullptr, double* devOut = nullptr,
+                    double* tolOut = nullptr, double* rOut = nullptr) {
+    const char* sink = nullptr;
+    if (!why) why = &sink;
+    *why = "accepted";
+    auto no = [&](const char* r) {
+        *why = r;
+        return false;
+    };
     const std::vector<Provisional>& provs = work.provisionals;
     const int N = static_cast<int>(cyc.order.size());
-    if (N < kNMin || N > kNMax) return false;
+    if (N < kNMin || N > kNMax) return no("N-out-of-range");
     for (int m : cyc.order) {
-        if (m < 0 || static_cast<size_t>(m) >= provs.size()) return false;
-        if (!provEligible(provs[static_cast<size_t>(m)])) return false;
+        if (m < 0 || static_cast<size_t>(m) >= provs.size()) return no("bad-member");
+        if (!provEligible(provs[static_cast<size_t>(m)])) return no("member-claimed");
     }
 
     const double sinSharp = std::sin(tol.thetaSharp);
@@ -886,7 +904,7 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
         gp_XYZ p, d;
         if (!planePlaneIntersect(provs[static_cast<size_t>(a)].plane,
                                  provs[static_cast<size_t>(b)].plane, p, d))
-            return false;
+            return no("gen-plane-parallel");
         genDirs.push_back(d);
         if (axisSum.SquareModulus() > kTiny && d.Dot(axisSum) < 0.0) d.Reverse();
         axisSum += d;
@@ -923,28 +941,29 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
                 return provs[static_cast<size_t>(a)].area > provs[static_cast<size_t>(b)].area;
             return minTriId(provs[static_cast<size_t>(a)]) < minTriId(provs[static_cast<size_t>(b)]);
         });
-        if (caps.size() < 2) return false;
+        if (caps.size() < 2) return no("axis-fallback-no-caps");
         const gp_Dir n0 = provs[static_cast<size_t>(caps[0])].plane.Direction();
         const gp_Dir n1 = provs[static_cast<size_t>(caps[1])].plane.Direction();
-        if (std::abs(n0.Dot(n1)) < std::cos(tol.thetaSharp)) return false;
+        if (std::abs(n0.Dot(n1)) < std::cos(tol.thetaSharp)) return no("axis-fallback-caps-skew");
         axis = canonicalAxis(n0.XYZ());
         haveAxis = true;
     }
-    if (!haveAxis) return false;
+    if (!haveAxis) return no("no-axis");
 
     const gp_XYZ axyz(axis.X(), axis.Y(), axis.Z());
 
     // Skip turning-axis blends: successive generators must stay ∥ mean axis.
     for (const gp_XYZ& d : genDirs) {
-        if (!dirsParallel(d, axyz, sinSharp)) return false;
+        if (!dirsParallel(d, axyz, sinSharp)) return no("gen-not-parallel-axis");
     }
     // Reject cycles that share an axis-turn (blend) with an outside wall.
-    if (sharesAxisTurnBlend(mv, provs, adj, cyc, axyz, sewTol, sinSharp)) return false;
+    if (sharesAxisTurnBlend(mv, provs, adj, cyc, axyz, sewTol, sinSharp))
+        return no("axis-turn-blend");
 
     // Skip cones: |n_i · axis| must be < sin(thetaSharp) on every wall.
     for (int m : cyc.order) {
         const gp_Dir n = provs[static_cast<size_t>(m)].plane.Direction();
-        if (std::abs(n.Dot(axis)) >= sinSharp) return false;
+        if (std::abs(n.Dot(axis)) >= sinSharp) return no("wall-is-cone");
     }
 
     // Lateral (shared wall-wall) edges ∥ axis within sewTol.
@@ -952,20 +971,25 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
         const int a = cyc.order[static_cast<size_t>(i)];
         const int b = cyc.order[static_cast<size_t>((i + 1) % N)];
         const ProvLink* L = findLink(adj, a, b);
-        if (!L || L->edges.empty()) return false;
+        if (!L || L->edges.empty()) return no("no-lateral-link");
         for (int e : L->edges) {
-            if (!edgeParallelTo(mv, e, axyz, sewTol)) return false;
+            if (!edgeParallelTo(mv, e, axyz, sewTol)) return no("lateral-edge-not-parallel");
         }
     }
 
     const std::vector<int> tris = mergeCycleTris(provs, cyc.order);
-    if (tris.empty()) return false;
+    if (tris.empty()) return no("no-tris");
     const std::vector<int> lvs = uniqueLocalVerts(mv, g2l, tris);
-    if (lvs.size() < 3) return false;
+    if (lvs.size() < 3) return no("no-verts");
 
     const double cosSharp = std::cos(tol.thetaSharp);
     const CycleEnds ends = classifyCycleEnds(mv, provs, adj, cyc, axis, lvs, sewTol, cosSharp);
-    if (!isThroughHoleOrOuterBoss(ends, N, cyc.fromCapPair)) return false;
+    if (!isThroughHoleOrOuterBoss(ends, N, cyc.fromCapPair)) {
+        if (ngonDiagOn())
+            std::fprintf(stderr, "  DIAG_A_ENDS N=%d capEnds=%d otherEndChamfer=%d\n", N,
+                         ends.nCapEnds, ends.otherEndChamfer ? 1 : 0);
+        return no("not-through-hole-or-boss");
+    }
 
     // Axis point = I5 centroid of unique verts in the plane ⊥ axis.
     gp_XYZ sumPerp(0, 0, 0);
@@ -982,7 +1006,8 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
         sumR += axyz.Crossed(p - locPerp).Modulus();
     }
     const double R = sumR / static_cast<double>(lvs.size());
-    if (!(R > 0.0) || R >= 2.0 * mv.diag) return false;
+    if (rOut) *rOut = R;
+    if (!(R > 0.0) || R >= 2.0 * mv.diag) return no("bad-radius");
 
     double maxDev = 0.0;
     for (int lv : lvs) {
@@ -991,12 +1016,14 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
         maxDev = std::max(maxDev, std::abs(rho - R));
     }
     const double acceptTol = std::max(sewTol, chordSagitta(R, N));
-    if (maxDev > acceptTol) return false;
+    if (devOut) *devOut = maxDev;
+    if (tolOut) *tolOut = acceptTol;
+    if (maxDev > acceptTol) return no("residual-over-accept-tol");
 
     // closed360: vertex azimuths around the axis, D2-style max-gap test.
     gp_XYZ x0 = (std::abs(axyz.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
     gp_XYZ xD = axyz.Crossed(x0);
-    if (xD.Modulus() < kTiny) return false;
+    if (xD.Modulus() < kTiny) return no("degenerate-basis");
     xD /= xD.Modulus();
     const gp_XYZ yD = axyz.Crossed(xD);
     std::vector<double> chi;
@@ -1012,7 +1039,7 @@ bool tryAcceptCycle(const MeshView& mv, const DerivedTols& tol, SegmentWork& wor
     if (!chi.empty())
         maxGap = std::max(maxGap, kTwoPi - chi.back() + chi.front());
     const double bandArc = kTwoPi / static_cast<double>(N);
-    if (!(maxGap <= 1.5 * bandArc)) return false;
+    if (!(maxGap <= 1.5 * bandArc)) return no("not-closed360");
 
     const gp_Pnt center(locPerp.X(), locPerp.Y(), locPerp.Z());
     Region reg;
@@ -1049,7 +1076,50 @@ bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTo
     std::vector<CycleCand> cands;
     std::set<std::vector<int>> seen;
     collectCapPairCycles(work.provisionals, adj, tol, cands, seen);
+    const size_t nCapPairCands = cands.size();
     collectGeneratorCycles(mv, work.provisionals, adj, tol, mv.sewTol, cands, seen);
+    if (ngonDiagOn()) {
+        int nElig = 0;
+        int byClaim[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+        int emptyTris = 0;
+        for (const Provisional& pr : work.provisionals) {
+            if (provEligible(pr)) nElig++;
+            byClaim[static_cast<int>(pr.claim) & 7]++;
+            if (pr.tris.empty()) emptyTris++;
+        }
+        std::fprintf(stderr,
+                     "DIAG_A_CANDS nProv=%d eligible=%d emptyTris=%d claim[U/inCyl/cyl/"
+                     "inFil/fil/plane]=%d/%d/%d/%d/%d/%d cands=%zu capPair=%zu gen=%zu\n",
+                     nProv, nElig, emptyTris, byClaim[0], byClaim[1], byClaim[2],
+                     byClaim[3], byClaim[4], byClaim[5], cands.size(), nCapPairCands,
+                     cands.size() - nCapPairCands);
+        // Per-provisional ridge degree in the unclaimed dual graph: a ring of a
+        // closed N-gon bore has exactly two generator ridges per wall.
+        std::vector<int> degHist(8, 0);
+        int nRidge = 0;
+        for (size_t i = 0; i < adj.size(); i++) {
+            if (!provEligible(work.provisionals[i])) continue;
+            int deg = 0;
+            for (const ProvLink& L : adj[i]) {
+                if (!provEligible(work.provisionals[static_cast<size_t>(L.other)])) continue;
+                if (isGeneratorRidge(mv, work.provisionals, L, static_cast<int>(i), mv.sewTol))
+                    deg++;
+            }
+            nRidge += deg;
+            degHist[static_cast<size_t>(std::min(deg, 7))]++;
+        }
+        std::fprintf(stderr,
+                     "DIAG_A_RIDGEDEG halfEdges=%d deg0=%d deg1=%d deg2=%d deg3=%d "
+                     "deg4=%d deg5=%d deg6=%d deg7+=%d\n",
+                     nRidge, degHist[0], degHist[1], degHist[2], degHist[3], degHist[4],
+                     degHist[5], degHist[6], degHist[7]);
+        for (const Region& r : work.accepted)
+            std::fprintf(stderr,
+                         "DIAG_A_PRIOR origin=%d type=%d R=%.5f nTri=%zu nSides=%d "
+                         "closed360=%d minTri=%d\n",
+                         static_cast<int>(r.origin), static_cast<int>(r.type), r.radius,
+                         r.tris.size(), r.nSides, r.closed360 ? 1 : 0, minTriOf(r.tris));
+    }
 
     // Prefer holes whose two rims lie in cap planes, then larger N (real
     // bores over 6-facet bumps), then I5 min-tri / member order.
@@ -1060,8 +1130,17 @@ bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTo
         return a.order < b.order;
     });
 
-    for (const CycleCand& c : cands)
-        tryAcceptCycle(mv, tol, work, adj, c, g2l);
+    for (const CycleCand& c : cands) {
+        const char* why = nullptr;
+        double dev = -1.0, atol = -1.0, R = -1.0;
+        const bool ok = tryAcceptCycle(mv, tol, work, adj, c, g2l, &why, &dev, &atol, &R);
+        if (ngonDiagOn())
+            std::fprintf(stderr,
+                         "DIAG_A_CYC N=%zu minTri=%d capPair=%d R=%.6f dev=%.6g "
+                         "acceptTol=%.6g accepted=%d why=%s\n",
+                         c.order.size(), c.minTri, c.fromCapPair ? 1 : 0, R, dev, atol,
+                         ok ? 1 : 0, why ? why : "?");
+    }
 
     sortRegions(work.accepted);
     return true;
