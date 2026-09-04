@@ -2528,6 +2528,8 @@ bool regionExploded(const std::vector<char>& exploded, int id) {
     return id >= 0 && (size_t)id < exploded.size() && exploded[(size_t)id] != 0;
 }
 
+bool collapseDiagEnabled();
+
 TopoDS_Face makeFacet(const MeshView& mv, const std::vector<TopoDS_Vertex>& verts,
                       const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
                       size_t k) {
@@ -2545,18 +2547,62 @@ TopoDS_Face makeFacet(const MeshView& mv, const std::vector<TopoDS_Vertex>& vert
     BRep_Builder bb;
     TopoDS_Wire w;
     bb.MakeWire(w);
+    // The three points this wire actually joins. They are NOT mv.pts[]: a shared
+    // vertex on the boundary of an analytic region has been snapped onto that
+    // region's chain curve (snapVertexToCurve), and the mesh array does not move
+    // with it.
+    gp_XYZ wp[3];
+    bool haveWp = true;
     for (int s = 0; s < 3; s++) {
         int id = mv.triEdges[k][s];
         if (id < 0 || (size_t)id >= meshE.size() || !edgeOk[(size_t)id]) return TopoDS_Face();
         bool fwd = (mv.triDirs[k] >> s) & 1;
         diagNoteEdge(meshE[(size_t)id], "makeFacet");
-        bb.Add(w, fwd ? meshE[(size_t)id] : TopoDS::Edge(meshE[(size_t)id].Reversed()));
+        const TopoDS_Edge oe =
+            fwd ? meshE[(size_t)id] : TopoDS::Edge(meshE[(size_t)id].Reversed());
+        const TopoDS_Vertex v0 = TopExp::FirstVertex(oe, Standard_True);
+        if (v0.IsNull()) haveWp = false;
+        else wp[s] = BRep_Tool::Pnt(v0).XYZ();
+        bb.Add(w, oe);
     }
     w.Closed(Standard_True);
+    // A facet is filled on the plane of its OWN wire. Taking the plane from
+    // mv.pts[] instead leaves the face not containing the edges it is built
+    // from: measured 3.21725e-07 mm on the plate's cross-bore island facet
+    // (vertex snapped 4.4e-06 mm onto the R10 generator), which survives
+    // construction only because the shared edge still carries the mesh
+    // tolerance. BRepLib::SameParameter(forced) then recomputes that tolerance
+    // from the STORED representations -- and a facet plane stores no pcurve
+    // (ban N3) -- so the edge drops to Precision::Confusion(), the face reads
+    // InvalidCurveOnSurface in its own context and BRepCheck_Face cannot orient
+    // its single wire: st=27 UnorientableShape. Refill locally, and only when a
+    // wire vertex has actually left the mesh plane by more than the tolerance
+    // the face will carry; where nothing was snapped the two planes are the same
+    // numbers and the face is unchanged. The mesh normal keeps the casting vote:
+    // a refill may never flip the facet's side or degenerate it.
+    gp_XYZ pA = A;
+    gp_XYZ pn = n;
+    if (haveWp) {
+        const gp_XYZ nHat = n / mag;
+        double off = 0.0;
+        for (int s = 0; s < 3; s++) off = std::max(off, std::abs((wp[s] - A).Dot(nHat)));
+        if (off > Precision::Confusion()) {
+            const gp_XYZ n2 = (wp[1] - wp[0]).Crossed(wp[2] - wp[0]);
+            const double mag2 = n2.Modulus();
+            if (mag2 > 0.5 * mag && n2.Dot(n) > 0.0) {
+                pA = wp[0];
+                pn = n2;
+                if (collapseDiagEnabled())
+                    std::fprintf(stderr,
+                                 "DIAG_FACETREFILL k=%zu gt=%d off=%.6g p=(%.7f,%.7f,%.7f)\n", k,
+                                 gt, off, wp[0].X(), wp[0].Y(), wp[0].Z());
+            }
+        }
+    }
     // BRep_Builder::MakeFace + Add keeps the wire's verts[] slots (J2).
     // MakeFace(gp_Pln, wire) copies vertices and is the explode-path twin source.
     try {
-        Handle(Geom_Plane) pln = new Geom_Plane(gp_Pln(gp_Pnt(A), gp_Dir(n)));
+        Handle(Geom_Plane) pln = new Geom_Plane(gp_Pln(gp_Pnt(pA), gp_Dir(pn)));
         TopoDS_Face f;
         bb.MakeFace(f, pln, Precision::Confusion());
         bb.Add(f, w);
@@ -4692,6 +4738,152 @@ void dumpShellCheck(const TopoDS_Shell& sh, const std::vector<TopoDS_Face>& buil
             dumpBRepStatuses(fr);
             dumpBRepStatuses(fan.Result(f));
             std::fprintf(stderr, "\n");
+            // Name the face and the sub-shape that made it invalid, the same way
+            // DIAG_R2SUB does at the R2 probe (ee834db): a face reported with an
+            // empty own-status list is invalid only in the CONTEXT of a wire or
+            // an edge, and the context list is the only place that says so.
+            // A rid=-1 face carries no region, so its shape is the only name it
+            // has: wire count, edge count, the wire's closure and its signed
+            // area in UV -- a zero/negative UV area on the single outer wire is
+            // exactly what BRepCheck_Face reports as UnorientableShape.
+            {
+                int nW = 0, nE = 0;
+                for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) nW++;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) nE++;
+                std::fprintf(stderr, "DIAG_SHELL_FACESHAPE rid=%d nW=%d nE=%d", rid, nW, nE);
+                int wi = 0;
+                for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), wi++) {
+                    const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                    int nWE = 0;
+                    for (TopExp_Explorer ex(w, TopAbs_EDGE); ex.More(); ex.Next()) nWE++;
+                    std::fprintf(stderr, " w%d=[nE=%d closed=%d ori=%s uvA=%.6g]", wi, nWE,
+                                 (w.Closed() || BRep_Tool::IsClosed(w)) ? 1 : 0,
+                                 w.Orientation() == TopAbs_FORWARD ? "F" : "R",
+                                 pcurveSignedArea(f, w));
+                }
+                gp_Pnt p0;
+                bool haveP = false;
+                for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
+                    p0 = BRep_Tool::Pnt(TopoDS::Vertex(vx.Current()));
+                    haveP = true;
+                    break;
+                }
+                if (haveP)
+                    std::fprintf(stderr, " p=(%.5f,%.5f,%.5f)", p0.X(), p0.Y(), p0.Z());
+                {
+                    TopLoc_Location fl3;
+                    Handle(Geom_Surface) fs3 = BRep_Tool::Surface(f, fl3);
+                    Handle(Geom_Plane) pl3 = Handle(Geom_Plane)::DownCast(fs3);
+                    if (!pl3.IsNull()) {
+                        gp_Pln pp = pl3->Pln();
+                        if (!fl3.IsIdentity()) pp.Transform(fl3.Transformation());
+                        std::fprintf(stderr, " plnP=(%.7f,%.7f,%.7f) plnN=(%.7f,%.7f,%.7f)",
+                                     pp.Location().X(), pp.Location().Y(), pp.Location().Z(),
+                                     pp.Axis().Direction().X(), pp.Axis().Direction().Y(),
+                                     pp.Axis().Direction().Z());
+                    }
+                    std::fprintf(stderr, " ftol=%.6g", BRep_Tool::Tolerance(f));
+                }
+                std::fprintf(stderr, "\n");
+                TopTools_IndexedMapOfShape subMap;
+                TopExp::MapShapes(f, subMap);
+                for (int si = 1; si <= subMap.Extent(); si++) {
+                    const TopoDS_Shape& sh = subMap(si);
+                    Handle(BRepCheck_Result) sr = fan.Result(sh);
+                    if (sr.IsNull()) continue;
+                    char ctxSt[128];
+                    ctxSt[0] = '\0';
+                    size_t cu = 0;
+                    for (sr->InitContextIterator(); sr->MoreShapeInContext();
+                         sr->NextShapeInContext()) {
+                        for (BRepCheck_ListOfStatus::Iterator it(sr->StatusOnShape()); it.More();
+                             it.Next()) {
+                            if (it.Value() == BRepCheck_NoError) continue;
+                            const int wn =
+                                std::snprintf(ctxSt + cu, sizeof(ctxSt) - cu, "%s%s",
+                                              cu ? "," : "", brepCheckName((int)it.Value()));
+                            if (wn < 0 || (size_t)wn >= sizeof(ctxSt) - cu) break;
+                            cu += (size_t)wn;
+                        }
+                    }
+                    char ownSt[128];
+                    formatStatusList(sr, ownSt, sizeof(ownSt));
+                    const bool ownClean =
+                        (ownSt[0] == '\0' || (ownSt[0] == '[' && ownSt[1] == ']'));
+                    if (ownClean && ctxSt[0] == '\0') continue;
+                    gp_Pnt sp;
+                    double dev = -1.0;
+                    double etol = 0.0;
+                    int sameP = -1;
+                    if (sh.ShapeType() == TopAbs_VERTEX) {
+                        sp = BRep_Tool::Pnt(TopoDS::Vertex(sh));
+                        etol = BRep_Tool::Tolerance(TopoDS::Vertex(sh));
+                    } else if (sh.ShapeType() == TopAbs_EDGE) {
+                        const TopoDS_Edge ee = TopoDS::Edge(sh);
+                        sameP = BRep_Tool::SameParameter(ee) ? 1 : 0;
+                        etol = BRep_Tool::Tolerance(ee);
+                        Standard_Real ef = 0, el = 0;
+                        Handle(Geom_Curve) ec = BRep_Tool::Curve(ee, ef, el);
+                        if (!ec.IsNull()) sp = ec->Value(ef);
+                        TopLoc_Location fl;
+                        Handle(Geom_Surface) fs2 = BRep_Tool::Surface(f, fl);
+                        // No stored pcurve on a plane: measure the 3d curve
+                        // against the SURFACE itself (the distance a synthesised
+                        // pcurve would have to absorb), which is what
+                        // InvalidCurveOnSurface reports.
+                        if (!ec.IsNull() && !fs2.IsNull()) {
+                            dev = 0.0;
+                            GeomAPI_ProjectPointOnSurf pr;
+                            for (int kk = 0; kk <= 64; kk++) {
+                                const double t = ef + (el - ef) * (double)kk / 64.0;
+                                gp_Pnt q = ec->Value(t);
+                                if (!fl.IsIdentity())
+                                    q.Transform(fl.Transformation().Inverted());
+                                pr.Init(q, fs2);
+                                if (pr.NbPoints() > 0) dev = std::max(dev, pr.LowerDistance());
+                            }
+                        }
+                    }
+                    if (sh.ShapeType() == TopAbs_EDGE) {
+                        const TopoDS_Edge ee = TopoDS::Edge(sh);
+                        Standard_Real ef = 0, el = 0;
+                        Handle(Geom_Curve) ec = BRep_Tool::Curve(ee, ef, el);
+                        const char* cty = "none";
+                        if (!ec.IsNull()) {
+                            if (ec->DynamicType() == STANDARD_TYPE(Geom_Line)) cty = "line";
+                            else if (ec->DynamicType() == STANDARD_TYPE(Geom_Circle)) cty = "circ";
+                            else if (ec->DynamicType() == STANDARD_TYPE(Geom_Ellipse)) cty = "elips";
+                            else if (ec->DynamicType() == STANDARD_TYPE(Geom_BSplineCurve))
+                                cty = "bspl";
+                            else cty = "other";
+                        }
+                        Standard_Real pf = 0, pl = 0;
+                        Standard_Boolean stored = Standard_False;
+                        TopLoc_Location fl2;
+                        Handle(Geom_Surface) fsur = BRep_Tool::Surface(f, fl2);
+                        if (!fsur.IsNull())
+                            (void)BRep_Tool::CurveOnSurface(ee, fsur, fl2, pf, pl, &stored);
+                        gp_Pnt pa = ec.IsNull() ? gp_Pnt() : ec->Value(ef);
+                        gp_Pnt pb = ec.IsNull() ? gp_Pnt() : ec->Value(el);
+                        std::fprintf(stderr,
+                                     "DIAG_SHELL_SUBE rid=%d i=%d cty=%s stored=%d "
+                                     "range=[%.9g,%.9g] a=(%.7f,%.7f,%.7f) b=(%.7f,%.7f,%.7f) "
+                                     "len=%.9g\n",
+                                     rid, si, cty, stored ? 1 : 0, ef, el, pa.X(), pa.Y(), pa.Z(),
+                                     pb.X(), pb.Y(), pb.Z(), pa.Distance(pb));
+                    }
+                    std::fprintf(stderr,
+                                 "DIAG_SHELL_SUB rid=%d i=%d type=%s own=%s ctx=[%s] "
+                                 "dev=%.6g sameP=%d tol=%.6g p=(%.5f,%.5f,%.5f)\n",
+                                 rid, si,
+                                 sh.ShapeType() == TopAbs_EDGE     ? "EDGE"
+                                 : sh.ShapeType() == TopAbs_VERTEX ? "VERTEX"
+                                 : sh.ShapeType() == TopAbs_WIRE   ? "WIRE"
+                                 : sh.ShapeType() == TopAbs_FACE   ? "FACE"
+                                                                   : "OTHER",
+                                 ownSt, ctxSt, dev, sameP, etol, sp.X(), sp.Y(), sp.Z());
+                }
+            }
             if (diagP2Enabled()) dumpDiagWiresOfFace(rid, f, sewTol, "shell-invalid");
         }
         if (diagP2Enabled()) dumpM5OnShell(an, built, builtRid, rs);
@@ -13469,6 +13661,26 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 TopoDS_Face f = makeFacet(mv, verts, meshE, edgeOk, k);
                 if (!f.IsNull()) {
                     ensureFaceValid(f, meshTolCap(mv, nullptr));
+                    if (collapseDiagEnabled()) {
+                        BRepCheck_Analyzer fa(f, Standard_True);
+                        if (!fa.IsValid()) {
+                            const int gt = mv.compTris ? mv.compTris[k] : -1;
+                            gp_XYZ a0, b0, c0;
+                            if (gt >= 0 && mv.tris && mv.pts) {
+                                a0 = mv.pts[mv.tris[gt][0]];
+                                b0 = mv.pts[mv.tris[gt][1]];
+                                c0 = mv.pts[mv.tris[gt][2]];
+                            }
+                            const double ar = 0.5 * (b0 - a0).Crossed(c0 - a0).Modulus();
+                            std::fprintf(stderr,
+                                         "DIAG_FACETBAD k=%zu gt=%d rid=%d iid=%d exp=%d "
+                                         "efill=%d area=%.6g A=(%.5f,%.5f,%.5f) "
+                                         "B=(%.5f,%.5f,%.5f) C=(%.5f,%.5f,%.5f)\n",
+                                         k, gt, rid, iid, exp ? 1 : 0, efill ? 1 : 0, ar, a0.X(),
+                                         a0.Y(), a0.Z(), b0.X(), b0.Y(), b0.Z(), c0.X(), c0.Y(),
+                                         c0.Z());
+                        }
+                    }
                     built.push_back(f);
                     builtRid.push_back((exp || efill) ? rid : -1);
                 }
@@ -13476,6 +13688,24 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         }
 
         if (built.empty()) return false;
+
+        auto diagStageInvalid = [&](const char* stage) {
+            if (!collapseDiagEnabled()) return;
+            int nBad = 0;
+            int firstI = -1;
+            for (size_t i = 0; i < built.size(); i++) {
+                if (built[i].IsNull()) continue;
+                BRepCheck_Analyzer fa(built[i], Standard_True);
+                if (fa.IsValid()) continue;
+                if (firstI < 0) firstI = (int)i;
+                nBad++;
+            }
+            std::fprintf(stderr, "DIAG_STAGEBAD stage=%s nBad=%d firstI=%d rid=%d\n", stage, nBad,
+                         firstI,
+                         (firstI >= 0 && (size_t)firstI < builtRid.size()) ? builtRid[(size_t)firstI]
+                                                                          : -2);
+        };
+        diagStageInvalid("built");
 
         for (auto& f : built) {
             try {
@@ -13504,9 +13734,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         }
 
+        diagStageInvalid("prewalk");
         {
             orientFaceWalk(built);
         }
+        diagStageInvalid("postwalk");
 
         // Re-assert outwardNormal on *partial* (not closed360) cylinders after
         // ShapeFix/walk. Seamed 360 faces already match AC4; touching them
@@ -13533,6 +13765,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         }
 
+        diagStageInvalid("preshell");
         // J4: assemble a shell and SameParameter(forced).
         BRep_Builder B;
         B.MakeShell(sh);
@@ -13579,6 +13812,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
         }
+        diagStageInvalid("postseampc");
         // D-S3-54: construction-time closure healing (pre-J6). Demote built faces
         // that own free edges via eprimeFill (never exploded[]). Full rebuild
         // with eprimeFill-aware chain admission; no uncollapse (opens neighbours).
@@ -13977,6 +14211,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         };
 
         const bool shValid = shellIsValid(sh);
+        // The valid first-pass shell has to be printable too, or "valid=1" is a
+        // claim about the absence of a log line rather than a measurement.
+        if (collapseDiagEnabled() && BRep_Tool::IsClosed(sh) && shValid)
+            dumpShellCheck(sh, built, builtRid, rs, sewTol);
         // Site B is closed-but-invalid only. Open shells are site C (untouched).
         if (BRep_Tool::IsClosed(sh) && !shValid) {
             dumpShellCheck(sh, built, builtRid, rs, sewTol);
