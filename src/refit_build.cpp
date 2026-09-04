@@ -12515,6 +12515,298 @@ void dumpShippedInContext(const std::vector<TopoDS_Face>& built, const std::vect
                  nPlane, nFlagged, gIncontextShippedExamined, gIncontextShippedFlagged);
 }
 
+// ---------------------------------------------------------------------------
+// D-130-2 edge-class census.
+//
+// The bind site already certifies each pcurve as it is written (DIAG_BINDTOL /
+// DIAG_OVERCAP).  What DECISION-130 asks for is the census of the SHIPPED
+// shell: for every edge two analytic faces share, the class exactMaxAtBind
+// gives on each side, the tolerance the edge finally records, that region's
+// meshTolCap, and the deviation.  Construction is not touched -- this reads the
+// finished shell.
+//
+// An analytic face is one whose surface handle is a REGION surface (the interned
+// handle registered by registerRegionSurf).  makeFacet builds its own plane per
+// triangle and never registers it, so facet fill faces are excluded by identity,
+// not by a heuristic.
+//
+// Tier, per D-130-2:
+//   tier 1 "analytic"       -- the 3D curve is a Line / Circle / Ellipse and
+//                              every analytic side returns a certified class;
+//   tier 2 "polylineTier2"  -- the 3D curve is the degree-1 mesh polyline; it is
+//                              counted, not absorbed (a cylinder side has no
+//                              closed form for it and returns -1 by design);
+//   "unhandled"             -- anything else on an analytic|analytic edge: an
+//                              analytic curve whose class is unhandled*, or a
+//                              degree>=2 spline (tier 3, refused for 1.3.0).
+// Plus the 130-CORE tripwire's failure mode, resolved against the SHELL rather
+// than against geom[] (130-core.md C3.8 left that choice to this lane): an
+// analytic-curve edge sitting on an analytic face that NO second face in a
+// closed shell references is the makeFaceKeep-seam / ci=-1 edge -- an edge no
+// other face can name.  It counts unhandled.
+struct EdgeClassRow {
+    int ridA = -1, ridB = -1;
+    const char* clsA = "none";
+    const char* clsB = "none";
+    const char* tier = "unhandled";
+    const char* curve = "?";
+    double tol = 0.0, dev = 0.0, cap = 0.0, devEnds = 0.0;
+    bool devExact = false;
+    bool overTol = false, overCap = false;
+};
+
+const char* edgeCurveKindName(const Handle(Geom_Curve)& c3) {
+    Handle(Geom_Curve) src = basisCurveOf(c3);
+    if (src.IsNull()) return "null";
+    if (src->DynamicType() == STANDARD_TYPE(Geom_Line)) return "line";
+    if (src->DynamicType() == STANDARD_TYPE(Geom_Circle)) return "circle";
+    if (src->DynamicType() == STANDARD_TYPE(Geom_Ellipse)) return "ellipse";
+    Handle(Geom_BSplineCurve) bs = Handle(Geom_BSplineCurve)::DownCast(src);
+    if (!bs.IsNull()) return bs->Degree() <= 1 ? "polyline" : "bspline";
+    return "other";
+}
+
+bool edgeCurveIsAnalytic(const Handle(Geom_Curve)& c3) {
+    const char* k = edgeCurveKindName(c3);
+    return std::strcmp(k, "line") == 0 || std::strcmp(k, "circle") == 0 ||
+           std::strcmp(k, "ellipse") == 0;
+}
+
+bool edgeCurveIsMeshPolyline(const Handle(Geom_Curve)& c3) {
+    return std::strcmp(edgeCurveKindName(c3), "polyline") == 0;
+}
+
+// rid of the region whose interned surface the face carries, or -1.
+int analyticRidOfFace(const TopoDS_Face& f) {
+    if (f.IsNull()) return -1;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) s = BRep_Tool::Surface(f, loc);
+    if (s.IsNull()) return -1;
+    auto it = gSurfIdent.find(static_cast<const void*>(s.get()));
+    return (it == gSurfIdent.end()) ? -1 : it->second.first;
+}
+
+void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape& sh,
+                     RefitStats& stats) {
+    if (sh.IsNull()) return;
+    const bool closedShell = (sh.ShapeType() == TopAbs_SHELL) && BRep_Tool::IsClosed(sh);
+    // The identity assumption this census rests on -- a shipped analytic face
+    // still carries the interned region surface -- is measured, not assumed.
+    int nFaceAll = 0, nFaceAnalytic = 0;
+    for (TopExp_Explorer fx(sh, TopAbs_FACE); fx.More(); fx.Next()) {
+        nFaceAll++;
+        if (analyticRidOfFace(TopoDS::Face(fx.Current())) >= 0) nFaceAnalytic++;
+    }
+    TopTools_IndexedDataMapOfShapeListOfShape anc;
+    try {
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
+    } catch (const Standard_Failure&) {
+        return;
+    }
+    int nAnalytic = 0, nPoly = 0, nUnhandled = 0, nOverTol = 0, nOverCap = 0;
+    int nSeam = 0, nMixed = 0, nUnshared = 0, nLocated = 0, nDevOverCap = 0;
+    for (int ie = 1; ie <= anc.Extent(); ie++) {
+        const TopoDS_Edge e = TopoDS::Edge(anc.FindKey(ie));
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3;
+        try {
+            c3 = BRep_Tool::Curve(e, f, l);
+        } catch (const Standard_Failure&) {
+            continue;
+        }
+        if (c3.IsNull() || l - f <= Precision::PConfusion()) continue;
+        // Every face on this edge, and the analytic subset of it.  A face is
+        // listed once even where the edge runs through it twice (a cylinder's
+        // own seam), so the seam is asked for by name below rather than counted.
+        std::vector<TopoDS_Face> allFaces;
+        std::vector<TopoDS_Face> aFaces;
+        std::unordered_set<const void*> seenFace;
+        for (TopTools_ListOfShape::Iterator fit(anc.FindFromIndex(ie)); fit.More(); fit.Next()) {
+            if (fit.Value().ShapeType() != TopAbs_FACE) continue;
+            const TopoDS_Face F = TopoDS::Face(fit.Value());
+            if (F.IsNull()) continue;
+            if (!seenFace.insert(static_cast<const void*>(F.TShape().get())).second) continue;
+            allFaces.push_back(F);
+            if (analyticRidOfFace(F) >= 0) aFaces.push_back(F);
+        }
+        EdgeClassRow row;
+        row.curve = edgeCurveKindName(c3);
+        row.tol = BRep_Tool::Tolerance(e);
+        if (aFaces.size() < 2) {
+            // Not a census edge.  Two shapes live here and neither is a defect:
+            // a SEAM (one face, the edge twice on it -- a closed cylinder's own
+            // generator), and a MIXED edge where the second side is a facet
+            // face.  Both are counted so the census adds up, neither is a red
+            // line.
+            //
+            // What IS the tripwire's mode (130-core.md C3.8), resolved against
+            // the shell rather than against geom[]: an analytic edge that no
+            // SECOND face references at all -- "an edge no other face can
+            // reference".  That is a free edge at an analytic face.
+            bool seam = false;
+            if (allFaces.size() == 1) {
+                try {
+                    seam = (BRep_Tool::IsClosed(e, allFaces[0]) == Standard_True);
+                } catch (const Standard_Failure&) {
+                }
+            }
+            if (aFaces.size() == 1 && allFaces.size() == 1 && !seam &&
+                edgeCurveIsAnalytic(c3)) {
+                row.ridA = analyticRidOfFace(aFaces[0]);
+                row.tier = "unhandled";
+                row.clsA = "unshared-seam";
+                nUnhandled++;
+                nUnshared++;
+                if (diagP2Enabled())
+                    std::fprintf(stderr,
+                                 "DIAG_EDGECLASS ridA=%d ridB=%d tier=unhandled curve=%s "
+                                 "clsA=unshared-seam clsB=none tol=%.9f dev=-1.000000000 "
+                                 "devExact=0 cap=-1.000000000 overTol=0 overCap=0 noStored=0\n",
+                                 row.ridA, -1, row.curve, row.tol);
+            } else if (seam) {
+                nSeam++;
+            } else if (aFaces.size() == 1) {
+                nMixed++;
+            }
+            continue;
+        }
+        bool anyUnhandledCls = false;
+        double devMax = -1.0, devEndsMax = 0.0;
+        bool devExact = true;
+        double capMin = -1.0;
+        const char* clsSide[2] = {"none", "none"};
+        int ridSide[2] = {-1, -1};
+        int nNoStored = 0;
+        for (size_t k = 0; k < aFaces.size() && k < 2; k++) {
+            const TopoDS_Face& F = aFaces[k];
+            TopLoc_Location floc;
+            Handle(Geom_Surface) srf = BRep_Tool::Surface(F, floc);
+            const int rid = analyticRidOfFace(F);
+            ridSide[k] = rid;
+            const Region* R = regionById(rs, rid);
+            const double cap = meshTolCap(mv, R);
+            if (capMin < 0.0 || cap < capMin) capMin = cap;
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) c2d;
+            Standard_Boolean stored = Standard_False;
+            try {
+                Standard_Real pf = 0, pl = 0;
+                (void)BRep_Tool::CurveOnSurface(e, srf, floc, pf, pl, &stored);
+                c2d = BRep_Tool::CurveOnSurface(e, F, a, b);
+            } catch (const Standard_Failure&) {
+            }
+            if (!stored) nNoStored++;
+            if (c2d.IsNull()) {
+                clsSide[k] = "no-pcurve";
+                anyUnhandledCls = true;
+                continue;
+            }
+            const char* cls = "unhandled";
+            double ex = -1.0;
+            // The face's own location, not an assumed identity: `srf` is the
+            // UNLOCATED surface handle (that is what makes the gSurfIdent
+            // lookup work), so the location has to travel with it.
+            if (!floc.IsIdentity()) nLocated++;
+            try {
+                ex = exactMaxAtBind(c3, f, l, srf, c2d, floc, &cls);
+            } catch (const Standard_Failure&) {
+                cls = "exception";
+                ex = -1.0;
+            }
+            clsSide[k] = cls;
+            double d = ex;
+            if (!(ex >= 0.0 && std::isfinite(ex))) {
+                anyUnhandledCls = true;
+                devExact = false;
+                try {
+                    d = brepDevMaxOnSurf(c3, f, l, srf, c2d, f, l, floc);
+                } catch (const Standard_Failure&) {
+                    d = -1.0;
+                }
+            }
+            if (std::isfinite(d) && d > devMax) devMax = d;
+            // Split the supremum: every class starts from the deviation at the
+            // two parameter ends (the term an affine map is exhausted by), and
+            // a circle adds its own ring term on top. Reporting them apart is
+            // what tells a reader whether a large `dev` is a pcurve that does
+            // not meet its 3D curve at the ends, or a circle on the wrong ring.
+            try {
+                const double de = std::max(curveSurfDevAtBind(c3, f, srf, c2d, floc),
+                                           curveSurfDevAtBind(c3, l, srf, c2d, floc));
+                if (std::isfinite(de) && de > devEndsMax) devEndsMax = de;
+            } catch (const Standard_Failure&) {
+            }
+        }
+        row.ridA = ridSide[0];
+        row.ridB = ridSide[1];
+        row.clsA = clsSide[0];
+        row.clsB = clsSide[1];
+        row.dev = devMax;
+        row.devEnds = devEndsMax;
+        row.cap = capMin;
+        row.devExact = devExact;
+        // Tier 2 is the MESH POLYLINE population, and on this engine a chain
+        // that did not collapse does not ship as one degree-1 spline: it ships
+        // as its own mesh edges, each a straight `Geom_Line`, indistinguishable
+        // from a real plane|plane intersection by geometry alone. The engine
+        // already keeps the two apart by birth -- `gMeshTShapes` are the mesh
+        // edges, `gSeamTShapes` the ones born at `bindAllVariants` -- and that
+        // is the discriminator D-130-2's "counted, not absorbed" needs. Without
+        // it the tier-2 count reads 0 on every fixture and the ratchet protects
+        // nothing.
+        // A mesh TShape does not by itself mean tier 2: the ellipse-arc path
+        // (8c1498d) replaces a mesh segment's CURVE with an analytic arc and
+        // keeps the TShape, and a one-edge line chain can collapse onto the mesh
+        // edge it came from. So tier 2 is a mesh edge that was never bound as a
+        // seam AND still carries the straight segment the tessellator drew.
+        const void* ets = diagTShapePtr(e);
+        const bool meshBorn = ets && gMeshTShapes.count(ets) && !gSeamTShapes.count(ets);
+        if (edgeCurveIsMeshPolyline(c3) ||
+            (meshBorn && std::strcmp(row.curve, "line") == 0)) {
+            row.tier = "polylineTier2";
+            nPoly++;
+        } else if (edgeCurveIsAnalytic(c3) && !anyUnhandledCls) {
+            row.tier = "analytic";
+            nAnalytic++;
+        } else {
+            row.tier = "unhandled";
+            nUnhandled++;
+        }
+        // D-130-2's two numeric red lines, both read off the shipped edge.
+        row.overTol = (row.dev >= 0.0 && row.dev > row.tol + Precision::PConfusion());
+        row.overCap = (row.cap >= 0.0 && row.tol > row.cap + Precision::PConfusion());
+        if (row.overTol) nOverTol++;
+        if (row.overCap) nOverCap++;
+        // The invariant D-130-2 states bounds the SUPREMUM by meshTolCap; the
+        // red line it summarises bounds the RECORDED TOLERANCE by it. They are
+        // not the same number on an edge whose tolerance a later writer raised,
+        // so both are counted and both are reported.
+        if (row.dev >= 0.0 && row.cap >= 0.0 && row.dev > row.cap + Precision::PConfusion())
+            nDevOverCap++;
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_EDGECLASS ridA=%d ridB=%d tier=%s curve=%s clsA=%s clsB=%s "
+                         "tol=%.9f dev=%.9f devEnds=%.9f devExact=%d cap=%.9f overTol=%d "
+                         "overCap=%d noStored=%d\n",
+                         row.ridA, row.ridB, row.tier, row.curve, row.clsA, row.clsB, row.tol,
+                         row.dev, row.devEnds, row.devExact ? 1 : 0, row.cap,
+                         row.overTol ? 1 : 0, row.overCap ? 1 : 0, nNoStored);
+    }
+    stats.edgeAnalytic += nAnalytic;
+    stats.edgePolylineTier2 += nPoly;
+    stats.edgeUnhandled += nUnhandled;
+    stats.edgeOverTol += nOverTol;
+    stats.edgeOverCap += nOverCap;
+    std::fprintf(stderr,
+                 "DIAG_EDGECLASS_SUM analytic=%d polylineTier2=%d unhandled=%d overTol=%d "
+                 "overCap=%d closedShell=%d analyticFaces=%d/%d seams=%d mixedAnalyticFacet=%d "
+                 "unsharedSeam=%d devOverCap=%d locatedFaces=%d meshTShapes=%zu "
+                 "seamTShapes=%zu\n",
+                 nAnalytic, nPoly, nUnhandled, nOverTol, nOverCap, closedShell ? 1 : 0,
+                 nFaceAnalytic, nFaceAll, nSeam, nMixed, nUnshared, nDevOverCap, nLocated,
+                 gMeshTShapes.size(), gSeamTShapes.size());
+}
+
 void dumpTolBindSummary() {
     if (!diagP2Enabled() && !diagPlatesEnabled()) return;
     std::fprintf(stderr, "DIAG_BINDTOL_SUM unhandled=%d overCap=%d overCapUnique=%zu genuine=%d cylSideChanged=%d\n",
@@ -14851,6 +15143,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         }
 
         fitAnalyticTolerances(sh);
+
+        // D-130-2: certify the shipped edges, after the last tolerance writer.
+        edgeClassCensus(mv, rs, sh, rs.stats);
 
         dumpShippedInContext(built, builtRid, rs);
         dumpTolBindSummary();

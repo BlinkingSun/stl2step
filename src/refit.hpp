@@ -218,6 +218,16 @@ struct RefitStats {
     int facetIslands = 0, facetTriangles = 0;
     int distinctRadii = 0;
     double maxVertexDev = 0, maxEdgeTol = 0, dVolPredicted = 0;
+    // D-130-2 edge-class census, measured on the SHIPPED shell (not on the
+    // bind site's bookkeeping): every edge shared by two analytic faces is
+    // classified by exactMaxAtBind against the tolerance the edge carries and
+    // the region's meshTolCap.  analytic + polylineTier2 + unhandled partition
+    // the shared-edge set; overTol / overCap count the same set again.
+    int edgeAnalytic = 0;        // tier 1: closed-form supremum on every side
+    int edgePolylineTier2 = 0;   // tier 2: the mesh polyline, counted not absorbed
+    int edgeUnhandled = 0;       // no class, or an unshared analytic seam edge
+    int edgeOverTol = 0;         // deviation > the tolerance the edge records
+    int edgeOverCap = 0;         // recorded tolerance > meshTolCap
 };
 
 struct RegionSet {                  // exactly one per CLEAN component

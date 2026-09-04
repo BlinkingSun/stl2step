@@ -210,6 +210,16 @@ struct Result {
     int smoothBuiltComponents = 0;
     int smoothRevertedComponents = 0;
 
+    // D-130-2 edge-class census over the shipped shells: every edge two
+    // analytic faces share, classified by the closed-form bind-site supremum
+    // against the tolerance the edge records and the region's meshTolCap.
+    // Emitted as the RESULT object "edgeClasses".
+    int edgeClassAnalytic = 0;       // tier 1 (closed-form supremum both sides)
+    int edgeClassPolylineTier2 = 0;  // tier 2 (mesh polyline, counted not absorbed)
+    int edgeClassUnhandled = 0;      // no class, or an analytic edge no face names
+    int edgeClassOverTol = 0;        // deviation above the recorded tolerance
+    int edgeClassOverCap = 0;        // recorded tolerance above meshTolCap
+
     // The machine-readable payload the CLI prints after "RESULT ". Stable field
     // set and ordering; safe to parse. Does not include the "RESULT " prefix.
     std::string toJson() const;
