@@ -1476,6 +1476,95 @@ bool diagP2Enabled() {
     return cached != 0;
 }
 
+// D-130-16 -- THE TWO-ARC RIM COLLAPSE.
+//
+// A closed360 cylinder that carries an enclosed interruption ships as ONE face
+// with that interruption as an inner wire (D-130-14). The face's seam is a
+// GENERATOR of the same face, so it must stand at an azimuth the inner wire
+// does not cover, on a vertex both cap wires actually have. On the mesh that
+// produced this ruling the cap's 288 deg rim chain collapses into a SINGLE
+// analytic arc, so the cap wire keeps only six vertices -- and all six are the
+// tooth-arc junctions, every one of them inside the inner wire's span. The seam
+// has nowhere to stand and the face is UnorientableShape.
+//
+// The rim's own mesh has twenty vertices outside that span; the collapse is
+// what discards them. So the rim collapses into TWO arcs of the same circle
+// instead of one, meeting at the chain's own mesh vertex nearest the seam
+// target. Nothing is invented and nothing is widened: the meeting point is a
+// real mesh vertex of that chain, the rim stays analytic (two arcs of one
+// circle, not a polyline), both faces still share the same edges, and the split
+// vertex must lie on the chain's own analytic curve within the chain's own
+// snap cap -- the admission the terminals already get. The neighbouring plane's
+// hole gains exactly that one real vertex.
+//
+// Returns the local mesh vertex to split at, or -1 when the chain is not such a
+// rim (then the collapse is the single arc it has always been).
+int rimSplitVertex(const RegionSet& rs, const MeshView& mv, const BoundaryChain& ch, int ci,
+                   const Region* A, const Region* B, double snapCap, const AnalyticCurve& curve) {
+    if (ch.closedLoop || ch.meshVerts.size() < 3) return -1;
+    if (curve.kind != AnalyticCurve::Circ) return -1;
+    for (const Region* R : {A, B}) {
+        if (!R || R->type != SurfType::Cylinder || !R->closed360) continue;
+        // ... carrying an inner wire, and this chain on one of its rims.
+        bool onCap = false;
+        std::vector<double> innerU;
+        for (const Loop& lp : R->loops) {
+            if (lp.role == LoopRole::CapLow || lp.role == LoopRole::CapHigh) {
+                for (int k : lp.chainIdx)
+                    if (k == ci) onCap = true;
+            } else if (lp.role == LoopRole::Inner) {
+                for (int k : lp.chainIdx) {
+                    if (k < 0 || (size_t)k >= rs.chains.size()) continue;
+                    for (int lv : rs.chains[(size_t)k].meshVerts)
+                        innerU.push_back(azimuthOf(*R, pntOf(mv, lv)));
+                }
+            }
+        }
+        if (!onCap || innerU.empty()) continue;
+        // The seam target is the middle of the widest azimuth gap between the
+        // interruptions -- the same measurement trySeamed360 makes, of this
+        // region and nothing else. "Outside the inner wire's span" is exactly
+        // "strictly inside that gap".
+        std::sort(innerU.begin(), innerU.end());
+        double gap = innerU.front() + 2.0 * kPi - innerU.back();
+        double gLo = innerU.back(), gHi = innerU.front() + 2.0 * kPi;
+        for (size_t i = 1; i < innerU.size(); i++) {
+            const double g = innerU[i] - innerU[i - 1];
+            if (g > gap) {
+                gap = g;
+                gLo = innerU[i - 1];
+                gHi = innerU[i];
+            }
+        }
+        const double target = 0.5 * (gLo + gHi);
+        int best = -1;
+        double bestD = 1e300;
+        for (size_t i = 1; i + 1 < ch.meshVerts.size(); i++) {  // interior vertices only
+            const int lv = ch.meshVerts[i];
+            const gp_Pnt p = pntOf(mv, lv);
+            if (curveResidual(curve, p) > snapCap) continue;  // not on this rim's own circle
+            double u = azimuthOf(*R, p);
+            while (u < gLo) u += 2.0 * kPi;
+            if (!(u > gLo && u < gHi)) continue;              // inside the interruption's span
+            const double d = std::fabs(u - target);
+            if (d < bestD || (d == bestD && lv < best)) {
+                bestD = d;
+                best = lv;
+            }
+        }
+        if (best >= 0) {
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_RIMSPLIT ci=%d rid=%d nV=%zu gap=[%.5f,%.5f] target=%.5f "
+                             "splitLv=%d u=%.5f\n",
+                             ci, R->id, ch.meshVerts.size(), gLo, gHi, target, best,
+                             azimuthOf(*R, pntOf(mv, best)));
+            return best;
+        }
+    }
+    return -1;
+}
+
 bool diag130Enabled() {
     static int cached = -1;
     if (cached < 0) {
@@ -11101,11 +11190,89 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         eSeam.Closed(Standard_False);
     };
 
+    // D-130-16: the face's parameter domain is [u0, u0+2pi] and the SEAM names
+    // it. A cylinder is 2pi-periodic in u, so a cap arc bound on another branch
+    // is the same curve written as a different number, and the wire then does
+    // not close in UV. Measured on handle-pickup's R=4 wall with the rim split
+    // in place: the low cap arrived on [2pi, 4pi] while the high cap and the
+    // seam were on [0, 2pi], every wire itself clean, and BRepCheck answered
+    // UnorientableShape on the face. Shifting a pcurve by a WHOLE PERIOD is
+    // exact -- no tolerance is spent, no geometry moves, and the 3d edge and
+    // its neighbour face's pcurve are untouched.
+    TopoDS_Edge gSeamE;
+    double gSeamU0 = 0.0;
+    bool gSeamSet = false;
+    auto rebranchEdges = [&](const TopoDS_Shape& w, double u0, const TopoDS_Edge& skip) {
+        BRep_Builder B;
+        for (TopExp_Explorer it(w, TopAbs_EDGE); it.More(); it.Next()) {
+            TopoDS_Edge e = TopoDS::Edge(it.Current());
+            if (!skip.IsNull() && e.IsSame(skip)) continue;  // the seam pair is deliberate
+            Standard_Real f = 0, l = 0;
+            Handle(Geom2d_Curve) pc =
+                BRep_Tool::CurveOnSurface(e, surf, TopLoc_Location(), f, l);
+            if (pc.IsNull()) continue;
+            const double uMid = 0.5 * (pc->Value(f).X() + pc->Value(l).X());
+            const double k = std::floor((uMid - u0) / (2.0 * kPi));
+            if (k == 0.0) continue;
+            Handle(Geom2d_Curve) shifted = Handle(Geom2d_Curve)::DownCast(
+                pc->Translated(gp_Vec2d(-k * 2.0 * kPi, 0.0)));
+            if (shifted.IsNull()) continue;
+            B.UpdateEdge(e, shifted, surf, TopLoc_Location(), sewTol);
+            B.Range(e, surf, TopLoc_Location(), f, l);
+            if (diagP2Enabled())
+                std::fprintf(stderr, "DIAG_REBRANCH rid=%d u0=%.5f uMid=%.5f k=%+.0f\n", r.id,
+                             u0, uMid, k);
+        }
+    };
+
     auto finishFace = [&](TopoDS_Face got, bool publishSimple, int ciL, int ciH,
                           const TopoDS_Edge& eL, const TopoDS_Edge& eH) -> bool {
         if (got.IsNull()) return false;
         setFaceOutward(got, r.outwardNormal);
         addPcurvesOnFace(got, sewTol, true);
+        // D-130-16: addPcurvesOnFace is what BIRTHS the inner wire's pcurves,
+        // so the branch pass has to run after it too -- an inner loop written
+        // on [0, 2pi] under a seam that named [2pi, 4pi] is outside its own
+        // face's domain, which is the UnorientableShape.
+        if (gSeamSet) rebranchEdges(got, gSeamU0, gSeamE);
+        if (gSeamSet && diagP2Enabled()) {
+            char st[128] = "[]";
+            try {
+                BRepCheck_Analyzer an(got, Standard_True);
+                formatStatusList(an.Result(got), st, sizeof(st));
+            } catch (const Standard_Failure&) {
+            }
+            std::fprintf(stderr, "DIAG_REBRANCH_FACE rid=%d valid=%d st=%s\n", r.id,
+                         faceIsValid(got) ? 1 : 0, st);
+            try {
+                TopLoc_Location L;
+                Handle(Geom_Surface) sF = BRep_Tool::Surface(got, L);
+                int wi = 0;
+                for (TopExp_Explorer wx(got, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                    int ei = 0;
+                    double uLo = 1e300, uHi = -1e300;
+                    for (BRepTools_WireExplorer ex(TopoDS::Wire(wx.Current())); ex.More();
+                         ex.Next(), ++ei) {
+                        const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                        Standard_Real a2 = 0, b2 = 0;
+                        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(ee, sF, L, a2, b2);
+                        if (pc.IsNull()) continue;
+                        uLo = std::min({uLo, pc->Value(a2).X(), pc->Value(b2).X()});
+                        uHi = std::max({uHi, pc->Value(a2).X(), pc->Value(b2).X()});
+                        if (ee.IsSame(gSeamE))
+                            std::fprintf(stderr,
+                                         "DIAG_RB_SEAM w=%d e=%d ori=%s u0=%.5f u1=%.5f\n", wi,
+                                         ei, ee.Orientation() == TopAbs_FORWARD ? "F" : "R",
+                                         pc->Value(a2).X(), pc->Value(b2).X());
+                    }
+                    std::fprintf(stderr,
+                                 "DIAG_RB_WIRE rid=%d w=%d ori=%s nE=%d u=[%.5f,%.5f]\n", r.id,
+                                 wi, wx.Current().Orientation() == TopAbs_FORWARD ? "F" : "R",
+                                 ei, uLo, uHi);
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
         if (!faceIsValid(got)) {
             try {
                 ShapeFix_Face sff(got);
@@ -11126,6 +11293,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             }
             setFaceOutward(got, r.outwardNormal);
             addPcurvesOnFace(got, sewTol, true);
+            if (gSeamSet) rebranchEdges(got, gSeamU0, gSeamE);
         }
         if (!faceIsValid(got) && !ensureFaceValid(got, meshTolCap(mv, &r))) {
             if (diagP2Enabled()) {
@@ -11220,14 +11388,29 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                    !makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2)) {
             return false;
         }
-        if (!unionBuildOn() || inners.empty() || faceIsValid(out2)) return true;
+        if (!unionBuildOn() || inners.empty()) return true;
+        // D-130-16: an inner wire's sense on the FACE is opposite the outer's,
+        // and the wire P1 hands over is oriented for the REGION boundary. Which
+        // sense is right cannot be judged on the bare face: the inner wire's
+        // pcurves do not exist until addPcurvesOnFace births them, and until
+        // they are on the seam's own branch the face is unorientable either
+        // way. So prepare the face fully -- pcurves, branch, outward normal --
+        // and let BRepCheck answer; only then try the other sense.
+        auto prepare = [&](TopoDS_Face& f) -> bool {
+            if (f.IsNull()) return false;
+            setFaceOutward(f, r.outwardNormal);
+            addPcurvesOnFace(f, sewTol, true);
+            if (gSeamSet) rebranchEdges(f, gSeamU0, gSeamE);
+            return faceIsValid(f);
+        };
+        if (prepare(out2)) return true;
         std::vector<TopoDS_Wire> rev;
         rev.reserve(inners.size());
         for (const TopoDS_Wire& iw : inners) rev.push_back(TopoDS::Wire(iw.Reversed()));
         TopoDS_Face alt;
         if ((makeFaceKeep(surf, ow2, rev, r.outwardNormal, alt) ||
              makeFaceCopy(surf, ow2, rev, r.outwardNormal, alt)) &&
-            faceIsValid(alt))
+            prepare(alt))
             out2 = alt;
         return true;
     };
@@ -11406,6 +11589,11 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 Bs.UpdateEdge(eSeam, pcS0, pcS1, surf, TopLoc_Location(), sewTol);
                 if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
                 eSeam.Closed(Standard_False);
+                gSeamE = eSeam;
+                gSeamU0 = u0;
+                gSeamSet = true;
+                rebranchEdges(ow, u0, eSeam);
+                for (TopoDS_Wire& iw : inners) rebranchEdges(iw, u0, eSeam);
             }
             bindCylPCurves(ow, surf, r, sewTol);
             TopoDS_Face got;
@@ -13269,6 +13457,43 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (partialCyl(A) || partialCyl(B))
                         e = orientEdgeFromTo(e, verts[(size_t)ia]);
                 }
+                // D-130-16: the two-arc rim collapse. The chain publishes TWO
+                // arcs of its own circle, meeting at its own mesh vertex
+                // nearest the seam target, when it is the rim of a closed360
+                // cylinder that carries an inner wire and the single arc would
+                // otherwise leave the seam nowhere outside that wire to stand.
+                std::vector<TopoDS_Edge> chainEdges{e};
+                if (unionBuildOn() && !full && curve.kind == AnalyticCurve::Circ) {
+                    const int lvSplit = rimSplitVertex(rs, mv, ch, (int)ci, A, B,
+                                                       geom[ci].chainSnapCap, curve);
+                    if (lvSplit >= 0 && (size_t)lvSplit < verts.size() &&
+                        !verts[(size_t)lvSplit].IsNull()) {
+                        size_t k = 0;
+                        while (k < ch.meshVerts.size() && ch.meshVerts[k] != lvSplit) k++;
+                        auto halfMid = [&](size_t i0, size_t i1) -> gp_Pnt {
+                            if (i1 - i0 >= 2) return pntOf(mv, ch.meshVerts[(i0 + i1) / 2]);
+                            const double p1 =
+                                ElCLib::Parameter(curve.circ, pntOf(mv, ch.meshVerts[i0]));
+                            const double p2 =
+                                ElCLib::Parameter(curve.circ, pntOf(mv, ch.meshVerts[i1]));
+                            double df = p2 - p1;
+                            while (df <= 0.0) df += 2.0 * kPi;
+                            if (df > kPi) df -= 2.0 * kPi;
+                            return ElCLib::Value(p1 + 0.5 * df, curve.circ);
+                        };
+                        if (k > 0 && k + 1 < ch.meshVerts.size()) {
+                            snapVertexToCurve(verts[(size_t)lvSplit], curve,
+                                              geom[ci].chainSnapCap);
+                            const TopoDS_Edge e0 =
+                                makeArc(curve.circ, verts[(size_t)ia], verts[(size_t)lvSplit],
+                                        halfMid(0, k));
+                            const TopoDS_Edge e1 =
+                                makeArc(curve.circ, verts[(size_t)lvSplit], verts[(size_t)ib],
+                                        halfMid(k, ch.meshVerts.size() - 1));
+                            if (!e0.IsNull() && !e1.IsNull()) chainEdges = {e0, e1};
+                        }
+                    }
+                }
                 {
                     const Region* ownerR = nullptr;
                     const Region* consumerR = nullptr;
@@ -13290,9 +13515,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     else if (curve.kind == AnalyticCurve::Lin) kindStr = "lin";
                     else if (curve.kind == AnalyticCurve::Elips) kindStr = "elips";
                     SeamBindCounts acc;
-                    bindAllVariants(e, *ownerR, kindStr, mv, (int)ci, acc);
-                    bindAllVariants(e, *consumerR, kindStr, mv, (int)ci, acc);
-                    bindAllVariants(e, *ownerR, kindStr, mv, (int)ci, acc);
+                    for (TopoDS_Edge& ce : chainEdges) {
+                        bindAllVariants(ce, *ownerR, kindStr, mv, (int)ci, acc);
+                        bindAllVariants(ce, *consumerR, kindStr, mv, (int)ci, acc);
+                        bindAllVariants(ce, *ownerR, kindStr, mv, (int)ci, acc);
+                    }
                     if (diagP2Enabled()) {
                         std::fprintf(stderr,
                                      "DIAG_SEAMBIND ci=%d nWrite=%d nGuardHit=%d nDoubleWrite=%d\n",
@@ -13300,8 +13527,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     }
                 }
                 geom[ci].collapsed = true;
-                geom[ci].edges = {e};
-                noteWirePop(e, "rebuildCollapsed", (int)ci);
+                geom[ci].edges = chainEdges;
+                for (const TopoDS_Edge& ce : chainEdges) noteWirePop(ce, "rebuildCollapsed", (int)ci);
                 collapsed[ci] = 1;
                 nOk++;
                 if (diagCoverEnabled()) {
