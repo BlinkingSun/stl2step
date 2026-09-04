@@ -11903,6 +11903,8 @@ void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<Topo
             Handle(BRepCheck_Result) fr = an.Result(f);
             BRepCheck_Analyzer fan(f, Standard_True);
             bool faceBad = !fan.IsValid();
+            TopTools_IndexedMapOfShape subMap;
+            TopExp::MapShapes(f, subMap);
             if (!fr.IsNull()) {
                 for (BRepCheck_ListOfStatus::Iterator it(fr->Status()); it.More(); it.Next())
                     if (it.Value() != BRepCheck_NoError) faceBad = true;
@@ -11955,6 +11957,75 @@ void dumpR2Probe(const MeshView& mv, const RegionSet& rs, const std::vector<Topo
                          "nE=%d pcurveMissing=%d\n",
                          rid, kind, bas, faceSt, wireSt, edgeSt, countFaceEdges(f),
                          pcurveMissingOnFace(f));
+            // Name the sub-shape that made this face invalid, and separate a
+            // WRONG GEOMETRY from a WRONG FLAG. `an.Result(edge)` above carries
+            // only the context-free status list; an edge that is invalid ONLY in
+            // the context of this face (InvalidSameParameterFlag,
+            // InvalidCurveOnSurface) records its status in the context list and
+            // is otherwise invisible -- which is how a bad cone rim reads as an
+            // empty faceSt=[] on its neighbour cylinder. `dev` is
+            // sup|C3d(t) - S(pc(t))| on a 65-point grid: dev = 0 with sameP = 0
+            // is a flag BRepLib could not set (some OTHER face's pcurve on the
+            // same edge disagrees), not a gap on this one.
+            for (int si = 1; si <= subMap.Extent(); si++) {
+                const TopoDS_Shape& sh = subMap(si);
+                Handle(BRepCheck_Result) sr = fan.Result(sh);
+                if (sr.IsNull()) continue;
+                char ctxSt[128];
+                ctxSt[0] = '\0';
+                size_t cu = 0;
+                for (sr->InitContextIterator(); sr->MoreShapeInContext();
+                     sr->NextShapeInContext()) {
+                    for (BRepCheck_ListOfStatus::Iterator it(sr->StatusOnShape()); it.More();
+                         it.Next()) {
+                        if (it.Value() == BRepCheck_NoError) continue;
+                        const int w = std::snprintf(ctxSt + cu, sizeof(ctxSt) - cu, "%s%s",
+                                                    cu ? "," : "", brepCheckName((int)it.Value()));
+                        if (w < 0 || (size_t)w >= sizeof(ctxSt) - cu) break;
+                        cu += (size_t)w;
+                    }
+                }
+                char ownSt[128];
+                formatStatusList(sr, ownSt, sizeof(ownSt));
+                const bool ownClean = (ownSt[0] == '\0' || (ownSt[0] == '[' && ownSt[1] == ']'));
+                if (ownClean && ctxSt[0] == '\0') continue;
+                double dev = -1.0;
+                int sameP = -1;
+                double etol = 0.0;
+                gp_Pnt p0;
+                if (sh.ShapeType() == TopAbs_EDGE) {
+                    const TopoDS_Edge ee = TopoDS::Edge(sh);
+                    sameP = BRep_Tool::SameParameter(ee) ? 1 : 0;
+                    etol = BRep_Tool::Tolerance(ee);
+                    Standard_Real ef = 0, el = 0, pf = 0, pl = 0;
+                    Handle(Geom_Curve) ec = BRep_Tool::Curve(ee, ef, el);
+                    Handle(Geom2d_Curve) pc2 = BRep_Tool::CurveOnSurface(ee, f, pf, pl);
+                    TopLoc_Location fl;
+                    Handle(Geom_Surface) fs2 = BRep_Tool::Surface(f, fl);
+                    if (!ec.IsNull()) p0 = ec->Value(ef);
+                    if (!ec.IsNull() && !pc2.IsNull() && !fs2.IsNull()) {
+                        dev = 0.0;
+                        for (int k = 0; k <= 64; k++) {
+                            const double t = ef + (el - ef) * (double)k / 64.0;
+                            const gp_Pnt2d q = pc2->Value(t);
+                            gp_Pnt b3 = fs2->Value(q.X(), q.Y());
+                            if (!fl.IsIdentity()) b3.Transform(fl.Transformation());
+                            dev = std::max(dev, ec->Value(t).Distance(b3));
+                        }
+                    }
+                } else if (sh.ShapeType() == TopAbs_VERTEX) {
+                    p0 = BRep_Tool::Pnt(TopoDS::Vertex(sh));
+                    etol = BRep_Tool::Tolerance(TopoDS::Vertex(sh));
+                }
+                std::fprintf(stderr,
+                             "DIAG_R2SUB rid=%d i=%d type=%s own=%s ctx=[%s] dev=%.6g sameP=%d "
+                             "tol=%.6g p=(%.5f,%.5f,%.5f)\n",
+                             rid, si, sh.ShapeType() == TopAbs_EDGE     ? "EDGE"
+                             : sh.ShapeType() == TopAbs_VERTEX ? "VERTEX"
+                             : sh.ShapeType() == TopAbs_WIRE   ? "WIRE"
+                                                               : "FACE", ownSt, ctxSt, dev, sameP,
+                             etol, p0.X(), p0.Y(), p0.Z());
+            }
             dumpDiagWiresOfFace(rid, f, sewTol, "r2-invalid", &anc, &faceMap, &faceRid, &eprimeFill,
                                 &rs);
         }
