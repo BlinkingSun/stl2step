@@ -1,0 +1,87 @@
+{
+  "id": "edge-class-ratchet",
+  "authority": "edge-class-ratchet.json",
+  "engineRef": "wip/1.3.0 at 8a646f5 + 130-bind-work.patch, build-wip/stl2step",
+  "seededBy": "lane 130-BIND-2A, 2026-09-04, `edge_class_gate.py --measure --binary build-wip/stl2step --jobs 4` on HEAD (numbers identical to the 149564f seed)",
+  "notes": "D-130-2 red lines and the tier-2 mesh-polyline ratchet, over tests/corpus/*.stl and tests/gates/build_fixtures/*/*.stl. tier2Ceiling is a NEVER-INCREASE ceiling per fixture: an edge that ships analytic today may not become a mesh polyline tomorrow. A decrease passes and the gate prints the instruction to re-baseline it with a note. expectedRed records, per fixture, the red lines the branch that seeded this file already violates -- an admission, not a waiver: the gate names each one on every run, a fixture that heals prints the instruction to delete its entry, and a violation on a fixture or a line not listed here is a hard FAIL. Widening expectedRed to make a run green is a defect. The causes are attributed in _team/reports/130-bind.md 4: 'unhandled' is ONE cause on every fixture that carries it -- exactMaxAtBind has no ellipse class, so an ellipse edge ships analytic with no closed-form supremum (D-130-2 admits Ellipse in tier 1); 'overTol' is a recorded tolerance below the certified supremum on 13 edges; 'overCap' is the recorded tolerance above meshTolCap, which is the 1.2.0 registered sliver-plate limitation plus the later tolerance writers. None of the three is relaxed by this file.",
+  "tier2Ceiling": {
+    "Body11": 5218,
+    "Body28": 1442,
+    "S01": 0,
+    "S02": 0,
+    "S03": 60,
+    "S04": 136,
+    "S05": 0,
+    "S06": 0,
+    "S07": 0,
+    "S08": 0,
+    "S09": 4,
+    "S10": 0,
+    "S11": 0,
+    "S11-b": 0,
+    "S12": 0,
+    "S12-a": 0,
+    "S12-b": 0,
+    "S13": 0,
+    "S14": 0,
+    "S15": 0,
+    "S16-R1-explode-success": 0,
+    "S16-R1-round-2": 0,
+    "S16-R2-ChainUnstable": 0,
+    "boss_cone_chamfer": 0,
+    "build_fixtures/counterbore": 0,
+    "build_fixtures/fillet_strip_2tri": 0,
+    "build_fixtures/full_360_hole": 0,
+    "build_fixtures/plate_half_hole": 0,
+    "build_fixtures/quarter_round_1tri": 0,
+    "build_fixtures/r1_round2_cascade": 0,
+    "build_fixtures/r1_success": 0,
+    "build_fixtures/r2_forced": 0,
+    "build_fixtures/r8_360_explode_caps": 0,
+    "build_fixtures/s09_mixed": 0,
+    "build_fixtures/slotted_stadium": 0,
+    "chamfer_straight_ring": 0,
+    "counterbore_chamfer": 0,
+    "cross_bores": 0,
+    "cyl_meets_chamfer": 0,
+    "handle-lock": 0,
+    "handle-pickup": 358,
+    "linkage_bores_chamfer": 204,
+    "nonprismatic-control": 0
+  },
+  "expectedRed": {
+    "Body11": [
+      "overCap"
+    ],
+    "Body28": [
+      "overCap",
+      "unhandled"
+    ],
+    "S03": [
+      "overCap"
+    ],
+    "S04": [
+      "overCap"
+    ],
+    "S09": [
+      "overCap"
+    ],
+    "S11-b": [
+      "unhandled"
+    ],
+    "S16-R1-explode-success": [
+      "overCap",
+      "unhandled"
+    ],
+    "handle-pickup": [
+      "overCap",
+      "overTol",
+      "unhandled"
+    ],
+    "linkage_bores_chamfer": [
+      "overCap",
+      "overTol",
+      "unhandled"
+    ]
+  }
+}

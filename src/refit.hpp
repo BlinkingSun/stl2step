@@ -228,6 +228,12 @@ struct RefitStats {
     int edgeUnhandled = 0;       // no class, or an unshared analytic seam edge
     int edgeOverTol = 0;         // deviation > the tolerance the edge records
     int edgeOverCap = 0;         // recorded tolerance > meshTolCap
+    // Radius truth census (SPEC-130-bind addendum): every built cylinder's
+    // shipped radius against the least-squares radius of its own claimed
+    // vertices about its own axis.  Measurement only; no red line yet.
+    int    radiusN = 0;
+    double radiusMaxAbs = 0;     // max |R_built - R_lsq| (mm)
+    double radiusMaxRel = 0;     // max |R_built - R_lsq| / R_lsq
 };
 
 struct RegionSet {                  // exactly one per CLEAN component

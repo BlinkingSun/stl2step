@@ -12819,6 +12819,154 @@ void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape
                  meshTs.size());
 }
 
+// ---------------------------------------------------------------------------
+// Radius truth census (SPEC-130-bind addendum, from 130-arcs.md 1.5).
+//
+// A built cylinder can ship a radius the mesh does not support: rid 67 on the
+// plate was measured at cylGrow R = 3.0693 against a least-squares mesh fit of
+// R = 3.0306 over a 45.84 deg span -- a short arc cannot pin its radius, and no
+// gate sees it because the face is valid and watertight.
+//
+// R_lsq is the least-squares radius of the region's OWN claimed vertices about
+// the axis the face ships: minimising sum (rho_i - R)^2 at a fixed axis gives
+// R = mean(rho_i) in closed form, so there is no solver and no constant here.
+// This is measurement only -- D-130 has not ruled on a red line yet, and this
+// lane changes no construction.
+const char* originName(Origin o) {
+    switch (o) {
+        case Origin::PlaneGrow: return "PlaneGrow";
+        case Origin::CylGrow: return "CylGrow";
+        case Origin::FilletStrip: return "FilletStrip";
+        case Origin::NgonWall: return "NgonWall";
+        case Origin::ChamferCone: return "ChamferCone";
+    }
+    return "?";
+}
+
+void radiusTruthCensus(const MeshView& mv, const RegionSet& rs,
+                       const std::vector<char>& exploded, RefitStats& stats) {
+    int n = 0;
+    double maxAbs = 0.0, maxRel = 0.0;
+    int worstRid = -1;
+    for (const Region& r : rs.regions) {
+        if (r.type != SurfType::Cylinder) continue;
+        if (!regionShippedAnalytic(r, exploded)) continue;
+        if (!(r.radius > 0.0)) continue;
+        const gp_Pnt origin = r.ax.Location();
+        const gp_Dir axD = r.ax.Direction();
+        const gp_Dir xD = r.ax.XDirection();
+        const gp_Dir yD = axD.Crossed(xD);
+        std::unordered_set<int> seenPt;
+        double sum = 0.0;
+        int np = 0;
+        double devBuilt = 0.0;
+        std::vector<double> az;
+        std::vector<double> rho;
+        for (int lt : r.tris) {
+            if (lt < 0 || (size_t)lt >= mv.nTri) continue;
+            const int gt = mv.compTris[lt];
+            if (gt < 0) continue;
+            const int* T = mv.tris[gt];
+            for (int k = 0; k < 3; k++) {
+                if (!seenPt.insert(T[k]).second) continue;
+                const gp_Pnt p(mv.pts[T[k]]);
+                const gp_Vec v(origin, p);
+                const double d = gp_Vec(axD).Crossed(v).Magnitude();
+                rho.push_back(d);
+                sum += d;
+                np++;
+                devBuilt = std::max(devBuilt, std::fabs(d - r.radius));
+                az.push_back(std::atan2(v.Dot(gp_Vec(yD)), v.Dot(gp_Vec(xD))));
+            }
+        }
+        if (np < 3) continue;
+        const double rLsq = sum / (double)np;
+        double devLsq = 0.0;
+        for (double d : rho) devLsq = std::max(devLsq, std::fabs(d - rLsq));
+        // Covered span: 2*pi minus the largest azimuth gap (360 deg for a
+        // closed cylinder, where the largest gap is one tessellation step).
+        std::sort(az.begin(), az.end());
+        double gap = 0.0;
+        for (size_t i = 1; i < az.size(); i++) gap = std::max(gap, az[i] - az[i - 1]);
+        gap = std::max(gap, (az.front() + 2.0 * kPi) - az.back());
+        const double span = r.closed360 ? 2.0 * kPi : std::max(0.0, 2.0 * kPi - gap);
+        const double drift = std::fabs(r.radius - rLsq);
+        const double rel = (rLsq > 0.0) ? drift / rLsq : 0.0;
+        n++;
+        if (drift > maxAbs) {
+            maxAbs = drift;
+            worstRid = r.id;
+        }
+        maxRel = std::max(maxRel, rel);
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_RADIUS rid=%d R_built=%.9f R_lsq=%.9f span=%.4f maxDev=%.9f "
+                         "maxDevBuilt=%.9f drift=%.9f rel=%.9f nVtx=%d nSides=%d origin=%s\n",
+                         r.id, r.radius, rLsq, span * 180.0 / kPi, devLsq, devBuilt, drift, rel,
+                         np, r.nSides, originName(r.origin));
+    }
+    stats.radiusN += n;
+    stats.radiusMaxAbs = std::max(stats.radiusMaxAbs, maxAbs);
+    stats.radiusMaxRel = std::max(stats.radiusMaxRel, maxRel);
+    std::fprintf(stderr, "DIAG_RADIUS_SUM n=%d maxAbs=%.9f maxRel=%.9f worstRid=%d\n", n, maxAbs,
+                 maxRel, worstRid);
+}
+
+// ---------------------------------------------------------------------------
+// Torus-band census (D-130-7(c)).
+//
+// C1's two-facet `filletStrip` regions are exact local cylinder fits, but on
+// the plate 78 of them are slices of genuinely TOROIDAL rounds at the cross-bore
+// mouths: the band's axis turns.  Two strips of one cylinder share one axis
+// LINE; strips of a torus band do not.  The comparison tolerance is the angle
+// each strip's own fit residual subtends at its own radius (maxVertexDev / R) --
+// the mesh's measurement of itself, not a chosen constant.  Below that angle the
+// strip cannot tell a turn from its own noise.
+//
+// Census only: D-130-7(b)/D-130-9(a) already rule what happens to these strips
+// in 1.3.0, and tori are a 1.4 item.
+void torusBandCensus(const MeshView& mv, const RegionSet& rs,
+                     const std::vector<char>& exploded) {
+    int nStrip = 0, nOnBand = 0;
+    double maxTurn = 0.0;
+    auto epsAngOf = [](const Region& r) {
+        return (r.radius > 0.0) ? r.maxVertexDev / r.radius : 0.0;
+    };
+    for (const Region& r : rs.regions) {
+        if (r.origin != Origin::FilletStrip) continue;
+        if (!regionShippedAnalytic(r, exploded)) continue;
+        nStrip++;
+        double turn = 0.0;
+        double eps = epsAngOf(r);
+        int nbr = 0;
+        for (const BoundaryChain& ch : rs.chains) {
+            const int other = (ch.regA == r.id) ? ch.regB : (ch.regB == r.id ? ch.regA : -1);
+            if (other < 0) continue;
+            const Region* o = regionById(rs, other);
+            if (!o || o->origin != Origin::FilletStrip) continue;
+            if (!regionShippedAnalytic(*o, exploded)) continue;
+            nbr++;
+            double a = r.ax.Direction().Angle(o->ax.Direction());
+            if (a > 0.5 * kPi) a = kPi - a;  // antiparallel axes are one axis
+            turn = std::max(turn, a);
+            eps = std::max(eps, epsAngOf(*o));
+        }
+        const bool onBand = (nbr > 0 && turn > eps);
+        if (onBand) nOnBand++;
+        maxTurn = std::max(maxTurn, turn);
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_TORUSBAND rid=%d nbrStrips=%d turnDeg=%.6f epsDeg=%.6f R=%.6f "
+                         "onTorusBand=%d\n",
+                         r.id, nbr, turn * 180.0 / kPi, eps * 180.0 / kPi, r.radius,
+                         onBand ? 1 : 0);
+    }
+    (void)mv;
+    std::fprintf(stderr,
+                 "DIAG_TORUSBAND_SUM filletStrips=%d filletStripOnTorusBand=%d maxTurnDeg=%.6f\n",
+                 nStrip, nOnBand, maxTurn * 180.0 / kPi);
+}
+
 void dumpTolBindSummary() {
     if (!diagP2Enabled() && !diagPlatesEnabled()) return;
     std::fprintf(stderr, "DIAG_BINDTOL_SUM unhandled=%d overCap=%d overCapUnique=%zu genuine=%d cylSideChanged=%d\n",
@@ -15158,6 +15306,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         // D-130-2: certify the shipped edges, after the last tolerance writer.
         edgeClassCensus(mv, rs, sh, meshE, rs.stats);
+        // SPEC-130-bind addendum: radius truth on every built cylinder, and the
+        // torus-band class D-130-7(c) owes the 1.4 decision.
+        radiusTruthCensus(mv, rs, exploded, rs.stats);
+        torusBandCensus(mv, rs, exploded);
 
         dumpShippedInContext(built, builtRid, rs);
         dumpTolBindSummary();

@@ -427,6 +427,42 @@ if(EXISTS "${_g01_plane}")
 endif()
 unset(_g01_plane)
 unset(_g01_plane_ratchet)
+# --- 130-BIND edge-class red lines (D-130-2) ---
+# unhandled / overTol / overCap == 0 over the corpus + the P2 build fixtures,
+# tier-2 mesh-polyline count ratcheted per fixture. Never expected-red as a
+# CTest property: a fixture that violates a line on the branch that seeded the
+# ratchet is named in edge-class-ratchet.json's expectedRed and stays loud.
+set(_edge_class "${CMAKE_CURRENT_SOURCE_DIR}/edge_class_gate.py")
+set(_edge_class_ratchet "${CMAKE_CURRENT_SOURCE_DIR}/baseline/edge-class-ratchet.json")
+if(EXISTS "${_edge_class}")
+    add_test(NAME edge_class_gate_selftest
+        COMMAND "${Python3_EXECUTABLE}" "${_edge_class}" --self-test)
+    set_tests_properties(edge_class_gate_selftest PROPERTIES
+        LABELS "gates"
+        TIMEOUT 60)
+    add_test(NAME edge_class_gate_synthetic
+        COMMAND "${Python3_EXECUTABLE}" "${_edge_class}" --synthetic-pass)
+    set_tests_properties(edge_class_gate_synthetic PROPERTIES
+        LABELS "gates"
+        TIMEOUT 30)
+    if(TARGET stl2step AND EXISTS "${_edge_class_ratchet}")
+        add_test(NAME edge_class_gate
+            COMMAND "${Python3_EXECUTABLE}" "${_edge_class}"
+                    --binary "$<TARGET_FILE:stl2step>"
+                    --ratchet "${_edge_class_ratchet}"
+                    --jobs 4)
+        set_tests_properties(edge_class_gate PROPERTIES
+            LABELS "gates"
+            TIMEOUT 900
+            REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_edge_class_ratchet}")
+        if(TARGET stl2step_corpus_gen)
+            set_tests_properties(edge_class_gate PROPERTIES DEPENDS corpus_generate)
+        endif()
+    endif()
+endif()
+unset(_edge_class)
+unset(_edge_class_ratchet)
+
 # --- NW-CYL never-worse (D-S3-15, gates-g01-delta-nwcyl) ---
 set(_nwcyl_script "${CMAKE_CURRENT_SOURCE_DIR}/nwcyl_gate.py")
 set(_nwcyl_baseline "${CMAKE_CURRENT_SOURCE_DIR}/nwcyl_baseline.json")

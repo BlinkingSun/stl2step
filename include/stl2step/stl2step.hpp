@@ -220,6 +220,13 @@ struct Result {
     int edgeClassOverTol = 0;        // deviation above the recorded tolerance
     int edgeClassOverCap = 0;        // recorded tolerance above meshTolCap
 
+    // Radius truth (SPEC-130-bind addendum): the shipped radius of every built
+    // cylinder against the least-squares radius of its own claimed vertices.
+    // Emitted as the RESULT object "radiusDrift". Measurement, not a gate.
+    int    radiusDriftN = 0;
+    double radiusDriftMaxAbs = 0.0;
+    double radiusDriftMaxRel = 0.0;
+
     // The machine-readable payload the CLI prints after "RESULT ". Stable field
     // set and ordering; safe to parse. Does not include the "RESULT " prefix.
     std::string toJson() const;

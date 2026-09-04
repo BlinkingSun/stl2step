@@ -851,6 +851,9 @@ Result Converter::run() {
             refitTotals.edgeUnhandled += st.edgeUnhandled;
             refitTotals.edgeOverTol += st.edgeOverTol;
             refitTotals.edgeOverCap += st.edgeOverCap;
+            refitTotals.radiusN += st.radiusN;
+            refitTotals.radiusMaxAbs = std::max(refitTotals.radiusMaxAbs, st.radiusMaxAbs);
+            refitTotals.radiusMaxRel = std::max(refitTotals.radiusMaxRel, st.radiusMaxRel);
             dVolPredSigned += st.dVolPredicted;
             dVolPredAbs += o.refitDVolAbs;
         }
@@ -1176,6 +1179,9 @@ Result Converter::run() {
             r.edgeClassUnhandled = refitTotals.edgeUnhandled;
             r.edgeClassOverTol = refitTotals.edgeOverTol;
             r.edgeClassOverCap = refitTotals.edgeOverCap;
+            r.radiusDriftN = refitTotals.radiusN;
+            r.radiusDriftMaxAbs = refitTotals.radiusMaxAbs;
+            r.radiusDriftMaxRel = refitTotals.radiusMaxRel;
         }
         r.ok = true;
         r.exitCode = warnings.empty() ? 0 : 2;
@@ -1245,7 +1251,8 @@ std::string Result::toJson() const {
         "\"smoothBuiltFillets\":%d,"
         "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d,"
         "\"edgeClasses\":{\"analytic\":%d,\"polylineTier2\":%d,\"unhandled\":%d,"
-        "\"overTol\":%d,\"overCap\":%d}}";
+        "\"overTol\":%d,\"overCap\":%d},"
+        "\"radiusDrift\":{\"n\":%d,\"maxAbs\":%.9f,\"maxRel\":%.9f}}";
     std::string ei = jsonEscape(input), eo = jsonEscape(output);
     const bool emitSmooth = facesAfterSmooth != 0 || smoothSkippedComponents != 0
         || smoothPlanes != 0 || smoothCylinders != 0 || smoothFillets != 0;
@@ -1261,7 +1268,8 @@ std::string Result::toJson() const {
                           smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
                           smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
                           smoothRevertedComponents, edgeClassAnalytic, edgeClassPolylineTier2,
-                          edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap);
+                          edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
+                          radiusDriftMaxAbs, radiusDriftMaxRel);
     } else {
         n = std::snprintf(nullptr, 0, fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                           components, solids, openShells, facesBeforeUnify, facesAfterUnify,
@@ -1280,7 +1288,8 @@ std::string Result::toJson() const {
                       smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
                       smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
                       smoothRevertedComponents, edgeClassAnalytic, edgeClassPolylineTier2,
-                      edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap);
+                      edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
+                      radiusDriftMaxAbs, radiusDriftMaxRel);
     } else {
         std::snprintf(&s[0], s.size(), fmt, ei.c_str(), eo.c_str(), triangles, vertices,
                       components, solids, openShells, facesBeforeUnify, facesAfterUnify,
