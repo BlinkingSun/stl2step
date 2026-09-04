@@ -10083,10 +10083,27 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
         }
         if (!faceIsValid(outF) && inners.empty()) {
             try {
+                if (diagP2Enabled())
+                    std::fprintf(stderr, "DIAG_130_SFF rid=%d rung=shapefix-face\n", r.id);
                 ShapeFix_Face sff(outF);
                 sff.FixOrientationMode() = 1;
                 sff.FixAddNaturalBoundMode() = 0;
                 sff.FixMissingSeamMode() = 0;
+                // D-130: this rung exists to fix the WIRE ORIENTATION of a
+                // single-wire plate. ShapeFix_Wire (FixWireMode, on by default)
+                // closes 2d/3d gaps by MOVING vertices -- and these vertices are
+                // shared with every neighbouring face, so the repair opens the
+                // shell it was called to close. Measured on
+                // linkage_bores_chamfer: 93 of 1601 shared vertices left their
+                // snapshot by up to 12.45 mm with tolerances up to 13.71 mm
+                // (sewTol 0.0018), which is the same effect as the F7 note on
+                // the R1 path ("displaces shared verts[], measured 18.8 mm on
+                // S02"). Orientation only; wire geometry is not ours to move.
+                sff.FixWireMode() = 0;
+                sff.FixSmallAreaWireMode() = 0;
+                sff.FixIntersectingWiresMode() = 0;
+                sff.FixLoopWiresMode() = 0;
+                sff.FixSplitFaceMode() = 0;
                 sff.Perform();
                 TopoDS_Shape res = sff.Result();
                 if (res.IsNull()) res = sff.Face();
@@ -12228,6 +12245,30 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             rebuildMeshEdges();
             birthMeshEdgePlanePCurves(rs, meshE, edgeOk, mv);
+            // D-130 step 3: verts[] against its own snapshot, immediately before
+            // the chain edges are made. A shared vertex that has left vsnap by
+            // more than the sew budget is the thing that makes coincident chain
+            // endpoints (and so the "identic" MakeEdge refusals).
+            if (diagP2Enabled()) {
+                int nOff = 0;
+                double maxOff = 0.0, maxTol = 0.0;
+                int worst = -1;
+                for (size_t i = 0; i < verts.size(); i++) {
+                    if (verts[i].IsNull()) continue;
+                    const double d = BRep_Tool::Pnt(verts[i]).Distance(vsnap[i].p);
+                    const double t = BRep_Tool::Tolerance(verts[i]);
+                    if (d > std::max(sewTol, Precision::Confusion())) nOff++;
+                    if (d > maxOff) {
+                        maxOff = d;
+                        worst = (int)i;
+                    }
+                    maxTol = std::max(maxTol, t);
+                }
+                std::fprintf(stderr,
+                             "DIAG_130_VTXDRIFT pass=%d nVerts=%zu nOffSnapshot=%d maxOff=%.6f "
+                             "worstVid=%d maxVtxTol=%.6f sewTol=%.6f\n",
+                             recoverPass, verts.size(), nOff, maxOff, worst, maxTol, sewTol);
+            }
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 if (geom[ci].curve.kind == AnalyticCurve::None) continue;
                 const AnalyticCurve curve = geom[ci].curve;
@@ -12338,7 +12379,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (!identicLine && !identicCirc) chainEdgeFail[ci] = 1;
                     if (!identicLine && !identicCirc) nFail++;
                     static thread_local int gMeFailN = 0;
-                    if (!identicLine && !identicCirc && gMeFailN < 12) {
+                    // D-130 step 3: every MakeEdge refusal, not only the
+                    // non-degenerate ones -- on this part all 30 were "identic"
+                    // (coincident endpoints) and so invisible here.
+                    if (gMeFailN < 64) {
                         const char* d130 = std::getenv("STL2STEP_DIAG_130");
                         if (d130 && d130[0] && d130[0] != '0') {
                         gMeFailN++;
@@ -12349,14 +12393,50 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             p1 = ElCLib::Parameter(curve.circ, pa);
                             p2 = ElCLib::Parameter(curve.circ, pb);
                         }
+                        const Region* RA130 = regionById(rs, geom[ci].regA);
+                        const Region* RB130 = regionById(rs, geom[ci].regB);
+                        auto kindName130 = [](const Region* R) {
+                            if (!R) return "none";
+                            switch (R->type) {
+                            case SurfType::Plane: return "plane";
+                            case SurfType::Cylinder: return "cyl";
+                            case SurfType::Cone: return "cone";
+                            default: return "other";
+                            }
+                        };
                         std::fprintf(stderr,
-                                     "DIAG_130_MEFAIL ci=%d kind=%d full=%d nV=%zu "
-                                     "dA=%.6g dB=%.6g dist=%.6g p1=%.6g p2=%.6g "
-                                     "tolA=%.6g tolB=%.6g ia=%d ib=%d\n",
-                                     (int)ci, (int)curve.kind, (int)full, ch.meshVerts.size(),
+                                     "DIAG_130_MEFAIL ci=%d kind=%d full=%d closedLoop=%d nV=%zu "
+                                     "identic=%d sameVtxT=%d nMeshE=%zu vFront=%d vBack=%d "
+                                     "R=%.6g dA=%.6g dB=%.6g dist=%.6g p1=%.6g p2=%.6g "
+                                     "tolA=%.6g tolB=%.6g ia=%d ib=%d ridA=%d ridB=%d "
+                                     "kindA=%s kindB=%s snapCap=%.6g "
+                                     "vA=(%.5f,%.5f,%.5f) vB=(%.5f,%.5f,%.5f) "
+                                     "mA=(%.5f,%.5f,%.5f) mB=(%.5f,%.5f,%.5f) meshLen=%.6g "
+                                     "sA=(%.5f,%.5f,%.5f) sB=(%.5f,%.5f,%.5f) sTolA=%.6g\n",
+                                     (int)ci, (int)curve.kind, (int)full,
+                                     ch.closedLoop ? 1 : 0, ch.meshVerts.size(),
+                                     (identicLine || identicCirc) ? 1 : 0,
+                                     (diagTShapePtr(verts[(size_t)ia]) ==
+                                      diagTShapePtr(verts[(size_t)ib]))
+                                         ? 1
+                                         : 0,
+                                     ch.meshEdges.size(),
+                                     ch.meshVerts.empty() ? -1 : ch.meshVerts.front(),
+                                     ch.meshVerts.empty() ? -1 : ch.meshVerts.back(),
+                                     curve.kind == AnalyticCurve::Circ ? curve.circ.Radius() : 0.0,
                                      curveResidual(curve, pa), curveResidual(curve, pb),
                                      pa.Distance(pb), p1, p2, BRep_Tool::Tolerance(verts[(size_t)ia]),
-                                     BRep_Tool::Tolerance(verts[(size_t)ib]), ia, ib);
+                                     BRep_Tool::Tolerance(verts[(size_t)ib]), ia, ib,
+                                     geom[ci].regA, geom[ci].regB, kindName130(RA130),
+                                     kindName130(RB130), geom[ci].chainSnapCap, pa.X(), pa.Y(),
+                                     pa.Z(), pb.X(), pb.Y(), pb.Z(), pntOf(mv, ia).X(),
+                                     pntOf(mv, ia).Y(), pntOf(mv, ia).Z(), pntOf(mv, ib).X(),
+                                     pntOf(mv, ib).Y(), pntOf(mv, ib).Z(),
+                                     pntOf(mv, ia).Distance(pntOf(mv, ib)),
+                                     vsnap[(size_t)ia].p.X(), vsnap[(size_t)ia].p.Y(),
+                                     vsnap[(size_t)ia].p.Z(), vsnap[(size_t)ib].p.X(),
+                                     vsnap[(size_t)ib].p.Y(), vsnap[(size_t)ib].p.Z(),
+                                     vsnap[(size_t)ia].t);
                         }
                     }
                     if ((diagP2Enabled() || diagPlatesEnabled()) && gSeamFailFirst == 0 &&
