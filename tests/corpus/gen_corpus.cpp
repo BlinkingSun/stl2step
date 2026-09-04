@@ -453,7 +453,9 @@ FixtureResult buildS03() {
                       cylRec(4.0, {80, 15, 5}, {0, 0, 1}, 1, 0, true),
                       cylRec(4.0, {20, 45, 5}, {0, 0, 1}, 1, 0, true),
                       cylRec(4.0, {80, 45, 5}, {0, 0, 1}, 1, 0, true)};
-    sc.expectedRejects = {"coneNYI"};
+    // D-130-15(2): `expectedRejects: coneNYI` predates the cone (D-130-3);
+    // retired by that ruling. The 5 deg drafted hole is outside detector C's
+    // chamfer window, so whatever reject it carries is measured, not expected.
     return emitShape("S03", "100x60x10 plate with four R=4 holes + 5 deg drafted cone hole", plate,
                      0.2, 0.5, sc);
 }

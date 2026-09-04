@@ -1117,8 +1117,9 @@ def _infer_sidecar_codes(sid):
     elif "s11" in s:
         codes = ["filletConsensus"]
         forbid_origin = ["filletStrip"]
-    elif "cone" in s:
-        codes = ["coneNYI"]
+    # D-130-15(2): the "cone" name heuristic asserted a premise D-130-3 retired
+    # (chamfer cones are built since b50328c); boss_cone_chamfer's row was red
+    # for having SUCCEEDED. Retired by that ruling. Sphere stays (SphereNYI).
     elif "sphere" in s:
         codes = ["sphereNYI"]
     return codes, exactly, forbid_origin
