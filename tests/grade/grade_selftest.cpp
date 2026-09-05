@@ -6,6 +6,7 @@
 #include "stl_quant.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <clocale>
 #include <cmath>
@@ -63,6 +64,23 @@ std::string join(const std::string& a, const std::string& b) {
     char c = a.back();
     if (c == '/' || c == '\\') return a + b;
     return a + "/" + b;
+}
+
+std::string tmpRoot() {
+#ifdef _WIN32
+    const char* t = std::getenv("TEMP");
+    return t ? std::string(t) : std::string(".");
+#else
+    return "/tmp";
+#endif
+}
+
+void ensureDir(const std::string& p) {
+#ifdef _WIN32
+    _mkdir(p.c_str());
+#else
+    mkdir(p.c_str(), 0755);
+#endif
 }
 
 void silence() {
@@ -385,7 +403,7 @@ int syntheticTests(const std::string& corpus) {
     grade::GradeConfig cfg;
     cfg.skipVolume = true;
     cfg.quiet = true;
-    const std::string tmp = join(corpus, "_grade_synth");
+    const std::string tmp = join(tmpRoot(), "stl2step_grade_selftest");
 #ifdef _WIN32
     _mkdir(tmp.c_str());
 #else
@@ -523,7 +541,9 @@ int syntheticTests(const std::string& corpus) {
 
 int asciiTest(const std::string& corpus) {
     std::setlocale(LC_ALL, "C");
-    const std::string ascii = join(corpus, "_grade_s01_ascii.stl");
+    const std::string asciiDir = join(tmpRoot(), "stl2step_grade_selftest");
+    ensureDir(asciiDir);
+    const std::string ascii = join(asciiDir, "s01_ascii.stl");
     grade::Mesh mesh;
     std::string err;
     if (!grade::loadStl(join(corpus, "S01.stl"), mesh, err)) {
