@@ -125,6 +125,44 @@ void frameFromAxis(const Vec3& a, Vec3& u, Vec3& v) {
     v = cross(an, u);
 }
 
+double signedDist(const Vec3& v, const SurfParams& S) {
+    switch (S.cls) {
+        case SurfClass::Plane:
+            return dot(v - S.p0, S.n);
+        case SurfClass::Cylinder: {
+            const Vec3 w = v - S.p0;
+            const double ax = dot(w, S.n);
+            return norm(w - S.n * ax) - S.R;
+        }
+        case SurfClass::Cone: {
+            const double a = S.alpha;
+            const Vec3 u = v - S.apex;
+            const double ax = dot(u, S.n);
+            const double r = norm(u - S.n * ax);
+            return r * std::cos(a) - ax * std::sin(a);
+        }
+        case SurfClass::Sphere:
+            return norm(v - S.p0) - S.R;
+        case SurfClass::Torus: {
+            const Vec3 u = v - S.p0;
+            const double ax = dot(u, S.n);
+            const double r = norm(u - S.n * ax);
+            return std::sqrt((r - S.R) * (r - S.R) + ax * ax) - S.r;
+        }
+        default:
+            return 1e300;
+    }
+}
+
+double rssSigned(const Mesh& m, const std::vector<int>& verts, const SurfParams& S) {
+    double s = 0;
+    for (int vi : verts) {
+        const double r = signedDist(m.verts[static_cast<size_t>(vi)], S);
+        s += r * r;
+    }
+    return s;
+}
+
 bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, SurfParams& S) {
     const int nV = static_cast<int>(verts.size());
     if (nV < paramCount(c) + 1) return false;
@@ -145,47 +183,48 @@ bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, Surf
     }();
     const double dirTol = q / extent;
 
-    auto pack = [&](std::vector<double>& p) {
+    auto pack = [&](std::vector<double>& p, const SurfParams& T) {
         p.clear();
         switch (c) {
             case SurfClass::Cylinder:
-                p = {S.p0.x, S.p0.y, S.p0.z, S.n.x, S.n.y, S.n.z, S.R};
+                p = {T.p0.x, T.p0.y, T.p0.z, T.n.x, T.n.y, T.n.z, T.R};
                 break;
             case SurfClass::Cone:
-                p = {S.apex.x, S.apex.y, S.apex.z, S.n.x, S.n.y, S.n.z, S.alpha};
+                p = {T.apex.x, T.apex.y, T.apex.z, T.n.x, T.n.y, T.n.z, T.alpha};
                 break;
             case SurfClass::Sphere:
-                p = {S.p0.x, S.p0.y, S.p0.z, S.R};
+                p = {T.p0.x, T.p0.y, T.p0.z, T.R};
                 break;
             case SurfClass::Torus:
-                p = {S.p0.x, S.p0.y, S.p0.z, S.n.x, S.n.y, S.n.z, S.R, S.r};
+                p = {T.p0.x, T.p0.y, T.p0.z, T.n.x, T.n.y, T.n.z, T.R, T.r};
                 break;
             default:
                 break;
         }
     };
-    auto unpack = [&](const std::vector<double>& p) {
+    auto unpack = [&](const std::vector<double>& p, SurfParams& T) {
+        T.cls = c;
         switch (c) {
             case SurfClass::Cylinder:
-                S.p0 = {p[0], p[1], p[2]};
-                S.n = normalized(Vec3{p[3], p[4], p[5]});
-                S.p0 = footFromOrigin(S.p0, S.n);
-                S.R = std::fabs(p[6]);
+                T.p0 = {p[0], p[1], p[2]};
+                T.n = normalized(Vec3{p[3], p[4], p[5]});
+                T.p0 = footFromOrigin(T.p0, T.n);
+                T.R = std::fabs(p[6]);
                 break;
             case SurfClass::Cone:
-                S.apex = {p[0], p[1], p[2]};
-                S.n = normalized(Vec3{p[3], p[4], p[5]});
-                S.alpha = p[6];
+                T.apex = {p[0], p[1], p[2]};
+                T.n = normalized(Vec3{p[3], p[4], p[5]});
+                T.alpha = p[6];
                 break;
             case SurfClass::Sphere:
-                S.p0 = {p[0], p[1], p[2]};
-                S.R = std::fabs(p[3]);
+                T.p0 = {p[0], p[1], p[2]};
+                T.R = std::fabs(p[3]);
                 break;
             case SurfClass::Torus:
-                S.p0 = {p[0], p[1], p[2]};
-                S.n = normalized(Vec3{p[3], p[4], p[5]});
-                S.R = std::fabs(p[6]);
-                S.r = std::fabs(p[7]);
+                T.p0 = {p[0], p[1], p[2]};
+                T.n = normalized(Vec3{p[3], p[4], p[5]});
+                T.R = std::fabs(p[6]);
+                T.r = std::fabs(p[7]);
                 break;
             default:
                 break;
@@ -193,26 +232,32 @@ bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, Surf
     };
 
     std::vector<double> p;
-    pack(p);
+    pack(p, S);
     const int np = static_cast<int>(p.size());
     if (np == 0) return true;
     std::vector<double> r(static_cast<size_t>(nV)), J(static_cast<size_t>(nV * np));
     std::vector<double> p2 = p;
+    double lam = 1e-3;
+    double bestRss = rssSigned(m, verts, S);
+    SurfParams best = S;
     for (int it = 0; it < kMaxIters; ++it) {
-        unpack(p);
+        SurfParams cur;
+        unpack(p, cur);
         for (int i = 0; i < nV; ++i)
-            r[static_cast<size_t>(i)] = distToSurf(m.verts[static_cast<size_t>(verts[static_cast<size_t>(i)])], S);
+            r[static_cast<size_t>(i)] =
+                signedDist(m.verts[static_cast<size_t>(verts[static_cast<size_t>(i)])], cur);
+        const double fd = std::max(q, extent * 1e-8);
         for (int j = 0; j < np; ++j) {
             p2 = p;
-            p2[static_cast<size_t>(j)] += q;
-            unpack(p2);
+            p2[static_cast<size_t>(j)] += fd;
+            SurfParams T;
+            unpack(p2, T);
             for (int i = 0; i < nV; ++i) {
                 const double rp =
-                    distToSurf(m.verts[static_cast<size_t>(verts[static_cast<size_t>(i)])], S);
-                J[static_cast<size_t>(i * np + j)] = (rp - r[static_cast<size_t>(i)]) / q;
+                    signedDist(m.verts[static_cast<size_t>(verts[static_cast<size_t>(i)])], T);
+                J[static_cast<size_t>(i * np + j)] = (rp - r[static_cast<size_t>(i)]) / fd;
             }
         }
-        unpack(p);
         std::vector<double> JtJ(static_cast<size_t>(np * np), 0.0), Jtr(static_cast<size_t>(np), 0.0);
         for (int i = 0; i < nV; ++i) {
             for (int j = 0; j < np; ++j) {
@@ -222,20 +267,154 @@ bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, Surf
                         J[static_cast<size_t>(i * np + j)] * J[static_cast<size_t>(i * np + k)];
             }
         }
-        for (int j = 0; j < np; ++j) Jtr[static_cast<size_t>(j)] = -Jtr[static_cast<size_t>(j)];
+        for (int j = 0; j < np; ++j) {
+            Jtr[static_cast<size_t>(j)] = -Jtr[static_cast<size_t>(j)];
+            JtJ[static_cast<size_t>(j * np + j)] *= (1.0 + lam);
+        }
         std::vector<double> dp(static_cast<size_t>(np), 0.0);
-        if (!solveN(np, JtJ.data(), Jtr.data(), dp.data())) break;
+        if (!solveN(np, JtJ.data(), Jtr.data(), dp.data())) {
+            lam = std::min(lam * 10.0, 1e12);
+            if (lam >= 1e12) break;
+            continue;
+        }
+        std::vector<double> pTry = p;
         double maxStep = 0;
         for (int j = 0; j < np; ++j) {
-            p[static_cast<size_t>(j)] += dp[static_cast<size_t>(j)];
-            const bool dirP = (c != SurfClass::Sphere && (j == 3 || j == 4 || j == 5) && c != SurfClass::Plane);
+            pTry[static_cast<size_t>(j)] += dp[static_cast<size_t>(j)];
+            const bool dirP =
+                (c != SurfClass::Sphere && (j == 3 || j == 4 || j == 5) && c != SurfClass::Plane);
             const double tol = dirP ? dirTol : q;
             maxStep = std::max(maxStep, std::fabs(dp[static_cast<size_t>(j)]) / std::max(tol, q));
         }
-        if (maxStep <= 1.0) break;
+        SurfParams T;
+        unpack(pTry, T);
+        const double rss = rssSigned(m, verts, T);
+        if (rss <= bestRss) {
+            p.swap(pTry);
+            bestRss = rss;
+            best = T;
+            lam = std::max(lam * 0.1, 1e-12);
+            if (maxStep <= 1.0) break;
+        } else {
+            lam = std::min(lam * 10.0, 1e12);
+            if (lam >= 1e12) break;
+        }
     }
-    unpack(p);
+    S = best;
+    if (c == SurfClass::Cone) S.alpha = std::fabs(S.alpha);
     return true;
+}
+
+// SPEC §5.2 cone: 6 parameters (apex 3 + axis 2-DOF + α). A 3-component unit
+// axis is rank-deficient; the local (u,v) chart is the 2-DOF parameterisation.
+bool gaussNewtonCone(const Mesh& m, const std::vector<int>& verts, SurfParams& S) {
+    const int nV = static_cast<int>(verts.size());
+    if (nV < paramCount(SurfClass::Cone) + 1) return false;
+    const double q = m.q;
+    Vec3 mn = m.verts[static_cast<size_t>(verts[0])], mx = mn;
+    for (int vi : verts) {
+        const Vec3& p = m.verts[static_cast<size_t>(vi)];
+        mn.x = std::min(mn.x, p.x);
+        mn.y = std::min(mn.y, p.y);
+        mn.z = std::min(mn.z, p.z);
+        mx.x = std::max(mx.x, p.x);
+        mx.y = std::max(mx.y, p.y);
+        mx.z = std::max(mx.z, p.z);
+    }
+    const double extent = std::max(dist(mn, mx), q);
+    const double dirTol = q / extent;
+    Vec3 a = normalized(S.n);
+    Vec3 u, v;
+    frameFromAxis(a, u, v);
+    double p[6] = {S.apex.x, S.apex.y, S.apex.z, 0, 0, S.alpha};
+    auto apply = [&](const double* pp, SurfParams& T) {
+        T.cls = SurfClass::Cone;
+        T.apex = {pp[0], pp[1], pp[2]};
+        T.n = normalized(a + u * pp[3] + v * pp[4]);
+        T.alpha = pp[5];
+    };
+    auto rechart = [&]() {
+        a = normalized(S.n);
+        frameFromAxis(a, u, v);
+        p[0] = S.apex.x;
+        p[1] = S.apex.y;
+        p[2] = S.apex.z;
+        p[3] = 0;
+        p[4] = 0;
+        p[5] = S.alpha;
+    };
+    rechart();
+    double lam = 1e-3;
+    double bestRss = rssSigned(m, verts, S);
+    SurfParams best = S;
+    const int np = 6;
+    std::vector<double> r(static_cast<size_t>(nV)), J(static_cast<size_t>(nV * np));
+    for (int it = 0; it < kMaxIters; ++it) {
+        SurfParams cur;
+        apply(p, cur);
+        for (int i = 0; i < nV; ++i)
+            r[static_cast<size_t>(i)] =
+                signedDist(m.verts[static_cast<size_t>(verts[static_cast<size_t>(i)])], cur);
+        const double fd = std::max(q, extent * 1e-8);
+        for (int j = 0; j < np; ++j) {
+            double p2[6];
+            for (int k = 0; k < np; ++k) p2[k] = p[k];
+            p2[j] += fd;
+            SurfParams T;
+            apply(p2, T);
+            for (int i = 0; i < nV; ++i) {
+                const double rp =
+                    signedDist(m.verts[static_cast<size_t>(verts[static_cast<size_t>(i)])], T);
+                J[static_cast<size_t>(i * np + j)] = (rp - r[static_cast<size_t>(i)]) / fd;
+            }
+        }
+        std::vector<double> JtJ(static_cast<size_t>(np * np), 0.0), Jtr(static_cast<size_t>(np), 0.0);
+        for (int i = 0; i < nV; ++i) {
+            for (int j = 0; j < np; ++j) {
+                Jtr[static_cast<size_t>(j)] += J[static_cast<size_t>(i * np + j)] * r[static_cast<size_t>(i)];
+                for (int k = 0; k < np; ++k)
+                    JtJ[static_cast<size_t>(j * np + k)] +=
+                        J[static_cast<size_t>(i * np + j)] * J[static_cast<size_t>(i * np + k)];
+            }
+        }
+        for (int j = 0; j < np; ++j) {
+            Jtr[static_cast<size_t>(j)] = -Jtr[static_cast<size_t>(j)];
+            JtJ[static_cast<size_t>(j * np + j)] *= (1.0 + lam);
+        }
+        std::vector<double> dp(static_cast<size_t>(np), 0.0);
+        if (!solveN(np, JtJ.data(), Jtr.data(), dp.data())) {
+            lam = std::min(lam * 10.0, 1e12);
+            if (lam >= 1e12) break;
+            continue;
+        }
+        double pTry[6];
+        double maxStep = 0;
+        for (int j = 0; j < np; ++j) {
+            pTry[j] = p[j] + dp[static_cast<size_t>(j)];
+            const double tol = (j == 3 || j == 4 || j == 5) ? dirTol : q;
+            maxStep = std::max(maxStep, std::fabs(dp[static_cast<size_t>(j)]) / std::max(tol, q));
+        }
+        SurfParams T;
+        apply(pTry, T);
+        T.alpha = std::fabs(T.alpha);
+        const double rss = rssSigned(m, verts, T);
+        if (rss <= bestRss) {
+            for (int j = 0; j < np; ++j) p[j] = pTry[j];
+            bestRss = rss;
+            best = T;
+            S = T;
+            rechart();
+            lam = std::max(lam * 0.1, 1e-12);
+            if (maxStep <= 1.0) break;
+        } else {
+            lam = std::min(lam * 10.0, 1e12);
+            if (lam >= 1e12) break;
+        }
+    }
+    S = best;
+    S.alpha = std::fabs(S.alpha);
+    S.n = normalized(S.n);
+    return S.alpha > 0.0 && S.alpha < M_PI * 0.5;
 }
 
 bool fitCylinder(const Mesh& m, const std::vector<int>& region, const std::vector<int>& verts,
@@ -306,6 +485,41 @@ bool fitSphere(const Mesh& m, const std::vector<int>& verts, SurfParams& S, bool
     return S.R > 0.0;
 }
 
+bool seedConeFromAxis(const Mesh& m, const std::vector<int>& verts, Vec3 a, SurfParams& T) {
+    a = normalized(a);
+    if (!(norm2(a) > 0.0) || verts.empty()) return false;
+    Vec3 c{};
+    for (int vi : verts) c = c + m.verts[static_cast<size_t>(vi)];
+    c = c * (1.0 / static_cast<double>(verts.size()));
+    // SPEC §5.2: apex from least squares on ρ = (apex-offset)·tanα, i.e. a
+    // line in the (axial, radial) plane of the vertices — not facet normals.
+    double AtA00 = 0, AtA01 = 0, AtA11 = 0, Atb0 = 0, Atb1 = 0;
+    int n = 0;
+    for (int vi : verts) {
+        const Vec3 w = m.verts[static_cast<size_t>(vi)] - c;
+        const double ax = dot(w, a);
+        const double rho = norm(w - a * ax);
+        AtA00 += 1.0;
+        AtA01 += ax;
+        AtA11 += ax * ax;
+        Atb0 += rho;
+        Atb1 += rho * ax;
+        ++n;
+    }
+    if (n < 3) return false;
+    const double det = AtA00 * AtA11 - AtA01 * AtA01;
+    if (!(std::fabs(det) > 0.0)) return false;
+    const double p0 = (AtA11 * Atb0 - AtA01 * Atb1) / det;
+    const double p1 = (AtA00 * Atb1 - AtA01 * Atb0) / det;
+    if (!(std::fabs(p1) > 0.0)) return false;
+    T.cls = SurfClass::Cone;
+    T.n = a;
+    T.alpha = std::atan(std::fabs(p1));
+    const double tApex = -p0 / p1;
+    T.apex = c + a * tApex;
+    return T.alpha > 0.0 && T.alpha < M_PI * 0.5;
+}
+
 bool fitCone(const Mesh& m, const std::vector<int>& region, const std::vector<int>& verts,
              SurfParams& S, bool refine) {
     // Cone of normals: n · â = sin(α) (constant). Axis is the smallest
@@ -355,94 +569,35 @@ bool fitCone(const Mesh& m, const std::vector<int>& region, const std::vector<in
         if (eval[2] < eval[imin]) imin = 2;
         return normalized(Vec3{evec[0][imin], evec[1][imin], evec[2][imin]});
     };
-    Vec3 c{};
-    for (int vi : verts) c = c + m.verts[static_cast<size_t>(vi)];
-    c = c * (1.0 / static_cast<double>(verts.size()));
-    auto seedAxis = [&](Vec3 a, SurfParams& T) -> double {
-        a = normalized(a);
-        if (!(norm2(a) > 0.0)) return 1e300;
-        if (dot(a, nmean) < 0.0) a = -a;
-        double meanAbsDot = 0;
-        for (int t : region)
-            meanAbsDot += std::fabs(dot(m.tris[static_cast<size_t>(t)].n, a));
-        meanAbsDot /= static_cast<double>(region.size());
-        double alpha = std::asin(clamp1(meanAbsDot));
-        if (alpha < 0.0) alpha = -alpha;
-        double meanAx = 0, meanRho = 0;
-        for (int vi : verts) {
-            const Vec3 u = m.verts[static_cast<size_t>(vi)] - c;
-            const double ax = dot(u, a);
-            meanAx += ax;
-            meanRho += norm(u - a * ax);
-        }
-        meanAx /= static_cast<double>(verts.size());
-        meanRho /= static_cast<double>(verts.size());
-        const double ta = std::tan(std::max(alpha, m.q));
-        const double along = (ta > 0.0) ? (meanRho / ta) : 0.0;
-        auto evalApex = [&](const Vec3& apex) {
-            SurfParams U;
-            U.cls = SurfClass::Cone;
-            U.n = a;
-            U.alpha = alpha;
-            U.apex = apex;
-            double mx = 0;
-            for (int vi : verts) mx = std::max(mx, distToSurf(m.verts[static_cast<size_t>(vi)], U));
-            return std::make_pair(mx, U);
-        };
-        const auto p1 = evalApex(c + a * meanAx - a * along);
-        const auto p2 = evalApex(c + a * meanAx + a * along);
-        auto p = (p1.first <= p2.first) ? p1 : p2;
-        // 1-D search of apex along the axis (extent-scaled; not a tolerance).
-        Vec3 mn{1e300, 1e300, 1e300}, mxb{-1e300, -1e300, -1e300};
-        for (int vi : verts) {
-            const Vec3& q = m.verts[static_cast<size_t>(vi)];
-            mn.x = std::min(mn.x, q.x);
-            mn.y = std::min(mn.y, q.y);
-            mn.z = std::min(mn.z, q.z);
-            mxb.x = std::max(mxb.x, q.x);
-            mxb.y = std::max(mxb.y, q.y);
-            mxb.z = std::max(mxb.z, q.z);
-        }
-        const double ext = std::max(dist(mn, mxb), m.q);
-        const Vec3 A0 = c + a * meanAx;
-        double bestT = dot(p.second.apex - A0, a);
-        double bestMx = p.first;
-        const double span = std::max(ext * 20.0, along * 4.0);
-        for (int k = 0; k <= 40; ++k) {
-            const double t = -span + (2.0 * span) * (static_cast<double>(k) / 40.0);
-            const auto pk = evalApex(A0 + a * t);
-            if (pk.first < bestMx) {
-                bestMx = pk.first;
-                bestT = t;
-            }
-        }
-        T = evalApex(A0 + a * bestT).second;
-        return bestMx;
+    auto maxAbs = [&](const SurfParams& T) {
+        double mx = 0;
+        for (int vi : verts) mx = std::max(mx, distToSurf(m.verts[static_cast<size_t>(vi)], T));
+        return mx;
     };
     const Vec3 cands[5] = {axisOf(Cov), axisOf(NNT), Vec3{0, 0, 1}, Vec3{1, 0, 0}, Vec3{0, 1, 0}};
     bool any = false;
     double best = 1e300;
-    for (const Vec3& ax : cands) {
-        SurfParams T;
-        const double mx = seedAxis(ax, T);
-        if (mx < best) {
-            best = mx;
-            S = T;
-            any = true;
+    for (const Vec3& ax0 : cands) {
+        for (int sgn = 0; sgn < 2; ++sgn) {
+            Vec3 ax = (sgn == 0) ? ax0 : (ax0 * -1.0);
+            if (dot(ax, nmean) < 0.0) ax = ax * -1.0;
+            SurfParams T;
+            if (!seedConeFromAxis(m, verts, ax, T)) continue;
+            const double mx = maxAbs(T);
+            if (!any || mx < best) {
+                any = true;
+                best = mx;
+                S = T;
+            }
         }
     }
     if (!any) return false;
     if (refine) {
-        auto coneMax = [&](const SurfParams& T) {
-            double mx = 0;
-            for (int vi : verts) mx = std::max(mx, distToSurf(m.verts[static_cast<size_t>(vi)], T));
-            return mx;
-        };
         const SurfParams seed = S;
-        const double r0 = coneMax(S);
-        gaussNewton(m, verts, SurfClass::Cone, S);
+        const double r0 = maxAbs(S);
+        gaussNewtonCone(m, verts, S);
         S.alpha = std::fabs(S.alpha);
-        if (coneMax(S) > r0) S = seed;
+        if (!(S.alpha > 0.0 && S.alpha < M_PI * 0.5) || maxAbs(S) > r0) S = seed;
     }
     S.alpha = std::fabs(S.alpha);
     return S.alpha > 0.0 && S.alpha < M_PI * 0.5;
@@ -708,6 +863,40 @@ bool cylinderNormalsOk(const Mesh& m, const std::vector<int>& triIds, const Surf
     return true;
 }
 
+// SPEC §5.3 analog for spheres: the region's normals must span ℝ³. A fillet
+// band or plane cluster is rank ≤ 2. Noise floor is Σ area·sin²(θ_q) — no
+// size constant. Emit-only (a 2-tri seed is rank 2).
+bool sphereNormalsSpan(const Mesh& m, const std::vector<int>& triIds) {
+    double G[3][3] = {};
+    double noise = 0;
+    double wsum = 0;
+    for (int t : triIds) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        const double w = tr.area;
+        wsum += w;
+        const Vec3& n = tr.n;
+        G[0][0] += w * n.x * n.x;
+        G[0][1] += w * n.x * n.y;
+        G[0][2] += w * n.x * n.z;
+        G[1][1] += w * n.y * n.y;
+        G[1][2] += w * n.y * n.z;
+        G[2][2] += w * n.z * n.z;
+        const double s = std::sin(tr.thetaQ);
+        noise += w * s * s;
+    }
+    G[1][0] = G[0][1];
+    G[2][0] = G[0][2];
+    G[2][1] = G[1][2];
+    if (!(wsum > 0.0)) return false;
+    double eval[3];
+    double evec[3][3];
+    eigen3(G, eval, evec);
+    double lmin = eval[0];
+    if (eval[1] < lmin) lmin = eval[1];
+    if (eval[2] < lmin) lmin = eval[2];
+    return lmin > noise;
+}
+
 bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
     // Growth admission: vertex-on-surface (and the plane normal clause). Size
     // gates are applied only when a region is emitted (certifies).
@@ -736,6 +925,7 @@ bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const
     uniqueVerts(m, region, verts, st);
     if (static_cast<int>(verts.size()) < paramCount(c) + 1) return false;
     if (!admits(m, region, c, S)) return false;
+    if (c == SurfClass::Sphere && !sphereNormalsSpan(m, region)) return false;
     double maxR = 0;
     for (int vi : verts) maxR = std::max(maxR, distToSurf(m.verts[static_cast<size_t>(vi)], S));
     double maxNd = 0;
@@ -1073,7 +1263,7 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
     }
     std::sort(cand.begin(), cand.end());
     cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
-    if (reverse) std::reverse(cand.begin(), cand.end());
+    (void)reverse;  // neighbour order is always ascending (SPEC §5.4)
     for (int u : cand) {
         std::vector<int> R2 = R;
         R2.push_back(u);
@@ -1162,7 +1352,7 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
     // seed with each unclaimed neighbour (ascending, or reversed).
     std::vector<int> nbrs = m.adj[static_cast<size_t>(seed)];
     std::sort(nbrs.begin(), nbrs.end());
-    if (reverse) std::reverse(nbrs.begin(), nbrs.end());
+    (void)reverse;
     for (int u : nbrs) {
         if (claimed[static_cast<size_t>(u)]) continue;
         if (c == SurfClass::Cylinder || c == SurfClass::Cone || c == SurfClass::Torus) {
@@ -1308,14 +1498,19 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
             o.id = static_cast<int>(out.oracles.size());
             out.oracles.push_back(std::move(o));
         }
-        // Claim pass (islands)
+        // Claim pass (islands). Triangle order is always ascending — seed
+        // reversal is a growth-order probe; SPEC §5.4's claim/merge must be
+        // a canonical maximal partition (area desc, then min welded-vertex
+        // index — never input index / region id).
         bool claimChanged = true;
         while (claimChanged) {
             claimChanged = false;
-            for (int u : seedList()) {
+            for (int u = 0; u < static_cast<int>(m.tris.size()); ++u) {
                 if (claimed[static_cast<size_t>(u)]) continue;
                 int best = -1;
                 double bestResid = 1e300;
+                double bestArea = -1;
+                int bestMinV = 0;
                 SurfParams bestS;
                 for (int ri = 0; ri < static_cast<int>(out.oracles.size()); ++ri) {
                     Oracle& Rk = out.oracles[static_cast<size_t>(ri)];
@@ -1323,11 +1518,19 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
                     std::vector<int> R2 = Rk.tris;
                     R2.push_back(u);
                     SurfParams S2;
-                    if (!fitClass(m, R2, c, S2)) continue;
+                    if (!fitClassEx(m, R2, c, S2, false)) continue;
                     double maxR = 0;
                     if (!certifies(m, R2, c, S2, &maxR)) continue;
-                    if (maxR < bestResid || (maxR == bestResid && (best < 0 || ri < best))) {
+                    const double area = regionArea(m, Rk.tris);
+                    const int mv = minVertOf(m, Rk.tris);
+                    const bool better =
+                        (maxR < bestResid) ||
+                        (maxR == bestResid && area > bestArea) ||
+                        (maxR == bestResid && area == bestArea && (best < 0 || mv < bestMinV));
+                    if (better) {
                         bestResid = maxR;
+                        bestArea = area;
+                        bestMinV = mv;
                         best = ri;
                         bestS = S2;
                     }
@@ -1342,27 +1545,41 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
                 }
             }
         }
-        // Merge pass
+        // Merge pass: oracles of this class in canonical order (area desc,
+        // min welded-vertex), then first certifying pair. Deterministic
+        // without an all-pairs scan each round (F12).
         bool merged = true;
         while (merged) {
             merged = false;
-            for (int i = 0; i < static_cast<int>(out.oracles.size()) && !merged; ++i) {
-                if (out.oracles[static_cast<size_t>(i)].cls != c) continue;
-                for (int j = i + 1; j < static_cast<int>(out.oracles.size()); ++j) {
-                    if (out.oracles[static_cast<size_t>(j)].cls != c) continue;
+            std::vector<int> idx;
+            for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i)
+                if (out.oracles[static_cast<size_t>(i)].cls == c) idx.push_back(i);
+            std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+                const double wa = regionArea(m, out.oracles[static_cast<size_t>(a)].tris);
+                const double wb = regionArea(m, out.oracles[static_cast<size_t>(b)].tris);
+                if (wa != wb) return wa > wb;
+                return minVertOf(m, out.oracles[static_cast<size_t>(a)].tris) <
+                       minVertOf(m, out.oracles[static_cast<size_t>(b)].tris);
+            });
+            for (size_t ii = 0; ii < idx.size() && !merged; ++ii) {
+                const int i = idx[ii];
+                for (size_t jj = ii + 1; jj < idx.size(); ++jj) {
+                    const int j = idx[jj];
                     std::vector<int> U = out.oracles[static_cast<size_t>(i)].tris;
                     U.insert(U.end(), out.oracles[static_cast<size_t>(j)].tris.begin(),
                              out.oracles[static_cast<size_t>(j)].tris.end());
                     SurfParams S;
-                    if (!fitClass(m, U, c, S)) continue;
+                    if (!fitClassEx(m, U, c, S, false)) continue;
                     if (!certifies(m, U, c, S)) continue;
-                    out.oracles[static_cast<size_t>(i)].tris.swap(U);
-                    out.oracles[static_cast<size_t>(i)].S = S;
-                    for (int t : out.oracles[static_cast<size_t>(j)].tris)
-                        out.owner[static_cast<size_t>(t)] = i;
-                    out.oracles.erase(out.oracles.begin() + j);
+                    const int lo = std::min(i, j), hi = std::max(i, j);
+                    out.oracles[static_cast<size_t>(lo)].tris.swap(U);
+                    out.oracles[static_cast<size_t>(lo)].S = S;
+                    for (int t : out.oracles[static_cast<size_t>(hi)].tris)
+                        out.owner[static_cast<size_t>(t)] = lo;
+                    out.oracles.erase(out.oracles.begin() + hi);
                     for (int t = 0; t < static_cast<int>(m.tris.size()); ++t) {
-                        if (out.owner[static_cast<size_t>(t)] > j) --out.owner[static_cast<size_t>(t)];
+                        if (out.owner[static_cast<size_t>(t)] > hi)
+                            --out.owner[static_cast<size_t>(t)];
                     }
                     for (int k = 0; k < static_cast<int>(out.oracles.size()); ++k)
                         out.oracles[static_cast<size_t>(k)].id = k;
@@ -1507,6 +1724,19 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
     }
 
     assignFeatureIds(m, out);
+    // Canonical oracle order: area desc, then featureId (SPEC §5.4 / §7.2).
+    // Seed order must not leak into assignment ties.
+    std::sort(out.oracles.begin(), out.oracles.end(), [](const Oracle& a, const Oracle& b) {
+        if (a.w != b.w) return a.w > b.w;
+        if (a.featureId != b.featureId) return a.featureId < b.featureId;
+        return a.minVertIndex < b.minVertIndex;
+    });
+    out.owner.assign(m.tris.size(), -1);
+    for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i) {
+        out.oracles[static_cast<size_t>(i)].id = i;
+        for (int t : out.oracles[static_cast<size_t>(i)].tris)
+            out.owner[static_cast<size_t>(t)] = i;
+    }
 }
 
 }  // namespace grade
