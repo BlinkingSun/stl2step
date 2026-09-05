@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +88,8 @@
 #include <IntAna_QuadQuadGeo.hxx>
 #include <IntAna_ResultType.hxx>
 #include <Precision.hxx>
+#include <math.hxx>
+#include <math_Vector.hxx>
 #include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Face.hxx>
 #include <Standard_Failure.hxx>
@@ -104,11 +107,14 @@
 #include <TopoDS_Shell.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <TopoDS_Wire.hxx>
+#include <gp.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cone.hxx>
 #include <gp_Cylinder.hxx>
+#include <gp_Sphere.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Dir2d.hxx>
 #include <gp_Vec2d.hxx>
@@ -12694,6 +12700,369 @@ bool regionShippedAnalytic(const Region& r, const std::vector<char>& exploded) {
            r.builtAs == BuiltAs::TwoHalves;
 }
 
+// ---------------------------------------------------------------------------
+// D-140-10 / SPEC-volid — volume-attribution identity (diag-only, default off).
+//   v(F) = (1/3) INT_F r·n̂ dA = (1/3) [ k A(F) + p · N(F) ]
+// Printed under STL2STEP_VOLID.  unset/0 = no stderr; 1 = CLASS+SUM; 2 = +row.
+// Never read from product. Never edits faceVolumeContribution.
+// ---------------------------------------------------------------------------
+int volidLevel() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = std::getenv("STL2STEP_VOLID");
+        if (!e || !*e || e[0] == '0') cached = 0;
+        else cached = std::atoi(e);
+    }
+    return cached;
+}
+
+gp_XYZ edgeMomentRxDr(const TopoDS_Edge& e) {
+    BRepAdaptor_Curve bc(e);
+    const double tFirst = bc.FirstParameter(), tLast = bc.LastParameter();
+    const bool rev = (e.Orientation() == TopAbs_REVERSED);
+    const double t0 = rev ? tLast : tFirst;
+    const double t1 = rev ? tFirst : tLast;
+    if (bc.GetType() == GeomAbs_Line) {
+        const gp_XYZ a = bc.Value(t0).XYZ(), b = bc.Value(t1).XYZ();
+        return a.Crossed(b);
+    }
+    if (bc.GetType() == GeomAbs_Circle) {
+        const gp_Circ ci = bc.Circle();
+        const gp_XYZ C = ci.Location().XYZ();
+        const gp_XYZ X = ci.Position().XDirection().XYZ();
+        const gp_XYZ Y = ci.Position().YDirection().XYZ();
+        const gp_XYZ Z = X.Crossed(Y);
+        const double R = ci.Radius();
+        const gp_XYZ dRho =
+            X * (std::cos(t1) - std::cos(t0)) + Y * (std::sin(t1) - std::sin(t0));
+        return C.Crossed(dRho) * R + Z * (R * R * (t1 - t0));
+    }
+    const int nNative = bc.NbIntervals(GeomAbs_C1);
+    const int nInt = nNative > 0 ? nNative : 1;
+    TColStd_Array1OfReal cuts(1, nInt + 1);
+    if (nNative > 0) bc.Intervals(cuts, GeomAbs_C1);
+    else {
+        cuts(1) = tFirst;
+        cuts(2) = tLast;
+    }
+    std::vector<double> knots;
+    knots.reserve((size_t)nInt + 2);
+    knots.push_back(t0);
+    const double lo = std::min(t0, t1), hi = std::max(t0, t1);
+    for (int i = 1; i <= nInt + 1; ++i) {
+        const double t = cuts(i);
+        if (t > lo && t < hi) knots.push_back(t);
+    }
+    knots.push_back(t1);
+    if (t1 >= t0) std::sort(knots.begin(), knots.end());
+    else std::sort(knots.begin(), knots.end(), [](double a, double b) { return a > b; });
+    knots.erase(std::unique(knots.begin(), knots.end()), knots.end());
+    const int nSpan = (int)knots.size() - 1;
+    if (nSpan <= 0) return gp_XYZ(0, 0, 0);
+
+    const int gmax = math::GaussPointsMax();
+    gp_XYZ prev(0, 0, 0), acc(0, 0, 0);
+    int order = 8;
+    for (;;) {
+        if (order > gmax) order = gmax;
+        math_Vector gx(1, order), gw(1, order);
+        math::GaussPoints(order, gx);
+        math::GaussWeights(order, gw);
+        acc = gp_XYZ(0, 0, 0);
+        for (int s = 0; s < nSpan; ++s) {
+            const double a = knots[(size_t)s], b = knots[(size_t)s + 1];
+            const double hm = 0.5 * (b - a), mid = 0.5 * (a + b);
+            for (int i = 1; i <= order; ++i) {
+                gp_Pnt P;
+                gp_Vec D1;
+                bc.D1(mid + hm * gx(i), P, D1);
+                acc += P.XYZ().Crossed(D1.XYZ()) * (gw(i) * hm);
+            }
+        }
+        const double mag = acc.Modulus();
+        const double ulp = (double)(nSpan * order + 1) * DBL_EPSILON * mag;
+        if (order > 8 && (acc - prev).Modulus() <= ulp) return acc;
+        prev = acc;
+        if (order >= gmax) break;
+        order *= 2;
+    }
+    return acc;
+}
+
+gp_XYZ faceVectorArea(const TopoDS_Face& f) {
+    gp_XYZ N(0, 0, 0);
+    TopoDS_Face fw = f;
+    fw.Orientation(TopAbs_FORWARD);
+    for (TopExp_Explorer we(fw, TopAbs_WIRE); we.More(); we.Next()) {
+        for (BRepTools_WireExplorer ex(TopoDS::Wire(we.Current()), fw); ex.More(); ex.Next())
+            N += edgeMomentRxDr(ex.Current());
+    }
+    N *= 0.5;
+    if (f.Orientation() == TopAbs_REVERSED) N.Reverse();
+    return N;
+}
+
+bool faceConstK(const TopoDS_Face& f, const gp_XYZ& p, double& k) {
+    BRepAdaptor_Surface sa(f, Standard_False);
+    const double u = 0.5 * (sa.FirstUParameter() + sa.LastUParameter());
+    const double v = 0.5 * (sa.FirstVParameter() + sa.LastVParameter());
+    gp_Pnt P;
+    gp_Vec Du, Dv;
+    sa.D1(u, v, P, Du, Dv);
+    gp_Vec n = Du.Crossed(Dv);
+    if (n.Magnitude() <= gp::Resolution()) return false;
+    n.Normalize();
+    if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+    k = (P.XYZ() - p).Dot(n.XYZ());
+    return true;
+}
+
+double faceVolExact(const TopoDS_Face& f, int* unsupported) {
+    if (f.IsNull()) return 0.0;
+    try {
+        BRepAdaptor_Surface sa(f, Standard_False);
+        GProp_GProps sp;
+        BRepGProp::SurfaceProperties(f, sp, Precision::Confusion());
+        const double A = sp.Mass();
+        const gp_XYZ c = sp.CentreOfMass().XYZ();
+        switch (sa.GetType()) {
+            case GeomAbs_Plane: {
+                gp_Dir n = sa.Plane().Axis().Direction();
+                if (f.Orientation() == TopAbs_REVERSED) n.Reverse();
+                return c.Dot(n.XYZ()) * A / 3.0;
+            }
+            case GeomAbs_Cylinder: {
+                const gp_Cylinder cy = sa.Cylinder();
+                const double R = cy.Radius();
+                const gp_XYZ p = cy.Position().Location().XYZ();
+                const gp_XYZ ax = cy.Position().Direction().XYZ();
+                double k = 0;
+                if (!faceConstK(f, p, k)) {
+                    if (unsupported) (*unsupported)++;
+                    return 0.0;
+                }
+                gp_XYZ d = c - p;
+                d -= ax * d.Dot(ax);
+                const gp_XYZ N = d * (k * A / (R * R));
+                return (k * A + p.Dot(N)) / 3.0;
+            }
+            case GeomAbs_Sphere: {
+                const gp_Sphere sp2 = sa.Sphere();
+                const double R = sp2.Radius();
+                const gp_XYZ p = sp2.Location().XYZ();
+                double k = 0;
+                if (!faceConstK(f, p, k)) {
+                    if (unsupported) (*unsupported)++;
+                    return 0.0;
+                }
+                const gp_XYZ N = (c - p) * (k * A / (R * R));
+                return (k * A + p.Dot(N)) / 3.0;
+            }
+            case GeomAbs_Cone: {
+                const gp_Cone co = sa.Cone();
+                const gp_XYZ p = co.Position().Location().XYZ();
+                double k = 0;
+                if (!faceConstK(f, p, k)) {
+                    if (unsupported) (*unsupported)++;
+                    return 0.0;
+                }
+                const gp_XYZ N = faceVectorArea(f);
+                return (k * A + p.Dot(N)) / 3.0;
+            }
+            default:
+                if (unsupported) (*unsupported)++;
+                return 0.0;
+        }
+    } catch (const Standard_Failure&) {
+        if (unsupported) (*unsupported)++;
+        return 0.0;
+    }
+}
+
+double faceVolContour(const TopoDS_Face& f, int* unsupported) {
+    if (f.IsNull()) return 0.0;
+    try {
+        BRepAdaptor_Surface sa(f, Standard_False);
+        gp_XYZ p(0, 0, 0);
+        switch (sa.GetType()) {
+            case GeomAbs_Plane: p = sa.Plane().Location().XYZ(); break;
+            case GeomAbs_Cylinder: p = sa.Cylinder().Position().Location().XYZ(); break;
+            case GeomAbs_Sphere: p = sa.Sphere().Location().XYZ(); break;
+            case GeomAbs_Cone: p = sa.Cone().Position().Location().XYZ(); break;
+            default:
+                if (unsupported) (*unsupported)++;
+                return 0.0;
+        }
+        double k = 0;
+        if (!faceConstK(f, p, k)) {
+            if (unsupported) (*unsupported)++;
+            return 0.0;
+        }
+        GProp_GProps sp;
+        BRepGProp::SurfaceProperties(f, sp, Precision::Confusion());
+        const gp_XYZ N = faceVectorArea(f);
+        return (k * sp.Mass() + p.Dot(N)) / 3.0;
+    } catch (const Standard_Failure&) {
+        if (unsupported) (*unsupported)++;
+        return 0.0;
+    }
+}
+
+const char* volidClassName(const RegionSet& rs, int rid, const std::vector<char>& eprimeFill,
+                           const std::vector<char>& exploded) {
+    if (rid < 0) return "facet";
+    if ((size_t)rid < eprimeFill.size() && eprimeFill[(size_t)rid]) return "fill";
+    if (regionExploded(exploded, rid)) return "exploded";
+    const Region* r = regionById(rs, rid);
+    if (!r) return "facet";
+    switch (r->type) {
+        case SurfType::Plane: return "plane";
+        case SurfType::Cylinder: return "cylinder";
+        case SurfType::Cone: return "cone";
+        case SurfType::Sphere: return "sphere";
+        case SurfType::Torus: return "torus";
+    }
+    return "other";
+}
+
+void dumpVolAttrib(const char* site, const MeshView& mv, const RegionSet& rs,
+                   const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                   const std::vector<char>& eprimeFill, const std::vector<char>& exploded) {
+    if (volidLevel() <= 0) return;
+    const int lvl = volidLevel();
+    TopoDS_Shell probe;
+    BRep_Builder pb;
+    pb.MakeShell(probe);
+    int nNull = 0;
+    for (const auto& f : built) {
+        if (f.IsNull()) {
+            nNull++;
+            continue;
+        }
+        pb.Add(probe, f);
+    }
+    double shellVol = 0;
+    try {
+        GProp_GProps g;
+        BRepGProp::VolumeProperties(probe, g, Precision::Confusion());
+        shellVol = g.Mass();
+    } catch (const Standard_Failure&) {
+    }
+
+    struct Bucket {
+        double vPcurve = 0, vContour = 0, vChord = 0;
+        int nFace = 0, nTri = 0;
+    };
+    std::map<int, Bucket> B;
+    std::map<std::string, Bucket> C;
+    double sumPcurve = 0, sumContour = 0, sumAbs = 0;
+    int nUnsup = 0, nTerm = 0, nFaceAccounted = 0;
+    for (size_t fi = 0; fi < built.size(); fi++) {
+        const int rid = fi < builtRid.size() ? builtRid[fi] : -1;
+        int uExact = 0, uContour = 0;
+        const double vp = faceVolExact(built[fi], &uExact);
+        const double vc = faceVolContour(built[fi], &uContour);
+        if (uExact || uContour) nUnsup++;
+        Bucket& bk = B[rid];
+        bk.vPcurve += vp;
+        bk.vContour += vc;
+        bk.nFace++;
+        Bucket& ck = C[volidClassName(rs, rid, eprimeFill, exploded)];
+        ck.vPcurve += vp;
+        ck.vContour += vc;
+        ck.nFace++;
+        sumPcurve += vp;
+        sumContour += vc;
+        sumAbs += std::fabs(vp);
+        nTerm++;
+        nFaceAccounted++;
+    }
+    std::vector<int> cover(mv.nTri, 0);
+    for (const Region& r : rs.regions) {
+        Bucket& bk = B[r.id];
+        bk.vChord += regionChordVol(mv, r);
+        bk.nTri += (int)r.tris.size();
+        Bucket& ck = C[volidClassName(rs, r.id, eprimeFill, exploded)];
+        ck.vChord += regionChordVol(mv, r);
+        ck.nTri += (int)r.tris.size();
+        for (int t : r.tris)
+            if (t >= 0 && (size_t)t < mv.nTri) cover[(size_t)t]++;
+    }
+    for (size_t k = 0; k < mv.nTri; k++) {
+        const int rid = (k < rs.triRegion.size()) ? rs.triRegion[k] : -1;
+        if (rid >= 0) continue;
+        cover[k]++;
+        B[-1].vChord += meshTriChordVol(mv, (int)k);
+        B[-1].nTri++;
+        C["facet"].vChord += meshTriChordVol(mv, (int)k);
+        C["facet"].nTri++;
+    }
+    int nUncovered = 0, nDouble = 0;
+    for (size_t k = 0; k < mv.nTri; k++) {
+        if (cover[k] == 0) nUncovered++;
+        else if (cover[k] > 1) nDouble++;
+    }
+    double sumChord = 0;
+    for (const auto& kv : B) sumChord += kv.second.vChord;
+    const double meshVol = meshViewVolume(mv);
+    const int nFaceUnaccounted = (int)built.size() - nFaceAccounted;
+
+    if (lvl >= 2) {
+        for (const auto& kv : B)
+            std::fprintf(stderr,
+                         "DIAG_VOLID row site=%s rid=%d class=%s nFace=%d nTri=%d "
+                         "vPcurve=%.9g vContour=%.9g vChord=%.9g sharePcurve=%.9g "
+                         "shareContour=%.9g\n",
+                         site, kv.first,
+                         volidClassName(rs, kv.first, eprimeFill, exploded),
+                         kv.second.nFace, kv.second.nTri, kv.second.vPcurve,
+                         kv.second.vContour, kv.second.vChord,
+                         kv.second.vPcurve - kv.second.vChord,
+                         kv.second.vContour - kv.second.vChord);
+    }
+    for (const auto& kv : C)
+        std::fprintf(stderr,
+                     "DIAG_VOLID_CLASS site=%s class=%s nFace=%d nTri=%d "
+                     "vPcurve=%.9g vContour=%.9g vChord=%.9g sharePcurve=%.9g "
+                     "shareContour=%.9g\n",
+                     site, kv.first.c_str(), kv.second.nFace, kv.second.nTri,
+                     kv.second.vPcurve, kv.second.vContour, kv.second.vChord,
+                     kv.second.vPcurve - kv.second.vChord,
+                     kv.second.vContour - kv.second.vChord);
+
+    const double chordResid = sumChord - meshVol;
+    const double residPcurve = sumPcurve - shellVol;
+    const double residContour = sumContour - shellVol;
+    const double ulpSum = (double)(nTerm + 1) * DBL_EPSILON * sumAbs;
+    const double quadSup = Precision::Confusion() * sumAbs;
+    const double width = std::fabs(sumPcurve - sumContour);
+    const double lo = std::min(sumPcurve, sumContour) - ulpSum - quadSup;
+    const double hi = std::max(sumPcurve, sumContour) + ulpSum + quadSup;
+    const double denom = std::fabs(shellVol) > 0.0 ? std::fabs(shellVol)
+                       : (std::fabs(meshVol) > 0.0 ? std::fabs(meshVol) : 0.0);
+    const double relBest =
+        denom > 0.0
+            ? std::min(std::fabs(residPcurve), std::fabs(residContour)) / denom
+            : 0.0;
+    const int closesA = (nUncovered == 0 && nDouble == 0 && nFaceUnaccounted == 0 &&
+                         std::fabs(chordResid) <= ulpSum)
+                            ? 1
+                            : 0;
+    const int closesB = (nUnsup == 0 && lo <= shellVol && shellVol <= hi) ? 1 : 0;
+    const int closes = (closesA && closesB) ? 1 : 0;
+
+    std::fprintf(stderr,
+                 "DIAG_VOLID_SUM site=%s nFace=%d nNull=%d nUnsup=%d nTri=%d "
+                 "uncoveredTri=%d doubleTri=%d meshVol=%.10g sumChord=%.10g "
+                 "chordResid=%.6g shellVol=%.10g sumPcurve=%.10g sumContour=%.10g "
+                 "residPcurve=%.10g residContour=%.10g ulpSum=%.6g quadSup=%.6g "
+                 "width=%.6g relBest=%.6g closesA=%d closesB=%d closes=%d\n",
+                 site, (int)built.size(), nNull, nUnsup, (int)mv.nTri, nUncovered,
+                 nDouble, meshVol, sumChord, chordResid, shellVol, sumPcurve,
+                 sumContour, residPcurve, residContour, ulpSum, quadSup, width,
+                 relBest, closesA, closesB, closes);
+}
+
 void collectResidualCulprits(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape& sh,
                              const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
                              const std::vector<char>& exploded, double meshVol,
@@ -15934,6 +16303,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             restoreShared();
             dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
+            dumpVolAttrib("open", mv, rs, built, builtRid, eprimeFill, exploded);
             out.clear();
             return false;
         }
@@ -15980,6 +16350,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (plan.hostR2 || cascadeSt.u2Done || !shValid) {
                 restoreShared();
                 dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
+                dumpVolAttrib("invalid", mv, rs, built, builtRid, eprimeFill, exploded);
                 out.clear();
                 return false;
             }
@@ -16022,6 +16393,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (plan.hostR2 && tightFail && !cascadeSt.u2Done) {
                     restoreShared();
                     dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
+                    dumpVolAttrib("tight", mv, rs, built, builtRid, eprimeFill, exploded);
                     out.clear();
                     return false;
                 }
@@ -16042,6 +16414,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         dumpShippedInContext(built, builtRid, rs);
         dumpTolBindSummary();
         dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
+        dumpVolAttrib("ship", mv, rs, built, builtRid, eprimeFill, exploded);
         std::fprintf(stderr, "DIAG_RECONNECT_SUM fires=%d nTri=%d notDetermined=%d\n",
                      gReconnectFires, (int)mv.nTri, gOriNotDetermined);
         out = std::move(built);

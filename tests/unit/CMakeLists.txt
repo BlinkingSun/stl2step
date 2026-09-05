@@ -275,6 +275,36 @@ set_tests_properties(quant_floor_unit PROPERTIES
     LABELS "unit;quant"
     TIMEOUT 60)
 
+# SPEC-volid §4.3 / D-140-10 — S01/S02/S03 volume-attribution identity.
+# Spawns the CLI with STL2STEP_VOLID=1; asserts the §2.5 closesA/closesB
+# bracket on the three synthetic fixtures only.
+if(TARGET stl2step)
+    add_executable(volid_identity_test volid_identity.cpp)
+    target_compile_features(volid_identity_test PRIVATE cxx_std_17)
+    set_target_properties(volid_identity_test PROPERTIES
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    target_include_directories(volid_identity_test PRIVATE
+        "${_stl2step_root}/tests/support")
+    if(MSVC)
+        target_compile_definitions(volid_identity_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    endif()
+    if(COMMAND stl2step_adhoc_sign)
+        stl2step_adhoc_sign(volid_identity_test)
+    endif()
+    add_test(NAME volid_identity
+        COMMAND volid_identity_test
+            $<TARGET_FILE:stl2step>
+            "${_stl2step_root}/tests/corpus/S01.stl"
+            "${_stl2step_root}/tests/corpus/S02.stl"
+            "${_stl2step_root}/tests/corpus/S03.stl")
+    set_tests_properties(volid_identity PROPERTIES
+        LABELS "unit;volid"
+        TIMEOUT 180
+        DEPENDS corpus_generate)
+endif()
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

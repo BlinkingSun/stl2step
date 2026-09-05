@@ -137,7 +137,10 @@ suite:
   kernel's boundary-representation checks; a closed-but-invalid shell is
   treated as failure regardless of how good its census looks.
 - **Determinism.** Stage 1 output is byte-reproducible, and every optional
-  feature (including DXF emission) is inert when unset. The conversion path
+  feature (including DXF emission) is inert when unset. `STL2STEP_VOLID`
+  (unset or `0`) is a default-off stderr instrument for the volume-attribution
+  identity: `1` prints `DIAG_VOLID_CLASS` + `DIAG_VOLID_SUM`, `2` adds per-bucket
+  `DIAG_VOLID row`; it does not change STEP bytes. The conversion path
   contains no nondeterministic components.
 
 ## 6. Summary
