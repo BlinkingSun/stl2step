@@ -43,6 +43,24 @@ void uniqueVerts(const Mesh& m, const std::vector<int>& region, std::vector<int>
     }
 }
 
+// SPEC §9 data structure: certifies() and admits() are the innermost loop of
+// the oracle (100 % of the grip's sampled stacks). A fresh `Stamp` there is an
+// O(|V|) zero-fill plus two heap allocations per certificate — 19 % of the
+// grip's samples sat in __bzero under admits(). One generation-stamped scratch
+// per call site, grown but never re-zeroed, removes both. The grader is
+// single-threaded (§7.4); thread_local keeps it re-entrant anyway. No vertex
+// is skipped: the scratch holds exactly the same marks the local Stamp did.
+struct Scratch {
+    Stamp st{0};
+    std::vector<int> verts;
+    void ensure(size_t n) {
+        if (st.gen.size() < n) {
+            st.gen.assign(n, 0);
+            st.g = 1;
+        }
+    }
+};
+
 bool fitPlane(const Mesh& m, const std::vector<int>& region, SurfParams& S) {
     double wsum = 0;
     Vec3 c{};
@@ -851,8 +869,7 @@ bool surroundsAxis(const Mesh& m, const std::vector<int>& triIds, Vec3 axis) {
 
 // Centroids wrap an axis (max azimuth gap ≤ π). A torus latitude ring
 // around the boss wraps; an S02 octant in a cube corner does not.
-bool wrapsAxis(const Mesh& m, const std::vector<int>& triIds, const Vec3& origin, Vec3 axis,
-               double maxGapLim) {
+bool wrapsAxis(const Mesh& m, const std::vector<int>& triIds, const Vec3& origin, Vec3 axis) {
     axis = normalized(axis);
     if (!(norm2(axis) > 0.0)) return false;
     Vec3 uu, vv;
@@ -872,8 +889,7 @@ bool wrapsAxis(const Mesh& m, const std::vector<int>& triIds, const Vec3& origin
         seen |= 1u << b;
         ++nAng;
     }
-    (void)maxGapLim;
-    if (nAng < 3) return false;
+    if (nAng < paramCount(SurfClass::Plane)) return false;  // 3 azimuths minimum
     return seen == (1u << bins) - 1u;
 }
 
@@ -951,9 +967,10 @@ bool sphereNormalsSpan(const Mesh& m, const std::vector<int>& triIds, const Surf
 bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
     // Growth admission: vertex-on-surface (and the plane normal clause). Size
     // gates are applied only when a region is emitted (certifies).
-    Stamp st(static_cast<int>(m.verts.size()));
-    std::vector<int> verts;
-    uniqueVerts(m, region, verts, st);
+    thread_local Scratch sc;
+    sc.ensure(m.verts.size());
+    std::vector<int>& verts = sc.verts;
+    uniqueVerts(m, region, verts, sc.st);
     for (int vi : verts) {
         if (distToSurf(m.verts[static_cast<size_t>(vi)], S) > m.tau) return false;
     }
@@ -971,9 +988,11 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
 bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S,
                double* maxResidOut, double* maxNDevOut) {
     if (static_cast<int>(region.size()) < 2) return false;
-    Stamp st(static_cast<int>(m.verts.size()));
-    std::vector<int> verts;
-    uniqueVerts(m, region, verts, st);
+    // Own scratch: admits() below reuses its own, so `verts` here stays valid.
+    thread_local Scratch sc;
+    sc.ensure(m.verts.size());
+    std::vector<int>& verts = sc.verts;
+    uniqueVerts(m, region, verts, sc.st);
     if (static_cast<int>(verts.size()) < paramCount(c) + 1) return false;
     if (!admits(m, region, c, S)) return false;
     if (c == SurfClass::Sphere && !sphereNormalsSpan(m, region, S)) return false;
@@ -1346,12 +1365,10 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             if (fitPlane(m, R, P) && certifies(m, R, SurfClass::Plane, P)) return false;
         }
         if (c == SurfClass::Sphere) {
-            const double tess =
-                2.0 * M_PI / static_cast<double>(paramCount(SurfClass::Cylinder) + 1);
             const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
             bool wrap = false;
             for (const Vec3& ax : axes) {
-                if (wrapsAxis(m, R, S.p0, ax, tess)) {
+                if (wrapsAxis(m, R, S.p0, ax)) {
                     wrap = true;
                     break;
                 }
@@ -1519,13 +1536,15 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
         }
     };
 
-    for (SurfClass c : order) {
+    // One pass of SPEC §5.4's growth loop over `seeds`: committed regions go to
+    // `sink`, deferred 2-triangle planes to `held`, and `claimedV` is marked.
+    auto walk = [&](SurfClass c, const std::vector<int>& seeds, std::vector<char>& claimedV,
+                    std::vector<Oracle>& sink, std::vector<Oracle>& held) {
         std::vector<char> skipComp(m.tris.size(), 0);
-        const auto seeds = seedList();
         for (int seed : seeds) {
-            if (claimed[static_cast<size_t>(seed)]) continue;
+            if (claimedV[static_cast<size_t>(seed)]) continue;
             Oracle o;
-            if (!tryGrow(m, claimed, c, seed, false, o, skipComp)) continue;
+            if (!tryGrow(m, claimedV, c, seed, false, o, skipComp)) continue;
             if (c == SurfClass::Plane && static_cast<int>(o.tris.size()) == 2) {
                 // Tessellated cylinders/spheres are planar quads. Hold a 2-tri
                 // plane whose neighbour dihedral is the tessellation step
@@ -1545,24 +1564,46 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
                     }
                 }
                 if (sharp) {
-                    for (int t : o.tris) {
-                        claimed[static_cast<size_t>(t)] = 1;
-                        out.owner[static_cast<size_t>(t)] = static_cast<int>(out.oracles.size());
-                    }
-                    o.id = static_cast<int>(out.oracles.size());
-                    out.oracles.push_back(std::move(o));
+                    for (int t : o.tris) claimedV[static_cast<size_t>(t)] = 1;
+                    sink.push_back(std::move(o));
                     continue;
                 }
-                heldPlanes.push_back(std::move(o));
+                held.push_back(std::move(o));
                 continue;
             }
-            for (int t : o.tris) {
-                claimed[static_cast<size_t>(t)] = 1;
-                out.owner[static_cast<size_t>(t)] = static_cast<int>(out.oracles.size());
-            }
+            for (int t : o.tris) claimedV[static_cast<size_t>(t)] = 1;
+            sink.push_back(std::move(o));
+        }
+    };
+
+    for (SurfClass c : order) {
+        std::vector<Oracle> grown, grownHeld;
+        walk(c, seedList(), claimed, grown, grownHeld);
+        // SPEC §5.4 asserts growth order affects nothing. It does not hold of
+        // the greedy walk by itself: θ_q coplanarity is a tolerance, not an
+        // equivalence, so a tessellated band whose quads are pairwise within
+        // θ_q but not transitively is chopped where the walk entered it —
+        // handle-pickup swaps 35 two-triangle planes and 37 ten-triangle
+        // cylinders between the forward and reversed walks. Re-run the same
+        // walk over exactly this class's own output, entered at the lowest
+        // triangle index of each component: an order the seed direction
+        // cannot change. Same certificate, canonical entry point. Triangles
+        // the canonical walk does not re-take go back to unclaimed.
+        std::vector<int> mine;
+        for (const Oracle& o : grown) mine.insert(mine.end(), o.tris.begin(), o.tris.end());
+        for (const Oracle& o : grownHeld) mine.insert(mine.end(), o.tris.begin(), o.tris.end());
+        std::sort(mine.begin(), mine.end());
+        mine.erase(std::unique(mine.begin(), mine.end()), mine.end());
+        std::vector<char> mask(m.tris.size(), 1);
+        for (int t : mine) mask[static_cast<size_t>(t)] = 0;
+        std::vector<Oracle> canon, canonHeld;
+        walk(c, mine, mask, canon, canonHeld);
+        for (int t : mine) claimed[static_cast<size_t>(t)] = mask[static_cast<size_t>(t)];
+        for (Oracle& o : canon) {
             o.id = static_cast<int>(out.oracles.size());
             out.oracles.push_back(std::move(o));
         }
+        for (Oracle& o : canonHeld) heldPlanes.push_back(std::move(o));
         restabilize();
         // Claim pass (islands). Triangle order is always ascending — seed
         // reversal is a growth-order probe; SPEC §5.4's claim/merge must be

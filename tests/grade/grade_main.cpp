@@ -40,6 +40,10 @@ int main(int argc, char** argv) {
     std::setlocale(LC_ALL, "C");
     std::string stl, step, outDir, jsonPath, mdPath, engine;
     bool quiet = false;
+    bool reverseSeeds = false;  // §8 case 9 growth-order probe, exposed for the
+                                // training set (the selftest can only reach the
+                                // corpus fixtures). Diagnostic only: it changes
+                                // the seed walk, never a tolerance.
     for (int i = 1; i < argc; ++i) {
         const char* a = argv[i];
         if (std::strcmp(a, "-o") == 0 && i + 1 < argc) {
@@ -52,6 +56,8 @@ int main(int argc, char** argv) {
             engine = argv[++i];
         } else if (std::strcmp(a, "--quiet") == 0) {
             quiet = true;
+        } else if (std::strcmp(a, "--reverse-seeds") == 0) {
+            reverseSeeds = true;
         } else if (a[0] != '-') {
             if (stl.empty()) stl = a;
             else if (step.empty()) step = a;
@@ -63,7 +69,7 @@ int main(int argc, char** argv) {
     if (stl.empty() || step.empty()) {
         std::fprintf(stderr,
                      "usage: stl2step_grade <stl> <step> [-o dir] [--json p] [--md p] "
-                     "[--engine-bin p] [--quiet]\n");
+                     "[--engine-bin p] [--quiet] [--reverse-seeds]\n");
         return 1;
     }
     const std::string stem = stemOf(step);
@@ -77,6 +83,7 @@ int main(int argc, char** argv) {
     grade::GradeConfig cfg;
     cfg.quiet = quiet;
     cfg.engineBin = engine;
+    cfg.reverseSeeds = reverseSeeds;
     grade::GradeDocument doc;
     std::string err;
     if (!grade::gradeFiles(stl, step, cfg, doc, err)) {

@@ -496,6 +496,12 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
             const Oracle& Op = doc.oracle.oracles[static_cast<size_t>(oi)];
             if (Op.cls != F.cls) continue;
             if (sameSurface(Op.S, F.S, Op, doc.mesh)) continue;
+            // SPEC §6.2 D: spanned is "one face, two design surfaces". If Op
+            // carries a face of its own, F is not standing in for Op — the
+            // overhang is a modelling overlap, not a lost design surface.
+            // Without this the rule fired on every perpendicular wall that
+            // projects inside its own floor face (pickup 20, test 10).
+            if (!facesOf[static_cast<size_t>(oi)].empty()) continue;
             if (!shareMeshEdge(doc.mesh, O0, Op)) continue;
             // Cube overhang is orthogonal (S01 top vs +Y). Shallow dihedrals
             // project a neighbour centroid into F and must not span.
@@ -515,10 +521,15 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
                     break;
                 }
             }
-            if (inside) {
-                spanned[static_cast<size_t>(primary)] = 1;
-                spanned[static_cast<size_t>(oi)] = 1;
-            }
+            if (!inside) continue;
+            // "One face, two design surfaces" (§6.2 D) is an area identity:
+            // F must account for O0 and Op together, to the §6.1 facet-area
+            // tolerance. A big face beside a small unrecovered sliver does
+            // not (pickup: 9828 mm^2 face vs a 4.97 mm^2 rim plane).
+            const double aqSpan = areaQ(doc.mesh, O0.tris) + areaQ(doc.mesh, Op.tris);
+            if (std::fabs(F.area - O0.w - Op.w) > aqSpan) continue;
+            spanned[static_cast<size_t>(primary)] = 1;
+            spanned[static_cast<size_t>(oi)] = 1;
         }
     }
 
