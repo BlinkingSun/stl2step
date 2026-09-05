@@ -42,7 +42,7 @@
     "build_fixtures/slotted_stadium": 0,
     "chamfer_straight_ring": 0,
     "counterbore_chamfer": 0,
-    "cross_bores": 0,
+    "cross_bores": 2,
     "cyl_meets_chamfer": 0,
     "handle-lock": 0,
     "handle-pickup": 358,
