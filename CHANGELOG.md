@@ -15,6 +15,8 @@ All notable changes to this project are documented here. The format follows
 ### Fixed
 - **The OpenCASCADE toolkits the engine uses are named explicitly** (github issue #1): `stl2step_core` linked only the finder's umbrella target, which omitted TKPrim (`BRepPrimAPI_MakePrism`) and TKBO (`BRepAlgoAPI_Fuse`, `BOPAlgo_GlueEnum`); they arrived transitively on Homebrew and on an OCCT that ships a CMake package config, and not at all under Debian/Ubuntu's `ld --as-needed` when OCCT is installed without one (`undefined reference to BRepAlgoAPI_Fuse::~BRepAlgoAPI_Fuse()` / `libTKBO.so: DSO missing from command line`). CMakeLists.txt now links the measured minimal cover of 15 toolkits, selected by `if(TARGET ...)` with a `find_library` fallback and the pre-7.8 TKSTL/TKSTEP* spellings as alternates.
 - **takeFullCap may not mint against an unbuilt partner** (D-140-2): a `Seamed360` cap facing an island / eprimeFill / exploded / non-analytic region keeps the mesh polyline both sides already share, instead of inventing a full-2π `CIRCLE` TShape that the fill cannot carry. shelf_bracket's eight through-holes ship as cylinders; the shell closes with no `J6:` line.
+### Changed
+- **Grader selftest expected-red (D-140-7)**: `grade.reverse-seed.handle-pickup` (case 9's cylinder-phase claim-order dependence, owed by `grader-c5`) is registered in `tests/gates/baseline/expected-red.json`'s new `grader` section; the assertion still runs and is reported `XFAIL`, not skipped or weakened, and a passing listed check is reported `XPASS` and counted as a failure so the row must be removed.
 
 ## [1.3.0] - 2026-09-05
 

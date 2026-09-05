@@ -46,6 +46,10 @@ target_include_directories(stl2step_grade_selftest PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
     "${_stl2step_root}/src")
 target_link_libraries(stl2step_grade_selftest PRIVATE OpenCASCADE::OpenCASCADE)
+# D-140-7 / D-130-23: recorded-deferral list, resolved from the source tree at
+# configure time (the same file run_gates.py's DEFAULT_BASELINE resolves).
+target_compile_definitions(stl2step_grade_selftest PRIVATE
+    STL2STEP_EXPECTED_RED_JSON="${_stl2step_root}/tests/gates/baseline/expected-red.json")
 # Synthetic STEPs (cases 5–8) need TKPrim / sewing primitives when present.
 foreach(_tk IN ITEMS TKPrim TKBool TKFillet)
     if(TARGET ${_tk})

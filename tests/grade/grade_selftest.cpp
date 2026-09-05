@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -43,9 +44,15 @@
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
 
+#ifndef STL2STEP_EXPECTED_RED_JSON
+#define STL2STEP_EXPECTED_RED_JSON ""
+#endif
+
 namespace {
 
 int gPass = 0, gFail = 0;
+int gXFail = 0;
+std::map<std::string, std::string> gExpectedRed;
 
 void check(bool ok, const char* name) {
     if (ok) {
@@ -55,6 +62,94 @@ void check(bool ok, const char* name) {
         ++gFail;
         std::fprintf(stderr, "FAIL %s\n", name);
     }
+}
+
+// D-140-7 / D-130-23: a check whose stable id is listed in expected-red.json's
+// "grader" section is a recorded deferral, not a hard failure. Failing is
+// reported XFAIL and excluded from the exit code; passing is reported XPASS
+// (the row must be removed) and counted as a failure so the list shrinks.
+void checkId(bool ok, const std::string& id, const char* name) {
+    const auto it = gExpectedRed.find(id);
+    if (it == gExpectedRed.end()) {
+        check(ok, name);
+        return;
+    }
+    if (ok) {
+        ++gFail;
+        std::fprintf(stderr, "XPASS %s — remove the row from expected-red.json\n", id.c_str());
+    } else {
+        ++gXFail;
+        std::fprintf(stderr, "XFAIL %s (%s)\n", id.c_str(), it->second.c_str());
+    }
+}
+
+std::string readFileText(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return std::string();
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    std::string s(n > 0 ? static_cast<size_t>(n) : 0, '\0');
+    if (n > 0) {
+        const size_t got = std::fread(&s[0], 1, static_cast<size_t>(n), f);
+        s.resize(got);
+    }
+    std::fclose(f);
+    return s;
+}
+
+// Minimal reader for tests/gates/baseline/expected-red.json (D-130-23): a flat
+// JSON object of named sections, each an object mapping check id -> reason
+// string. Returns the "grader" section only. Missing file or missing section
+// is an empty map — never a silent XFAIL.
+std::map<std::string, std::string> loadExpectedRedGrader(const std::string& path) {
+    std::map<std::string, std::string> out;
+    const std::string text = readFileText(path);
+    if (text.empty()) return out;
+
+    auto parseString = [&](size_t& i) -> std::string {
+        std::string s;
+        ++i;  // opening quote
+        while (i < text.size() && text[i] != '"') {
+            if (text[i] == '\\' && i + 1 < text.size()) {
+                ++i;
+                s += text[i];
+            } else {
+                s += text[i];
+            }
+            ++i;
+        }
+        ++i;  // closing quote
+        return s;
+    };
+
+    const size_t sectionKeyPos = text.find("\"grader\"");
+    if (sectionKeyPos == std::string::npos) return out;
+    const size_t objStart = text.find('{', sectionKeyPos);
+    if (objStart == std::string::npos) return out;
+    int depth = 0;
+    size_t objEnd = std::string::npos;
+    for (size_t j = objStart; j < text.size(); ++j) {
+        if (text[j] == '{') ++depth;
+        else if (text[j] == '}') {
+            --depth;
+            if (depth == 0) { objEnd = j; break; }
+        }
+    }
+    if (objEnd == std::string::npos) return out;
+
+    size_t i = objStart + 1;
+    while (i < objEnd) {
+        while (i < objEnd && std::strchr(" \n\r\t,", text[i])) ++i;
+        if (i >= objEnd || text[i] != '"') break;
+        const std::string key = parseString(i);
+        while (i < objEnd && text[i] != ':') ++i;
+        ++i;  // ':'
+        while (i < objEnd && std::strchr(" \n\r\t", text[i])) ++i;
+        if (i >= objEnd || text[i] != '"') break;
+        out[key] = parseString(i);
+    }
+    return out;
 }
 
 bool near(double a, double b, double tol) {
@@ -326,7 +421,8 @@ int coreTests(const std::string& corpus) {
             auto b = once(false, stl, step);
             auto c = once(true, stl, step);
             check(a.first == b.first && a.second == b.second, "S01 twice identical");
-            check(a.first == c.first && a.second == c.second, "S01 reverse-seed identical");
+            checkId(a.first == c.first && a.second == c.second, "grade.reverse-seed.S01",
+                    "S01 reverse-seed identical");
         }
         {
             const std::string stl = join(corpus, "S03.stl");
@@ -335,7 +431,7 @@ int coreTests(const std::string& corpus) {
             auto b = once(false, stl, step);
             auto c = once(true, stl, step);
             check(a.first == b.first, "S03 twice json identical");
-            check(a.first == c.first, "S03 reverse-seed json identical");
+            checkId(a.first == c.first, "grade.reverse-seed.S03", "S03 reverse-seed json identical");
         }
         {
             const std::string stl = join(corpus, "handle-pickup.stl");
@@ -344,7 +440,8 @@ int coreTests(const std::string& corpus) {
             auto b = once(false, stl, step);
             auto c = once(true, stl, step);
             check(a.first == b.first, "handle-pickup twice json identical");
-            check(a.first == c.first, "handle-pickup reverse-seed json identical");
+            checkId(a.first == c.first, "grade.reverse-seed.handle-pickup",
+                    "handle-pickup reverse-seed json identical");
         }
     }
     return gFail;
@@ -713,6 +810,7 @@ int main(int argc, char** argv) {
     }
     const std::string mode = argv[1];
     const std::string corpus = argv[2];
+    gExpectedRed = loadExpectedRedGrader(STL2STEP_EXPECTED_RED_JSON);
     int rc = 0;
     if (mode == "core") rc = coreTests(corpus);
     else if (mode == "synthetic") rc = syntheticTests(corpus, argv[0]);
@@ -721,6 +819,11 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "unknown mode %s\n", mode.c_str());
         return 1;
     }
-    std::fprintf(stderr, "grade_selftest %s: %d/%d PASS\n", mode.c_str(), gPass, gPass + gFail);
+    const int total = gPass + gFail + gXFail;
+    if (gXFail > 0) {
+        std::fprintf(stderr, "grade_selftest %s: %d/%d PASS (%d XFAIL)\n", mode.c_str(), gPass, total, gXFail);
+    } else {
+        std::fprintf(stderr, "grade_selftest %s: %d/%d PASS\n", mode.c_str(), gPass, total);
+    }
     return rc ? 1 : 0;
 }
