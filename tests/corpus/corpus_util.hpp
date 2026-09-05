@@ -50,9 +50,9 @@ struct AxisSpec {
 };
 
 struct Recoverable {
-    std::string type;   // "plane" | "cylinder" | "cone"
+    std::string type;   // "plane" | "cylinder" | "cone" | "torus"
     double radius = 0;
-    double radius2 = 0;       // cones: second radius (R_top or R_max)
+    double radius2 = 0;       // cones: second radius (R_top or R_max); torus: R_minor
     double halfAngleDeg = 0;  // cones: semi-vertical angle
     AxisSpec axis;
     int count = 1;
@@ -488,6 +488,15 @@ inline std::string writeSidecarJson(const Sidecar& s) {
                << ", \"dir\": " << jsonVec3(r.axis.dir) << "},\n";
             os << "      \"count\": " << r.count << ",\n";
             os << "      \"nSides\": " << r.nSides << ",\n";
+            os << "      \"closed360\": " << (r.closed360 ? "true" : "false") << "\n";
+        } else if (r.type == "torus") {
+            // D-140-6 A.1: radius = R_major, radius2 = R_minor, axis.loc = the
+            // profile-circle centre ON the axis. No nSides (not a cylinder measurement).
+            os << "      \"radius\": " << r.radius << ",\n";
+            os << "      \"radius2\": " << r.radius2 << ",\n";
+            os << "      \"axis\": {\"loc\": " << jsonVec3(r.axis.loc)
+               << ", \"dir\": " << jsonVec3(r.axis.dir) << "},\n";
+            os << "      \"count\": " << r.count << ",\n";
             os << "      \"closed360\": " << (r.closed360 ? "true" : "false") << "\n";
         } else {
             os << "      \"count\": " << r.count << ",\n";

@@ -28,15 +28,25 @@
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
+#include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <GC_MakeArcOfCircle.hxx>
+#include <Geom_Surface.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <Geom_TrimmedCurve.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
+#include <APIHeaderSection_MakeHeader.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <Precision.hxx>
+#include <STEPControl_Writer.hxx>
+#include <StepData_StepModel.hxx>
+#include <TCollection_HAsciiString.hxx>
 #include <stdexcept>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -63,7 +73,7 @@ namespace {
 struct FixtureResult {
     Sidecar sidecar;
     MeshData mesh;
-    TopoDS_Shape exact;  // D-140-1(7): kept so writeFixture can emit <id>.exact.step
+    TopoDS_Shape exact;  // D-140-1(7): null unless writeFixture emits <id>.exact.step
 };
 
 Recoverable cylRec(double R, const Vec3& loc, const Vec3& dir, int count, int nSides,
@@ -97,6 +107,21 @@ Recoverable coneRec(double R0, double R1, double halfAngleDeg, const Vec3& loc, 
     r.count = count;
     r.nSides = nSides;
     r.closed360 = true;
+    return r;
+}
+
+// D-140-6 A.1: radius = R_major, radius2 = R_minor, axis.loc = the
+// profile-circle centre ON the axis. No nSides (measureRecoverableNSides is a
+// cylinder measurement, never invoked for "torus").
+Recoverable torusRec(double Rmaj, double Rmin, const Vec3& loc, const Vec3& dir, int count,
+                     bool closed360) {
+    Recoverable r;
+    r.type = "torus";
+    r.radius = Rmaj;
+    r.radius2 = Rmin;
+    r.axis = {loc, normalize(dir)};
+    r.count = count;
+    r.closed360 = closed360;
     return r;
 }
 
@@ -374,7 +399,11 @@ void fillLiveExpectations(FixtureResult& out) {
 }
 
 FixtureResult emitShape(const std::string& id, const std::string& desc, TopoDS_Shape shape,
-                        double deflection, double angDeflection, Sidecar sidecar) {
+                        double deflection, double angDeflection, Sidecar sidecar,
+                        bool emitExactStep = false) {
+    // A.4: capture the exact BRep before tessellate() adds Poly_Triangulation
+    // data to it (tessellation never touches the analytic surfaces/curves).
+    const TopoDS_Shape exactBeforeTess = shape;
     tessellate(shape, deflection, angDeflection);
     FixtureResult out;
     out.mesh = weldQuantized(quantizeMesh(extractMesh(shape)));
@@ -382,8 +411,12 @@ FixtureResult emitShape(const std::string& id, const std::string& desc, TopoDS_S
     out.sidecar.id = id;
     out.sidecar.description = desc;
     out.sidecar.deflection = deflection;
+    if (emitExactStep) {
+        out.exact = exactBeforeTess;
+    } else if (id == "S01" || id == "S02" || id == "S03") {
+        out.exact = shape;
+    }
     fillMeshSidecar(out);
-    out.exact = shape;
     return out;
 }
 
@@ -403,18 +436,66 @@ bool writeFixture(const fs::path& dir, const FixtureResult& fx) {
     const std::string label = ("stl2step corpus " + fx.sidecar.id).substr(0, 79);
     if (!writeBinaryStl(stlPath.string(), fx.mesh, label.c_str())) return false;
     if (!writeTextFile(jsonPath.string(), writeSidecarJson(fx.sidecar))) return false;
-    // D-140-1(7): exact STEP for S01–S04 only. Generated, gitignored; STL/sidecar
-    // bytes are unchanged by this extra write.
-    if (fx.sidecar.id == "S01" || fx.sidecar.id == "S02" || fx.sidecar.id == "S03" ||
-        fx.sidecar.id == "S04") {
-        if (fx.exact.IsNull()) return false;
+    // D-140-1(7): exact STEP when fixture carries a non-null exact BRep. Generated,
+    // gitignored; STL/sidecar bytes are unchanged by this extra write.
+    if (!fx.exact.IsNull()) {
         Interface_Static::SetCVal("write.step.schema", "AP214IS");
         STEPControl_Writer writer;
         if (writer.Transfer(fx.exact, STEPControl_AsIs) < 1) return false;
+        // corpus_determinism diffs the WHOLE output directory byte-for-byte;
+        // OCCT's default FILE_NAME header stamps the wall-clock time, so pin it
+        // (this is a fixed label, not a geometric tolerance).
+        APIHeaderSection_MakeHeader header(writer.Model());
+        header.SetTimeStamp(new TCollection_HAsciiString("2000-01-01T00:00:00"));
+        header.Apply(writer.Model());
         const fs::path stepPath = dir / (fx.sidecar.id + ".exact.step");
         if (writer.Write(stepPath.string().c_str()) != IFSelect_RetDone) return false;
     }
     return true;
+}
+
+// D-140-6 §4(a) (Q4), closed form derived once: Pappus's theorem on the
+// profile region removed by a quarter-torus mouth round — the corner square
+// R x r minus the quarter disc of radius r, area A = r^2(1 - pi/4), centroid
+// offset from the profile circle's own centre r/(6 - 3*pi/2). V_rem = 2*pi*
+// (centroid radius)*A, expanded and simplified to the two forms below.
+// External rim (a boss top, e.g. S04): the removed corner sits OUTSIDE the
+// cylinder of radius R.
+double torusRemExternal(double R, double r) {
+    return 2.0 * M_PI * r * r * (1.0 - M_PI / 4.0) * (R - r) + M_PI * r * r * r / 3.0;
+}
+// Internal rim (a hole mouth, e.g. S19): the removed corner sits INSIDE the
+// cylinder of radius R.
+double torusRemInternal(double R, double r) {
+    return 2.0 * M_PI * r * r * (1.0 - M_PI / 4.0) * (R + r) - M_PI * r * r * r / 3.0;
+}
+
+double exactVolumeS04() {
+    return 50.0 * 50.0 * 10.0 + M_PI * 10.0 * 10.0 * 15.0 - torusRemExternal(10.0, 3.0);
+}
+
+double exactVolumeS19() {
+    return 60.0 * 60.0 * 20.0 - M_PI * 10.0 * 10.0 * 20.0 - torusRemInternal(10.0, 2.0) -
+           torusRemInternal(10.0, 1.0);
+}
+
+// A.3: the generator's own check on itself. BRepGProp on the EXACT solid
+// (Precision::Confusion(), the S03 pattern) must agree with the closed form;
+// on mismatch this throws with both values rather than write a number nobody
+// derived.
+void certifyExactVolume(const TopoDS_Shape& exactShape, double closedForm, const char* what) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(exactShape, props, Precision::Confusion());
+    const double brep = props.Mass();
+    const double tol = Precision::Confusion() * std::max(std::fabs(closedForm), std::fabs(brep));
+    std::cout << std::setprecision(17) << "EXACTVOL " << what << " closedForm=" << closedForm
+              << " BRepGProp=" << brep << " tol=" << tol << "\n";
+    if (!(std::fabs(closedForm - brep) <= tol)) {
+        std::ostringstream os;
+        os << std::setprecision(17) << "exactVolume mismatch for " << what
+           << ": closedForm=" << closedForm << " BRepGProp=" << brep;
+        throw std::runtime_error(os.str());
+    }
 }
 
 // ---- S01: 10 mm cube -------------------------------------------------------
@@ -495,10 +576,209 @@ FixtureResult buildS04() {
     sc.recoverable = {planeRec({0, 0, 1}, 2), planeRec({0, 0, -1}, 1),
                       planeRec({1, 0, 0}, 1), planeRec({-1, 0, 0}, 1),
                       planeRec({0, 1, 0}, 1), planeRec({0, -1, 0}, 1),
-                      cylRec(10.0, {25, 25, 10}, {0, 0, 1}, 1, 0, true)};
-    sc.mustRemainFaceted = {{ "torus", 1, "boss top blend annulus (TorusNYI)" }};
+                      cylRec(10.0, {25, 25, 10}, {0, 0, 1}, 1, 0, true),
+                      torusRec(7.0, 3.0, {25, 25, 22}, {0, 0, 1}, 1, /*closed360=*/true)};
+    sc.mustRemainFaceted.clear();  // was {{"torus", 1, "boss top blend annulus (TorusNYI)"}}
+    sc.exactVolume = exactVolumeS04();  // D-130-15(1)
+    certifyExactVolume(fused, sc.exactVolume, "S04");  // A.3: closed form vs BRepGProp
     return emitShape("S04", "50x50 plate + R=10 boss H=15 with torus top blend", fused, 0.2, 0.4,
-                     sc);
+                     sc, /*emitExactStep=*/true);
+}
+
+// ---- S19_mouth_round: through hole with two coaxial mouth rounds (D-140-6 A.5) ----
+
+// D-130-12's q, reproduced locally (tests/corpus takes no dependency on
+// src/stl_quant.hpp — the fixture lane may not touch src/): binary-STL
+// coordinates are IEEE-754 float32, so the certificate radius is half the
+// binary32 ulp at the file's own maxAbs, times sqrt(3) for three independent
+// axis roundings.
+double ulpFloat32(double x) {
+    const float f = static_cast<float>(std::fabs(x));
+    if (!std::isfinite(f)) return 0.0;
+    const float up = std::nextafterf(f, std::numeric_limits<float>::infinity());
+    const double u = static_cast<double>(up) - static_cast<double>(f);
+    return u > 0.0 ? u : 0.0;
+}
+
+// Total-least-squares (orthogonal regression) max perpendicular residual of a
+// 2-D point set to its own best-fit line — clause 4's "straight profile"
+// refusal test (D-140-6 §1(4)), used here only to assert clause 4 does NOT
+// fire on a real torus profile.
+double lineMaxPerpResidual(const std::vector<std::pair<double, double>>& pts) {
+    double mx = 0, mz = 0;
+    for (const auto& p : pts) { mx += p.first; mz += p.second; }
+    mx /= static_cast<double>(pts.size());
+    mz /= static_cast<double>(pts.size());
+    double sxx = 0, szz = 0, sxz = 0;
+    for (const auto& p : pts) {
+        const double dx = p.first - mx, dz = p.second - mz;
+        sxx += dx * dx;
+        szz += dz * dz;
+        sxz += dx * dz;
+    }
+    const double theta = 0.5 * std::atan2(2.0 * sxz, sxx - szz);
+    const double nx = -std::sin(theta), nz = std::cos(theta);
+    double maxResid = 0;
+    for (const auto& p : pts) {
+        const double dx = p.first - mx, dz = p.second - mz;
+        maxResid = std::max(maxResid, std::fabs(dx * nx + dz * nz));
+    }
+    return maxResid;
+}
+
+struct ProfileCensus {
+    int levels = 0;
+    int cols = 0;
+    double maxDevQ = 0;
+    double lineResQ = 0;
+    bool ok = false;
+};
+
+// D-140-6 §1 clause 3, measured on the fixture's OWN mesh before any engine
+// run (A.5): profile over-determination (levels/cols) and the vertex test, in
+// the axis frame. The oracle is the MESH: every node is passed through
+// roundFloat() first, which is exactly what quantizeMesh()/weldQuantized()
+// write into the STL, so these are the vertex values the engine will read.
+// The face's own triangulation is the source only because MeshData carries no
+// face attribution and a blend may not be identified by the answer it is
+// about to be tested for.
+ProfileCensus measureTorusProfile(const TopoDS_Face& face, double Rmaj, double Rmin,
+                                  const Vec3& centre, const Vec3& axisDir, double q) {
+    ProfileCensus c;
+    TopLoc_Location loc;
+    Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+    if (tri.IsNull()) return c;
+    const gp_Trsf tr = loc.Transformation();
+    const Vec3 axis = normalize(axisDir);
+    const Vec3 w = (std::fabs(axis.x) <= std::fabs(axis.y) && std::fabs(axis.x) <= std::fabs(axis.z))
+                       ? Vec3(1, 0, 0)
+                   : (std::fabs(axis.y) <= std::fabs(axis.z) ? Vec3(0, 1, 0) : Vec3(0, 0, 1));
+    const Vec3 u0 = normalize(cross(axis, w));
+    const Vec3 v0 = cross(axis, u0);
+    const double tau = 2.0 * q;
+
+    std::vector<double> levels;
+    std::vector<double> cols;
+    std::vector<std::pair<double, double>> profile;
+    double maxDev = 0;
+    for (int i = 1; i <= tri->NbNodes(); ++i) {
+        gp_Pnt p = tri->Node(i);
+        p.Transform(tr);
+        const Vec3 qv(roundFloat(p.X()), roundFloat(p.Y()), roundFloat(p.Z()));
+        const Vec3 d = sub(qv, centre);
+        const double z = dot(d, axis);
+        const Vec3 perp = sub(d, scale(axis, z));
+        const double rho = norm(perp);
+        const double ang = std::atan2(dot(perp, v0), dot(perp, u0));
+        bool foundZ = false;
+        for (double zl : levels) {
+            if (std::fabs(zl - z) <= tau) { foundZ = true; break; }
+        }
+        if (!foundZ) levels.push_back(z);
+        // Two vertices share an azimuth column when their TANGENTIAL separation
+        // is within tau -- q-derived, no angular constant. A tighter tolerance
+        // can only split a column, never merge two, so `cols >= 2` is tested
+        // conservatively.
+        const double angTol = rho > 0 ? tau / rho : tau;
+        bool foundA = false;
+        for (double a : cols) {
+            if (std::fabs(a - ang) <= angTol) { foundA = true; break; }
+        }
+        if (!foundA) cols.push_back(ang);
+        profile.emplace_back(rho, z);
+        maxDev = std::max(maxDev, std::fabs(std::hypot(rho - Rmaj, z) - Rmin));
+    }
+    c.levels = static_cast<int>(levels.size());
+    c.cols = static_cast<int>(cols.size());
+    c.maxDevQ = q > 0 ? maxDev / q : 0.0;
+    c.lineResQ = q > 0 ? lineMaxPerpResidual(profile) / q : 0.0;
+    c.ok = (c.levels >= 3 && c.cols >= 2 && maxDev <= tau && c.lineResQ > 1.0);
+    return c;
+}
+
+// Fillet the one edge of `shape` that is a full circle of the given radius
+// centred at the given axial offset (the through hole's top or bottom rim).
+TopoDS_Shape filletCircularEdge(const TopoDS_Shape& shape, double radius, double z,
+                                double filletRadius) {
+    BRepFilletAPI_MakeFillet fillet(shape);
+    for (TopExp_Explorer exp(shape, TopAbs_EDGE); exp.More(); exp.Next()) {
+        const TopoDS_Edge e = TopoDS::Edge(exp.Current());
+        double first = 0, last = 0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(e, first, last);
+        if (curve.IsNull()) continue;
+        const Handle(Geom_Circle) circ = Handle(Geom_Circle)::DownCast(curve);
+        if (circ.IsNull()) continue;
+        if (std::fabs(circ->Radius() - radius) > 1e-6) continue;
+        if (std::fabs(circ->Position().Location().Z() - z) > 1e-6) continue;
+        fillet.Add(filletRadius, e);
+    }
+    return fillet.Shape();
+}
+
+FixtureResult buildS19MouthRound() {
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(60.0, 60.0, 20.0);
+    gp_Ax2 holeAx(gp_Pnt(30, 30, -1), gp_Dir(0, 0, 1));
+    TopoDS_Shape hole = BRepPrimAPI_MakeCylinder(holeAx, 10.0, 22.0);
+    TopoDS_Shape cut = BRepAlgoAPI_Cut(plate, hole);
+    TopoDS_Shape topRounded = filletCircularEdge(cut, 10.0, 20.0, 2.0);
+    TopoDS_Shape shape = filletCircularEdge(topRounded, 10.0, 0.0, 1.0);
+
+    TopoDS_Face topFace, bottomFace;
+    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+        const TopoDS_Face f = TopoDS::Face(exp.Current());
+        const Handle(Geom_Surface) surf = BRep_Tool::Surface(f);
+        const Handle(Geom_ToroidalSurface) tor = Handle(Geom_ToroidalSurface)::DownCast(surf);
+        if (tor.IsNull()) continue;
+        if (std::fabs(tor->MajorRadius() - 12.0) < 1e-6 && std::fabs(tor->MinorRadius() - 2.0) < 1e-6)
+            topFace = f;
+        else if (std::fabs(tor->MajorRadius() - 11.0) < 1e-6 &&
+                std::fabs(tor->MinorRadius() - 1.0) < 1e-6)
+            bottomFace = f;
+    }
+    if (topFace.IsNull() || bottomFace.IsNull())
+        throw std::runtime_error("S19_mouth_round: torus faces not found on the exact shape");
+
+    // A.5: 60x60x20 -> maxAbs is the box's own corner, exactly like S04's 50.
+    const double q19 = ulpFloat32(60.0) * std::sqrt(3.0) / 2.0;
+    double defl = 0.2, angDefl = 0.4;
+    ProfileCensus topC, botC;
+    bool ok = false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        BRepTools::Clean(shape);
+        tessellate(shape, defl, angDefl);
+        topC = measureTorusProfile(topFace, 12.0, 2.0, {30, 30, 18}, {0, 0, 1}, q19);
+        botC = measureTorusProfile(bottomFace, 11.0, 1.0, {30, 30, 1}, {0, 0, 1}, q19);
+        std::cout << std::setprecision(6)
+                  << "S19-PROFILE blend=top Rmaj=12.000000 Rmin=2.000000 levels=" << topC.levels
+                  << " cols=" << topC.cols << " maxVertexDev=" << topC.maxDevQ
+                  << "q lineRes=" << topC.lineResQ << "q ok=" << (topC.ok ? 1 : 0)
+                  << " defl=" << defl << " angDefl=" << angDefl << "\n";
+        std::cout << std::setprecision(6)
+                  << "S19-PROFILE blend=bottom Rmaj=11.000000 Rmin=1.000000 levels=" << botC.levels
+                  << " cols=" << botC.cols << " maxVertexDev=" << botC.maxDevQ
+                  << "q lineRes=" << botC.lineResQ << "q ok=" << (botC.ok ? 1 : 0)
+                  << " defl=" << defl << " angDefl=" << angDefl << "\n";
+        if (topC.ok && botC.ok) { ok = true; break; }
+        defl *= 0.5;
+        angDefl *= 0.5;
+    }
+    if (!ok) {
+        throw std::runtime_error(
+            "S19_mouth_round: profile-level certificate not reached at any tried deflection");
+    }
+
+    Sidecar sc;
+    sc.recoverable = {planeRec({0, 0, 1}, 1), planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
+                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1), planeRec({0, -1, 0}, 1),
+                      cylRec(10.0, {30, 30, 10}, {0, 0, 1}, 1, 0, true),
+                      torusRec(12.0, 2.0, {30, 30, 18}, {0, 0, 1}, 1, /*closed360=*/true),
+                      torusRec(11.0, 1.0, {30, 30, 1}, {0, 0, 1}, 1, /*closed360=*/true)};
+    sc.mustRemainFaceted.clear();
+    sc.exactVolume = exactVolumeS19();  // D-130-15(1)
+    certifyExactVolume(shape, sc.exactVolume, "S19_mouth_round");  // A.3
+    return emitShape("S19_mouth_round",
+                     "60x60x20 plate, R=10 through hole, mouth rounds r=2 top / r=1 bottom",
+                     shape, defl, angDefl, sc, /*emitExactStep=*/true);
 }
 
 // ---- S05: slot with rounded ends ---------------------------------------------
@@ -1158,6 +1438,7 @@ int main(int argc, char** argv) {
     run("S02", [] { return buildS02(); });
     run("S03", [] { return buildS03(); });
     run("S04", [] { return buildS04(); });
+    run("S19_mouth_round", [] { return buildS19MouthRound(); });
     run("S05", [] { return buildS05(); });
     run("S06", [] { return buildNGonCylinder("S06", "N=8 polygonal cylinder D=50 H=100", 8, 0.05); });
     run("S07", [] { return buildNGonCylinder("S07", "N=12 polygonal cylinder D=50 H=100", 12, 0.05); });
