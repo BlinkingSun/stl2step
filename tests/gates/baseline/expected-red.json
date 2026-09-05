@@ -22,7 +22,9 @@
     "S19.mouth-round-not-built": "D-140-6 §4(d),(e): registered by the fixture commit (torus-fixture, D-140-6), removed by the build commit if and when it lands. S19_mouth_round.stl's mesh certifies two coaxial tori on one R=10 cylinder (top Rmaj=12.000000/Rmin=2.000000 centre z=18; bottom Rmaj=11.000000/Rmin=1.000000 centre z=1), the generator's own pre-run S19-PROFILE census passing both blends (levels=9 cols=33 ok=1), but src/ is untouched this commit -- refit_build.cpp's buildOneRegion U-3 branch still routes SurfType::Torus to Reject::TorusNYI. If torus-build does not land in this wave, this row is the honest record."
   },
   "gates_full": {
-    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)"
+    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)",
+    "S04": "D-140-6 4(a),(e) — see reverts/S04.torus-not-built. The fixture commit lands the torus as a sidecar recoverable while src/ is untouched, so I-checker reports SIDECAR FAIL recoverable7 (the torus, Rmaj=7.000000 Rmin=3.000000 centre (25,25,22) axis +Z) has no matching accepted region: buildOneRegion's U-3 branch still routes SurfType::Torus to Reject::TorusNYI. I1-I9 and G5 all PASS inside the I-checker; the sidecar clause is the only one red. Removed by the build commit, which turns this row into the XPASS notice.",
+    "S19_mouth_round": "D-140-6 4(d),(e) — see reverts/S19.mouth-round-not-built. New fixture, same cause: I-checker reports SIDECAR FAIL recoverable6,recoverable7,recoverable8 (the R=10 bore between the two mouth rounds and both tori, Rmaj=12.000000/Rmin=2.000000 centre z=18 and Rmaj=11.000000/Rmin=1.000000 centre z=1) have no matching accepted region while src/ is untouched. The generator's own pre-run S19-PROFILE census passes both blends (levels=9 cols=32 maxVertexDev=0.920478q/0.550567q ok=1), so the mesh certifies what the engine cannot yet build. I1-I9 and G5 PASS inside the I-checker. Removed by the build commit."
   },
   "edge_class_gate": {
     "Body11": "D-130-23 / 082194b red lines not relaxed",
