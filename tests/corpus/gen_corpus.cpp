@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1414,6 +1415,436 @@ FixtureResult buildCylMeetsChamfer() {
                      plate, 0.2, 0.5, sc);
 }
 
+// ---- S20_cross_bore_union: the same-surface union fixture (D-140-8 U-R15/U-R16) ----
+//
+// 80 x 60 x 40 block.  A mid-span through slot (x in [30,50], z in [8,32]) leaves
+// two walls; ONE Phi20 bore on +X through both of them therefore ships as TWO
+// coaxial faces at disjoint axial spans [0,30] and [50,80].  The wall-A span is
+// the UNION bore: a Phi12 cross bore on +Z at x = 15 pierces it at u = 90 deg and
+// u = 270 deg, strictly inside (0,30), so its claim at tau = 2q breaks into
+// several edge-pieces that are ONE domain component with exactly two winding-0
+// inner wires.  The wall-B span is the NEGATIVE CONTROL for U-R3: same surface,
+// disjoint extent, and it must stay its own face -- so the PRG multiset ceiling
+// for R = 10 on this fixture is exactly 2.
+//
+// The bore is an N-gon prism (the cross_bores convention) and the cross feature a
+// true cylinder.  That pairing is what makes the fixture exercise the union at
+// all: the intersection curve lies on the prism's PLANAR facets, so its mesh
+// nodes sit strictly inside R = 10 -- punctures in the sense of U-R6, bounded by
+// the facet chord sagitta, which is exactly sigma (U-R5).  It also keeps the
+// exact volume elementary (a prism cross-section has piecewise-linear height).
+
+struct BoreCensus {
+    std::string bore;
+    double R = 0;
+    double sigma = 0;
+    double sigmaQ = 0;
+    int edgePieces = 0;
+    int punctures = 0;
+    int domainFaces = 0;
+    int innerWires = 0;
+    int pinchVertices = 0;
+    std::vector<int> winding;
+    bool ok = false;
+};
+
+struct DisjointSet {
+    std::vector<int> p;
+    explicit DisjointSet(int n) : p(n) {
+        for (int i = 0; i < n; ++i) p[i] = i;
+    }
+    int find(int a) {
+        while (p[a] != a) a = p[a] = p[p[a]];
+        return a;
+    }
+    void join(int a, int b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) p[a] = b;
+    }
+};
+
+inline std::pair<int, int> edgeKey(int a, int b) {
+    return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+}
+
+// U-R15/U-R16, measured on the fixture's OWN welded float32-quantized mesh --
+// the vertex values the engine will read -- before any engine run.  Every
+// quantity is D-140-8's own definition and nothing is taken from engine output:
+//   claim     triangles whose three vertices all satisfy |rho - R| <= tau = 2q,
+//             whose centroid lies in this bore's axial span, and which are not
+//             axially flat (a cap-plane triangle on the bore rim has all three
+//             vertices at rho = R but zero axial spread -- it is not the wall).
+//   sigma     U-R5: max over the claim's welded mesh edges of R - dist(axis, mid).
+//   puncture  U-R6: a vertex in the claim's neighbourhood, off-surface at tau but
+//             within sigma of the surface.
+//   domain    U-R6/U-R7: claim triangles; arcs are shared mesh edges, plus one arc
+//             joining every claim triangle that lies in a common puncture's star.
+//   pinch     U-R8: a vertex whose link inside its component is >= 2 edge-fans.
+//   wires     U-R9: boundary cycles of what the shipped face's wires enclose --
+//             the claim plus the triangles absorbed at punctures (U-R5: sigma is a
+//             DOMAIN tolerance).  A cycle is a cap chain when every vertex sits on
+//             one rim, an inner wire when it touches neither rim, a cut otherwise.
+BoreCensus measureBoreCensus(const MeshData& mv, const std::string& label, const Vec3& axLoc,
+                             const Vec3& axDirIn, double R, double tLo, double tHi, double q) {
+    BoreCensus c;
+    c.bore = label;
+    c.R = R;
+    const Vec3 d = normalize(axDirIn);
+    const Vec3 w = (std::fabs(d.x) <= std::fabs(d.y) && std::fabs(d.x) <= std::fabs(d.z))
+                       ? Vec3(1, 0, 0)
+                   : (std::fabs(d.y) <= std::fabs(d.z) ? Vec3(0, 1, 0) : Vec3(0, 0, 1));
+    const Vec3 e1 = normalize(cross(d, w));
+    const Vec3 e2 = cross(d, e1);
+    const double tau = 2.0 * q;
+    const int nv = static_cast<int>(mv.verts.size());
+    const int nt = static_cast<int>(mv.tris.size());
+
+    std::vector<double> axl(nv), rho(nv), ang(nv);
+    for (int i = 0; i < nv; ++i) {
+        const Vec3 rel = sub(mv.verts[i], axLoc);
+        axl[i] = dot(rel, d);
+        const Vec3 perp = sub(rel, scale(d, axl[i]));
+        rho[i] = norm(perp);
+        ang[i] = std::atan2(dot(perp, e2), dot(perp, e1));
+    }
+    auto distToSurf = [&](int i) { return std::fabs(rho[i] - R); };
+    std::vector<char> onSurf(nv, 0);
+    for (int i = 0; i < nv; ++i) onSurf[i] = (distToSurf(i) <= tau) ? 1 : 0;
+
+    std::vector<std::vector<int>> star(nv);
+    for (int t = 0; t < nt; ++t)
+        for (int k = 0; k < 3; ++k) star[mv.tris[t][k]].push_back(t);
+
+    std::vector<char> inClaim(nt, 0);
+    for (int t = 0; t < nt; ++t) {
+        const auto& tr = mv.tris[t];
+        if (!(onSurf[tr[0]] && onSurf[tr[1]] && onSurf[tr[2]])) continue;
+        const double a0 = axl[tr[0]], a1 = axl[tr[1]], a2 = axl[tr[2]];
+        const double lo = std::min({a0, a1, a2}), hi = std::max({a0, a1, a2});
+        if (hi - lo <= tau) continue;  // a rim triangle of a cap plane, not the wall
+        const double cAx = (a0 + a1 + a2) / 3.0;
+        if (cAx < tLo || cAx > tHi) continue;
+        inClaim[t] = 1;
+    }
+
+    std::map<std::pair<int, int>, std::vector<int>> e2tClaim;
+    for (int t = 0; t < nt; ++t) {
+        if (!inClaim[t]) continue;
+        const auto& tr = mv.tris[t];
+        for (int k = 0; k < 3; ++k) e2tClaim[edgeKey(tr[k], tr[(k + 1) % 3])].push_back(t);
+    }
+
+    // sigma (U-R5): the claim's own welded mesh edges, inscribed-chord deviation.
+    for (const auto& kv : e2tClaim) {
+        const Vec3 mid = scale(add(mv.verts[kv.first.first], mv.verts[kv.first.second]), 0.5);
+        const Vec3 rel = sub(mid, axLoc);
+        const Vec3 perp = sub(rel, scale(d, dot(rel, d)));
+        c.sigma = std::max(c.sigma, R - norm(perp));
+    }
+    c.sigma = std::max(c.sigma, 0.0);
+    c.sigmaQ = q > 0 ? c.sigma / q : 0.0;
+
+    DisjointSet edgeComp(nt);
+    for (const auto& kv : e2tClaim)
+        for (size_t i = 1; i < kv.second.size(); ++i) edgeComp.join(kv.second[0], kv.second[i]);
+    std::set<int> edgeRoots;
+    for (int t = 0; t < nt; ++t)
+        if (inClaim[t]) edgeRoots.insert(edgeComp.find(t));
+    c.edgePieces = static_cast<int>(edgeRoots.size());
+
+    std::vector<char> claimVert(nv, 0);
+    for (int t = 0; t < nt; ++t)
+        if (inClaim[t])
+            for (int k = 0; k < 3; ++k) claimVert[mv.tris[t][k]] = 1;
+
+    // punctures (U-R6): off-surface at tau, within sigma, in the claim's
+    // neighbourhood.  The neighbourhood grows through punctures: U-R6's reason is
+    // that a vertex inside the tessellation's own deviation from S is a point OF S
+    // the mesh sampled badly, and a run of such vertices is still a run of points
+    // of S.  It cannot leak off the surface -- every vertex it admits is within
+    // sigma of S -- and it cannot cross a real interruption, which has no mesh
+    // triangles in it at all.
+    std::vector<char> cand(nv, 0), isPuncture(nv, 0);
+    for (int i = 0; i < nv; ++i)
+        cand[i] = (!onSurf[i] && axl[i] >= tLo && axl[i] <= tHi && distToSurf(i) <= c.sigma) ? 1 : 0;
+    std::vector<int> frontier;
+    for (int i = 0; i < nv; ++i) {
+        if (!cand[i]) continue;
+        bool nearClaim = false;
+        for (int t : star[i])
+            for (int k = 0; k < 3 && !nearClaim; ++k)
+                if (claimVert[mv.tris[t][k]]) nearClaim = true;
+        if (!nearClaim) continue;
+        isPuncture[i] = 1;
+        frontier.push_back(i);
+    }
+    while (!frontier.empty()) {
+        const int v = frontier.back();
+        frontier.pop_back();
+        for (int t : star[v])
+            for (int k = 0; k < 3; ++k) {
+                const int u = mv.tris[t][k];
+                if (!cand[u] || isPuncture[u]) continue;
+                isPuncture[u] = 1;
+                frontier.push_back(u);
+            }
+    }
+    for (int i = 0; i < nv; ++i) c.punctures += isPuncture[i] ? 1 : 0;
+
+    // domain graph (U-R6/U-R7): shared edges, plus one arc per puncture star.
+    DisjointSet dom(nt);
+    for (const auto& kv : e2tClaim)
+        for (size_t i = 1; i < kv.second.size(); ++i) dom.join(kv.second[0], kv.second[i]);
+    for (int i = 0; i < nv; ++i) {
+        if (!isPuncture[i]) continue;
+        std::set<int> starVerts;
+        for (int t : star[i])
+            for (int k = 0; k < 3; ++k) starVerts.insert(mv.tris[t][k]);
+        int hub = -1;
+        for (int sv : starVerts)
+            for (int t : star[sv]) {
+                if (!inClaim[t]) continue;
+                if (hub < 0) hub = t;
+                else dom.join(hub, t);
+            }
+    }
+    std::map<int, int> domRoots;
+    for (int t = 0; t < nt; ++t)
+        if (inClaim[t]) domRoots.emplace(dom.find(t), static_cast<int>(domRoots.size()));
+    c.domainFaces = static_cast<int>(domRoots.size());
+
+    // pinch vertices (U-R8): link inside the component is >= 2 edge-fans.
+    for (int v = 0; v < nv; ++v) {
+        if (!claimVert[v]) continue;
+        std::map<int, std::vector<int>> byComp;
+        for (int t : star[v])
+            if (inClaim[t]) byComp[dom.find(t)].push_back(t);
+        for (const auto& kv : byComp) {
+            const std::vector<int>& fan = kv.second;
+            if (fan.size() < 2) continue;
+            DisjointSet fs(static_cast<int>(fan.size()));
+            for (size_t a = 0; a < fan.size(); ++a)
+                for (size_t b = a + 1; b < fan.size(); ++b) {
+                    int shared = 0;
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j)
+                            if (mv.tris[fan[a]][i] == mv.tris[fan[b]][j]) ++shared;
+                    if (shared >= 2) fs.join(static_cast<int>(a), static_cast<int>(b));
+                }
+            std::set<int> fans;
+            for (size_t a = 0; a < fan.size(); ++a) fans.insert(fs.find(static_cast<int>(a)));
+            if (fans.size() >= 2) ++c.pinchVertices;
+        }
+    }
+
+    // The domain the shipped face's wires enclose (U-R5/U-R9): the claim plus the
+    // triangles absorbed at punctures.
+    std::vector<char> inDomain = inClaim;
+    for (int t = 0; t < nt; ++t) {
+        if (inClaim[t]) continue;
+        const auto& tr = mv.tris[t];
+        bool touchesClaim = false, allOnOrPunct = true;
+        for (int k = 0; k < 3; ++k) {
+            if (claimVert[tr[k]]) touchesClaim = true;
+            if (!onSurf[tr[k]] && !isPuncture[tr[k]]) allOnOrPunct = false;
+        }
+        if (touchesClaim && allOnOrPunct) inDomain[t] = 1;
+    }
+
+    std::map<std::pair<int, int>, int> e2cDomain;
+    for (int t = 0; t < nt; ++t) {
+        if (!inDomain[t]) continue;
+        const auto& tr = mv.tris[t];
+        for (int k = 0; k < 3; ++k) ++e2cDomain[edgeKey(tr[k], tr[(k + 1) % 3])];
+    }
+    std::map<int, std::vector<int>> badj;
+    for (const auto& kv : e2cDomain) {
+        if (kv.second != 1) continue;
+        badj[kv.first.first].push_back(kv.first.second);
+        badj[kv.first.second].push_back(kv.first.first);
+    }
+    auto onRim = [&](int v) {
+        return std::fabs(axl[v] - tLo) <= tau || std::fabs(axl[v] - tHi) <= tau;
+    };
+    std::set<std::pair<int, int>> usedEdge;
+    for (const auto& kv : badj) {
+        for (int nb : kv.second) {
+            const auto key = edgeKey(kv.first, nb);
+            if (usedEdge.count(key)) continue;
+            std::vector<int> cyc;
+            int prev = -1, cur = kv.first;
+            while (true) {
+                cyc.push_back(cur);
+                int nxt = -1;
+                for (int cand : badj[cur]) {
+                    if (cand == prev) continue;
+                    if (usedEdge.count(edgeKey(cur, cand))) continue;
+                    nxt = cand;
+                    break;
+                }
+                if (nxt < 0) break;
+                usedEdge.insert(edgeKey(cur, nxt));
+                prev = cur;
+                cur = nxt;
+                if (cur == kv.first) break;
+            }
+            if (cyc.size() < 3) continue;
+            bool anyRim = false;
+            for (int v : cyc) anyRim = anyRim || onRim(v);
+            if (anyRim) continue;  // cap chain or a cut, never an inner wire
+            double turn = 0;
+            for (size_t i = 0; i < cyc.size(); ++i) {
+                double dA = ang[cyc[(i + 1) % cyc.size()]] - ang[cyc[i]];
+                while (dA > M_PI) dA -= 2.0 * M_PI;
+                while (dA < -M_PI) dA += 2.0 * M_PI;
+                turn += dA;
+            }
+            ++c.innerWires;
+            c.winding.push_back(static_cast<int>(std::llround(turn / (2.0 * M_PI))));
+        }
+    }
+    return c;
+}
+
+// D-140-8 U-R15's exact volume, closed form on the generator's own parameters.
+// Removed = Slot u Bore u Cross, inclusion-exclusion; Slot n Cross is empty
+// (x in [30,50] vs [9,21]) and so is the triple term.
+double nGonAreaExact(double R, int N) {
+    return 0.5 * static_cast<double>(N) * R * R * std::sin(2.0 * M_PI / static_cast<double>(N));
+}
+
+// The extent of a regular N-gon (circumradius R, a vertex at theta = 0) along its
+// SECOND coordinate, at first-coordinate value t -- piecewise linear in t.
+// `swap` reads the polygon with its two coordinates exchanged.
+double nGonExtentAt(double R, int N, double t, bool swap) {
+    double lo = 0, hi = 0;
+    bool any = false;
+    for (int i = 0; i < N; ++i) {
+        const double a0 = 2.0 * M_PI * i / N, a1 = 2.0 * M_PI * (i + 1) / N;
+        double p0 = R * std::cos(a0), q0 = R * std::sin(a0);
+        double p1 = R * std::cos(a1), q1 = R * std::sin(a1);
+        if (swap) { std::swap(p0, q0); std::swap(p1, q1); }
+        if (std::fabs(p1 - p0) < 1e-15) continue;
+        if (t < std::min(p0, p1) || t > std::max(p0, p1)) continue;
+        const double q = q0 + (q1 - q0) * (t - p0) / (p1 - p0);
+        if (!any) { lo = hi = q; any = true; }
+        lo = std::min(lo, q);
+        hi = std::max(hi, q);
+    }
+    return any ? hi - lo : 0.0;
+}
+
+// |prism(axis X, N-gon circumradius Rb) n prism(axis Z, N-gon circumradius Rc)|,
+// axes intersecting perpendicularly.  At a fixed v = y - y0 the z-extent is the
+// bore polygon's own height and the x-extent is the cross polygon's own width,
+// both piecewise linear, so the integrand is piecewise QUADRATIC and Simpson on
+// each breakpoint interval is exact -- a closed form, not a quadrature.
+double prismMeetsPrism(double Rb, int Nb, double Rc, int Nc) {
+    std::set<double> cuts = {-Rc, Rc};
+    for (int i = 0; i < Nb; ++i) {
+        const double v = Rb * std::cos(2.0 * M_PI * i / Nb);
+        if (v > -Rc && v < Rc) cuts.insert(v);
+    }
+    for (int i = 0; i < Nc; ++i) cuts.insert(Rc * std::sin(2.0 * M_PI * i / Nc));
+    auto f = [&](double v) {
+        return nGonExtentAt(Rb, Nb, v, /*swap=*/false) * nGonExtentAt(Rc, Nc, v, /*swap=*/true);
+    };
+    double total = 0;
+    auto it = cuts.begin();
+    double prev = *it++;
+    for (; it != cuts.end(); ++it) {
+        const double cur = *it;
+        if (cur - prev < 1e-15) { prev = cur; continue; }
+        total += (cur - prev) / 6.0 * (f(prev) + 4.0 * f(0.5 * (prev + cur)) + f(cur));
+        prev = cur;
+    }
+    return total;
+}
+
+double exactVolumeS20() {
+    const double A = nGonAreaExact(10.0, kTessN);
+    return 80.0 * 60.0 * 40.0                             // block
+           - 20.0 * 60.0 * 24.0                           // mid-span slot
+           - 60.0 * A                                     // bore, less the span the slot took
+           - nGonAreaExact(6.0, kTessN) * 40.0            // cross bore
+           + prismMeetsPrism(10.0, kTessN, 6.0, kTessN);  // bore n cross bore
+}
+
+FixtureResult buildS20CrossBoreUnion() {
+    TopoDS_Shape solid = BRepPrimAPI_MakeBox(80.0, 60.0, 40.0);
+    // Mid-span slot through +/-Y: two walls, x in [0,30] and x in [50,80].
+    solid = BRepAlgoAPI_Cut(solid, BRepPrimAPI_MakeBox(gp_Pnt(30, 0, 8), 20.0, 60.0, 24.0));
+    // ONE Phi20 bore on +X through both walls: two coaxial faces, disjoint spans.
+    // Explicit XDirection = +Y so u = 0 is +Y and the cross bore pierces at
+    // u = 90 deg (+Z) and u = 270 deg (-Z), and so the closed form's N-gon
+    // orientation is the generator's own, not OCCT's default choice.
+    const gp_Ax2 boreAx(gp_Pnt(-1, 30, 20), gp_Dir(1, 0, 0), gp_Dir(0, 1, 0));
+    solid = BRepAlgoAPI_Cut(solid, makeNGonPrism(10.0, 82.0, kTessN, boreAx));
+    // The cross feature: Phi12 on +Z at x = 15, strictly inside (0,30).  Also an
+    // N-gon prism, and that is the whole mechanism: the two prisms' intersection
+    // polyline alternates between bore-edge x cross-facet vertices (exactly on
+    // R = 10) and cross-edge x bore-facet vertices, which sit on a chord of the
+    // bore and are therefore strictly inside it -- the punctures, SPARSE and at
+    // the window corners, exactly the plate's eight (D-140-8 U1).
+    const gp_Ax2 crossAx(gp_Pnt(15, 30, -1), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    solid = BRepAlgoAPI_Cut(solid, makeNGonPrism(6.0, 42.0, kTessN, crossAx));
+
+    const double q20 = ulpFloat32(80.0) * std::sqrt(3.0) / 2.0;
+    double defl = 0.2, angDefl = 0.4;
+    BoreCensus uc, cc;
+    bool ok = false;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        BRepTools::Clean(solid);
+        tessellate(solid, defl, angDefl);
+        const MeshData mv = weldQuantized(quantizeMesh(extractMesh(solid)));
+        uc = measureBoreCensus(mv, "union", {0, 30, 20}, {1, 0, 0}, 10.0, 0.0, 30.0, q20);
+        cc = measureBoreCensus(mv, "control", {0, 30, 20}, {1, 0, 0}, 10.0, 50.0, 80.0, q20);
+        const bool overlap = !(30.0 <= 50.0);  // the two spans, from the generator's parameters
+        uc.ok = uc.edgePieces >= 3 && uc.domainFaces == 1 && uc.innerWires == 2 && !overlap &&
+                std::all_of(uc.winding.begin(), uc.winding.end(), [](int w) { return w == 0; });
+        cc.ok = cc.domainFaces == 1 && cc.innerWires == 0 && !overlap;
+        const auto line = [&](const BoreCensus& b) {
+            std::cout << std::setprecision(9) << "S20-UNION bore=" << b.bore << " R=" << b.R
+                      << " sigma=" << b.sigma << " sigmaQ=" << b.sigmaQ << "q edgePieces="
+                      << b.edgePieces << " punctures=" << b.punctures
+                      << " domainFaces=" << b.domainFaces << " innerWires=" << b.innerWires
+                      << " pinchVertices=" << b.pinchVertices << " windingPerWire=[";
+            for (size_t i = 0; i < b.winding.size(); ++i)
+                std::cout << (i ? "," : "") << b.winding[i];
+            std::cout << "] axialOverlap=" << (overlap ? 1 : 0) << " ok=" << (b.ok ? 1 : 0)
+                      << " attempt=" << attempt << " defl=" << defl << " angDefl=" << angDefl
+                      << "\n";
+        };
+        line(uc);
+        line(cc);
+        if (uc.ok && cc.ok) { ok = true; break; }
+        defl *= 0.5;
+        angDefl *= 0.5;
+    }
+    if (!ok) {
+        // U-R16: a fixture whose own mesh does not exercise the union cannot fail
+        // the engine.  The predicate is never relaxed.
+        throw std::runtime_error(
+            "S20_cross_bore_union: union/control topology certificate not reached at any tried "
+            "deflection");
+    }
+
+    Sidecar sc;
+    sc.recoverable = {planeRec({0, 0, 1}, 2),  planeRec({0, 0, -1}, 2), planeRec({1, 0, 0}, 2),
+                      planeRec({-1, 0, 0}, 2), planeRec({0, 1, 0}, 1),  planeRec({0, -1, 0}, 1),
+                      cylRec(10.0, {0, 30, 20}, {1, 0, 0}, 2, 0, true),
+                      cylRec(6.0, {15, 30, 0}, {0, 0, 1}, 2, 0, true)};
+    sc.mustRemainFaceted.clear();
+    sc.intersections = {{"cyl R10", "cyl R6", "cylcyl"}};
+    sc.exactVolume = exactVolumeS20();  // D-130-15(1)
+    certifyExactVolume(solid, sc.exactVolume, "S20_cross_bore_union");
+    return emitShape("S20_cross_bore_union",
+                     "80x60x40 block, one Phi20 bore on +X across a mid-span slot (union bore "
+                     "pierced by a Phi12 cross bore + coaxial disjoint-span control)",
+                     solid, defl, angDefl, sc, /*emitExactStep=*/true);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1463,6 +1894,7 @@ int main(int argc, char** argv) {
     run("boss_cone_chamfer", [] { return buildBossConeChamfer(); });
     run("counterbore_chamfer", [] { return buildCounterboreChamfer(); });
     run("cyl_meets_chamfer", [] { return buildCylMeetsChamfer(); });
+    run("S20_cross_bore_union", [] { return buildS20CrossBoreUnion(); });
 
     for (const auto& fx : fixtures) {
         if (isPinnedCorpusFixture(fx.sidecar.id)
