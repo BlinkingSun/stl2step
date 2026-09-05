@@ -119,7 +119,7 @@ DEFAULT_RULES = (
     "I9",
     "G5",
 )
-ALL_RULES = DEFAULT_RULES + ("SIDECAR",)
+ALL_RULES = DEFAULT_RULES + ("SIDECAR", "SIDECAR_RECOVERABLE")
 
 EPS = 1e-12
 
@@ -1176,21 +1176,12 @@ def check_SIDECAR(dump, ctx):
 
     # recoverable primitives -> matching accepted region (D-130-22(3))
     rec = sidecar.get("recoverable") or sidecar.get("mustRecover") or []
-    if isinstance(rec, list):
-        unused = list(accepted_of(dump))
-        reg_map = regions_by_id(dump)
-
-        for i, entry in enumerate(rec):
-            hit = None
-            for r in unused:
-                if _match_recoverable_entry(entry, r, reg_map):
-                    hit = r
-                    break
-            if hit is None:
-                f.add("recoverable%d" % i,
-                      "sidecar recoverable %s has no matching accepted region" % entry)
-            else:
-                unused.remove(hit)
+    if isinstance(rec, list) and rec and not ctx.get("skip_recoverable"):
+        comp_idx = ctx.get("component_index")
+        if comp_idx is None or _component_has_analytic_census(sidecar, comp_idx):
+            reg_map = regions_by_id(dump)
+            pool = [(r, reg_map) for r in accepted_of(dump)]
+            _check_recoverable_entries(rec, pool, f)
 
     # mustRemainFaceted -> triIsland, not triRegion
     faceted = sidecar.get("mustRemainFaceted") or sidecar.get("mustFallback") or []
@@ -1341,6 +1332,71 @@ def _cone_entry_radii(entry):
     return e0, e1
 
 
+def _live_row_for_component(sidecar, component_index):
+    if component_index is None:
+        return None
+    want = _as_int(component_index)
+    for row in sidecar.get("live") or []:
+        if isinstance(row, dict) and _as_int(row.get("component")) == want:
+            return row
+    return None
+
+
+def _component_has_analytic_census(sidecar, component_index):
+    """True when live[] says this component ships plane/cylinder/cone analytics."""
+    row = _live_row_for_component(sidecar, component_index)
+    if row is None:
+        return True
+    census = row.get("surfaceCensus") or {}
+    for key in ("plane", "cylinder", "cone"):
+        if _as_int(census.get(key)) > 0:
+            return True
+    return False
+
+
+def _recoverable_pool_from_paths(paths):
+    pool = []
+    for path in paths:
+        with open(path, "r", encoding="utf-8") as fh:
+            dump = json.load(fh)
+        reg_map = regions_by_id(dump)
+        for r in accepted_of(dump):
+            pool.append((r, reg_map))
+    return pool
+
+
+def _check_recoverable_entries(rec, pool, findings=None):
+    """Match recoverable[] against a pool of (region, reg_map) pairs."""
+    f = findings or Findings()
+    if not isinstance(rec, list):
+        return f
+    unused = list(pool)
+    for i, entry in enumerate(rec):
+        hit_idx = None
+        for j, (r, reg_map) in enumerate(unused):
+            if _match_recoverable_entry(entry, r, reg_map):
+                hit_idx = j
+                break
+        if hit_idx is None:
+            f.add("recoverable%d" % i,
+                  "sidecar recoverable %s has no matching accepted region" % entry)
+        else:
+            unused.pop(hit_idx)
+    return f
+
+
+def check_SIDECAR_RECOVERABLE(dump, ctx):
+    """Fixture-wide recoverable[] vs union of all components' shipped surfaces."""
+    sidecar = ctx.get("sidecar")
+    if not sidecar:
+        return Findings()
+    pool = ctx.get("recoverable_pool")
+    if not pool:
+        return Findings()
+    rec = sidecar.get("recoverable") or sidecar.get("mustRecover") or []
+    return _check_recoverable_entries(rec, pool)
+
+
 def _match_recoverable_entry(entry, r, regions_by_id):
     """Match a sidecar recoverable entry to a region by shipped geometry."""
     if not isinstance(entry, dict):
@@ -1449,6 +1505,7 @@ RULE_FUNCS = {
     "I9": check_I9,
     "G5": check_G5,
     "SIDECAR": check_SIDECAR,
+    "SIDECAR_RECOVERABLE": check_SIDECAR_RECOVERABLE,
 }
 
 
@@ -1566,6 +1623,12 @@ def build_parser():
     p.add_argument("dump", metavar="dump.json", help="RegionSet JSON dump")
     p.add_argument("--sidecar", metavar="fixture.expected.json",
                    help="fixture expected.json (rejected codes, G5, recoverable)")
+    p.add_argument("--component", type=int, metavar="N",
+                   help="component index for live[] surfaceCensus (D-130-22(3) addendum)")
+    p.add_argument("--skip-recoverable", action="store_true",
+                   help="SIDECAR: omit recoverable[] (fixture-wide union pass)")
+    p.add_argument("--recoverable-union", metavar="PATH[,PATH...]",
+                   help="comma-separated bare dumps for SIDECAR_RECOVERABLE union pool")
     p.add_argument("--schema", metavar="SCHEMA",
                    default=default_schema_path(),
                    help="regionset.schema.json (enum source / documentation; default: alongside this script)")
@@ -1592,7 +1655,21 @@ def main(argv=None):
         sys.stderr.write("invalid JSON in dump: %s\n" % e)
         return 1
 
-    ctx = {"enums": {}, "sidecar": None, "sidecar_path": None}
+    ctx = {
+        "enums": {},
+        "sidecar": None,
+        "sidecar_path": None,
+        "component_index": args.component,
+        "skip_recoverable": bool(args.skip_recoverable),
+        "recoverable_pool": None,
+    }
+    if args.recoverable_union:
+        union_paths = [p.strip() for p in args.recoverable_union.split(",") if p.strip()]
+        missing = [p for p in union_paths if not os.path.isfile(p)]
+        if missing:
+            sys.stderr.write("recoverable-union path(s) not found: %s\n" % ", ".join(missing))
+            return 1
+        ctx["recoverable_pool"] = _recoverable_pool_from_paths(union_paths)
     schema_path = args.schema
     if schema_path:
         if not os.path.isfile(schema_path):

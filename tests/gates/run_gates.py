@@ -1017,6 +1017,7 @@ def gate_i_checker(ctx: GateContext) -> GateOutcome:
                   hard=True)
 
     sidecar = ctx.fixture.sidecar if getattr(ctx.fixture, "sidecar", None) else None
+    bare_paths: Dict[int, Path] = {}
     failures: List[str] = []
     for comp in comps:
         bare = ctx.work_dir / f"{ctx.fixture.id}-comp{comp}.regionset.json"
@@ -1027,13 +1028,44 @@ def gate_i_checker(ctx: GateContext) -> GateOutcome:
         if made.returncode != 0 or not bare.is_file():
             failures.append(f"comp{comp}: --bare dump failed: {made.stderr.strip()[:200]}")
             continue
+        bare_paths[comp] = bare
+
+    union_arg: Optional[str] = None
+    if len(bare_paths) > 1 and sidecar and Path(sidecar).is_file():
+        try:
+            sc_doc = json.loads(Path(sidecar).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            sc_doc = {}
+        if sc_doc.get("recoverable") or sc_doc.get("mustRecover"):
+            union_arg = ",".join(str(bare_paths[c]) for c in comps if c in bare_paths)
+
+    for comp in comps:
+        bare = bare_paths.get(comp)
+        if bare is None:
+            continue
         cmd = [sys.executable, str(ctx.ichecker_path), str(bare)]
         if sidecar and Path(sidecar).is_file():
             cmd += ["--sidecar", str(sidecar)]
+        if union_arg:
+            cmd += ["--skip-recoverable", "--component", str(comp)]
         chk = subprocess.run(cmd, check=False, capture_output=True, text=True)
         if chk.returncode != 0:
             detail = (chk.stdout.strip() or chk.stderr.strip())[:400]
             failures.append(f"comp{comp}: {detail}")
+
+    if union_arg and sidecar:
+        first_bare = bare_paths.get(comps[0])
+        if first_bare is not None:
+            cmd = [
+                sys.executable, str(ctx.ichecker_path), str(first_bare),
+                "--sidecar", str(sidecar),
+                "--recoverable-union", union_arg,
+                "--rule", "SIDECAR_RECOVERABLE",
+            ]
+            chk = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            if chk.returncode != 0:
+                detail = (chk.stdout.strip() or chk.stderr.strip())[:400]
+                failures.append(f"recoverable(fixture): {detail}")
 
     if failures:
         return go(ctx, gate_id, "FAIL",
