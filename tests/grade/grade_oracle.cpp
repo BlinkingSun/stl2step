@@ -1595,18 +1595,28 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
     // Stage A of each class phase: WHICH COMPONENTS CARRY THIS CLASS.
     // `ambient` is the unclaimed set at the phase's start and is frozen for
     // the whole pass, so no seed consumes another seed's triangles and R(t) —
-    // the maximal region grown from t — is a pure function of
-    // (mesh, ambient, class, t). Write CORE(c) = { t : R(t) certifies }; it
-    // names no seed order. The pass grows from every seed it finds uncovered,
-    // so a seed is skipped only when some certifying region already covers it:
-    //   * t in CORE(c) grown        => t is covered;
-    //   * t in CORE(c) skipped      => t was already covered.
-    // Either way `cov` meets every connected component of the unclaimed set
-    // that CORE(c) meets, and meets no other — and THAT is the quantity the
-    // partition is taken over (see `mine` below). Which triangle inside a
-    // component gets covered still depends on the walk (growth stops after a
-    // fixed run, so a seed entering a tessellated band mid-way chops it
-    // differently); which components are met does not.
+    // the maximal region grown from t — is a function of (mesh, ambient,
+    // class, t). Write CORE(c) = { t : R(t) certifies }; it names no seed
+    // order. The pass answers ONE BOOLEAN PER COMPONENT of the unclaimed set,
+    // `carries[K]`, and never materialises CORE(c) or a coverage bitmap:
+    //   * carries[K] is set only when some seed t in K grew a certifying
+    //     region, i.e. only when K meets CORE(c);
+    //   * conversely, if K meets CORE(c), take any t in K ∩ CORE(c). seedList()
+    //     enumerates every triangle, so t is reached; either carries[K] was
+    //     already set by an earlier seed of K, or the early-out below does not
+    //     fire and R(t) certifies, setting it. Either way carries[K] = 1.
+    // So carries[K] ⟺ K ∩ CORE(c) ≠ ∅, with no reference to the seed order —
+    // and THAT is the quantity the partition is taken over (see `mine` below).
+    // The early-out (skip a component once it has answered yes) is what makes
+    // this affordable: one certifying grow retires a whole component instead
+    // of leaving the rest of it to be re-grown. Which triangle inside a
+    // component a stage-A grow happens to cover still depends on the walk
+    // (growth stops after a fixed run, so a seed entering a tessellated band
+    // mid-way chops it differently); which components carry the class does
+    // not, and stage B re-derives the partition from the lowest index.
+    // `skipComp` is tryGrow's own negative cache, not state this pass reads:
+    // it retires triangles a grow already tried and failed on (for cone/torus
+    // that is the whole component, so the retirement is itself per-component).
     auto coverage = [&](SurfClass c, const std::vector<int>& seeds,
                         const std::vector<char>& ambient, const std::vector<int>& compId,
                         int nComp) {

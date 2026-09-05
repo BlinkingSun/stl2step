@@ -31,7 +31,5 @@
   "gate_130": {
     "cyl_meets_chamfer": "D-130-23 (B6 deferred)"
   },
-  "grader": {
-    "grade.reverse-seed.handle-pickup": "D-140-7 (user, 2026-09-05): cylinder-phase claim order is not canonical — one tessellation quad (1245 vs 1247 tris) flips with seed order on handle-pickup; plane phase invariant since c4-rw1 b8082a2; owed by grader-c5."
-  }
+  "grader": {}
 }
