@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <numeric>
 #include <unordered_set>
 
@@ -12,6 +14,17 @@ namespace grade {
 namespace {
 
 constexpr int kMaxIters = 50;
+
+// Measurement instrument, default OFF (STL2STEP_GRADE_DIAG). It reads the
+// oracle state and prints; it never changes a partition, a tolerance or a
+// certificate. Every graded artefact in this report was produced with it off.
+bool gdiag() {
+    static const bool on = [] {
+        const char* e = std::getenv("STL2STEP_GRADE_DIAG");
+        return e && e[0] && std::strcmp(e, "0") != 0;
+    }();
+    return on;
+}
 
 struct Stamp {
     std::vector<int> gen;
@@ -964,6 +977,153 @@ bool sphereNormalsSpan(const Mesh& m, const std::vector<int>& triIds, const Surf
     return true;
 }
 
+// The facet-normal clause for the ruled/curved classes (cone, torus).
+//
+// SPEC §5.3 names the normal clause "THE discriminator" and applies it to the
+// plane with theta_q(t), because a facet inscribed in a plane carries the
+// plane's normal exactly. On a curved surface it does not: the facet normal is
+// the normal at some interior point, so the exact supremum of its deviation
+// from the normal at the centroid is the FITTED SURFACE'S OWN normal spread
+// over that facet's vertices — a closed form in (S, the mesh's own vertices),
+// with theta_q(t) added for quantization. Nothing is chosen: a coarser
+// tessellation widens the bound by exactly the amount its own facet widens the
+// Gauss image, and a facet that does not lie on the surface fails it.
+//
+// Without this clause cone/torus growth is unbounded: `admits` was only the
+// vertex test, and an under-determined 2- or 3-triangle cone can be re-solved
+// to swallow any neighbour, so every seed runs off its feature and the
+// over-grown set then fails `certifies`. Measured on the linkage plate: 0 of
+// 511 seeds in the cross-bore component grew a certifying cone, although 200
+// of those triangles are a 45.000000-degree frustum at 0.107 q (D-140-6 M2).
+double normalSpread(const Mesh& m, int t, const SurfParams& S) {
+    const Tri& tr = m.tris[static_cast<size_t>(t)];
+    const Vec3 nc = normalAt(S, tr.centroid);
+    if (!(norm2(nc) > 0.0)) return 0.0;
+    double sp = 0;
+    for (int k = 0; k < 3; ++k) {
+        const Vec3 nv = normalAt(S, m.verts[static_cast<size_t>(tr.v[k])]);
+        if (!(norm2(nv) > 0.0)) continue;
+        sp = std::max(sp, angleUnit(nc, nv));
+    }
+    return sp;
+}
+
+bool curvedNormalsOk(const Mesh& m, const std::vector<int>& region, const SurfParams& S) {
+    // Orientation of the fitted surface against the mesh is a property of the
+    // whole region (a bore's facet normals point at the axis), taken once from
+    // the region's own agreement, never per triangle.
+    double sgn = 0;
+    for (int t : region) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        sgn += dot(tr.n, normalAt(S, tr.centroid));
+    }
+    const double s = (sgn < 0.0) ? -1.0 : 1.0;
+    for (int t : region) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        const Vec3 nc = normalAt(S, tr.centroid) * s;
+        if (!(norm2(nc) > 0.0)) return false;
+        if (angleUnit(tr.n, nc) > normalSpread(m, t, S) + tr.thetaQ) return false;
+    }
+    return true;
+}
+
+// D-140-6 §1(2): a surface of revolution about `a` through `p0` is a plane
+// curve in (rho, z); a torus is a CIRCLE there and dist_torus is identically
+// the profile-circle distance. The whole torus certificate is therefore a 2-D
+// statement, and over-determination must be counted on the profile.
+struct ProfileCensus {
+    int levels = 0;      // distinct z, collapsed within tau
+    int columns = 0;     // distinct azimuth columns, collapsed within tau of arc
+    double lineRes = 0;  // max perpendicular residual of the best profile line
+};
+
+ProfileCensus profileCensus(const Mesh& m, const std::vector<int>& verts, const SurfParams& S) {
+    ProfileCensus pc;
+    if (verts.empty()) return pc;
+    const Vec3 a = normalized(S.n);
+    if (!(norm2(a) > 0.0)) return pc;
+    Vec3 e1{1, 0, 0};
+    if (std::fabs(a.x) > std::fabs(a.y)) e1 = Vec3{0, 1, 0};
+    e1 = normalized(e1 - a * dot(e1, a));
+    const Vec3 e2 = cross(a, e1);
+    std::vector<double> zs, phis, rhos;
+    zs.reserve(verts.size());
+    phis.reserve(verts.size());
+    rhos.reserve(verts.size());
+    for (int vi : verts) {
+        const Vec3 w = m.verts[static_cast<size_t>(vi)] - S.p0;
+        const double z = dot(w, a);
+        const Vec3 rad = w - a * z;
+        zs.push_back(z);
+        rhos.push_back(norm(rad));
+        phis.push_back(std::atan2(dot(rad, e2), dot(rad, e1)));
+    }
+    // levels: distinct z within tau
+    std::vector<double> zz = zs;
+    std::sort(zz.begin(), zz.end());
+    pc.levels = 1;
+    double last = zz.front();
+    for (double v : zz) {
+        if (v - last > m.tau) {
+            ++pc.levels;
+            last = v;
+        }
+    }
+    // columns: distinct azimuth, separated by more than the arc that tau
+    // subtends at the region's own largest radius (so the split is the mesh's,
+    // not a chosen angle).
+    double rhoMax = 0;
+    for (double r : rhos) rhoMax = std::max(rhoMax, r);
+    const double dphi = (rhoMax > 0.0) ? (m.tau / rhoMax) : 0.0;
+    std::vector<double> pp = phis;
+    std::sort(pp.begin(), pp.end());
+    pc.columns = 1;
+    double lastp = pp.front();
+    for (double v : pp) {
+        if (v - lastp > dphi) {
+            ++pc.columns;
+            lastp = v;
+        }
+    }
+    // best line through (rho, z) by total least squares, and its max
+    // perpendicular residual. D-140-6 §1(4): a straight profile is a cone,
+    // a cylinder or a plane, never a torus.
+    double mr = 0, mz = 0;
+    const double n = static_cast<double>(verts.size());
+    for (size_t i = 0; i < rhos.size(); ++i) {
+        mr += rhos[i];
+        mz += zs[i];
+    }
+    mr /= n;
+    mz /= n;
+    double srr = 0, srz = 0, szz = 0;
+    for (size_t i = 0; i < rhos.size(); ++i) {
+        const double dr = rhos[i] - mr, dz = zs[i] - mz;
+        srr += dr * dr;
+        srz += dr * dz;
+        szz += dz * dz;
+    }
+    const double tr2 = srr + szz;
+    const double det = srr * szz - srz * srz;
+    const double disc = std::sqrt(std::max(0.0, tr2 * tr2 * 0.25 - det));
+    const double lmin = tr2 * 0.5 - disc;
+    double nx = srz, ny = lmin - srr;
+    if (!(nx * nx + ny * ny > 0.0)) {
+        nx = lmin - szz;
+        ny = srz;
+    }
+    if (!(nx * nx + ny * ny > 0.0)) {
+        nx = 1.0;
+        ny = 0.0;
+    }
+    const double nl = std::sqrt(nx * nx + ny * ny);
+    nx /= nl;
+    ny /= nl;
+    for (size_t i = 0; i < rhos.size(); ++i)
+        pc.lineRes = std::max(pc.lineRes, std::fabs((rhos[i] - mr) * nx + (zs[i] - mz) * ny));
+    return pc;
+}
+
 bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
     // Growth admission: vertex-on-surface (and the plane normal clause). Size
     // gates are applied only when a region is emitted (certifies).
@@ -981,6 +1141,8 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
         }
     } else if (c == SurfClass::Cylinder) {
         if (!cylinderNormalsOk(m, region, S)) return false;
+    } else if (c == SurfClass::Cone || c == SurfClass::Torus) {
+        if (!curvedNormalsOk(m, region, S)) return false;
     }
     return true;
 }
@@ -998,7 +1160,31 @@ bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const
     if (c == SurfClass::Sphere && !sphereNormalsSpan(m, region, S)) return false;
     if ((c == SurfClass::Cylinder || c == SurfClass::Sphere) && S.R > m.meshDiag)
         return false;
-    if (c == SurfClass::Torus && (S.R > m.meshDiag || S.r > m.meshDiag)) return false;
+    if (c == SurfClass::Torus) {
+        if (S.R > m.meshDiag || S.r > m.meshDiag) return false;
+        // D-140-6 §1, clauses (3) and (4) — the certificate, not a bound.
+        const ProfileCensus pc = profileCensus(m, verts, S);
+        // (3) PROFILE over-determination. Two levels make the profile a chord:
+        // every circle through those two rings fits at zero residual and the
+        // fit is a one-parameter family (measured: the plate's 200-triangle
+        // band admits (10,2), (12,2) AND a 45-degree cone, all within 0.16 q).
+        // The floor is on profile rows, never on |V| in 3-space.
+        // A cylinder is an axis line plus a radius, so an axis line carries
+        // paramCount(Cylinder) - 1 degrees of freedom; a torus is that same
+        // line plus the profile circle, so d_profile = paramCount(Torus) -
+        // (paramCount(Cylinder) - 1) = 3, and the floor is d_profile levels.
+        // Two columns is what makes the set a surface of revolution at all.
+        const int axisDof = paramCount(SurfClass::Cylinder) - 1;
+        const int dProfile = paramCount(SurfClass::Torus) - axisDof;
+        if (pc.levels < dProfile || pc.columns < axisDof - paramCount(SurfClass::Plane) + 1)
+            return false;
+        // (4) fewest parameters first, both degeneracies, refused by
+        // measurement: a straight profile is a cone / cylinder / plane, and a
+        // vanishing major radius is a sphere (d = 4 < 7).
+        if (pc.lineRes <= m.tau) return false;
+        if (!(S.R > m.tau) || !(S.r > m.tau)) return false;
+        if (!(S.R > S.r)) return false;
+    }
     double maxR = 0;
     for (int vi : verts) maxR = std::max(maxR, distToSurf(m.verts[static_cast<size_t>(vi)], S));
     double maxNd = 0;
@@ -1351,18 +1537,192 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
     return changed;
 }
 
-bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, bool reverse,
-             Oracle& out, std::vector<char>& skipComp) {
-    if (claimed[static_cast<size_t>(seed)]) return false;
-    if (skipComp[static_cast<size_t>(seed)]) return false;
-
-    auto finish = [&](std::vector<int>& R, SurfParams& S) -> bool {
-        while (growOnce(m, claimed, c, R, S, reverse)) {
+// D-140-6 §1(1)+(2): THE AXIS IS INHERITED, NOT FITTED FREE. Given an axis
+// line taken from an already-certified neighbour, every vertex reduces to its
+// profile point (rho, z) and the class becomes a 2-D fit there: a cone is a
+// LINE in the profile, a torus is a CIRCLE. Two or three triangles cannot
+// determine a free 6- or 7-parameter surface, which is why a free seed either
+// runs away or never admits; about an inherited axis the same two triangles
+// determine the profile exactly.
+bool fitAboutAxis(const Mesh& m, const std::vector<int>& verts, SurfClass c, const Vec3& aDirIn,
+                  const Vec3& aLoc, SurfParams& S) {
+    if (verts.size() < 2) return false;
+    Vec3 a = normalized(aDirIn);
+    if (!(norm2(a) > 0.0)) return false;
+    std::vector<double> rho, zz;
+    rho.reserve(verts.size());
+    zz.reserve(verts.size());
+    for (int vi : verts) {
+        const Vec3 w = m.verts[static_cast<size_t>(vi)] - aLoc;
+        const double z = dot(w, a);
+        rho.push_back(norm(w - a * z));
+        zz.push_back(z);
+    }
+    const double n = static_cast<double>(verts.size());
+    double mr = 0, mz = 0;
+    for (size_t i = 0; i < rho.size(); ++i) {
+        mr += rho[i];
+        mz += zz[i];
+    }
+    mr /= n;
+    mz /= n;
+    S = SurfParams{};
+    S.cls = c;
+    if (c == SurfClass::Cone) {
+        double srr = 0, srz = 0, szz = 0;
+        for (size_t i = 0; i < rho.size(); ++i) {
+            const double dr = rho[i] - mr, dz = zz[i] - mz;
+            srr += dr * dr;
+            srz += dr * dz;
+            szz += dz * dz;
         }
-        if (!fitClassEx(m, R, c, S, true) || !certifies(m, R, c, S)) return false;
+        // Total least squares line in (rho, z): the profile of a cone.
+        const double tr2 = srr + szz;
+        const double disc = std::sqrt(std::max(0.0, tr2 * tr2 * 0.25 - (srr * szz - srz * srz)));
+        const double lmax = tr2 * 0.5 + disc;
+        double dx = srz, dy = lmax - srr;  // direction along the line, (d rho, d z)
+        if (!(dx * dx + dy * dy > 0.0)) {
+            dx = lmax - szz;
+            dy = srz;
+        }
+        if (!(dx * dx + dy * dy > 0.0)) return false;
+        if (!(std::fabs(dy) > 0.0)) return false;  // rho independent of z: a plane
+        const double slope = dx / dy;              // d rho / d z = tan(alpha)
+        if (!(std::fabs(slope) > 0.0)) return false;  // constant rho: a cylinder
+        const double zApex = mz - mr / slope;
+        // The axis must point from the apex into the region, so ax > 0 there.
+        if (mz - zApex < 0.0) {
+            a = -a;
+            S.apex = aLoc + (-a) * zApex;
+        } else {
+            S.apex = aLoc + a * zApex;
+        }
+        S.n = a;
+        S.alpha = std::atan(std::fabs(slope));
+        return S.alpha > 0.0 && S.alpha < M_PI * 0.5;
+    }
+    if (c == SurfClass::Torus) {
+        std::vector<Vec3> prof;
+        prof.reserve(verts.size());
+        for (size_t i = 0; i < rho.size(); ++i) prof.push_back(Vec3{rho[i], zz[i], 0});
+        Vec3 c2{};
+        double rmin = 0;
+        if (!kasaCircle(prof, Vec3{}, Vec3{1, 0, 0}, Vec3{0, 1, 0}, c2, rmin)) return false;
+        if (!(rmin > 0.0) || !(c2.x > 0.0)) return false;
+        S.n = a;
+        S.p0 = aLoc + a * c2.y;
+        S.R = c2.x;
+        S.r = rmin;
+        return true;
+    }
+    return false;
+}
+
+// Measurement only (gdiag): where a seed's growth stopped and which clause
+// refused it. Never read by the algorithm.
+struct GrowTrace {
+    int pairs = 0, pairFit = 0, pairAdmit = 0;
+    size_t bestGrown = 0;
+    int failFit = 0, failCert = 0, failPlane = 0, failSize = 0;
+};
+
+// The already-certified neighbours a seed may inherit an axis from (D-140-6
+// §1(1)): the axis line of any certified cylinder that owns a triangle sharing
+// an edge with the seed. `prior`/`owner` are the oracle state at the phase's
+// start; nothing else about them is read.
+struct AxisLine {
+    Vec3 dir{}, loc{};
+};
+
+void inheritedAxes(const Mesh& m, int seed, const std::vector<Oracle>* prior,
+                   const std::vector<int>* owner, std::vector<AxisLine>& out) {
+    out.clear();
+    if (!prior || !owner) return;
+    for (int nb : m.adj[static_cast<size_t>(seed)]) {
+        const int oi = (*owner)[static_cast<size_t>(nb)];
+        if (oi < 0 || oi >= static_cast<int>(prior->size())) continue;
+        const Oracle& o = (*prior)[static_cast<size_t>(oi)];
+        if (o.cls != SurfClass::Cylinder) continue;
+        const AxisLine L{normalized(o.S.n), o.S.p0};
+        // D-140-6 §2: the blend class 1.4 recognises is plane-perpendicular-
+        // to-cylinder-axis x cylinder. The seed must therefore ALSO neighbour
+        // a certified plane whose normal is parallel to that axis, within that
+        // plane's own theta_q — the mesh's angle, never a chosen one. An
+        // oblique plane (blend.oblique-plane-cyl) and a cylinder-cylinder
+        // junction (blend.canal-cylcyl) are both deferred there. The test is
+        // on the GROWN REGION, not on the seed: a mouth round touches the
+        // plane along one rim and the cylinder along the other, so no single
+        // triangle of it neighbours both. See `rimOk` at the emit site.
+        bool dup = false;
+        for (const AxisLine& e : out) {
+            if (std::fabs(std::fabs(dot(e.dir, L.dir)) - 1.0) > 0.0) continue;
+            if (norm(cross(L.loc - e.loc, e.dir)) > 0.0) continue;
+            dup = true;
+        }
+        if (!dup) out.push_back(L);
+    }
+}
+
+bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, bool reverse,
+             Oracle& out, std::vector<char>& skipComp, GrowTrace* tr = nullptr,
+             const std::vector<Oracle>* prior = nullptr,
+             const std::vector<int>* owner = nullptr) {
+    if (claimed[static_cast<size_t>(seed)]) return false;
+    // For cone/torus `skipComp` records that the WHOLE-COMPONENT fallback has
+    // already been tried and refused for this component; it must not retire
+    // the component's per-seed growth as well. Measured on the linkage plate:
+    // it did, and one failing seed cost the other 510 triangles of the
+    // cross-bore component their entire cone phase (pairs=1 for 511 seeds).
+    if (skipComp[static_cast<size_t>(seed)] && c != SurfClass::Cone && c != SurfClass::Torus)
+        return false;
+
+    auto finish = [&](std::vector<int>& R, SurfParams& S, bool regrow = true) -> bool {
+        if (regrow) {
+            while (growOnce(m, claimed, c, R, S, reverse)) {
+            }
+        }
+        if (tr) tr->bestGrown = std::max(tr->bestGrown, R.size());
+        if (regrow && !fitClassEx(m, R, c, S, true)) {
+            if (tr) ++tr->failFit;
+            return false;
+        }
+        if (!certifies(m, R, c, S)) {
+            if (tr) ++tr->failCert;
+            return false;
+        }
+        // D-140-1 §3 / D-140-6 §1(4): fewest parameters first, refused by
+        // measurement and not by a bound. A region a cheaper class certifies
+        // IS that class — a near-zero half-angle cone is a cylinder with an
+        // apex 4.9e8 mm away, and a torus whose profile circle degenerates is
+        // a cone, a cylinder or a sphere. Each cheaper class is tried in
+        // paramCount order; nothing here is a threshold.
         if (c != SurfClass::Plane) {
             SurfParams P;
-            if (fitPlane(m, R, P) && certifies(m, R, SurfClass::Plane, P)) return false;
+            if (fitPlane(m, R, P) && certifies(m, R, SurfClass::Plane, P)) {
+                if (tr) ++tr->failPlane;
+                return false;
+            }
+        }
+        if (c == SurfClass::Cone) {
+            // Addendum C's instrument, applied to the cone's own degeneracy:
+            // a half-angle that vanishes puts the apex outside the mesh, and a
+            // surface whose defining point the mesh cannot reach is a cylinder
+            // in this mesh, not a cone (d = 5 < 6). Measured: an apex at
+            // x = 4.9e8 mm on a 152 mm part. meshDiag is the same instrument
+            // the cylinder/sphere/torus radii are already bounded by.
+            Vec3 mn, mx;
+            bboxOf(m, R, mn, mx);
+            const Vec3 mid = (mn + mx) * 0.5;
+            if (norm(S.apex - mid) > m.meshDiag) return false;
+        }
+        if (c == SurfClass::Torus) {
+            for (SurfClass cheaper : {SurfClass::Cylinder, SurfClass::Cone}) {
+                SurfParams Q;
+                if (fitClassEx(m, R, cheaper, Q, true) && certifies(m, R, cheaper, Q)) {
+                    if (tr) ++tr->failPlane;
+                    return false;
+                }
+            }
         }
         if (c == SurfClass::Sphere) {
             const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
@@ -1421,7 +1781,11 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
         }
         std::vector<int> R{seed, u};
         SurfParams S;
-        if (!fitClass(m, R, c, S) || !admits(m, R, c, S)) continue;
+        if (tr) ++tr->pairs;
+        if (!fitClass(m, R, c, S)) continue;
+        if (tr) ++tr->pairFit;
+        if (!admits(m, R, c, S)) continue;
+        if (tr) ++tr->pairAdmit;
         if (finish(R, S)) return true;
         if (c == SurfClass::Sphere &&
             static_cast<int>(R.size()) >= paramCount(SurfClass::Sphere) + 1) {
@@ -1429,11 +1793,81 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             break;
         }
     }
+    // D-140-6 §1(1): grow about an axis inherited from an already-certified
+    // neighbour. The profile fit is exact from the seed pair onward, so a
+    // feature that is a strict subset of its connected component (a mouth
+    // round inside a cross-bore component) is reachable without ever fitting
+    // 6 or 7 free parameters. The free re-solve is then admitted only as a
+    // refinement, and only if it still certifies.
+    if (c == SurfClass::Cone || c == SurfClass::Torus) {
+        std::vector<AxisLine> axes;
+        inheritedAxes(m, seed, prior, owner, axes);
+        thread_local Scratch axSc;
+        axSc.ensure(m.verts.size());
+        for (const AxisLine& L : axes) {
+            std::vector<int> R{seed};
+            std::vector<int> vs;
+            SurfParams S;
+            bool grew = true;
+            while (grew) {
+                grew = false;
+                std::vector<int> cand;
+                std::unordered_set<int> inR(R.begin(), R.end());
+                for (int t : R)
+                    for (int nb : m.adj[static_cast<size_t>(t)]) {
+                        if (claimed[static_cast<size_t>(nb)] || inR.count(nb)) continue;
+                        cand.push_back(nb);
+                    }
+                std::sort(cand.begin(), cand.end());
+                cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
+                for (int u : cand) {
+                    std::vector<int> R2 = R;
+                    R2.push_back(u);
+                    uniqueVerts(m, R2, vs, axSc.st);
+                    SurfParams S2;
+                    if (!fitAboutAxis(m, vs, c, L.dir, L.loc, S2)) continue;
+                    if (!admits(m, R2, c, S2)) continue;
+                    R.swap(R2);
+                    S = S2;
+                    grew = true;
+                }
+            }
+            if (static_cast<int>(R.size()) < 2) continue;
+            uniqueVerts(m, R, vs, axSc.st);
+            if (!fitAboutAxis(m, vs, c, L.dir, L.loc, S)) continue;
+            // D-140-6 §2 scope, evaluated over the region: some triangle of R
+            // must neighbour a certified plane whose normal is parallel to the
+            // inherited axis within that plane's own theta_q.
+            bool rimOk = false;
+            {
+                std::unordered_set<int> inR2(R.begin(), R.end());
+                for (int t : R) {
+                    for (int nb2 : m.adj[static_cast<size_t>(t)]) {
+                        if (inR2.count(nb2)) continue;
+                        const int oj = (*owner)[static_cast<size_t>(nb2)];
+                        if (oj < 0 || oj >= static_cast<int>(prior->size())) continue;
+                        const Oracle& pl = (*prior)[static_cast<size_t>(oj)];
+                        if (pl.cls != SurfClass::Plane) continue;
+                        double th = 0;
+                        for (int pt : pl.tris)
+                            th = std::max(th, m.tris[static_cast<size_t>(pt)].thetaQ);
+                        const double ang = angleUnit(normalized(pl.S.n), L.dir);
+                        if (std::min(ang, M_PI - ang) <= th) rimOk = true;
+                    }
+                }
+            }
+            if (!rimOk) continue;
+            std::vector<int> Rk = R;
+            SurfParams Sk = S;
+            if (finish(Rk, Sk, false)) return true;
+        }
+    }
     // Cone / torus: a local patch is under-determined and looks like a
     // cylinder/sphere. Take the whole unclaimed connected component (the
     // S04 512-tri band, the S03 drafted hole), then fit. finish() still
     // requires certifies — a freeform island fails and stays unclaimed.
     if (c == SurfClass::Cone || c == SurfClass::Torus) {
+        if (skipComp[static_cast<size_t>(seed)]) return false;
         std::vector<int> R{seed};
         std::unordered_set<int> inR{seed};
         std::vector<int> stack{seed};
@@ -1556,11 +1990,14 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
     // `sink`, deferred 2-triangle planes to `held`, and `claimedV` is marked.
     auto walk = [&](SurfClass c, const std::vector<int>& seeds, std::vector<char>& claimedV,
                     std::vector<Oracle>& sink, std::vector<Oracle>& held) {
+        const std::vector<Oracle> prior = out.oracles;
+        const std::vector<int> priorOwner = out.owner;
         std::vector<char> skipComp(m.tris.size(), 0);
         for (int seed : seeds) {
             if (claimedV[static_cast<size_t>(seed)]) continue;
             Oracle o;
-            if (!tryGrow(m, claimedV, c, seed, false, o, skipComp)) continue;
+            if (!tryGrow(m, claimedV, c, seed, false, o, skipComp, nullptr, &prior, &priorOwner))
+                continue;
             if (c == SurfClass::Plane && static_cast<int>(o.tris.size()) == 2) {
                 // Tessellated cylinders/spheres are planar quads. Hold a 2-tri
                 // plane whose neighbour dihedral is the tessellation step
@@ -1622,13 +2059,16 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                         int nComp) {
         std::vector<char> carries(static_cast<size_t>(nComp) + 1, 0);
         std::vector<char> amb = ambient;  // tryGrow reads it; the pass never writes it
+        const std::vector<Oracle> prior = out.oracles;
+        const std::vector<int> priorOwner = out.owner;
         std::vector<char> skipComp(m.tris.size(), 0);
         for (int seed : seeds) {
             if (amb[static_cast<size_t>(seed)]) continue;
             const int k = compId[static_cast<size_t>(seed)];
             if (carries[static_cast<size_t>(k)]) continue;  // already answered for this component
             Oracle o;
-            if (!tryGrow(m, amb, c, seed, false, o, skipComp)) continue;
+            if (!tryGrow(m, amb, c, seed, false, o, skipComp, nullptr, &prior, &priorOwner))
+                continue;
             carries[static_cast<size_t>(k)] = 1;
         }
         return carries;
@@ -1661,6 +2101,74 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
     for (SurfClass c : order) {
         std::vector<int> compId;
         const int nComp = componentsOf(claimed, compId);
+        if (gdiag()) {
+            int unc = 0;
+            for (int t = 0; t < static_cast<int>(m.tris.size()); ++t)
+                if (!claimed[static_cast<size_t>(t)]) ++unc;
+            std::fprintf(stderr, "GRADE_PHASE class=%s unclaimed=%d comps=%d q=%.9g\n",
+                         className(c), unc, nComp, m.q);
+            if (c == SurfClass::Cone || c == SurfClass::Torus) {
+                std::vector<std::vector<int>> comps(static_cast<size_t>(nComp));
+                for (int t = 0; t < static_cast<int>(m.tris.size()); ++t)
+                    if (!claimed[static_cast<size_t>(t)])
+                        comps[static_cast<size_t>(compId[static_cast<size_t>(t)])].push_back(t);
+                std::vector<int> ord(static_cast<size_t>(nComp));
+                for (int i = 0; i < nComp; ++i) ord[static_cast<size_t>(i)] = i;
+                std::stable_sort(ord.begin(), ord.end(), [&](int a, int b) {
+                    return regionArea(m, comps[static_cast<size_t>(a)]) >
+                           regionArea(m, comps[static_cast<size_t>(b)]);
+                });
+                for (int k = 0; k < nComp; ++k) {
+                    const std::vector<int>& K = comps[static_cast<size_t>(ord[static_cast<size_t>(k)])];
+                    if (K.size() < 2) continue;
+                    Vec3 mn, mx;
+                    bboxOf(m, K, mn, mx);
+                    SurfParams S;
+                    const bool fo = fitClass(m, K, c, S);
+                    double mr = 0;
+                    const bool ce = fo && certifies(m, K, c, S, &mr);
+                    // What the growth walk actually finds inside this
+                    // component: the largest certifying region over a frozen
+                    // ambient (no consumption), and how many seeds certify.
+                    {
+                        std::vector<char> amb(m.tris.size(), 1);
+                        for (int t : K) amb[static_cast<size_t>(t)] = 0;
+                        std::vector<char> skipC(m.tris.size(), 0);
+                        int nOk = 0;
+                        size_t bestN = 0;
+                        double bestA = 0;
+                        Oracle bo;
+                        GrowTrace tr;
+                        for (int seed : K) {
+                            Oracle o;
+                            if (!tryGrow(m, amb, c, seed, false, o, skipC, &tr, &out.oracles,
+                                         &out.owner))
+                                continue;
+                            ++nOk;
+                            const double a2 = regionArea(m, o.tris);
+                            if (o.tris.size() > bestN) {
+                                bestN = o.tris.size();
+                                bestA = a2;
+                                bo = o;
+                            }
+                        }
+                        std::fprintf(stderr,
+                                     "GRADE_GROW class=%s comp=%d seedsOk=%d bestN=%zu bestArea=%.6f "
+                                     "R=%.6f r=%.6f alpha=%.6f pairs=%d pairFit=%d pairAdmit=%d "
+                                     "bestGrown=%zu failFit=%d failCert=%d failPlane=%d\n",
+                                     className(c), ord[static_cast<size_t>(k)], nOk, bestN, bestA,
+                                     bo.S.R, bo.S.r, bo.S.alpha, tr.pairs, tr.pairFit, tr.pairAdmit,
+                                     tr.bestGrown, tr.failFit, tr.failCert, tr.failPlane);
+                    }
+                    std::fprintf(stderr,
+                                 "GRADE_CAND class=%s comp=%d n=%zu area=%.6f fit=%d cert=%d "
+                                 "R=%.6f r=%.6f alpha=%.6f maxResid=%.6eq bbox=[%.4f %.4f %.4f]-[%.4f %.4f %.4f]\n",
+                                 className(c), ord[static_cast<size_t>(k)], K.size(),
+                                 regionArea(m, K), fo ? 1 : 0, ce ? 1 : 0, S.R, S.r, S.alpha,
+                                 m.q > 0 ? mr / m.q : 0.0, mn.x, mn.y, mn.z, mx.x, mx.y, mx.z);
+                }
+            }
+        }
         // Stage A — the growth-order probe runs here, over seedList().
         const std::vector<char> carries = coverage(c, seedList(), claimed, compId, nComp);
         // Stage B — CANONICAL PARTITION. The domain is every unclaimed
@@ -1685,6 +2193,9 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             out.oracles.push_back(std::move(o));
         }
         for (Oracle& o : canonHeld) heldPlanes.push_back(std::move(o));
+        if (gdiag())
+            std::fprintf(stderr, "GRADE_PHASE_OUT class=%s domain=%zu emitted=%zu held=%zu\n",
+                         className(c), mine.size(), canon.size(), canonHeld.size());
         restabilize();
         // Claim pass (islands). Triangle order is always ascending — seed
         // reversal is a growth-order probe; SPEC §5.4's claim/merge must be
@@ -1815,11 +2326,36 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         out.oracles[static_cast<size_t>(i)].id = i;
         std::sort(out.oracles[static_cast<size_t>(i)].tris.begin(),
                   out.oracles[static_cast<size_t>(i)].tris.end());
-        fitClass(m, out.oracles[static_cast<size_t>(i)].tris, out.oracles[static_cast<size_t>(i)].cls,
-                 out.oracles[static_cast<size_t>(i)].S);
+        // D-130-12 / D-140-6 §1(5): a re-solve is admitted only if the region
+        // still certifies under it; otherwise roll back to the parameters the
+        // region was certified with. Without this a curved oracle can report
+        // parameters no clause ever passed (measured: a 6-triangle pickup
+        // torus reporting Rmin > Rmaj).
+        {
+            Oracle& oi = out.oracles[static_cast<size_t>(i)];
+            const SurfParams keep = oi.S;
+            if (!fitClass(m, oi.tris, oi.cls, oi.S) || !certifies(m, oi.tris, oi.cls, oi.S))
+                oi.S = keep;
+        }
         for (int t : out.oracles[static_cast<size_t>(i)].tris)
             out.owner[static_cast<size_t>(t)] = i;
         fillOracleStats(m, out.oracles[static_cast<size_t>(i)]);
+    }
+
+    if (const char* op = std::getenv("STL2STEP_GRADE_OWNERS")) {
+        if (op[0]) {
+            if (FILE* f = std::fopen(op, "w")) {
+                for (int t = 0; t < static_cast<int>(m.tris.size()); ++t) {
+                    const int oi = out.owner[static_cast<size_t>(t)];
+                    const Vec3& cn = m.tris[static_cast<size_t>(t)].centroid;
+                    std::fprintf(f, "%d %d %s %.9g %.9g %.9g\n", t, oi,
+                                 oi < 0 ? "residue"
+                                        : className(out.oracles[static_cast<size_t>(oi)].cls),
+                                 cn.x, cn.y, cn.z);
+                }
+                std::fclose(f);
+            }
+        }
     }
 
     // Residue
