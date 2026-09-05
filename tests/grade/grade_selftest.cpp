@@ -6,6 +6,8 @@
 #include "stl_quant.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <clocale>
@@ -340,7 +342,9 @@ int coreTests(const std::string& corpus) {
             const std::string step = join(corpus, "S01.exact.step");  // any STEP; oracle from mesh
             auto a = once(false, stl, step);
             auto b = once(false, stl, step);
+            auto c = once(true, stl, step);
             check(a.first == b.first, "handle-pickup twice json identical");
+            check(a.first == c.first, "handle-pickup reverse-seed json identical");
         }
     }
     return gFail;
@@ -372,17 +376,99 @@ TopoDS_Shape cubeWithSliverTop() {
     return sew.SewedShape();
 }
 
-TopoDS_Shape cubeSpanned() {
-    // One oversized top face (0..20 in v) hanging over a side, plus the other four.
-    BRepBuilderAPI_Sewing sew;
-    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, -1)), 0, 10, 0, 10).Face());
-    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 0)), 0, 10, 0, 10).Face());
-    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(10, 0, 0), gp_Dir(1, 0, 0)), 0, 10, 0, 10).Face());
-    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, -1, 0)), 0, 10, 0, 10).Face());
-    // no +Y face: oversized top in Y
-    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 10), gp_Dir(0, 0, 1)), 0, 10, 0, 20).Face());
-    sew.Perform();
-    return sew.SewedShape();
+bool writeBinaryStl(const std::string& path,
+                    const std::vector<std::array<grade::Vec3, 3>>& tris) {
+    std::FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    unsigned char head[84];
+    std::memset(head, 0, 84);
+    const uint32_t n = static_cast<uint32_t>(tris.size());
+    std::memcpy(head + 80, &n, 4);
+    std::fwrite(head, 1, 84, f);
+    for (const auto& t : tris) {
+        unsigned char rec[50];
+        std::memset(rec, 0, 50);
+        float v[9] = {static_cast<float>(t[0].x), static_cast<float>(t[0].y),
+                      static_cast<float>(t[0].z), static_cast<float>(t[1].x),
+                      static_cast<float>(t[1].y), static_cast<float>(t[1].z),
+                      static_cast<float>(t[2].x), static_cast<float>(t[2].y),
+                      static_cast<float>(t[2].z)};
+        std::memcpy(rec + 12, v, 36);
+        std::fwrite(rec, 1, 50, f);
+    }
+    std::fclose(f);
+    return true;
+}
+
+bool fileNonempty(const std::string& p) {
+    std::FILE* f = std::fopen(p.c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long n = std::ftell(f);
+    std::fclose(f);
+    return n > 0;
+}
+
+std::string engineBeside(const std::string& argv0) {
+    std::string d = argv0;
+    const auto sl = d.find_last_of("/\\");
+    if (sl == std::string::npos) d = ".";
+    else
+        d = d.substr(0, sl);
+    return join(d, "stl2step");
+}
+
+void unifyCoplanarFaces(const grade::Mesh& mesh, BRepBuilderAPI_Sewing& sew) {
+    const int T = static_cast<int>(mesh.tris.size());
+    std::vector<char> seen(static_cast<size_t>(T), 0);
+    for (int t = 0; t < T; ++t) {
+        if (seen[static_cast<size_t>(t)]) continue;
+        std::vector<int> stack{t}, group;
+        seen[static_cast<size_t>(t)] = 1;
+        const grade::Vec3 n0 = mesh.tris[static_cast<size_t>(t)].n;
+        const grade::Vec3 p0 = mesh.verts[static_cast<size_t>(mesh.tris[static_cast<size_t>(t)].v[0])];
+        while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            group.push_back(u);
+            for (int n : mesh.adj[static_cast<size_t>(u)]) {
+                if (seen[static_cast<size_t>(n)]) continue;
+                const grade::Tri& tr = mesh.tris[static_cast<size_t>(n)];
+                if (grade::angleUnit(tr.n, n0) > tr.thetaQ) continue;
+                bool on = true;
+                for (int k = 0; k < 3; ++k) {
+                    const grade::Vec3& v = mesh.verts[static_cast<size_t>(tr.v[k])];
+                    if (std::fabs(grade::dot(v - p0, n0)) > mesh.tau) {
+                        on = false;
+                        break;
+                    }
+                }
+                if (!on) continue;
+                seen[static_cast<size_t>(n)] = 1;
+                stack.push_back(n);
+            }
+        }
+        grade::Vec3 a = mesh.verts[static_cast<size_t>(mesh.tris[static_cast<size_t>(group[0])].v[0])];
+        grade::Vec3 u, v;
+        const grade::Vec3 n = n0;
+        grade::Vec3 tmpv = (std::fabs(n.z) < 0.9) ? grade::Vec3{0, 0, 1} : grade::Vec3{1, 0, 0};
+        u = grade::normalized(grade::cross(tmpv, n));
+        v = grade::cross(n, u);
+        double umin = 1e300, umax = -1e300, vmin = 1e300, vmax = -1e300;
+        for (int gi : group) {
+            const grade::Tri& tr = mesh.tris[static_cast<size_t>(gi)];
+            for (int k = 0; k < 3; ++k) {
+                const grade::Vec3 d = mesh.verts[static_cast<size_t>(tr.v[k])] - a;
+                const double uu = grade::dot(d, u), vv = grade::dot(d, v);
+                umin = std::min(umin, uu);
+                umax = std::max(umax, uu);
+                vmin = std::min(vmin, vv);
+                vmax = std::max(vmax, vv);
+            }
+        }
+        gp_Pln pl(gp_Pnt(a.x, a.y, a.z), gp_Dir(n.x, n.y, n.z));
+        sew.Add(BRepBuilderAPI_MakeFace(pl, umin, umax, vmin, vmax).Face());
+    }
 }
 
 TopoDS_Shape openShellFrom(const TopoDS_Shape& s) {
@@ -397,7 +483,7 @@ TopoDS_Shape openShellFrom(const TopoDS_Shape& s) {
     return c;
 }
 
-int syntheticTests(const std::string& corpus) {
+int syntheticTests(const std::string& corpus, const std::string& argv0) {
     silence();
     std::setlocale(LC_ALL, "C");
     grade::GradeConfig cfg;
@@ -413,39 +499,24 @@ int syntheticTests(const std::string& corpus) {
     // Case 4: S03 verbatim — cylinders faceted, planes recovered
     {
         std::string verbatim = join(tmp, "S03.verbatim.step");
-        // Prefer the engine if present next to this binary; else sew one planar face per tri.
-        bool made = false;
-        (void)made;
         grade::Mesh mesh;
         std::string err;
         grade::loadStl(join(corpus, "S03.stl"), mesh, err);
-        BRepBuilderAPI_Sewing sew;
-        for (const auto& tr : mesh.tris) {
-            const grade::Vec3& a = mesh.verts[static_cast<size_t>(tr.v[0])];
-            const grade::Vec3& b = mesh.verts[static_cast<size_t>(tr.v[1])];
-            const grade::Vec3& c = mesh.verts[static_cast<size_t>(tr.v[2])];
-            gp_Pln pl(gp_Pnt(a.x, a.y, a.z), gp_Dir(tr.n.x, tr.n.y, tr.n.z));
-            // unify coplanar: MakeFace of the triangle's plane; OCCT needs a bounded face.
-            // Use a small rectangle around the triangle via UV of its bbox in the plane.
-            grade::Vec3 u, v;
-            // reuse frame
-            const grade::Vec3 n = tr.n;
-            grade::Vec3 tmpv = (std::fabs(n.z) < 0.9) ? grade::Vec3{0, 0, 1} : grade::Vec3{1, 0, 0};
-            u = grade::normalized(grade::cross(tmpv, n));
-            v = grade::cross(n, u);
-            auto uv = [&](const grade::Vec3& p) {
-                const grade::Vec3 d = p - a;
-                return std::pair<double, double>{grade::dot(d, u), grade::dot(d, v)};
-            };
-            const auto ua = uv(a), ub = uv(b), uc = uv(c);
-            const double umin = std::min(ua.first, std::min(ub.first, uc.first));
-            const double umax = std::max(ua.first, std::max(ub.first, uc.first));
-            const double vmin = std::min(ua.second, std::min(ub.second, uc.second));
-            const double vmax = std::max(ua.second, std::max(ub.second, uc.second));
-            sew.Add(BRepBuilderAPI_MakeFace(pl, umin, umax, vmin, vmax).Face());
+        bool made = false;
+        const std::string eng = engineBeside(argv0);
+        if (fileNonempty(eng)) {
+            std::string cmd = std::string("\"") + eng + "\" \"" + join(corpus, "S03.stl") +
+                              "\" -o \"" + verbatim + "\" --engine verbatim --quiet --no-verify";
+            std::system(cmd.c_str());
+            made = fileNonempty(verbatim);
         }
-        sew.Perform();
-        writeStep(sew.SewedShape(), verbatim);
+        if (!made) {
+            // SPEC §8 case 4: one planar face per triangle, coplanar neighbours unified.
+            BRepBuilderAPI_Sewing sew;
+            unifyCoplanarFaces(mesh, sew);
+            sew.Perform();
+            writeStep(sew.SewedShape(), verbatim);
+        }
         grade::GradeDocument d;
         check(grade::gradeFiles(join(corpus, "S03.stl"), verbatim, cfg, d, err), "S03 verbatim grades");
         std::fprintf(stderr, "  case4 grade.cyl=%g grade.plane=%g\n", d.gradeCyl, d.gradePlane);
@@ -503,17 +574,32 @@ int syntheticTests(const std::string& corpus) {
         check(!hzValid, "case6 hardZero does not contain valid");
     }
 
-    // Case 7: spanned
+    // Case 7: spanned — two disjoint coplanar oracles, one STEP face
+    // (SPEC: "top face enlarged to overhang a second oracle plane"; the
+    // vertex-hit test needs both oracles on the untrimmed surface, so the
+    // construction is two coplanar squares + one combined face).
     {
-        const std::string p = join(tmp, "S01.span.step");
-        writeStep(cubeSpanned(), p);
+        const std::string stl = join(tmp, "span.stl");
+        const std::string p = join(tmp, "span.step");
+        std::vector<std::array<grade::Vec3, 3>> tris = {
+            {{{0, 0, 0}, {10, 0, 0}, {10, 10, 0}}},
+            {{{0, 0, 0}, {10, 10, 0}, {0, 10, 0}}},
+            {{{20, 0, 0}, {30, 0, 0}, {30, 10, 0}}},
+            {{{20, 0, 0}, {30, 10, 0}, {20, 10, 0}}},
+        };
+        check(writeBinaryStl(stl, tris), "case7 write stl");
+        BRepBuilderAPI_Sewing sew;
+        sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0, 30, 0, 10).Face());
+        sew.Perform();
+        writeStep(sew.SewedShape(), p);
         grade::GradeDocument d;
         std::string err;
-        check(grade::gradeFiles(join(corpus, "S01.stl"), p, cfg, d, err), "case7 grades");
+        check(grade::gradeFiles(stl, p, cfg, d, err), "case7 grades");
         int nSpan = 0;
         for (const auto& f : d.features)
             if (f.status == grade::Status::Spanned && f.credit == 0.0) ++nSpan;
-        std::fprintf(stderr, "  case7 spanned=%d\n", nSpan);
+        std::fprintf(stderr, "  case7 spanned=%d planeOracles=%d\n", nSpan,
+                     countClass(d, grade::SurfClass::Plane));
         check(nSpan >= 2, "case7 both oracles spanned");
     }
 
@@ -597,7 +683,7 @@ int main(int argc, char** argv) {
     const std::string corpus = argv[2];
     int rc = 0;
     if (mode == "core") rc = coreTests(corpus);
-    else if (mode == "synthetic") rc = syntheticTests(corpus);
+    else if (mode == "synthetic") rc = syntheticTests(corpus, argv[0]);
     else if (mode == "ascii") rc = asciiTest(corpus);
     else {
         std::fprintf(stderr, "unknown mode %s\n", mode.c_str());

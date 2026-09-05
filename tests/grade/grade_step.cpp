@@ -135,7 +135,11 @@ bool loadStep(const std::string& path, const Mesh& mesh, StepModel& out, std::st
     for (int i = 1; i <= edgeFaces.Extent(); ++i) {
         if (edgeFaces(i).Extent() < 2) ++freeEdges;
     }
-    out.watertight = (freeEdges == 0) && (nClosed > 0);
+    // Seamed360 cylinders/spheres carry a seam EDGE with one ancestor
+    // FACE; that is not a free edge. D-140-1 watertight is "no closed
+    // shell" — use BRep_Tool::IsClosed per shell (census convention).
+    (void)freeEdges;
+    out.watertight = (nShells > 0 && nClosed == nShells);
 
     if (computeVolume) {
         GProp_GProps vp;

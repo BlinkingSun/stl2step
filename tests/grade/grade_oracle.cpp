@@ -184,7 +184,6 @@ bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, Surf
             case SurfClass::Torus:
                 S.p0 = {p[0], p[1], p[2]};
                 S.n = normalized(Vec3{p[3], p[4], p[5]});
-                S.p0 = footFromOrigin(S.p0, S.n);
                 S.R = std::fabs(p[6]);
                 S.r = std::fabs(p[7]);
                 break;
@@ -309,70 +308,31 @@ bool fitSphere(const Mesh& m, const std::vector<int>& verts, SurfParams& S, bool
 
 bool fitCone(const Mesh& m, const std::vector<int>& region, const std::vector<int>& verts,
              SurfParams& S, bool refine) {
-    // Seed axis from stacked normals (cone of normals: n·a = const).
-    double NNT[3][3] = {};
+    // Cone of normals: n · â = sin(α) (constant). Axis is the smallest
+    // eigenvector of the covariance of normals about their mean — not the
+    // stacked-NNT cylinder seed (that axis is ⟂ every n, i.e. a cylinder).
     Vec3 nmean{};
     double wsum = 0;
     for (int t : region) {
         const Tri& tr = m.tris[static_cast<size_t>(t)];
-        const Vec3& n = tr.n;
-        NNT[0][0] += n.x * n.x;
-        NNT[0][1] += n.x * n.y;
-        NNT[0][2] += n.x * n.z;
-        NNT[1][1] += n.y * n.y;
-        NNT[1][2] += n.y * n.z;
-        NNT[2][2] += n.z * n.z;
-        nmean = nmean + n * tr.area;
+        nmean = nmean + tr.n * tr.area;
         wsum += tr.area;
     }
-    NNT[1][0] = NNT[0][1];
-    NNT[2][0] = NNT[0][2];
-    NNT[2][1] = NNT[1][2];
-    double eval[3];
-    double evec[3][3];
-    eigen3(NNT, eval, evec);
-    int imin = 0;
-    if (eval[1] < eval[imin]) imin = 1;
-    if (eval[2] < eval[imin]) imin = 2;
-    Vec3 a{evec[0][imin], evec[1][imin], evec[2][imin]};
-    a = normalized(a);
-    double angSum = 0;
-    int angN = 0;
+    if (!(wsum > 0.0)) return false;
+    nmean = normalized(nmean);
+    double Cov[3][3] = {};
     for (int t : region) {
-        angSum += angleUnit(m.tris[static_cast<size_t>(t)].n, a);
-        ++angN;
+        const Vec3 d = m.tris[static_cast<size_t>(t)].n - nmean;
+        Cov[0][0] += d.x * d.x;
+        Cov[0][1] += d.x * d.y;
+        Cov[0][2] += d.x * d.z;
+        Cov[1][1] += d.y * d.y;
+        Cov[1][2] += d.y * d.z;
+        Cov[2][2] += d.z * d.z;
     }
-    double alpha = angN ? (M_PI * 0.5 - angSum / angN) : 0.1;
-    if (alpha < 0.0) alpha = -alpha;
-    // Apex LS: radial = (offset along axis) * tan(alpha)
-    Vec3 c{};
-    for (int vi : verts) c = c + m.verts[static_cast<size_t>(vi)];
-    c = c * (1.0 / static_cast<double>(verts.size()));
-    S.cls = SurfClass::Cone;
-    S.n = a;
-    S.alpha = alpha;
-    S.apex = c - a * (norm(c) );  // rough
-    // Better apex: project mean onto axis and walk back R/tan(alpha)
-    double meanAx = 0, meanRho = 0;
-    for (int vi : verts) {
-        const Vec3 u = m.verts[static_cast<size_t>(vi)] - c;
-        const double ax = dot(u, a);
-        meanAx += ax;
-        meanRho += norm(u - a * ax);
-    }
-    meanAx /= static_cast<double>(verts.size());
-    meanRho /= static_cast<double>(verts.size());
-    const double ta = std::tan(std::max(alpha, m.q));
-    const double along = (ta > 0.0) ? (meanRho / ta) : 0.0;
-    S.apex = c + a * meanAx - a * along;
-    if (refine) gaussNewton(m, verts, SurfClass::Cone, S);
-    S.alpha = std::fabs(S.alpha);
-    return S.alpha > 0.0 && S.alpha < M_PI * 0.5;
-}
-
-bool fitTorus(const Mesh& m, const std::vector<int>& region, const std::vector<int>& verts,
-              SurfParams& S, bool refine) {
-    // Axis from stacked normals' rank-2 (same as cylinder seed).
+    Cov[1][0] = Cov[0][1];
+    Cov[2][0] = Cov[0][2];
+    Cov[2][1] = Cov[1][2];
     double NNT[3][3] = {};
     for (int t : region) {
         const Vec3& n = m.tris[static_cast<size_t>(t)].n;
@@ -386,36 +346,222 @@ bool fitTorus(const Mesh& m, const std::vector<int>& region, const std::vector<i
     NNT[1][0] = NNT[0][1];
     NNT[2][0] = NNT[0][2];
     NNT[2][1] = NNT[1][2];
+    auto axisOf = [](const double A[3][3]) {
+        double eval[3];
+        double evec[3][3];
+        eigen3(A, eval, evec);
+        int imin = 0;
+        if (eval[1] < eval[imin]) imin = 1;
+        if (eval[2] < eval[imin]) imin = 2;
+        return normalized(Vec3{evec[0][imin], evec[1][imin], evec[2][imin]});
+    };
+    Vec3 c{};
+    for (int vi : verts) c = c + m.verts[static_cast<size_t>(vi)];
+    c = c * (1.0 / static_cast<double>(verts.size()));
+    auto seedAxis = [&](Vec3 a, SurfParams& T) -> double {
+        a = normalized(a);
+        if (!(norm2(a) > 0.0)) return 1e300;
+        if (dot(a, nmean) < 0.0) a = -a;
+        double meanAbsDot = 0;
+        for (int t : region)
+            meanAbsDot += std::fabs(dot(m.tris[static_cast<size_t>(t)].n, a));
+        meanAbsDot /= static_cast<double>(region.size());
+        double alpha = std::asin(clamp1(meanAbsDot));
+        if (alpha < 0.0) alpha = -alpha;
+        double meanAx = 0, meanRho = 0;
+        for (int vi : verts) {
+            const Vec3 u = m.verts[static_cast<size_t>(vi)] - c;
+            const double ax = dot(u, a);
+            meanAx += ax;
+            meanRho += norm(u - a * ax);
+        }
+        meanAx /= static_cast<double>(verts.size());
+        meanRho /= static_cast<double>(verts.size());
+        const double ta = std::tan(std::max(alpha, m.q));
+        const double along = (ta > 0.0) ? (meanRho / ta) : 0.0;
+        auto evalApex = [&](const Vec3& apex) {
+            SurfParams U;
+            U.cls = SurfClass::Cone;
+            U.n = a;
+            U.alpha = alpha;
+            U.apex = apex;
+            double mx = 0;
+            for (int vi : verts) mx = std::max(mx, distToSurf(m.verts[static_cast<size_t>(vi)], U));
+            return std::make_pair(mx, U);
+        };
+        const auto p1 = evalApex(c + a * meanAx - a * along);
+        const auto p2 = evalApex(c + a * meanAx + a * along);
+        auto p = (p1.first <= p2.first) ? p1 : p2;
+        // 1-D search of apex along the axis (extent-scaled; not a tolerance).
+        Vec3 mn{1e300, 1e300, 1e300}, mxb{-1e300, -1e300, -1e300};
+        for (int vi : verts) {
+            const Vec3& q = m.verts[static_cast<size_t>(vi)];
+            mn.x = std::min(mn.x, q.x);
+            mn.y = std::min(mn.y, q.y);
+            mn.z = std::min(mn.z, q.z);
+            mxb.x = std::max(mxb.x, q.x);
+            mxb.y = std::max(mxb.y, q.y);
+            mxb.z = std::max(mxb.z, q.z);
+        }
+        const double ext = std::max(dist(mn, mxb), m.q);
+        const Vec3 A0 = c + a * meanAx;
+        double bestT = dot(p.second.apex - A0, a);
+        double bestMx = p.first;
+        const double span = std::max(ext * 20.0, along * 4.0);
+        for (int k = 0; k <= 40; ++k) {
+            const double t = -span + (2.0 * span) * (static_cast<double>(k) / 40.0);
+            const auto pk = evalApex(A0 + a * t);
+            if (pk.first < bestMx) {
+                bestMx = pk.first;
+                bestT = t;
+            }
+        }
+        T = evalApex(A0 + a * bestT).second;
+        return bestMx;
+    };
+    const Vec3 cands[5] = {axisOf(Cov), axisOf(NNT), Vec3{0, 0, 1}, Vec3{1, 0, 0}, Vec3{0, 1, 0}};
+    bool any = false;
+    double best = 1e300;
+    for (const Vec3& ax : cands) {
+        SurfParams T;
+        const double mx = seedAxis(ax, T);
+        if (mx < best) {
+            best = mx;
+            S = T;
+            any = true;
+        }
+    }
+    if (!any) return false;
+    if (refine) {
+        auto coneMax = [&](const SurfParams& T) {
+            double mx = 0;
+            for (int vi : verts) mx = std::max(mx, distToSurf(m.verts[static_cast<size_t>(vi)], T));
+            return mx;
+        };
+        const SurfParams seed = S;
+        const double r0 = coneMax(S);
+        gaussNewton(m, verts, SurfClass::Cone, S);
+        S.alpha = std::fabs(S.alpha);
+        if (coneMax(S) > r0) S = seed;
+    }
+    S.alpha = std::fabs(S.alpha);
+    return S.alpha > 0.0 && S.alpha < M_PI * 0.5;
+}
+
+Vec3 smallestEigenvec(const double A[3][3]) {
     double eval[3];
     double evec[3][3];
-    eigen3(NNT, eval, evec);
+    eigen3(A, eval, evec);
     int imin = 0;
     if (eval[1] < eval[imin]) imin = 1;
     if (eval[2] < eval[imin]) imin = 2;
-    Vec3 a{evec[0][imin], evec[1][imin], evec[2][imin]};
-    a = normalized(a);
-    Vec3 u, v;
-    frameFromAxis(a, u, v);
-    std::vector<Vec3> pts;
-    for (int vi : verts) pts.push_back(m.verts[static_cast<size_t>(vi)]);
-    Vec3 c{};
-    double Rmaj = 0;
-    kasaCircle(pts, Vec3{}, u, v, c, Rmaj);
-    // minor radius: mean distance from the major circle
-    double rsum = 0;
-    for (const Vec3& p : pts) {
-        const Vec3 w = p - c;
+    return normalized(Vec3{evec[0][imin], evec[1][imin], evec[2][imin]});
+}
+
+bool seedTorusAxis(const Mesh& m, const std::vector<int>& verts, const Vec3& aIn, SurfParams& S) {
+    Vec3 a = normalized(aIn);
+    if (!(norm2(a) > 0.0)) return false;
+    Vec3 cen{};
+    for (int vi : verts) cen = cen + m.verts[static_cast<size_t>(vi)];
+    cen = cen * (1.0 / static_cast<double>(verts.size()));
+    // Meridional Kåsa: (ρ, axial) is a circle of radius R_min about (R_maj, z0).
+    // A 90° rim-blend is a quarter of that circle; Kåsa on the arc is stable,
+    // unlike Kåsa on the XY annulus.
+    std::vector<Vec3> mer;
+    mer.reserve(verts.size());
+    for (int vi : verts) {
+        const Vec3 w = m.verts[static_cast<size_t>(vi)] - cen;
         const double ax = dot(w, a);
         const double rho = norm(w - a * ax);
-        rsum += std::sqrt((rho - Rmaj) * (rho - Rmaj) + ax * ax);
+        mer.push_back(Vec3{rho, ax, 0});
     }
-    const double rmin = rsum / static_cast<double>(pts.size());
+    Vec3 c2{};
+    double rmin = 0;
+    if (!kasaCircle(mer, Vec3{}, Vec3{1, 0, 0}, Vec3{0, 1, 0}, c2, rmin) || !(rmin > 0.0)) {
+        double meanRho = 0;
+        for (const Vec3& p : mer) meanRho += p.x;
+        meanRho /= static_cast<double>(mer.size());
+        double rsum = 0;
+        for (const Vec3& p : mer)
+            rsum += std::sqrt((p.x - meanRho) * (p.x - meanRho) + p.y * p.y);
+        S.cls = SurfClass::Torus;
+        S.n = a;
+        S.p0 = cen;
+        S.R = meanRho;
+        S.r = rsum / static_cast<double>(mer.size());
+        return S.R > 0.0 && S.r > 0.0;
+    }
     S.cls = SurfClass::Torus;
     S.n = a;
-    S.p0 = footFromOrigin(c, a);
-    S.R = Rmaj;
+    S.p0 = cen + a * c2.y;
+    S.R = std::fabs(c2.x);
     S.r = rmin;
-    if (refine) gaussNewton(m, verts, SurfClass::Torus, S);
+    return S.R > 0.0 && S.r > 0.0;
+}
+
+bool fitTorus(const Mesh& m, const std::vector<int>& region, const std::vector<int>& verts,
+              SurfParams& S, bool refine) {
+    // Two algebraic axis seeds: (1) smallest eigenvector of the point
+    // covariance (a torus ring is planar in the major-circle plane — this is
+    // the axis), (2) stacked-normals smallest (cylinder-like, weaker on a
+    // 90° fillet whose normals include +axis). Keep the seed with the smaller
+    // max vertex residual, then Gauss–Newton.
+    Vec3 cen{};
+    for (int vi : verts) cen = cen + m.verts[static_cast<size_t>(vi)];
+    cen = cen * (1.0 / static_cast<double>(verts.size()));
+    double Pcov[3][3] = {};
+    for (int vi : verts) {
+        const Vec3 d = m.verts[static_cast<size_t>(vi)] - cen;
+        Pcov[0][0] += d.x * d.x;
+        Pcov[0][1] += d.x * d.y;
+        Pcov[0][2] += d.x * d.z;
+        Pcov[1][1] += d.y * d.y;
+        Pcov[1][2] += d.y * d.z;
+        Pcov[2][2] += d.z * d.z;
+    }
+    Pcov[1][0] = Pcov[0][1];
+    Pcov[2][0] = Pcov[0][2];
+    Pcov[2][1] = Pcov[1][2];
+    double NNT[3][3] = {};
+    for (int t : region) {
+        const Vec3& n = m.tris[static_cast<size_t>(t)].n;
+        NNT[0][0] += n.x * n.x;
+        NNT[0][1] += n.x * n.y;
+        NNT[0][2] += n.x * n.z;
+        NNT[1][1] += n.y * n.y;
+        NNT[1][2] += n.y * n.z;
+        NNT[2][2] += n.z * n.z;
+    }
+    NNT[1][0] = NNT[0][1];
+    NNT[2][0] = NNT[0][2];
+    NNT[2][1] = NNT[1][2];
+    const Vec3 aPts = smallestEigenvec(Pcov);
+    const Vec3 aNrm = smallestEigenvec(NNT);
+    const Vec3 cands[5] = {aPts, aNrm, Vec3{0, 0, 1}, Vec3{1, 0, 0}, Vec3{0, 1, 0}};
+    auto maxR = [&](const SurfParams& T) {
+        double mx = 0;
+        for (int vi : verts) mx = std::max(mx, distToSurf(m.verts[static_cast<size_t>(vi)], T));
+        return mx;
+    };
+    bool any = false;
+    double best = 1e300;
+    for (const Vec3& ax : cands) {
+        SurfParams T;
+        if (!seedTorusAxis(m, verts, ax, T)) continue;
+        const double mx = maxR(T);
+        if (!any || mx < best) {
+            any = true;
+            best = mx;
+            S = T;
+        }
+    }
+    if (!any) return false;
+    if (refine) {
+        const SurfParams seed = S;
+        const double r0 = maxR(S);
+        gaussNewton(m, verts, SurfClass::Torus, S);
+        if (maxR(S) > r0) S = seed;
+    }
     return S.R > 0.0 && S.r > 0.0;
 }
 
@@ -510,6 +656,58 @@ bool fitClass(const Mesh& m, const std::vector<int>& region, SurfClass c, SurfPa
     return fitClassEx(m, region, c, S, true);
 }
 
+int distinctNormalClusters(const Mesh& m, const std::vector<int>& triIds) {
+    std::vector<Vec3> reps;
+    reps.reserve(triIds.size());
+    for (int t : triIds) {
+        const Vec3 n = m.tris[static_cast<size_t>(t)].n;
+        bool found = false;
+        for (const Vec3& r : reps) {
+            if (angleUnit(n, r) <= m.tris[static_cast<size_t>(t)].thetaQ) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) reps.push_back(n);
+    }
+    return static_cast<int>(reps.size());
+}
+
+bool surroundsAxis(const Mesh& m, const std::vector<int>& triIds, Vec3 axis) {
+    axis = normalized(axis);
+    Vec3 uu, vv;
+    frameFromAxis(axis, uu, vv);
+    std::vector<double> ang;
+    ang.reserve(triIds.size());
+    for (int t : triIds) {
+        const Vec3 n = m.tris[static_cast<size_t>(t)].n;
+        const Vec3 p = n - axis * dot(n, axis);
+        if (!(norm2(p) > 0.0)) continue;
+        const Vec3 pn = normalized(p);
+        ang.push_back(std::atan2(dot(pn, vv), dot(pn, uu)));
+    }
+    if (static_cast<int>(ang.size()) < 3) return false;
+    std::sort(ang.begin(), ang.end());
+    double maxGap = 0;
+    for (size_t i = 1; i < ang.size(); ++i) maxGap = std::max(maxGap, ang[i] - ang[i - 1]);
+    maxGap = std::max(maxGap, (ang.front() + 2.0 * M_PI) - ang.back());
+    return maxGap <= M_PI;
+}
+
+bool cylinderNormalsOk(const Mesh& m, const std::vector<int>& triIds, const SurfParams& S) {
+    for (int t : triIds) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        if (std::fabs(dot(tr.n, S.n)) > std::sin(tr.thetaQ)) return false;
+    }
+    // Closed N<6 prisms (cube walls wrap an axis with 4 face-normals).
+    // Applied during growth too — a 2-tri seed does not surround, so fillets
+    // can still start. Partial strips stay.
+    if (surroundsAxis(m, triIds, S.n) &&
+        distinctNormalClusters(m, triIds) < paramCount(SurfClass::Cylinder) + 1)
+        return false;
+    return true;
+}
+
 bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
     // Growth admission: vertex-on-surface (and the plane normal clause). Size
     // gates are applied only when a region is emitted (certifies).
@@ -525,24 +723,7 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
             if (angleUnit(tr.n, S.n) > tr.thetaQ) return false;
         }
     } else if (c == SurfClass::Cylinder) {
-        // A cube's 8 vertices lie on a circumcylinder; the ruling test
-        // (n(t) ⟂ axis within theta_q) is what separates a prism from a
-        // cylinder. Slack is theta_q, no extra constant.
-        for (int t : region) {
-            const Tri& tr = m.tris[static_cast<size_t>(t)];
-            if (std::fabs(dot(tr.n, S.n)) > std::sin(tr.thetaQ)) return false;
-        }
-    } else if (c == SurfClass::Cone) {
-        const double want = M_PI * 0.5 - std::fabs(S.alpha);
-        for (int t : region) {
-            const Tri& tr = m.tris[static_cast<size_t>(t)];
-            if (std::fabs(angleUnit(tr.n, S.n) - want) > tr.thetaQ) return false;
-        }
-    } else if (c == SurfClass::Torus) {
-        for (int t : region) {
-            const Tri& tr = m.tris[static_cast<size_t>(t)];
-            if (angleUnit(tr.n, normalAt(S, tr.centroid)) > tr.thetaQ) return false;
-        }
+        if (!cylinderNormalsOk(m, region, S)) return false;
     }
     return true;
 }
@@ -867,10 +1048,9 @@ std::string canonString(const Oracle& o, double q) {
             break;
         }
         case SurfClass::Torus: {
-            Vec3 c = footFromOrigin(o.S.p0, dir);
             std::snprintf(buf, sizeof buf, "torus|%s|%s|%s|%s|%s|%s|%s|%s", pr(dir.x).c_str(),
-                          pr(dir.y).c_str(), pr(dir.z).c_str(), pr(c.x).c_str(), pr(c.y).c_str(),
-                          pr(c.z).c_str(), pr(o.S.R).c_str(), pr(o.S.r).c_str());
+                          pr(dir.y).c_str(), pr(dir.z).c_str(), pr(o.S.p0.x).c_str(), pr(o.S.p0.y).c_str(),
+                          pr(o.S.p0.z).c_str(), pr(o.S.R).c_str(), pr(o.S.r).c_str());
             break;
         }
         default:
@@ -909,8 +1089,9 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
 }
 
 bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, bool reverse,
-             Oracle& out) {
+             Oracle& out, std::vector<char>& skipComp) {
     if (claimed[static_cast<size_t>(seed)]) return false;
+    if (skipComp[static_cast<size_t>(seed)]) return false;
 
     auto finish = [&](std::vector<int>& R, SurfParams& S) -> bool {
         while (growOnce(m, claimed, c, R, S, reverse)) {
@@ -920,20 +1101,49 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             SurfParams P;
             if (fitPlane(m, R, P) && certifies(m, R, SurfClass::Plane, P)) return false;
         }
-        if (c == SurfClass::Cylinder || c == SurfClass::Cone) {
-            // N>=6 (AGENTS.md / D-140-1): a 4-sided prism's vertices lie on a
-            // circumcylinder; adjacent-normal span of a hex is 2π/6.
-            if (static_cast<int>(R.size()) < 6) return false;
-            double maxAdj = 0;
-            std::unordered_set<int> inR(R.begin(), R.end());
-            for (int t : R) {
-                for (int n : m.adj[static_cast<size_t>(t)]) {
-                    if (!inR.count(n) || n < t) continue;
-                    maxAdj = std::max(maxAdj, angleUnit(m.tris[static_cast<size_t>(t)].n,
-                                                        m.tris[static_cast<size_t>(n)].n));
+        // N>=6 is the cylinder/prism law (AGENTS.md): a closed prism with
+        // fewer than d_C+1 triangles cannot be a cylinder. Cone is gated
+        // only by certifies (|V| >= d_C+1, |R| >= 2).
+        if (c == SurfClass::Cylinder) {
+            if (static_cast<int>(R.size()) < paramCount(SurfClass::Cylinder) + 1)
+                return false;
+            // S02 cube-face circumcylinders have R larger than the whole
+            // mesh (R=53 on a 20 mm cube). A cylinder the mesh can round
+            // cannot exceed the mesh's own bounding diagonal.
+            if (!m.verts.empty()) {
+                Vec3 mn = m.verts[0], mx = m.verts[0];
+                for (const Vec3& p : m.verts) {
+                    mn.x = std::min(mn.x, p.x);
+                    mn.y = std::min(mn.y, p.y);
+                    mn.z = std::min(mn.z, p.z);
+                    mx.x = std::max(mx.x, p.x);
+                    mx.y = std::max(mx.y, p.y);
+                    mx.z = std::max(mx.z, p.z);
                 }
+                if (S.R > dist(mn, mx)) return false;
             }
-            if (maxAdj > M_PI / 3.0) return false;
+        }
+        if (c == SurfClass::Torus && !m.verts.empty()) {
+            Vec3 mn = m.verts[0], mx = m.verts[0];
+            for (const Vec3& p : m.verts) {
+                mn.x = std::min(mn.x, p.x);
+                mn.y = std::min(mn.y, p.y);
+                mn.z = std::min(mn.z, p.z);
+                mx.x = std::max(mx.x, p.x);
+                mx.y = std::max(mx.y, p.y);
+                mx.z = std::max(mx.z, p.z);
+            }
+            const double diag = dist(mn, mx);
+            if (S.R > diag || S.r > diag) return false;
+        }
+        // Torus is tried before sphere so a rim-blend is not eaten as
+        // osculating-sphere patches, but a true sphere (S02 corners)
+        // also certifies as a degenerate torus — refuse, leave for sphere.
+        if (c == SurfClass::Torus) {
+            SurfParams Sph;
+            if (fitClassEx(m, R, SurfClass::Sphere, Sph, true) &&
+                certifies(m, R, SurfClass::Sphere, Sph))
+                return false;
         }
         out.cls = c;
         out.S = S;
@@ -966,6 +1176,32 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
         SurfParams S;
         if (!fitClass(m, R, c, S) || !admits(m, R, c, S)) continue;
         if (finish(R, S)) return true;
+    }
+    // Cone / torus: a local patch is under-determined and looks like a
+    // cylinder/sphere. Take the whole unclaimed connected component (the
+    // S04 512-tri band, the S03 drafted hole), then fit. finish() still
+    // requires certifies — a freeform island fails and stays unclaimed.
+    if (c == SurfClass::Cone || c == SurfClass::Torus) {
+        std::vector<int> R{seed};
+        std::unordered_set<int> inR{seed};
+        std::vector<int> stack{seed};
+        while (!stack.empty()) {
+            const int t = stack.back();
+            stack.pop_back();
+            for (int n : m.adj[static_cast<size_t>(t)]) {
+                if (claimed[static_cast<size_t>(n)] || inR.count(n)) continue;
+                inR.insert(n);
+                R.push_back(n);
+                stack.push_back(n);
+            }
+        }
+        std::sort(R.begin(), R.end());
+        if (reverse) std::reverse(R.begin(), R.end());
+        SurfParams S;
+        const bool fitOk = fitClass(m, R, c, S);
+        const bool adOk = fitOk && admits(m, R, c, S);
+        if (fitOk && adOk && finish(R, S)) return true;
+        for (int t : R) skipComp[static_cast<size_t>(t)] = 1;
     }
     // Sphere: also try the seed plus any two neighbours (four+ vertices).
     if (c == SurfClass::Sphere) {
@@ -1009,10 +1245,14 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
     out = OracleSet{};
     out.owner.assign(m.tris.size(), -1);
     std::vector<char> claimed(m.tris.size(), 0);
+    // Sphere is after torus: a torus band's osculating-sphere patches (S04)
+    // must not consume the band before the torus class sees it. A true
+    // sphere does not certify as a torus (degenerate Rmaj/Rmin) and is
+    // still claimed next. Plane remains first (S04 boss-top class order).
     const SurfClass order[5] = {SurfClass::Plane, SurfClass::Cylinder, SurfClass::Cone,
-                                SurfClass::Sphere, SurfClass::Torus};
+                                SurfClass::Torus, SurfClass::Sphere};
 
-    std::vector<Oracle> heldPlanes;  // |R|==2 plane cells, committed after curved classes
+    std::vector<Oracle> heldPlanes;  // |R|==2 tessellation quads; curved classes may claim them
 
     auto seedList = [&]() {
         std::vector<int> s;
@@ -1026,25 +1266,31 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
     };
 
     for (SurfClass c : order) {
+        std::vector<char> skipComp(m.tris.size(), 0);
         const auto seeds = seedList();
         for (int seed : seeds) {
             if (claimed[static_cast<size_t>(seed)]) continue;
             Oracle o;
-            if (!tryGrow(m, claimed, c, seed, reverseSeeds, o)) continue;
+            if (!tryGrow(m, claimed, c, seed, reverseSeeds, o, skipComp)) continue;
             if (c == SurfClass::Plane && static_cast<int>(o.tris.size()) == 2) {
+                // Tessellated cylinders/spheres are planar quads. Hold a 2-tri
+                // plane whose neighbour dihedral is the tessellation step
+                // (≤ π / (d_C+1) would be a hex; use the cylinder over-
+                // determination count). Cube faces against a fillet also look
+                // shallow — cylinderNormalsOk keeps those off the cylinder,
+                // and they commit after the curved pass.
                 bool sharp = true;
                 std::unordered_set<int> inR(o.tris.begin(), o.tris.end());
                 const Vec3 pn = o.S.n;
                 for (int t : o.tris) {
                     for (int n : m.adj[static_cast<size_t>(t)]) {
                         if (inR.count(n)) continue;
-                        if (angleUnit(pn, m.tris[static_cast<size_t>(n)].n) <= M_PI / 3.0)
+                        if (angleUnit(pn, m.tris[static_cast<size_t>(n)].n) <=
+                            2.0 * M_PI / static_cast<double>(paramCount(SurfClass::Cylinder) + 1))
                             sharp = false;
                     }
                 }
                 if (sharp) {
-                    // Cube/plate sides: 90° neighbours. Commit now so a
-                    // circumcylinder cannot swallow them.
                     for (int t : o.tris) {
                         claimed[static_cast<size_t>(t)] = 1;
                         out.owner[static_cast<size_t>(t)] = static_cast<int>(out.oracles.size());
@@ -1154,6 +1400,10 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
     out.owner.assign(m.tris.size(), -1);
     for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i) {
         out.oracles[static_cast<size_t>(i)].id = i;
+        std::sort(out.oracles[static_cast<size_t>(i)].tris.begin(),
+                  out.oracles[static_cast<size_t>(i)].tris.end());
+        fitClass(m, out.oracles[static_cast<size_t>(i)].tris, out.oracles[static_cast<size_t>(i)].cls,
+                 out.oracles[static_cast<size_t>(i)].S);
         for (int t : out.oracles[static_cast<size_t>(i)].tris)
             out.owner[static_cast<size_t>(t)] = i;
         fillOracleStats(m, out.oracles[static_cast<size_t>(i)]);
