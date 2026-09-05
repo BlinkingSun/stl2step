@@ -2,13 +2,16 @@
 """Composed P1 regiondump + ichecker gate (lane p1-compose-fix).
 
 Dual-axis:
-  1. every fixture x every clean component passes check_regionset.py (+ sidecar)
+  1. every fixture x every clean component passes check_regionset.py (+ the
+     fixture sidecar, whose recoverable[] is matched FIXTURE-WIDE over the
+     union of all components' shipped surfaces -- D-130-22(3) addendum)
   2. --threads 1 vs --threads 8 produce byte-identical bare RegionSet JSON
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import re
@@ -83,6 +86,21 @@ def ichecker_blocking_fail(proc: subprocess.CompletedProcess) -> str | None:
 def sidecar_for(stl: Path, corpus: Path) -> Path | None:
     sc = corpus / (stl.stem + ".expected.json")
     return sc if sc.is_file() else None
+
+
+def load_matcher(ichecker: Path):
+    """The I-checker this gate drives, imported as a module.
+
+    D-130-22(3) addendum: recoverable[] is matched fixture-wide. Both the plan
+    (which fixtures go fixture-wide) and the match itself come from that one
+    file — this gate never carries its own copy of either.
+    """
+    spec = importlib.util.spec_from_file_location("check_regionset", ichecker)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot import ichecker module from {ichecker}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def check_fillet_nbrs(rs: dict) -> list[str]:
@@ -213,6 +231,7 @@ def main() -> int:
     args = ap.parse_args()
 
     fixtures = sorted(args.corpus.glob("S*.stl")) + [args.cube]
+    matcher = load_matcher(args.ichecker)
     rows: list[str] = []
     failures: list[str] = []
 
@@ -229,6 +248,10 @@ def main() -> int:
                 rows.append(f"SKIP {stl.name}: no clean components")
                 continue
             sidecar = sidecar_for(stl, args.corpus)
+
+            # Every clean component is dumped before any is checked: the
+            # fixture-wide recoverable[] pool is the union of all of them.
+            bare: dict[int, Path] = {}
             for comp in comps:
                 tag = f"{stl.name} comp{comp}"
                 t1 = tmp / f"{stl.stem}_c{comp}_t1.json"
@@ -246,9 +269,23 @@ def main() -> int:
                     failures.append(f"{tag}: threads 1 vs 8 differ")
                     rows.append(f"FAIL {tag}: determinism")
                     continue
+                bare[comp] = t1
+
+            ordered = [bare[c] for c in comps if c in bare]
+            union_arg = matcher.recoverable_union_arg(sidecar, ordered)
+
+            for comp in comps:
+                t1 = bare.get(comp)
+                if t1 is None:
+                    continue
+                tag = f"{stl.name} comp{comp}"
                 icmd = [sys.executable, str(args.ichecker), str(t1)]
                 if sidecar is not None:
                     icmd += ["--sidecar", str(sidecar)]
+                if union_arg:
+                    # D-130-22(3) addendum: this component is not charged with
+                    # the fixture's recoverable[]; the union pass below is.
+                    icmd += ["--skip-recoverable", "--component", str(comp)]
                 proc = run(icmd, capture=True)
                 blocked = ichecker_blocking_fail(proc)
                 if blocked is not None:
@@ -263,6 +300,22 @@ def main() -> int:
                     rows.append(f"FAIL {tag}: recognition")
                     continue
                 rows.append(f"PASS {tag}")
+
+            if union_arg and sidecar is not None:
+                tag = f"{stl.name} recoverable(fixture)"
+                ucmd = [
+                    sys.executable, str(args.ichecker), str(ordered[0]),
+                    "--sidecar", str(sidecar),
+                    "--recoverable-union", union_arg,
+                    "--rule", "SIDECAR_RECOVERABLE",
+                ]
+                proc = run(ucmd, capture=True)
+                if proc.returncode != 0:
+                    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                    failures.append(f"{tag}: ichecker\n{text}")
+                    rows.append(f"FAIL {tag}: ichecker")
+                else:
+                    rows.append(f"PASS {tag}")
 
     print("P1 COMPOSE GATE")
     for row in rows:

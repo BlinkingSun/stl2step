@@ -1365,6 +1365,32 @@ def _recoverable_pool_from_paths(paths):
     return pool
 
 
+def recoverable_union_arg(sidecar_path, bare_paths):
+    """The --recoverable-union argument for one fixture (D-130-22(3) addendum).
+
+    recoverable[] is matched FIXTURE-WIDE, against the union of every clean
+    component's shipped analytic surfaces. A fixture with a single clean
+    component already is its own union, and a sidecar with no recoverable[]
+    has nothing to match; both keep the plain per-component SIDECAR path and
+    get None here. Otherwise the driver runs each component with
+    --skip-recoverable --component N and one extra SIDECAR_RECOVERABLE pass
+    over the value returned here.
+    """
+    paths = [str(p) for p in bare_paths]
+    if len(paths) < 2 or not sidecar_path:
+        return None
+    try:
+        with open(str(sidecar_path), "r", encoding="utf-8") as fh:
+            sidecar = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(sidecar, dict):
+        return None
+    if not (sidecar.get("recoverable") or sidecar.get("mustRecover")):
+        return None
+    return ",".join(paths)
+
+
 def _check_recoverable_entries(rec, pool, findings=None):
     """Match recoverable[] against a pool of (region, reg_map) pairs."""
     f = findings or Findings()

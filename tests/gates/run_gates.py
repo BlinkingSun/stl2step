@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
+import check_regionset as cr
 import smooth_on as so
 
 # Re-export frozen thresholds (single source: smooth_on.py).
@@ -1030,14 +1031,10 @@ def gate_i_checker(ctx: GateContext) -> GateOutcome:
             continue
         bare_paths[comp] = bare
 
-    union_arg: Optional[str] = None
-    if len(bare_paths) > 1 and sidecar and Path(sidecar).is_file():
-        try:
-            sc_doc = json.loads(Path(sidecar).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            sc_doc = {}
-        if sc_doc.get("recoverable") or sc_doc.get("mustRecover"):
-            union_arg = ",".join(str(bare_paths[c]) for c in comps if c in bare_paths)
+    # D-130-22(3) addendum: recoverable[] is matched fixture-wide (the plan is
+    # the matcher's own, so this gate and p1_compose_gate cannot drift).
+    union_arg = cr.recoverable_union_arg(
+        sidecar, [bare_paths[c] for c in comps if c in bare_paths])
 
     for comp in comps:
         bare = bare_paths.get(comp)
