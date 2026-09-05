@@ -84,24 +84,80 @@ target_link_libraries(stl2step_core
     PUBLIC  OpenCASCADE::OpenCASCADE
     PRIVATE Threads::Threads)
 
-# BRepMesh_IncrementalMesh (--mesh mode). Homebrew's TKDESTL pulls TKMesh
-# transitively; Ubuntu libocct does not. Name it on the core target.
-if(TARGET TKMesh)
-    target_link_libraries(stl2step_core PUBLIC TKMesh)
-else()
-    find_library(STL2STEP_TKMESH NAMES TKMesh
-        HINTS
-            "${OpenCASCADE_LIBRARY_DIR}"
-            "${OpenCASCADE_BINARY_DIR}"
-            ${OpenCASCADE_ROOT} $ENV{OpenCASCADE_ROOT} $ENV{CASROOT} ${CASROOT}
-        PATH_SUFFIXES lib lib64 win64/vc14/lib
-        PATHS
-            /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
-            /opt/homebrew/lib /opt/local/lib)
-    if(STL2STEP_TKMESH)
-        target_link_libraries(stl2step_core PUBLIC "${STL2STEP_TKMESH}")
+# ---------------------------------------------------------------------------
+# Name every OpenCASCADE toolkit the sources actually use.
+#
+# `OpenCASCADE::OpenCASCADE` is our own INTERFACE target (cmake/FindOpenCASCADE.cmake),
+# so it carries only the toolkits that finder happens to list. Anything it misses
+# has to arrive by luck: some other toolkit's INTERFACE_LINK_LIBRARIES dragging it
+# in, or a linker that keeps libraries nothing asked for. Debian/Ubuntu remove both
+# crutches -- `ld --as-needed` is the distro default, and an OCCT laid out without a
+# CMake package config (source install, $CASROOT/{inc,lib}, a vendored tree) reduces
+# the finder to bare find_library results that carry no interface deps at all. The
+# link line is then literally the list below, and a toolkit missing from it is a
+# missing DSO: `BRepAlgoAPI_Fuse` -> TKBO and `BRepPrimAPI_MakePrism` -> TKPrim were
+# both reached only transitively before, which is what github issue #1 reported.
+#
+# The list is the measured minimal cover of libstl2step.a's undefined symbols over
+# all 51 OCCT toolkits -- nothing missing, no spares. Ordered most-dependent-first so
+# a static OCCT resolves in one pass. OCCT >= 7.8 renamed the data-exchange toolkits
+# (TKSTL -> TKDESTL; TKSTEP/TKSTEPBase/TKSTEPAttr/TKSTEP209 -> TKDESTEP); the old
+# spellings are kept as alternates and only what this OCCT ships is linked.
+# ---------------------------------------------------------------------------
+set(_occt_toolkits
+    TKDESTL      # StlAPI_Writer, RWStl
+    TKDESTEP     # STEPControl_Reader / STEPControl_Writer
+    TKXSBase     # Interface_Static, IFSelect_ReturnStatus
+    TKMesh       # BRepMesh_IncrementalMesh, IMeshTools_Parameters (--mesh mode)
+    TKShHealing  # ShapeFix_*, ShapeUpgrade_UnifySameDomain
+    TKBO         # BRepAlgoAPI_Fuse, BOPAlgo_GlueEnum
+    TKPrim       # BRepPrimAPI_MakePrism
+    TKTopAlgo    # BRepBuilderAPI_*, BRepCheck_*, BRepClass3d_*, BRepGProp
+    TKGeomAlgo   # GeomAPI_ProjectPointOnSurf, BRepLib_ValidateEdge
+    TKBRep       # TopoDS_*, BRep_*, BRepTools*, BRepAdaptor_*, TopExp, TopTools
+    TKGeomBase   # GC_MakeArcOfCircle, GeomProjLib, IntAna_QuadQuadGeo
+    TKG3d        # Geom_*, Poly_*
+    TKG2d        # Geom2d_*
+    TKMath       # gp_*, TColgp_*, Bnd_Box, GProp_*, ElCLib, ElSLib
+    TKernel)     # Standard_*, TColStd_*, Message_*, OSD
+set(_occt_alt_TKDESTL  TKSTL)
+set(_occt_alt_TKDESTEP TKSTEP TKSTEPBase TKSTEPAttr TKSTEP209)
+
+foreach(_tk IN LISTS _occt_toolkits)
+    # The canonical name first, then the pre-7.8 spellings it replaced.
+    set(_occt_names ${_tk} ${_occt_alt_${_tk}})
+    set(_occt_found FALSE)
+    foreach(_name IN LISTS _occt_names)
+        if(TARGET ${_name})
+            target_link_libraries(stl2step_core PUBLIC ${_name})
+            set(_occt_found TRUE)
+        endif()
+    endforeach()
+    if(NOT _occt_found)
+        # No imported target: OCCT was found without its config package. Resolve
+        # by library name against the finder's own hints -- never a hard-coded path.
+        foreach(_name IN LISTS _occt_names)
+            find_library(STL2STEP_OCCT_${_name} NAMES ${_name}
+                HINTS
+                    "${OpenCASCADE_LIBRARY_DIR}"
+                    "${OpenCASCADE_BINARY_DIR}"
+                    ${OpenCASCADE_ROOT} $ENV{OpenCASCADE_ROOT} $ENV{CASROOT} ${CASROOT}
+                PATH_SUFFIXES lib lib64 win64/vc14/lib
+                PATHS
+                    /usr/lib /usr/local/lib /usr/lib/x86_64-linux-gnu
+                    /opt/homebrew/lib /opt/local/lib)
+            mark_as_advanced(STL2STEP_OCCT_${_name})
+            if(STL2STEP_OCCT_${_name})
+                target_link_libraries(stl2step_core PUBLIC "${STL2STEP_OCCT_${_name}}")
+            endif()
+        endforeach()
     endif()
-endif()
+endforeach()
+unset(_occt_toolkits)
+unset(_occt_alt_TKDESTL)
+unset(_occt_alt_TKDESTEP)
+unset(_occt_names)
+unset(_occt_found)
 
 if(MSVC)
     target_compile_definitions(stl2step_core PRIVATE _USE_MATH_DEFINES NOMINMAX)
