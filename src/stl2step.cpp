@@ -863,6 +863,8 @@ Result Converter::run() {
             refitTotals.radiusN += st.radiusN;
             refitTotals.radiusMaxAbs = std::max(refitTotals.radiusMaxAbs, st.radiusMaxAbs);
             refitTotals.radiusMaxRel = std::max(refitTotals.radiusMaxRel, st.radiusMaxRel);
+            refitTotals.containedRegions += st.containedRegions;
+            refitTotals.containedTriangles += st.containedTriangles;
             dVolPredSigned += st.dVolPredicted;
             dVolPredAbs += o.refitDVolAbs;
         }
@@ -1159,6 +1161,12 @@ Result Converter::run() {
         r.stepVolumeMM3 = stepVolume;
         r.volumeDeltaPct = volDeltaPct;
         r.watertight = watertight;
+        // D-140-3: containment warning is file-level (summed over components)
+        // and must land in Result::warnings before the D-130-10(2) sort.
+        if (smooth && refitTotals.containedRegions > 0)
+            warnings.push_back("smooth: contained " +
+                               std::to_string(refitTotals.containedRegions) +
+                               " region(s) to facets -- component built");
         // D-130-10(2): component builds run on a thread pool, so the arrival
         // order of warnings is scheduler state, not a property of the mesh
         // (S03 was measured emitting the same 34 strings in six orders with
@@ -1183,6 +1191,8 @@ Result Converter::run() {
             r.smoothBuiltFillets = builtFi;
             r.smoothBuiltComponents = builtCo;
             r.smoothRevertedComponents = revCo;
+            r.smoothContainedRegions = refitTotals.containedRegions;
+            r.smoothContainedTriangles = refitTotals.containedTriangles;
             r.edgeClassAnalytic = refitTotals.edgeAnalytic;
             r.edgeClassPolylineTier2 = refitTotals.edgePolylineTier2;
             r.edgeClassUnhandled = refitTotals.edgeUnhandled;
@@ -1259,6 +1269,7 @@ std::string Result::toJson() const {
         "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltCones\":%d,"
         "\"smoothBuiltFillets\":%d,"
         "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d,"
+        "\"smoothContainedRegions\":%d,\"smoothContainedTriangles\":%d,"
         "\"edgeClasses\":{\"analytic\":%d,\"polylineTier2\":%d,\"unhandled\":%d,"
         "\"overTol\":%d,\"overCap\":%d},"
         "\"radiusDrift\":{\"n\":%d,\"maxAbs\":%.9f,\"maxRel\":%.9f}}";
@@ -1276,7 +1287,8 @@ std::string Result::toJson() const {
                           smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
                           smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
                           smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
-                          smoothRevertedComponents, edgeClassAnalytic, edgeClassPolylineTier2,
+                          smoothRevertedComponents, smoothContainedRegions,
+                          smoothContainedTriangles, edgeClassAnalytic, edgeClassPolylineTier2,
                           edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
                           radiusDriftMaxAbs, radiusDriftMaxRel);
     } else {
@@ -1296,7 +1308,8 @@ std::string Result::toJson() const {
                       smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
                       smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
                       smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
-                      smoothRevertedComponents, edgeClassAnalytic, edgeClassPolylineTier2,
+                      smoothRevertedComponents, smoothContainedRegions,
+                      smoothContainedTriangles, edgeClassAnalytic, edgeClassPolylineTier2,
                       edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
                       radiusDriftMaxAbs, radiusDriftMaxRel);
     } else {
