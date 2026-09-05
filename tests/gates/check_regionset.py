@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter, defaultdict
@@ -21,7 +22,7 @@ from collections import Counter, defaultdict
 # ---------------------------------------------------------------------------
 
 SURF_TYPES = ("plane", "cylinder", "cone", "sphere", "torus")
-ORIGINS = ("planeGrow", "cylGrow", "filletStrip")
+ORIGINS = ("planeGrow", "cylGrow", "filletStrip", "ngonWall", "chamferCone")
 LOOP_ROLES = ("outer", "inner", "capLow", "capHigh")
 # C++ enum class LoopRole : uint8_t { Outer, Inner, CapLow, CapHigh };
 ROLE_INT = {"outer": 0, "inner": 1, "capLow": 2, "capHigh": 3}
@@ -1173,31 +1174,16 @@ def check_SIDECAR(dump, ctx):
             f.add("region%s" % r.get("id"),
                   "origin=%r is forbidden by sidecar (%s)" % (r.get("origin"), sid))
 
-    # recoverable primitives -> matching accepted region
+    # recoverable primitives -> matching accepted region (D-130-22(3))
     rec = sidecar.get("recoverable") or sidecar.get("mustRecover") or []
     if isinstance(rec, list):
         unused = list(accepted_of(dump))
-
-        def match(entry, r):
-            if not isinstance(entry, dict):
-                return r.get("type") == entry
-            if "type" in entry and r.get("type") != entry["type"]:
-                return False
-            if "id" in entry and _as_int(r.get("id")) != _as_int(entry.get("id")):
-                return False
-            if "origin" in entry and r.get("origin") != entry["origin"]:
-                return False
-            if "radius" in entry:
-                if abs(_as_float(r.get("radius")) - _as_float(entry.get("radius"))) > max(1e-6, 0.005 * abs(_as_float(entry.get("radius")))):
-                    return False
-            if "closed360" in entry and _as_bool(r.get("closed360")) != bool(entry["closed360"]):
-                return False
-            return True
+        reg_map = regions_by_id(dump)
 
         for i, entry in enumerate(rec):
             hit = None
             for r in unused:
-                if match(entry, r):
+                if _match_recoverable_entry(entry, r, reg_map):
                     hit = r
                     break
             if hit is None:
@@ -1242,6 +1228,188 @@ def check_SIDECAR(dump, ctx):
 # Schema enum extraction (optional --schema)
 # ---------------------------------------------------------------------------
 
+def _vec3(v):
+    if not (isinstance(v, list) and len(v) == 3):
+        return None
+    try:
+        return tuple(float(x) for x in v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _norm(v):
+    if v is None:
+        return None
+    m = math.sqrt(sum(x * x for x in v))
+    if m <= 0.0:
+        return None
+    return tuple(x / m for x in v)
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _geo_tol(ref):
+    return max(1e-6, 0.005 * abs(_as_float(ref, 0.0)))
+
+
+def _dirs_agree(a, b, tol=0.01):
+    na, nb = _norm(a), _norm(b)
+    if na is None or nb is None:
+        return False
+    d = abs(_dot(na, nb))
+    return d >= 1.0 - tol
+
+
+def _plane_normal_from_region(r, regions_by_id):
+    """Normal of the surface that ships for this region (D-130-22(3))."""
+    if r.get("type") == "plane":
+        ax = r.get("ax") or {}
+        return _norm(_vec3(ax.get("dir")))
+    if r.get("origin") != "filletStrip":
+        return None
+    na = nb = None
+    for key in ("filletNbrA", "filletNbrB"):
+        nid = _as_int(r.get(key), -1)
+        if nid < 0:
+            continue
+        nbr = regions_by_id.get(nid)
+        if not nbr or nbr.get("type") != "plane":
+            continue
+        n = _norm(_vec3((nbr.get("ax") or {}).get("dir")))
+        if n is None:
+            continue
+        if key == "filletNbrA":
+            na = n
+        else:
+            nb = n
+    if na is None or nb is None:
+        return None
+    return _norm(tuple(na[i] + nb[i] for i in range(3)))
+
+
+def _shipped_surface_type(r, regions_by_id):
+    """Detector label vs shipped surface (D-130-22(3))."""
+    origin = r.get("origin")
+    if origin == "chamferCone" or r.get("type") == "cone":
+        return "cone"
+    if r.get("type") == "plane":
+        return "plane"
+    if origin == "filletStrip":
+        return "cylinder"
+    return r.get("type")
+
+
+def _cone_radii(r):
+    r0 = _as_float(r.get("radius"), 0.0)
+    r1 = _as_float(r.get("vMax"), 0.0)
+    r2 = _as_float(r.get("vMin"), 0.0)
+    vals = [x for x in (r0, r1, r2) if x > 0.0]
+    if len(vals) < 2:
+        return (r0, r1) if r0 > 0.0 else (None, None)
+    vals = sorted(set(vals))
+    if len(vals) == 1:
+        return vals[0], vals[0]
+    return vals[0], vals[-1]
+
+
+def _coaxial(loc, axis_loc, axis_dir, tol):
+    if loc is None or axis_loc is None or axis_dir is None:
+        return True
+    ad = _norm(axis_dir)
+    if ad is None:
+        return False
+    d = tuple(loc[i] - axis_loc[i] for i in range(3))
+    along = _dot(d, ad)
+    perp = math.sqrt(sum((d[i] - along * ad[i]) ** 2 for i in range(3)))
+    return perp <= tol
+
+
+def _axis_of(entry):
+    ax = entry.get("axis") if isinstance(entry, dict) else None
+    if not isinstance(ax, dict):
+        return None, None
+    return _vec3(ax.get("loc")), _vec3(ax.get("dir"))
+
+
+def _cone_entry_radii(entry):
+    if "radiusLo" in entry or "radiusHi" in entry:
+        return _as_float(entry.get("radiusHi"), 0.0), _as_float(entry.get("radiusLo"), 0.0)
+    e0 = _as_float(entry.get("radius"), 0.0)
+    e1 = _as_float(entry.get("radius2"), e0)
+    return e0, e1
+
+
+def _match_recoverable_entry(entry, r, regions_by_id):
+    """Match a sidecar recoverable entry to a region by shipped geometry."""
+    if not isinstance(entry, dict):
+        return _shipped_surface_type(r, regions_by_id) == entry
+    want = entry.get("type")
+    if "id" in entry and _as_int(r.get("id")) != _as_int(entry.get("id")):
+        return False
+    if want == "plane":
+        want_n = _norm(_vec3(entry.get("normal")))
+        if want_n is None:
+            return False
+        if r.get("type") == "plane":
+            got_n = _plane_normal_from_region(r, regions_by_id)
+        elif r.get("origin") == "filletStrip":
+            got_n = _plane_normal_from_region(r, regions_by_id)
+        else:
+            return False
+        if got_n is None:
+            return False
+        return _dirs_agree(want_n, got_n) or _dirs_agree(want_n, tuple(-x for x in got_n))
+    shipped = _shipped_surface_type(r, regions_by_id)
+    if want and shipped != want:
+        return False
+    if want == "cylinder":
+        if "radius" in entry:
+            tol = _geo_tol(entry.get("radius"))
+            if abs(_as_float(r.get("radius")) - _as_float(entry.get("radius"))) > tol:
+                return False
+        if "closed360" in entry and _as_bool(r.get("closed360")) != bool(entry["closed360"]):
+            return False
+        eloc, edir = _axis_of(entry)
+        rloc, rdir = _vec3((r.get("ax") or {}).get("loc")), _vec3((r.get("ax") or {}).get("dir"))
+        if edir is not None and rdir is not None and not _dirs_agree(edir, rdir):
+            return False
+        if not _coaxial(eloc, rloc, rdir, max(_geo_tol(entry.get("radius", 1.0)), 0.05)):
+            return False
+        return True
+    if want == "cone":
+        r_lo, r_hi = _cone_radii(r)
+        if r_lo is None:
+            return False
+        e0, e1 = _cone_entry_radii(entry)
+        tol = max(_geo_tol(e0), _geo_tol(e1))
+        got = sorted((r_lo, r_hi))
+        want_r = sorted((e0, e1))
+        if abs(got[0] - want_r[0]) > tol or abs(got[1] - want_r[1]) > tol:
+            return False
+        eloc, edir = _axis_of(entry)
+        rloc, rdir = _vec3((r.get("ax") or {}).get("loc")), _vec3((r.get("ax") or {}).get("dir"))
+        if edir is not None and rdir is not None and not _dirs_agree(edir, rdir):
+            return False
+        span = abs(want_r[1] - want_r[0])
+        if not _coaxial(
+            eloc, rloc, rdir,
+            max(span + 0.05, _geo_tol(max(abs(x) for x in eloc)) if eloc else 0.05),
+        ):
+            return False
+        if "closed360" in entry and _as_bool(r.get("closed360")) != bool(entry["closed360"]):
+            return False
+        return True
+    if "radius" in entry:
+        tol = _geo_tol(entry.get("radius"))
+        if abs(_as_float(r.get("radius")) - _as_float(entry.get("radius"))) > tol:
+            return False
+    if "closed360" in entry and _as_bool(r.get("closed360")) != bool(entry["closed360"]):
+        return False
+    return True
+
+
 def load_schema_enums(path):
     with open(path, "r", encoding="utf-8") as fh:
         schema = json.load(fh)
@@ -1257,6 +1425,10 @@ def load_schema_enums(path):
     role = ((loop.get("properties") or {}).get("role") or {}).get("enum")
     if role:
         enums["role"] = tuple(role)
+    # D-130-22(2): dump_regionset emits chamferCone / ngonWall even if the
+    # frozen schema predates them.
+    if "origin" in enums:
+        enums["origin"] = tuple(dict.fromkeys((*enums["origin"], *ORIGINS)))
     return enums
 
 
