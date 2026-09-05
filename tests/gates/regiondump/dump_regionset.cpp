@@ -112,6 +112,8 @@ static const char* originName(Origin o) {
         case Origin::PlaneGrow:   return "planeGrow";
         case Origin::CylGrow:     return "cylGrow";
         case Origin::FilletStrip: return "filletStrip";
+        case Origin::NgonWall:    return "ngonWall";
+        case Origin::ChamferCone: return "chamferCone";
     }
     return "planeGrow";
 }
