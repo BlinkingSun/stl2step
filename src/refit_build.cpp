@@ -10,6 +10,7 @@
 
 #include "refit.hpp"
 #include "refit_cone_bind.hpp"
+#include "refit_ellipse_bind.hpp"
 #include "refit_cone_math.hpp"
 #include "refit_internal.hpp"
 
@@ -7442,6 +7443,19 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
                 return circleOnCylMax(gcyl, gc->Circ(), c3, f, l, srf, c2d, loc);
             }
         }
+    }
+    // D-140-9 §1/§3: `unhandled` on the 9-fixture edge-class red line is 55 of
+    // 55 ELLIPSE -- an oblique plane|cylinder cut shipping as tier-1
+    // `Geom_Ellipse` with no closed-form supremum. The two branches delegate to
+    // refit_ellipse_bind, which composes refit_ellipse_math's surface supremum
+    // (plane: EXACT) and certified bound (cylinder: no NURBS reproduces cos t in
+    // t, so no exact pcurve exists -- that is a theorem, not an engine
+    // limitation) with the parametrisation this site records. Each CERTIFIES or
+    // REFUSES with a named `unhandled-ellipse-*` clause; a refusal is tier 2 by
+    // D-130-2 -- counted, never a widened tolerance.
+    if (src->DynamicType() == STANDARD_TYPE(Geom_Ellipse)) {
+        if (!gpl.IsNull()) return ellipseBindSupOnPlane(c3, f, l, srf, c2d, loc, clsOut);
+        if (!gcyl.IsNull()) return ellipseBindSupOnCyl(c3, f, l, srf, c2d, loc, clsOut);
     }
     Handle(Geom_BSplineCurve) bs = Handle(Geom_BSplineCurve)::DownCast(src);
     if (!bs.IsNull() && bs->Degree() <= 1) {
