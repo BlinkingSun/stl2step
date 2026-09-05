@@ -206,6 +206,7 @@ struct Result {
     // on every part with no chamfer frustum; a new RESULT key, so an audit
     // comparing RESULT identity across this commit compares modulo it.
     int smoothBuiltCones = 0;
+    int smoothBuiltTori = 0;
     int smoothBuiltFillets = 0;
     int smoothBuiltComponents = 0;
     int smoothRevertedComponents = 0;

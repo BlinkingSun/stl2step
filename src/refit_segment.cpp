@@ -22,6 +22,9 @@ bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTo
 bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                         SegmentWork& work, int pass);
 
+bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                SegmentWork& work);
+
 namespace {
 
 constexpr double kDegToRad = M_PI / 180.0;
@@ -76,8 +79,13 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
         if (!claimFilletsC1(mv, p, tol, work)) return false;
     }
 
+    if (!claimToriT(mv, p, tol, work)) return false;
+
     if (!commitPlanesA3(mv, p, tol, work)) return false;
     if (!buildTopologyD(mv, p, tol, work, out)) return false;
+
+    for (const Region& r : out.regions)
+        if (r.origin == Origin::TorusBlend) out.stats.tori++;
 
     // D-130-11(1) cross-check: the same floor measured on the plane regions that
     // actually reached the RegionSet, so the stage-L number (taken from the A2
@@ -96,27 +104,23 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     }
 
     if (const char* d130 = std::getenv("STL2STEP_DIAG_130"); d130 && d130[0] && d130[0] != '0') {
-        int nNgon = 0, nCone = 0, nCyl = 0, nPl = 0, nFil = 0, nTorus = 0;
+        int nNgon = 0, nCone = 0, nCyl = 0, nPl = 0, nFil = 0, nTorus = 0, nTorBlend = 0;
         for (const Region& r : out.regions) {
             if (r.origin == Origin::NgonWall) nNgon++;
             if (r.origin == Origin::ChamferCone) nCone++;
             if (r.type == SurfType::Cylinder) nCyl++;
             if (r.type == SurfType::Plane) nPl++;
             if (r.origin == Origin::FilletStrip) nFil++;
-            // D-130-9(a): a strip whose neighbour is a RECOGNISED cylinder is a
-            // sliver lying on a torus, not a fillet. C1 already refuses it
-            // (nbrIsCylinder -> Reject::TorusNYI); the count is what 1.4
-            // inherits, so it is reported rather than left to be inferred from
-            // the difference between two fillet counts.
             if (r.reject == Reject::TorusNYI) nTorus++;
+            if (r.origin == Origin::TorusBlend) nTorBlend++;
         }
         for (const Region& r : work.rejected)
             if (r.reject == Reject::TorusNYI) nTorus++;
         std::fprintf(stderr,
                      "DIAG_130_CENSUS nTri=%zu nReg=%zu planes=%d cyl=%d ngon=%d "
-                     "cone=%d fillet=%d torusNYI=%d chains=%zu\n",
-                     mv.nTri, out.regions.size(), nPl, nCyl, nNgon, nCone, nFil, nTorus,
-                     out.chains.size());
+                     "cone=%d fillet=%d torus=%d torusNYI=%d chains=%zu\n",
+                     mv.nTri, out.regions.size(), nPl, nCyl, nNgon, nCone, nFil, nTorBlend,
+                     nTorus, out.chains.size());
         for (const Region& r : work.rejected) {
             if (r.reject != Reject::TorusNYI) continue;
             std::fprintf(stderr, "  DIAG_130_TORUSNYI nTri=%zu firstTri=%d nbrA=%d nbrB=%d\n",

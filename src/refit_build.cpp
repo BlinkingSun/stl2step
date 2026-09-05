@@ -12,6 +12,7 @@
 #include "refit_cone_bind.hpp"
 #include "refit_ellipse_bind.hpp"
 #include "refit_cone_math.hpp"
+#include "refit_torus_math.hpp"
 #include "refit_internal.hpp"
 
 #include <algorithm>
@@ -56,6 +57,7 @@
 #include <BRepCheck_Wire.hxx>
 #include <BRepLib.hxx>
 #include <BRepTools.hxx>
+#include <BRepTools_ReShape.hxx>
 #include <BRepTools_WireExplorer.hxx>
 #include <BRepTopAdaptor_FClass2d.hxx>
 #include <ElCLib.hxx>
@@ -76,6 +78,7 @@
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ConicalSurface.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <Geom_Ellipse.hxx>
 #include <Geom_Line.hxx>
 #include <Geom_Plane.hxx>
@@ -222,7 +225,9 @@ bool isAnalytic(const Region* r) {
     const bool planeOrCyl = (r->type == SurfType::Plane || r->type == SurfType::Cylinder);
     const bool chamferCone =
         (r->type == SurfType::Cone && r->origin == Origin::ChamferCone);
-    if (!planeOrCyl && !chamferCone) return false;
+    const bool torusBlend =
+        (r->type == SurfType::Torus && r->origin == Origin::TorusBlend);
+    if (!planeOrCyl && !chamferCone && !torusBlend) return false;
     if (r->id >= 0 && (size_t)r->id < gEPrimeDemoted.size() && gEPrimeDemoted[(size_t)r->id])
         return false;
     return true;
@@ -865,6 +870,57 @@ int vertexClosestToUOnLoop(const MeshView& mv, const Region& cyl, const Loop& lp
     return best;
 }
 
+int vertexClosestToTorusProfileV(const MeshView& mv, const Region& r, const gp_Torus& gt,
+                                 double targetV, double targetU) {
+    int best = -1;
+    double bestScore = 1e300;
+    for (int t : r.tris) {
+        if (t < 0 || (size_t)t >= mv.nTri) continue;
+        for (int s = 0; s < 3; ++s) {
+            const int e = mv.triEdges[t][s];
+            if (e < 0 || (size_t)e >= mv.nEdge) continue;
+            const auto& pe = mv.compEdges[e];
+            const int lv = ((mv.triDirs[t] >> s) & 1) ? pe.first : pe.second;
+            if (lv < 0 || (size_t)lv >= mv.nVtx) continue;
+            const gp_Pnt p = pntOf(mv, lv);
+            const double rho = torusRadialCoord(gt, p);
+            const double z = torusAxialCoord(gt, p);
+            const double vv = torusVOfProfilePoint(gt, rho, z);
+            const double u = azimuthOf(r, p);
+            const double score = angularDistance(vv, targetV) + angularDistance(u, targetU);
+            if (score < bestScore - 1e-15 || (std::fabs(score - bestScore) <= 1e-15 &&
+                                              (best < 0 || lv < best))) {
+                bestScore = score;
+                best = lv;
+            }
+        }
+    }
+    return best;
+}
+
+int vertexClosestOnTorusUV(const MeshView& mv, const Region& r,
+                           const Handle(Geom_ToroidalSurface)& tsurf, double u, double v) {
+    const gp_Pnt target = tsurf->Value(u, v);
+    int best = -1;
+    double bestD = 1e300;
+    for (int t : r.tris) {
+        if (t < 0 || (size_t)t >= mv.nTri) continue;
+        for (int s = 0; s < 3; ++s) {
+            const int e = mv.triEdges[t][s];
+            if (e < 0 || (size_t)e >= mv.nEdge) continue;
+            const auto& pe = mv.compEdges[e];
+            const int lv = ((mv.triDirs[t] >> s) & 1) ? pe.first : pe.second;
+            if (lv < 0 || (size_t)lv >= mv.nVtx) continue;
+            const double d = pntOf(mv, lv).SquareDistance(target);
+            if (d < bestD - 1e-15 || (std::fabs(d - bestD) <= 1e-15 && (best < 0 || lv < best))) {
+                bestD = d;
+                best = lv;
+            }
+        }
+    }
+    return best;
+}
+
 bool faceIsValid(const TopoDS_Face& f) {
     if (f.IsNull()) return false;
     try {
@@ -984,6 +1040,8 @@ bool ensureFaceValid(TopoDS_Face& f, double cap) {
                 gp_Vec v(c.Location(), p);
                 return std::fabs(gp_Vec(c.Axis().Direction()).Crossed(v).Magnitude() - c.Radius());
             }
+            if (s.GetType() == GeomAbs_Torus)
+                return pointTorusDist(s.Torus(), p);
             return 0.0;
         };
         for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
@@ -1310,6 +1368,10 @@ gp_Circ cylinderIsoCircle(const Region& cyl, double v) {
 
 bool isChamferConeR(const Region& r) {
     return r.type == SurfType::Cone && r.origin == Origin::ChamferCone;
+}
+
+bool isTorusBlendR(const Region& r) {
+    return r.type == SurfType::Torus && r.origin == Origin::TorusBlend;
 }
 
 // SIGNED axial offset from the R_lo rim (the region's Location) to the R_hi rim,
@@ -6473,7 +6535,8 @@ enum class SurfVar : int {
     CylRotU1 = 3,
     CylRectTrim = 4,
     CylRotTrim = 5,
-    ConeBase = 6
+    ConeBase = 6,
+    TorusBase = 7
 };
 
 const char* surfVarName(SurfVar v) {
@@ -6485,6 +6548,7 @@ const char* surfVarName(SurfVar v) {
     case SurfVar::CylRectTrim: return "CylRectTrim";
     case SurfVar::CylRotTrim: return "CylRotTrim";
     case SurfVar::ConeBase: return "ConeBase";
+    case SurfVar::TorusBase: return "TorusBase";
     }
     return "?";
 }
@@ -6509,6 +6573,8 @@ Handle(Geom_Surface) regionSurf(const Region& r, SurfVar v) {
     try {
         if (v == SurfVar::Plane) {
             if (r.type == SurfType::Plane) s = new Geom_Plane(asPlane(r));
+        } else if (isTorusBlendR(r) && v == SurfVar::TorusBase) {
+            s = new Geom_ToroidalSurface(r.ax, r.radius, r.radius2);
         } else if (isChamferConeR(r) && v == SurfVar::ConeBase) {
             // The frustum's surface comes from the REGION's own fitted numbers
             // (Location on the R_lo rim, Direction toward R_hi, RefRadius R_lo,
@@ -6561,6 +6627,10 @@ void variantsForRegion(const Region& r, SurfVar* out, int& n) {
     }
     if (isChamferConeR(r)) {
         out[n++] = SurfVar::ConeBase;
+        return;
+    }
+    if (isTorusBlendR(r)) {
+        out[n++] = SurfVar::TorusBase;
         return;
     }
     if (r.type != SurfType::Cylinder) return;
@@ -7021,6 +7091,32 @@ Handle(Geom_Curve) basisCurveOf(const Handle(Geom_Curve)& c) {
     return c;
 }
 
+bool circleEdgeMatchesCirc(const gp_Circ& target, const TopoDS_Edge& e, double linTol) {
+    if (e.IsNull()) return false;
+    Standard_Real f = 0, l = 0;
+    Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+    Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(basisCurveOf(c));
+    if (gc.IsNull()) return false;
+    const gp_Circ& got = gc->Circ();
+    if (std::fabs(got.Radius() - target.Radius()) > linTol) return false;
+    if (got.Axis().Direction().Angle(target.Axis().Direction()) > Precision::Angular())
+        return false;
+    gp_Lin axis(target.Axis());
+    return axis.Distance(got.Location()) <= linTol;
+}
+
+TopoDS_Edge findCollapsedCircleEdge(const gp_Circ& target, const std::vector<ChainGeom>& geom,
+                                    const std::vector<char>& collapsed, double linTol) {
+    for (size_t ci = 0; ci < geom.size(); ++ci) {
+        if (!collapsed[(std::size_t)ci] || geom[(std::size_t)ci].edges.size() != 1) continue;
+        TopoDS_Edge e =
+            TopoDS::Edge(geom[(std::size_t)ci].edges[0].Oriented(TopAbs_FORWARD));
+        if (!edgeSpansFullCircle(e)) continue;
+        if (circleEdgeMatchesCirc(target, e, linTol)) return e;
+    }
+    return TopoDS_Edge();
+}
+
 double pcurveDev(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
                  const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d);
 
@@ -7411,6 +7507,24 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
     // outcome, and a refusal is tier 2 (counted, per D-130-2).
     if (!basisConeOf(srf).IsNull())
         return coneBindSup(c3, f, l, srf, c2d, loc, clsOut);
+    Handle(Geom_ToroidalSurface) gtor = Handle(Geom_ToroidalSurface)::DownCast(srf);
+    if (!gtor.IsNull()) {
+        Handle(Geom_Curve) src = basisCurveOf(c3);
+        if (src.IsNull()) src = c3;
+        if (src->DynamicType() == STANDARD_TYPE(Geom_Circle)) {
+            Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+            if (!gc.IsNull()) {
+                TorusDevClass tcls = TorusDevClass::Unhandled;
+                const double m = circleOnTorusMax(gtor->Torus(), gc->Circ(), &tcls);
+                if (torusDevClassIsExact(tcls)) {
+                    if (clsOut) *clsOut = torusDevClassName(tcls);
+                    return m;
+                }
+            }
+        }
+        if (clsOut) *clsOut = "unhandled-surface";
+        return -1.0;
+    }
     if (gpl.IsNull() && gcyl.IsNull()) {
         if (clsOut) *clsOut = "unhandled-surface";
         return -1.0;
@@ -11502,6 +11616,19 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // buildWithInners / the composite UV path so a mesh-polyline rim keeps
     // meshE TShapes (makeFaceKeep) and retries outer-wire sense.
     bool mintRefused = false;
+    // A torus blend shares its rims with this wall. makeFaceCopy (the simple
+    // Seamed360 default) duplicates those TShapes (J2); the torus face then
+    // cannot sew and J6 reports two free edges. Force the keep path.
+    bool keepSharedCaps = false;
+    {
+        auto partnerTorus = [&](const Loop* lp) -> bool {
+            if (!lp || lp->chainIdx.empty()) return false;
+            const int other = capPartnerRid(lp->chainIdx.front(), r, rs);
+            const Region* o = regionById(rs, other);
+            return o && o->type == SurfType::Torus && o->origin == Origin::TorusBlend;
+        };
+        keepSharedCaps = partnerTorus(capL) || partnerTorus(capH);
+    }
 
     // The seam names the face's parameter domain [u0, u0+2pi] (D-130-16); every
     // wire the face carries has to be written on that branch. Declared here so
@@ -11814,7 +11941,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // monotone cap branch this face is assembled on. A union face carries
         // an inner wire and cannot survive that, so it takes makeFaceKeep
         // first; faces without an inner wire keep the order they had.
-        const bool keepFirst = composite360 || mintRefused;
+        const bool keepFirst = composite360 || mintRefused || keepSharedCaps;
         if (keepFirst) {
             if (!makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2) &&
                 !makeFaceCopy(surf, ow2, inners, r.outwardNormal, out2))
@@ -11953,6 +12080,18 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     const bool tookH = capsOneChain && takeFullCap(ciH0, circH, verts[(size_t)vH], eH);
     const bool simple = tookL && tookH;
     mintRefused = capsOneChain && !simple;
+    // Reused collapsed circles were birthed from each chain's own terminal,
+    // which need not be the shared seam vertex (D-130-16). Mint both rims
+    // onto verts[vL]/verts[vH] so the generator meets them; publish then
+    // lets the torus (and the plate) reuse those TShapes.
+    if (keepSharedCaps && simple) {
+        eL = makeFullCircle(circL, verts[(size_t)vL]);
+        eH = makeFullCircle(circH, verts[(size_t)vH]);
+        if (eL.IsNull() || eH.IsNull()) {
+            emit(warn, "seamed360: torus-partner cap mint failed");
+            return false;
+        }
+    }
 
     try {
         if (simple) {
@@ -11961,22 +12100,78 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 emit(warn, "seamed360: seam crosses an inner wire -- no generator clear of every window");
                 return false;
             }
+            if (diagP2Enabled())
+                std::fprintf(stderr,
+                             "DIAG_TORUS360 rid=%d keepShared=%d simple=%d tookL=%d tookH=%d "
+                             "ciL=%d ciH=%d eL=%p eH=%p\n",
+                             r.id, keepSharedCaps ? 1 : 0, simple ? 1 : 0, tookL ? 1 : 0,
+                             tookH ? 1 : 0, ciL0, ciH0, diagTShapePtr(eL), diagTShapePtr(eH));
             bindIsoPCurves(eL, r.vMin, u0, eSeam, true);
             bindIsoPCurves(eH, r.vMax, u0, eSeam, false);
+            if (keepSharedCaps) {
+                Standard_Real f = 0, l = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(eL, f, l);
+                gSeamE = eSeam;
+                gSeamU0 = c3.IsNull() ? u0 : f;
+                gSeamV0 = r.vMin;
+                gSeamFwdHigh = true;
+                gSeamSet = true;
+                assertSeamPair();
+            }
             BRep_Builder B;
             TopoDS_Wire w;
             B.MakeWire(w);
-            B.Add(w, eSeam);
-            B.Add(w, eH);
-            B.Add(w, TopoDS::Edge(eSeam.Reversed()));
-            B.Add(w, TopoDS::Edge(eL.Reversed()));
+            if (keepSharedCaps) {
+                B.Add(w, TopoDS::Edge(eSeam.Reversed()));
+                B.Add(w, eL);
+                B.Add(w, eSeam);
+                B.Add(w, TopoDS::Edge(eH.Reversed()));
+            } else {
+                B.Add(w, eSeam);
+                B.Add(w, eH);
+                B.Add(w, TopoDS::Edge(eSeam.Reversed()));
+                B.Add(w, TopoDS::Edge(eL.Reversed()));
+            }
             w.Closed(Standard_True);
             TopoDS_Face got;
             if (!buildWithInners(w, got)) {
                 emit(warn, "seamed360: MakeFace not done");
                 return false;
             }
-            return finishFace(got, true, ciL0, ciH0, eL, eH);
+            const bool fin = finishFace(got, true, ciL0, ciH0, eL, eH);
+            if (diagP2Enabled()) {
+                int nE = 0, nClosed = 0;
+                std::fprintf(stderr,
+                             "DIAG_CYLTS rid=%d fin=%d hasEL=%d hasEH=%d "
+                             "eL=%p eH=%p geomL=%p geomH=%p\n",
+                             r.id, fin ? 1 : 0, faceHasEdgeTShape(outF, eL) ? 1 : 0,
+                             faceHasEdgeTShape(outF, eH) ? 1 : 0, diagTShapePtr(eL),
+                             diagTShapePtr(eH),
+                             (ciL0 >= 0 && (size_t)ciL0 < geom.size() &&
+                              !geom[(size_t)ciL0].edges.empty())
+                                 ? diagTShapePtr(geom[(size_t)ciL0].edges[0])
+                                 : nullptr,
+                             (ciH0 >= 0 && (size_t)ciH0 < geom.size() &&
+                              !geom[(size_t)ciH0].edges.empty())
+                                 ? diagTShapePtr(geom[(size_t)ciH0].edges[0])
+                                 : nullptr);
+                for (TopExp_Explorer ex(outF, TopAbs_EDGE); ex.More(); ex.Next(), ++nE) {
+                    const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                    TopoDS_Vertex va, vb;
+                    TopExp::Vertices(ee, va, vb, Standard_True);
+                    const gp_Pnt pa = va.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(va);
+                    const bool cl = BRep_Tool::IsClosed(ee, outF);
+                    if (cl) nClosed++;
+                    std::fprintf(stderr,
+                                 "DIAG_CYLEDGE rid=%d ie=%d ts=%p closedOnF=%d sameV=%d "
+                                 "p=(%.3f,%.3f,%.3f)\n",
+                                 r.id, nE, diagTShapePtr(ee), cl ? 1 : 0,
+                                 (!va.IsNull() && va.IsSame(vb)) ? 1 : 0, pa.X(), pa.Y(),
+                                 pa.Z());
+                }
+                (void)nClosed;
+            }
+            return fin;
         }
 
         // Live I8 splits a cap into N chains (S04 boss-top torus junction). Build
@@ -13825,6 +14020,7 @@ const char* originName(Origin o) {
         case Origin::FilletStrip: return "FilletStrip";
         case Origin::NgonWall: return "NgonWall";
         case Origin::ChamferCone: return "ChamferCone";
+        case Origin::TorusBlend: return "TorusBlend";
     }
     return "?";
 }
@@ -14499,6 +14695,39 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         }
                     }
                     fallbackUsed[ci] = usedFallback ? 1 : 0;
+                }
+                // Torus rims are coaxial v-iso circles; IntAna_QuadQuadGeo has
+                // no torus. Construct the iso that matches the chain's radius.
+                if (curve.kind == AnalyticCurve::None && anaPair && ch.closedLoop &&
+                    ch.meshVerts.size() >= 3) {
+                    const Region* tor = (A && isTorusBlendR(*A)) ? A
+                                       : (B && isTorusBlendR(*B)) ? B
+                                                                 : nullptr;
+                    const Region* oth = (tor == A) ? B : A;
+                    if (tor && oth &&
+                        (oth->type == SurfType::Cylinder || oth->type == SurfType::Plane)) {
+                        const gp_Torus gt(tor->ax, tor->radius, tor->radius2);
+                        gp_Circ cLo, cHi;
+                        if (torusVIsoCircle(gt, tor->vMin, cLo) &&
+                            torusVIsoCircle(gt, tor->vMax, cHi)) {
+                            double sumR = 0.0;
+                            int nR = 0;
+                            for (int lv : ch.meshVerts) {
+                                const gp_Pnt p = pntOf(mv, lv);
+                                gp_Vec d(tor->ax.Location(), p);
+                                gp_Vec rad = d - gp_Vec(tor->ax.Direction()) *
+                                                     d.Dot(tor->ax.Direction());
+                                sumR += rad.Magnitude();
+                                nR++;
+                            }
+                            const double meanR = nR ? sumR / (double)nR : 0.0;
+                            curve.kind = AnalyticCurve::Circ;
+                            curve.circ = (std::fabs(meanR - cLo.Radius()) <=
+                                          std::fabs(meanR - cHi.Radius()))
+                                             ? cLo
+                                             : cHi;
+                        }
+                    }
                 }
                 // Detector B: a plane-loop CIRCLE answers where IntAna has no
                 // answer at all. It never overrides a curve IntAna derived from
@@ -15458,6 +15687,357 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                      Rlo, Rhi, ang, h);
                     r.builtAs = BuiltAs::Seamed360;
                     acc.push_back(f);
+                    return true;
+                }
+                if (r.type == SurfType::Torus && r.origin == Origin::TorusBlend) {
+                    auto torusFail = [&](const char* why) {
+                        if (diagP2Enabled() || diag130Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_TORUSFACE rid=%d Rmaj=%.4f Rmin=%.4f nTri=%zu why=%s\n",
+                                         r.id, r.radius, r.radius2, r.tris.size(), why);
+                        return false;
+                    };
+                    if (r.vMax - r.vMin >= kPi - Precision::Angular())
+                        return torusFail("v-closed");
+                    const gp_Torus gt(r.ax, r.radius, r.radius2);
+                    if (!torusIsRing(gt)) return torusFail("not-ring");
+                    Handle(Geom_ToroidalSurface) tsurf =
+                        Handle(Geom_ToroidalSurface)::DownCast(regionSurf(r, SurfVar::TorusBase));
+                    if (tsurf.IsNull())
+                        tsurf = new Geom_ToroidalSurface(r.ax, r.radius, r.radius2);
+
+                    const Loop *capL = nullptr, *capH = nullptr, *outer = nullptr;
+                    std::vector<TopoDS_Wire> inners;
+                    for (const Loop& lp : r.loops) {
+                        if (lp.role == LoopRole::CapLow) capL = &lp;
+                        else if (lp.role == LoopRole::CapHigh) capH = &lp;
+                        else if (lp.role == LoopRole::Outer) outer = &lp;
+                        else if (lp.role == LoopRole::Inner) {
+                            TopoDS_Wire iw;
+                            if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk,
+                                               nullptr))
+                                return torusFail("inner-loop-wire");
+                            inners.push_back(iw);
+                        }
+                    }
+
+                    auto finishTorus = [&](TopoDS_Face cand, BuiltAs as) -> bool {
+                        if (cand.IsNull()) return false;
+                        setFaceOutward(cand, r.outwardNormal);
+                        if (!faceIsValid(cand) && !ensureFaceValid(cand, meshTolCap(mv, &r)))
+                            return false;
+                        r.builtAs = as;
+                        rs.stats.tori++;
+                        acc.push_back(cand);
+                        if (diagP2Enabled() || diag130Enabled()) {
+                            std::fprintf(stderr,
+                                         "DIAG_TORUSFACE rid=%d Rmaj=%.4f Rmin=%.4f nTri=%zu "
+                                         "v=[%.4f,%.4f] valid=1 why=BUILT builtAs=%s\n",
+                                         r.id, r.radius, r.radius2, r.tris.size(), r.vMin, r.vMax,
+                                         as == BuiltAs::Seamed360 ? "Seamed360" : "Single");
+                            int ie = 0;
+                            for (TopExp_Explorer ex(cand, TopAbs_EDGE); ex.More();
+                                 ex.Next(), ++ie) {
+                                const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                                TopoDS_Vertex va, vb;
+                                TopExp::Vertices(ee, va, vb, Standard_True);
+                                const gp_Pnt pa = va.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(va);
+                                std::fprintf(stderr,
+                                             "DIAG_TORUSEDGE rid=%d ie=%d ts=%p closedOnF=%d "
+                                             "sameV=%d p=(%.3f,%.3f,%.3f)\n",
+                                             r.id, ie, diagTShapePtr(ee),
+                                             BRep_Tool::IsClosed(ee, cand) ? 1 : 0,
+                                             (!va.IsNull() && va.IsSame(vb)) ? 1 : 0, pa.X(),
+                                             pa.Y(), pa.Z());
+                            }
+                        }
+                        return true;
+                    };
+
+                    auto publishRim = [&](int ci, const TopoDS_Edge& e) {
+                        if (ci < 0 || (size_t)ci >= geom.size() || e.IsNull()) return;
+                        geom[(size_t)ci].collapsed = true;
+                        geom[(size_t)ci].edges = {e};
+                        collapsed[(size_t)ci] = 1;
+                    };
+
+                    if (r.closed360) {
+                        // Shared-rim probe (torus-u3-2): c-rev wire on the
+                        // cylinder rim TShape; v-isoline pcurve maps 3d param
+                        // → torus u; seam pair at that u and u+2π. u0 is the
+                        // reused rim's seam vertex (D-130-16), not hardcoded 0.
+                        gp_Circ circLo, circHi;
+                        if (!torusVIsoCircle(gt, r.vMin, circLo) ||
+                            !torusVIsoCircle(gt, r.vMax, circHi))
+                            return torusFail("cap-circle");
+                        int vL = -1, vH = -1;
+                        int ciL0 = -1, ciH0 = -1;
+                        if (capL && capH && !capL->chainIdx.empty() &&
+                            !capH->chainIdx.empty()) {
+                            ciL0 = capL->chainIdx.front();
+                            ciH0 = capH->chainIdx.front();
+                            vL = vertexClosestToUOnLoop(mv, r, *capL, rs, 0.0);
+                            vH = vertexClosestToUOnLoop(mv, r, *capH, rs, 0.0);
+                        } else {
+                            vL = vertexClosestOnTorusUV(mv, r, tsurf, 0.0, r.vMin);
+                            vH = vertexClosestOnTorusUV(mv, r, tsurf, 0.0, r.vMax);
+                        }
+                        if (vL < 0 || vH < 0 || (size_t)vL >= verts.size() ||
+                            (size_t)vH >= verts.size())
+                            return torusFail("no-seam-vertex");
+                        const double snapCap = meshTolCap(mv, &r);
+                        AnalyticCurve acL, acH;
+                        acL.kind = AnalyticCurve::Circ;
+                        acL.circ = circLo;
+                        acH.kind = AnalyticCurve::Circ;
+                        acH.circ = circHi;
+
+                        auto takeFullCap = [&](int ci, const gp_Circ& circ,
+                                               const TopoDS_Vertex& V, TopoDS_Edge& e,
+                                               bool& reused) -> bool {
+                            reused = false;
+                            if (ci >= 0 && (size_t)ci < geom.size() &&
+                                geom[(size_t)ci].collapsed &&
+                                geom[(size_t)ci].edges.size() == 1) {
+                                e = TopoDS::Edge(
+                                    geom[(size_t)ci].edges[0].Oriented(TopAbs_FORWARD));
+                                reused = !e.IsNull();
+                                return reused;
+                            }
+                            if (ci < 0) return false;
+                            const int other = capPartnerRid(ci, r, rs);
+                            if (!partnerBuildable(ci, r, rs, &eprimeFill, &exploded)) {
+                                diagCapMint(r.id, ci, other, 0, 0);
+                                return false;
+                            }
+                            diagCapMint(r.id, ci, other, 1, 1);
+                            e = makeFullCircle(circ, V);
+                            return !e.IsNull();
+                        };
+
+                        TopoDS_Edge eL, eH;
+                        bool reusedL = false, reusedH = false;
+                        if (!takeFullCap(ciL0, circLo, verts[(size_t)vL], eL, reusedL))
+                            eL = makeFullCircle(circLo, verts[(size_t)vL]);
+                        if (!takeFullCap(ciH0, circHi, verts[(size_t)vH], eH, reusedH))
+                            eH = makeFullCircle(circHi, verts[(size_t)vH]);
+                        if (eL.IsNull() || eH.IsNull()) return torusFail("cap-edge");
+
+                        TopoDS_Vertex VL = verts[(size_t)vL];
+                        TopoDS_Vertex VH = verts[(size_t)vH];
+                        if (reusedL) {
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(eL, a, b, Standard_True);
+                            if (!a.IsNull()) VL = a;
+                        } else {
+                            snapVertexToCurve(VL, acL, snapCap);
+                        }
+                        if (reusedH) {
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(eH, a, b, Standard_True);
+                            if (!a.IsNull()) VH = a;
+                        } else {
+                            snapVertexToCurve(VH, acH, snapCap);
+                        }
+
+                        const double u0 = azimuthOf(r, BRep_Tool::Pnt(VL));
+                        // D-130-16: both rims share one generator. A reused
+                        // high-cap circle whose vertex sits at another azimuth
+                        // cannot join UIso(u0); mint that rim (plane 8 is still
+                        // unbuilt) at the low cap's u.
+                        if (reusedH &&
+                            angularDistance(u0, azimuthOf(r, BRep_Tool::Pnt(VH))) >
+                                Precision::Angular()) {
+                            reusedH = false;
+                            if (capH)
+                                vH = vertexClosestToUOnLoop(mv, r, *capH, rs, u0);
+                            if (vH >= 0 && (size_t)vH < verts.size()) {
+                                VH = verts[(size_t)vH];
+                                snapVertexToCurve(VH, acH, snapCap);
+                                eH = makeFullCircle(circHi, VH);
+                            }
+                        }
+                        if (eH.IsNull()) return torusFail("cap-edge");
+                        TopoDS_Edge eSeam;
+                        try {
+                            Handle(Geom_Curve) uIso = tsurf->UIso(u0);
+                            Handle(Geom_Circle) uCirc =
+                                Handle(Geom_Circle)::DownCast(uIso);
+                            if (!uCirc.IsNull()) {
+                                AnalyticCurve acu;
+                                acu.kind = AnalyticCurve::Circ;
+                                acu.circ = uCirc->Circ();
+                                if (!reusedL) snapVertexToCurve(VL, acu, snapCap);
+                                if (!reusedH) snapVertexToCurve(VH, acu, snapCap);
+                                bumpVertexTol(VL, curveResidual(acu, BRep_Tool::Pnt(VL)));
+                                bumpVertexTol(VH, curveResidual(acu, BRep_Tool::Pnt(VH)));
+                            }
+                            BRepBuilderAPI_MakeEdge ms(uIso, VL, VH);
+                            if (!ms.IsDone()) return torusFail("seam-MakeEdge-failed");
+                            eSeam = ms.Edge();
+                        } catch (const Standard_Failure&) {
+                            return torusFail("seam-threw");
+                        }
+
+                        eSeam.Closed(Standard_False);
+
+                        // Shared-rim probe (torus-u3-2): a cylinder-minted
+                        // circle has 3d range [f, f+2π] at the D-130-16 seam
+                        // vertex, and CurveOnSurface(E, torusFace) is null
+                        // until we add the v-isoline. Line((u0-f, v), (1,0))
+                        // maps 3d param t → torus u; the seam pair sits at
+                        // u0 and u0+2π (FORWARD high). c-fwd and face-Reverse
+                        // are UnorientableShape / BadOrientationOfSubshape
+                        // on the two-face shell. Do not Range the shared rim
+                        // (J2). FixAddPCurve is not the author of these
+                        // pcurves (nopc ⇒ Closed2d=NotClosed when f≠0).
+                        auto bindTorusPCurves = [&]() {
+                            BRep_Builder Bp;
+                            const TopLoc_Location loc;
+                            Standard_Real fL = 0, lL = 0, fH = 0, lH = 0;
+                            (void)BRep_Tool::Curve(eL, fL, lL);
+                            (void)BRep_Tool::Curve(eH, fH, lH);
+                            Handle(Geom2d_Line) pcL = new Geom2d_Line(
+                                gp_Pnt2d(u0 - fL, r.vMin), gp_Dir2d(1.0, 0.0));
+                            Handle(Geom2d_Line) pcH = new Geom2d_Line(
+                                gp_Pnt2d(u0 - fH, r.vMax), gp_Dir2d(1.0, 0.0));
+                            Bp.UpdateEdge(eL, pcL, tsurf, loc, sewTol);
+                            Bp.UpdateEdge(eH, pcH, tsurf, loc, sewTol);
+                            // UIso is a full meridian circle: MakeEdge(VL,VH) may
+                            // range [vMin+2π, vMax+2π]. Line Y origin vMin-fs so
+                            // Value(fs)=(u, vMin) and the 2-D loop meets the rims.
+                            Standard_Real fs = 0, ls = 0;
+                            Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
+                            Handle(Geom2d_Line) pcFwd = new Geom2d_Line(
+                                gp_Pnt2d(u0 + 2.0 * kPi, r.vMin - fs), gp_Dir2d(0.0, 1.0));
+                            Handle(Geom2d_Line) pcRev = new Geom2d_Line(
+                                gp_Pnt2d(u0, r.vMin - fs), gp_Dir2d(0.0, 1.0));
+                            Bp.UpdateEdge(eSeam, pcFwd, pcRev, tsurf, loc, sewTol);
+                            if (!cs.IsNull()) Bp.Range(eSeam, fs, ls);
+                            eSeam.Closed(Standard_False);
+                        };
+                        bindTorusPCurves();
+
+                        BRep_Builder Bw;
+                        TopoDS_Wire w;
+                        Bw.MakeWire(w);
+                        Bw.Add(w, TopoDS::Edge(eSeam.Reversed()));
+                        Bw.Add(w, eL);
+                        Bw.Add(w, eSeam);
+                        Bw.Add(w, TopoDS::Edge(eH.Reversed()));
+                        w.Closed(Standard_True);
+
+                        if (diagP2Enabled() || diag130Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_TORUSCAP rid=%d ciL=%d ciH=%d reusedL=%d "
+                                         "reusedH=%d u0=%.5f eL=%p eH=%p\n",
+                                         r.id, ciL0, ciH0, reusedL ? 1 : 0, reusedH ? 1 : 0,
+                                         u0, diagTShapePtr(eL), diagTShapePtr(eH));
+
+                        TopoDS_Face f;
+                        const bool kept = makeFaceKeep(tsurf, w, inners, r.outwardNormal, f);
+                        auto tryFinish = [&](TopoDS_Face cand, const char* tag) -> bool {
+                            if (cand.IsNull()) return false;
+                            if (!inners.empty()) addPcurvesOnFace(cand, sewTol, true);
+                            bindTorusPCurves();
+                            try {
+                                BRepLib::SameParameter(eL, sewTol);
+                                BRepLib::SameParameter(eH, sewTol);
+                                BRepLib::SameParameter(eSeam, sewTol);
+                            } catch (const Standard_Failure&) {
+                            }
+                            if (finishTorus(cand, BuiltAs::Seamed360)) {
+                                if (diagP2Enabled() || diag130Enabled())
+                                    std::fprintf(stderr, "DIAG_TORUSKEEP rid=%d tag=%s ok=1\n",
+                                                 r.id, tag);
+                                if (!reusedL) publishRim(ciL0, eL);
+                                if (!reusedH) publishRim(ciH0, eH);
+                                return true;
+                            }
+                            if (diagP2Enabled() || diag130Enabled()) {
+                                char st[128] = "[]";
+                                try {
+                                    BRepCheck_Analyzer an(cand, Standard_True);
+                                    formatStatusList(an.Result(cand), st, sizeof(st));
+                                } catch (const Standard_Failure&) {
+                                }
+                                Standard_Real a = 0, b = 0;
+                                Handle(Geom2d_Curve) pc =
+                                    BRep_Tool::CurveOnSurface(eL, cand, a, b);
+                                std::fprintf(stderr,
+                                             "DIAG_TORUSKEEP rid=%d tag=%s st=%s onFL=%d "
+                                             "onFH=%d pcL=%d faceOri=%s\n",
+                                             r.id, tag, st,
+                                             faceHasEdgeTShape(cand, eL) ? 1 : 0,
+                                             faceHasEdgeTShape(cand, eH) ? 1 : 0,
+                                             pc.IsNull() ? 0 : 1,
+                                             cand.Orientation() == TopAbs_FORWARD ? "F" : "R");
+                                TopLoc_Location Luv;
+                                Handle(Geom_Surface) suv = BRep_Tool::Surface(cand, Luv);
+                                int ei = 0;
+                                for (TopExp_Explorer wx(cand, TopAbs_WIRE); wx.More();
+                                     wx.Next()) {
+                                    for (BRepTools_WireExplorer ex(
+                                             TopoDS::Wire(wx.Current()));
+                                         ex.More(); ex.Next(), ++ei) {
+                                        const TopoDS_Edge ee = TopoDS::Edge(ex.Current());
+                                        Standard_Real a2 = 0, b2 = 0;
+                                        Handle(Geom2d_Curve) pc2 =
+                                            BRep_Tool::CurveOnSurface(ee, suv, Luv, a2, b2);
+                                        const bool sm = BRep_Tool::IsClosed(ee, cand);
+                                        if (pc2.IsNull()) {
+                                            std::fprintf(stderr,
+                                                         "DIAG_TORUSUV rid=%d ie=%d ori=%s "
+                                                         "seam=%d pc=null ts=%p\n",
+                                                         r.id, ei,
+                                                         ee.Orientation() == TopAbs_FORWARD
+                                                             ? "F"
+                                                             : "R",
+                                                         sm ? 1 : 0, diagTShapePtr(ee));
+                                            continue;
+                                        }
+                                        const gp_Pnt2d p0 = pc2->Value(a2), p1 = pc2->Value(b2);
+                                        std::fprintf(stderr,
+                                                     "DIAG_TORUSUV rid=%d ie=%d ori=%s seam=%d "
+                                                     "uv0=(%.6f,%.6f) uv1=(%.6f,%.6f) "
+                                                     "rng=[%.6f,%.6f] ts=%p\n",
+                                                     r.id, ei,
+                                                     ee.Orientation() == TopAbs_FORWARD ? "F"
+                                                                                        : "R",
+                                                     sm ? 1 : 0, p0.X(), p0.Y(), p1.X(), p1.Y(),
+                                                     a2, b2, diagTShapePtr(ee));
+                                    }
+                                }
+                                Standard_Real fL = 0, lL = 0, fH = 0, lH = 0;
+                                (void)BRep_Tool::Curve(eL, fL, lL);
+                                (void)BRep_Tool::Curve(eH, fH, lH);
+                                std::fprintf(stderr,
+                                             "DIAG_TORUSUVP rid=%d u0=%.6f fL=%.6f lL=%.6f "
+                                             "fH=%.6f lH=%.6f sameP=%d sameR=%d\n",
+                                             r.id, u0, fL, lL, fH, lH,
+                                             BRep_Tool::SameParameter(eL) ? 1 : 0,
+                                             BRep_Tool::SameRange(eL) ? 1 : 0);
+                            }
+                            return false;
+                        };
+                        if (kept && tryFinish(f, "c-rev")) return true;
+                        return torusFail("invalid");
+                    }
+
+                    if (!outer) return torusFail("no-outer");
+                    TopoDS_Wire ow;
+                    if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk,
+                                       nullptr))
+                        return torusFail("outer-wire");
+                    double u0 = r.uMin, u1 = r.uMax;
+                    if (u1 < u0) u1 += 2.0 * kPi;
+                    Handle(Geom_RectangularTrimmedSurface) trim =
+                        new Geom_RectangularTrimmedSurface(tsurf, u0, u1, r.vMin, r.vMax);
+                    TopoDS_Face f;
+                    const bool got = makeFaceCopy(trim, ow, inners, r.outwardNormal, f) ||
+                                     makeFaceKeep(trim, ow, inners, r.outwardNormal, f);
+                    if (!got || f.IsNull()) return torusFail("makeFace-failed");
+                    if (!finishTorus(f, BuiltAs::Single)) return torusFail("invalid");
                     return true;
                 }
                 r.reject = (r.type == SurfType::Cone)     ? Reject::ConeNYI

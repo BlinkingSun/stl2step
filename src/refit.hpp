@@ -76,7 +76,8 @@ struct SegmentParams {
 };
 
 enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus };
-enum class Origin   : uint8_t { PlaneGrow, CylGrow, FilletStrip, NgonWall, ChamferCone };
+enum class Origin   : uint8_t { PlaneGrow, CylGrow, FilletStrip, NgonWall, ChamferCone,
+                                TorusBlend };
 enum class BuiltAs  : uint8_t { NotBuilt, Single, Seamed360, TwoHalves, ExplodedToFacets };
 enum class Reject   : uint8_t { None, GaussPlanarity, VertexResidual, ChordConsistency,
                                 RadiusSanity, Span, FilletConsensus, NeighborNotAnalytic,
@@ -132,7 +133,8 @@ struct Region {
                                     // a REAL MESH VERTEX azimuth (the region vertex with the
                                     // lowest local id), so a 360° seam at u=0 lands on a
                                     // facet generator instead of bisecting a facet.
-    double   radius = 0;            // Cylinder only
+    double   radius = 0;            // Cylinder only; Torus: R_major
+    double   radius2 = 0;           // Torus only: R_minor (D-140-6 §3(1))
     double   uMin = 0, uMax = 0;    // Cylinder: angular start + end from ax.XDirection().
                                     // closed360 => exactly 0 and 2*pi. Partial => the
                                     // complement of the largest vertex-azimuth gap.
@@ -214,7 +216,7 @@ struct BoundaryChain {
 };
 
 struct RefitStats {
-    int planes = 0, cylinders = 0, fillets = 0, rejected = 0;
+    int planes = 0, cylinders = 0, fillets = 0, tori = 0, rejected = 0;
     int facetIslands = 0, facetTriangles = 0;
     int distinctRadii = 0;
     double maxVertexDev = 0, maxEdgeTol = 0, dVolPredicted = 0;

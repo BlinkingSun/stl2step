@@ -20,6 +20,8 @@
 #include <gp_Vec.hxx>
 #include <gp_XYZ.hxx>
 
+#include "refit_torus_math.hpp"
+
 namespace stl2step {
 namespace refit {
 namespace {
@@ -846,12 +848,24 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
 
             if (reg.closed360) {
                 double sum = 0;
-                const gp_XYZ a = reg.ax.Direction().XYZ();
-                const gp_XYZ o = reg.ax.Location().XYZ();
                 int n = 0;
-                for (int lv : vs) {
-                    sum += (localPnt(mv, lv) - o).Dot(a);
-                    ++n;
+                if (reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend) {
+                    const gp_Torus gt(reg.ax, reg.radius, reg.radius2);
+                    for (int lv : vs) {
+                        const gp_Pnt p(localPnt(mv, lv).X(), localPnt(mv, lv).Y(),
+                                       localPnt(mv, lv).Z());
+                        const double rho = torusRadialCoord(gt, p);
+                        const double z = torusAxialCoord(gt, p);
+                        sum += torusVOfProfilePoint(gt, rho, z);
+                        ++n;
+                    }
+                } else {
+                    const gp_XYZ a = reg.ax.Direction().XYZ();
+                    const gp_XYZ o = reg.ax.Location().XYZ();
+                    for (int lv : vs) {
+                        sum += (localPnt(mv, lv) - o).Dot(a);
+                        ++n;
+                    }
                 }
                 s.meanV = n ? sum / n : 0;
             } else {
@@ -873,7 +887,12 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             sc.push_back(std::move(s));
         }
 
-        if (reg.closed360) {
+        if (reg.closed360 && reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend &&
+            sc.size() == 1) {
+            // Mouth-round band: tangency circles at vMin/vMax are internal;
+            // the mesh carries one outer loop.  Caps are built analytically.
+            sc[0].lp.role = LoopRole::Outer;
+        } else if (reg.closed360) {
             if (sc.size() < 2) return false;
             int iLow = 0, iHigh = 0;
             for (int i = 1; i < (int)sc.size(); ++i) {
@@ -971,6 +990,15 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         if (c.meshEdges.empty()) return -1;
         const bool back = (rev != atEnd);            // rev XOR atEnd == false => back
         return back ? c.meshEdges.front() : c.meshEdges.back();
+    };
+
+    auto diagTopoFail = [&](const Region& reg, const char* why) {
+        const char* d = std::getenv("STL2STEP_DIAG_130");
+        if (!d || !d[0] || d[0] == '0') return;
+        if (reg.type != SurfType::Torus || reg.origin != Origin::TorusBlend) return;
+        std::fprintf(stderr,
+                     "DIAG_TOPO_TORUS rid=%d nTri=%zu closed360=%d v=[%.4f,%.4f] why=%s\n",
+                     reg.id, reg.tris.size(), reg.closed360 ? 1 : 0, reg.vMin, reg.vMax, why);
     };
 
     for (Region& reg : out.regions) {
@@ -1072,20 +1100,44 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                     break;
                 }
             }
-            if (!closedOk || lp.chainIdx.empty()) return false;
+            if (!closedOk || lp.chainIdx.empty()) {
+                diagTopoFail(reg, "stitch-open-chain");
+                return false;
+            }
             loops.push_back(std::move(lp));
         }
 
         // Every chain touching this region must appear in exactly one loop (I7/I7b).
+        {
+            int nCh = 0, nClosed = 0;
+            for (int ci = 0; ci < (int)out.chains.size(); ++ci) {
+                const int rv = revFor(out.chains[ci]);
+                if (rv < 0) continue;
+                ++nCh;
+                if (out.chains[ci].closedLoop) ++nClosed;
+            }
+            const char* d = std::getenv("STL2STEP_DIAG_130");
+            if (d && d[0] && d[0] != '0' && reg.type == SurfType::Torus &&
+                reg.origin == Origin::TorusBlend)
+                std::fprintf(stderr,
+                             "DIAG_TOPO_TORUS rid=%d chains=%d closed=%d loops=%zu\n", reg.id,
+                             nCh, nClosed, loops.size());
+        }
         for (int ci = 0; ci < (int)out.chains.size(); ++ci) {
             const int rv = revFor(out.chains[ci]);
             if (rv < 0) continue;
             int hits = 0;
             for (const Loop& lp : loops) if (loopUsesChain(lp, ci)) ++hits;
-            if (hits != 1) return false;
+            if (hits != 1) {
+                diagTopoFail(reg, "chain-hits");
+                return false;
+            }
         }
 
-        if (!classifyAndPush(reg, loops)) return false;
+        if (!classifyAndPush(reg, loops)) {
+            diagTopoFail(reg, "classify");
+            return false;
+        }
 
         // D-130-14: a union face's SEAM is a generator of that same face, so it
         // may not run through an interruption the face carries as an inner
@@ -1195,7 +1247,24 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                 else if (lp.role == LoopRole::CapHigh) ++nHigh;
                 else if (lp.role == LoopRole::Outer) ++nOuter;
             }
-            if (nLow != 1 || nHigh != 1 || nOuter != 0) return false;
+            if (reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend) {
+                if (nOuter > 1) {
+                    diagTopoFail(reg, "cap-census");
+                    return false;
+                }
+                if (nLow != 0 || nHigh != 0) {
+                    if (nLow != 1 || nHigh != 1 || nOuter != 0) {
+                        diagTopoFail(reg, "cap-census");
+                        return false;
+                    }
+                } else if (nOuter != 1) {
+                    diagTopoFail(reg, "cap-census");
+                    return false;
+                }
+            } else if (nLow != 1 || nHigh != 1 || nOuter != 0) {
+                diagTopoFail(reg, "cap-census");
+                return false;
+            }
         } else {
             int nOuter = 0, nCap = 0;
             for (const Loop& lp : reg.loops) {
@@ -1284,6 +1353,9 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                 break;
             case Origin::ChamferCone:
                 break;  // not a FilletStrip
+            case Origin::TorusBlend:
+                if (r.type == SurfType::Torus) ++st.tori;
+                break;
             case Origin::PlaneGrow:
                 if (r.type == SurfType::Plane) ++st.planes;
                 else if (r.type == SurfType::Cylinder) ++st.cylinders;
@@ -1297,6 +1369,8 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         switch (r.origin) {
             case Origin::ChamferCone:
                 break;  // two-radius cone, not a fillet/cyl sample
+            case Origin::TorusBlend:
+                break;
             case Origin::FilletStrip:
             case Origin::CylGrow:
             case Origin::NgonWall:

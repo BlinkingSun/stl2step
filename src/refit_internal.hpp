@@ -59,6 +59,7 @@ enum class ProvClaim : uint8_t {
     ConsumedCylinder,   // B1 committed; permanently ineligible
     InFilletClaim,      // transient C1 member; rollback restores Unclaimed
     ConsumedFillet,     // C1 committed; permanently ineligible
+    ConsumedTorus,      // toroidal-round stage committed; permanently ineligible
     CommittedPlane      // A3 committed as PlaneGrow
 };
 
@@ -145,6 +146,9 @@ bool claimCylindersB1(const MeshView& mv, const SegmentParams& p, const DerivedT
 
 bool claimFilletsC1(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                     SegmentWork& work);
+
+bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                SegmentWork& work);
 
 bool commitPlanesA3(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                     SegmentWork& work);

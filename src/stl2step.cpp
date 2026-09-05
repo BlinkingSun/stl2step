@@ -970,12 +970,12 @@ Result Converter::run() {
             }
         }
 
-        int builtPl = 0, builtCy = 0, builtCn = 0, builtFi = 0, builtCo = 0, revCo = 0;
+        int builtPl = 0, builtCy = 0, builtCn = 0, builtTo = 0, builtFi = 0, builtCo = 0, revCo = 0;
         if (smooth) {
             size_t pi = 0;
             for (size_t ci = 0; ci < order.size(); ++ci) {
                 const CompOut& o = outs[ci];
-                int cyls = 0, cones = 0;
+                int cyls = 0, cones = 0, tori = 0;
                 for (size_t k = 0; k < o.parts.size(); ++k) {
                     for (TopExp_Explorer ex(parts[pi], TopAbs_FACE); ex.More(); ex.Next()) {
                         // D-130-10(1): the shipped cone faces are counted the
@@ -986,6 +986,7 @@ Result Converter::run() {
                                 .GetType();
                         if (t == GeomAbs_Cylinder) cyls++;
                         else if (t == GeomAbs_Cone) cones++;
+                        else if (t == GeomAbs_Torus) tori++;
                     }
                     ++pi;
                 }
@@ -996,6 +997,7 @@ Result Converter::run() {
                     builtPl += st.planes;
                     builtCy += cyls;
                     builtCn += cones;
+                    builtTo += tori;
                     builtFi += st.fillets;
                 } else
                     revCo++;
@@ -1180,6 +1182,7 @@ Result Converter::run() {
             r.smoothBuiltPlanes = builtPl;
             r.smoothBuiltCylinders = builtCy;
             r.smoothBuiltCones = builtCn;
+            r.smoothBuiltTori = builtTo;
             r.smoothBuiltFillets = builtFi;
             r.smoothBuiltComponents = builtCo;
             r.smoothRevertedComponents = revCo;
@@ -1257,7 +1260,7 @@ std::string Result::toJson() const {
         "\"smoothMaxDevMM\":%.6f,\"smoothMaxEdgeTolMM\":%.6f,"
         "\"smoothVolPredictedMM3\":%.6f,"
         "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltCones\":%d,"
-        "\"smoothBuiltFillets\":%d,"
+        "\"smoothBuiltTori\":%d,\"smoothBuiltFillets\":%d,"
         "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d,"
         "\"edgeClasses\":{\"analytic\":%d,\"polylineTier2\":%d,\"unhandled\":%d,"
         "\"overTol\":%d,\"overCap\":%d},"
@@ -1275,8 +1278,9 @@ std::string Result::toJson() const {
                           smoothRejected, smoothFacetFaces, facesAfterSmooth,
                           smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
                           smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
-                          smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
-                          smoothRevertedComponents, edgeClassAnalytic, edgeClassPolylineTier2,
+                          smoothBuiltCones, smoothBuiltTori, smoothBuiltFillets,
+                          smoothBuiltComponents, smoothRevertedComponents,
+                          edgeClassAnalytic, edgeClassPolylineTier2,
                           edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
                           radiusDriftMaxAbs, radiusDriftMaxRel);
     } else {
@@ -1295,8 +1299,9 @@ std::string Result::toJson() const {
                       smoothRejected, smoothFacetFaces, facesAfterSmooth,
                       smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
                       smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
-                      smoothBuiltCones, smoothBuiltFillets, smoothBuiltComponents,
-                      smoothRevertedComponents, edgeClassAnalytic, edgeClassPolylineTier2,
+                      smoothBuiltCones, smoothBuiltTori, smoothBuiltFillets,
+                      smoothBuiltComponents, smoothRevertedComponents,
+                      edgeClassAnalytic, edgeClassPolylineTier2,
                       edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
                       radiusDriftMaxAbs, radiusDriftMaxRel);
     } else {
