@@ -64,7 +64,7 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/download/v1.2.0/SolidOut-macOS-AppleSilicon.dmg) from the [1.2.0 release](https://github.com/BlinkingSun/stl2step/releases/tag/v1.2.0). Signed with Developer ID and notarized by Apple.
+Download: [SolidOut 1.3.0 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/download/v1.3.0/SolidOut-macOS-AppleSilicon.dmg) from the [1.3.0 release](https://github.com/BlinkingSun/stl2step/releases/tag/v1.3.0), or grab the [newest build](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from whatever release is latest. Signed with Developer ID and notarized by Apple.
 
 ![SolidOut with the Handle pickup mesh loaded (3,338 triangles)](https://github.com/BlinkingSun/stl2step/releases/download/v1.2.0/solidout-import-mesh.png)
 
@@ -73,14 +73,6 @@ Download: [SolidOut for macOS (Apple silicon)](https://github.com/BlinkingSun/st
 *The same part before and after: the STL tessellation on the left screen, the analytic STEP solid (70 planes, 121 cylinders) on the right, converted in under 20 seconds on an M-series Mac.*
 
 ---
-
----
-
-## Basilisk Step Studio: the desktop app (Windows)
-
-**Basilisk Step Studio** is a Windows interface over this engine, built by [Dominic Tursini](https://github.com/Dom-Tursini) of [Apex Invent](https://github.com/ApexInvent): drop STL files on the window, queue as many as you like, convert with Verbatim or TrueForm and check the result in a viewer that draws the engine's own B-Rep edges over the converted solid, which is the quickest way to see whether a face was really recovered or just re-triangulated. The command line stays on screen and works in both directions, so an existing stl2step invocation can be pasted in and the options fill from it. The engine and OpenCASCADE are bundled, so nothing else needs to be installed.
-
-Download: [Basilisk Step Studio for Windows](https://github.com/ApexInvent/Basilisk-Step-Studio/releases/latest) from its [releases page](https://github.com/ApexInvent/Basilisk-Step-Studio/releases). The engine is compiled from this repository at the pinned tag against OpenCASCADE 7.9.3 by a public workflow.
 
 ---
 
@@ -363,3 +355,11 @@ Node preflights (`scripts/ci-linux-preflight.sh` and `scripts/ci-windows-preflig
 MIT — see [LICENSE](LICENSE). Note that OpenCASCADE, the geometry kernel this
 engine links against, is LGPL-2.1-with-exception and is a separate dependency
 (not bundled). Distributors of linked binaries should review the OCCT license.
+
+---
+
+## Outside projects built with this engine
+
+- **[Basilisk Step Studio](https://github.com/ApexInvent/Basilisk-Step-Studio)** — a Windows desktop front-end by [Dominic Tursini](https://github.com/Dom-Tursini) ([Apex Invent](https://github.com/ApexInvent)): drop STL files on the window, queue as many as you like, convert with Verbatim or TrueForm, and check the result in a viewer that draws the engine's own B-Rep edges over the converted solid. The command line stays on screen and works in both directions. Bundles the engine, compiled unmodified from this repository at a pinned tag, with OpenCASCADE 7.9.3. GPL-3.0. [Download](https://github.com/ApexInvent/Basilisk-Step-Studio/releases/latest).
+
+Built something on stl2step? Open a PR that adds a line here.
