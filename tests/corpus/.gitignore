@@ -22,3 +22,8 @@ corpus.stamp
 # Mastercam linkage plate (1.3.0 N-gon bores + chamfer cone) — not generator output.
 !linkage_bores_chamfer.stl
 !linkage_bores_chamfer.expected.json
+# Real CAD exports joined in 1.4.0 (D-140-4 §3) — not generator output.
+!shelf_bracket.stl
+!shelf_bracket.expected.json
+!Body244.stl
+!Body244.expected.json
