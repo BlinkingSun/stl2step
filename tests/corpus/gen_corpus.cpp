@@ -328,9 +328,6 @@ void fillLiveExpectations(FixtureResult& out) {
     const bool hasFreeform =
         std::any_of(sc.mustRemainFaceted.begin(), sc.mustRemainFaceted.end(),
                     [](const FacetedRegion& f) { return f.type == "freeform"; });
-    const bool hasTorus =
-        std::any_of(sc.mustRemainFaceted.begin(), sc.mustRemainFaceted.end(),
-                    [](const FacetedRegion& f) { return f.type == "torus"; });
     for (const MeshComponentInfo& comp : sc.components) {
         LiveExpectation live;
         live.component = comp.index;
@@ -351,12 +348,9 @@ void fillLiveExpectations(FixtureResult& out) {
             live.surfaceCensus = {102, 4, 0};
             live.faceCount = 106;
         } else if (sc.id == "S04") {
-            live.disposition = "ESCALATE";
-            live.escalateReason =
-                "Boss-top torus blend (TorusNYI); P1 must mark blend annulus islands, "
-                "not cylinders.";
+            live.disposition = "PASS";
             live.surfaceCensus = {recPlanes, recCyl, 0};
-            live.faceCount = recPlanes + recCyl;
+            live.faceCount = recPlanes + recCyl + 1;  // + the recovered torus
         } else if (sc.id == "S05") {
             live.surfaceCensus = {10, 2, 0};
             live.faceCount = 12;
@@ -391,9 +385,6 @@ void fillLiveExpectations(FixtureResult& out) {
                 live.surfaceCensus = {6, 0, 0};
                 live.faceCount = 6;
             }
-        }
-        if (hasTorus && sc.id == "S04") {
-            (void)hasTorus;
         }
         sc.live.push_back(live);
     }
