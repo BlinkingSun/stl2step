@@ -2,15 +2,64 @@
   "id": "edge-class-ratchet",
   "authority": "edge-class-ratchet.json",
   "engineRef": "wip/1.3.0 at 8a646f5 + 130-bind-work.patch, build-wip/stl2step",
-  "seededBy": "lane 130-BIND-2A, 2026-09-04, `edge_class_gate.py --measure --binary build-wip/stl2step --jobs 4` on HEAD (numbers identical to the 149564f seed)",
+  "seededBy": "lane 130-BIND-2A, 2026-09-04, `edge_class_gate.py --measure --binary build-wip/stl2step --jobs 4` on HEAD (numbers identical to the 149564f seed); ceilings for the platform-divergent fixtures re-seeded to the cross-platform maximum by lane 130-XPLAT, 2026-09-04, D-130-24 (see `platforms`)",
   "notes": "D-130-2 red lines and the tier-2 mesh-polyline ratchet, over tests/corpus/*.stl and tests/gates/build_fixtures/*/*.stl. tier2Ceiling is a NEVER-INCREASE ceiling per fixture: an edge that ships analytic today may not become a mesh polyline tomorrow. A decrease passes and the gate prints the instruction to re-baseline it with a note. expectedRed records, per fixture, the red lines the branch that seeded this file already violates -- an admission, not a waiver: the gate names each one on every run, a fixture that heals prints the instruction to delete its entry, and a violation on a fixture or a line not listed here is a hard FAIL. Widening expectedRed to make a run green is a defect. The causes are attributed in _team/reports/130-bind.md 4: 'unhandled' is ONE cause on every fixture that carries it -- exactMaxAtBind has no ellipse class, so an ellipse edge ships analytic with no closed-form supremum (D-130-2 admits Ellipse in tier 1); 'overTol' is a recorded tolerance below the certified supremum on 13 edges; 'overCap' is the recorded tolerance above meshTolCap, which is the 1.2.0 registered sliver-plate limitation plus the later tolerance writers. None of the three is relaxed by this file.",
+  "platforms": {
+    "note": "D-130-24: every fixture whose edge-class census differs between macOS, Linux and Windows, with each platform's measured values. tier2Ceiling above is the MAXIMUM of these and expectedRed above is the UNION of the lines violated on any platform; nothing is set above a measured value. A platform that measures below the ceiling prints RATCHET-TIGHTEN on every run, which is how a later decrease stays visible. Measured at wip/1.3.0 c995151 by `edge_class_gate.py --measure` against each node's own Release build: macOS 15 / arm64 / Homebrew OCCT 7.9.3; Linux Ubuntu / x86_64 / g++-13 / conda-forge OCCT 7.9.3 (shop NUC); Windows 11 / x86_64 / MSVC 17.14 / vcpkg OCCT 7.9.3 (shop PC). Every other fixture is identical on all three.",
+    "Body28": {
+      "macos": {
+        "analytic": 449,
+        "polylineTier2": 1442,
+        "unhandled": 25,
+        "overTol": 0,
+        "overCap": 676
+      },
+      "linux": {
+        "analytic": 449,
+        "polylineTier2": 1433,
+        "unhandled": 25,
+        "overTol": 0,
+        "overCap": 674
+      },
+      "windows": {
+        "analytic": 449,
+        "polylineTier2": 1433,
+        "unhandled": 25,
+        "overTol": 0,
+        "overCap": 674
+      }
+    },
+    "S04": {
+      "macos": {
+        "analytic": 14,
+        "polylineTier2": 136,
+        "unhandled": 0,
+        "overTol": 0,
+        "overCap": 45
+      },
+      "linux": {
+        "analytic": 14,
+        "polylineTier2": 140,
+        "unhandled": 0,
+        "overTol": 1,
+        "overCap": 43
+      },
+      "windows": {
+        "analytic": 14,
+        "polylineTier2": 140,
+        "unhandled": 0,
+        "overTol": 1,
+        "overCap": 43
+      }
+    }
+  },
   "tier2Ceiling": {
     "Body11": 5218,
     "Body28": 1442,
     "S01": 0,
     "S02": 0,
     "S03": 60,
-    "S04": 136,
+    "S04": 140,
     "S05": 0,
     "S06": 0,
     "S07": 0,
@@ -61,7 +110,8 @@
       "overCap"
     ],
     "S04": [
-      "overCap"
+      "overCap",
+      "overTol"
     ],
     "S09": [
       "overCap"
