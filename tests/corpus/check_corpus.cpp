@@ -10,7 +10,6 @@
 #include <iostream>
 #include <limits>
 #include <map>
-#include <regex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -52,10 +51,97 @@ bool readBinaryStl(const std::string& path, MeshData& mesh) {
     return static_cast<bool>(in);
 }
 
+// Sidecar scanning. These are machine-written JSON documents, but the tool
+// deliberately takes no JSON dependency: every value is found by scanning the
+// text forward once. This replaced std::regex patterns chaining "[\s\S]*?"
+// across the WHOLE document -- MSVC's engine backtracks those combinatorially
+// and aborts a multi-KB sidecar with regex_error(error_complexity), which the
+// uncaught-exception path reports as 0xC0000409 on Windows CI. The scans below
+// reproduce those patterns' matching semantics exactly, quirks included.
+
+bool isJsonSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+
+size_t skipJsonSpace(const std::string& text, size_t p) {
+    while (p < text.size() && isJsonSpace(text[p])) ++p;
+    return p;
+}
+
+// `"<key>" \s* : \s*` anchored at `pos`; returns the value offset, or npos.
+size_t matchKeyColon(const std::string& text, size_t pos, const std::string& quotedKey) {
+    if (pos > text.size() || text.size() - pos < quotedKey.size()) return std::string::npos;
+    if (text.compare(pos, quotedKey.size(), quotedKey) != 0) return std::string::npos;
+    size_t p = skipJsonSpace(text, pos + quotedKey.size());
+    if (p >= text.size() || text[p] != ':') return std::string::npos;
+    return skipJsonSpace(text, p + 1);
+}
+
+// Greedy run of the ECMAScript class [-+0-9.eE]; returns `p` when it is empty.
+size_t scanNumber(const std::string& text, size_t p) {
+    size_t q = p;
+    while (q < text.size()) {
+        const char c = text[q];
+        if (c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' ||
+            (c >= '0' && c <= '9')) {
+            ++q;
+        } else {
+            break;
+        }
+    }
+    return q;
+}
+
+// Greedy run of [0-9]; returns `p` when it is empty.
+size_t scanDigits(const std::string& text, size_t p) {
+    size_t q = p;
+    while (q < text.size() && text[q] >= '0' && text[q] <= '9') ++q;
+    return q;
+}
+
+enum class ValueKind { Number, Digits, Array };
+
+struct KeyHit {
+    size_t begin = 0;  // first character of the value (inside [] for Array)
+    size_t end = 0;    // one past the last character of the value
+    size_t after = 0;  // one past the whole `"key": value` token (past ] for Array)
+};
+
+// First `"<key>" : <value>` at or after `from`, `<value>` matching `kind`.
+// Occurrences whose value does not match are skipped and the scan continues,
+// exactly as the lazy "[\s\S]*?" prefix used to.
+bool findKeyValue(const std::string& text, size_t from, const std::string& quotedKey,
+                  ValueKind kind, KeyHit& hit) {
+    for (size_t at = text.find(quotedKey, from); at != std::string::npos;
+         at = text.find(quotedKey, at + 1)) {
+        const size_t v = matchKeyColon(text, at, quotedKey);
+        if (v == std::string::npos) continue;
+        if (kind == ValueKind::Array) {
+            // \[([^\]]+)\]: [^\]] cannot cross the bracket, so the run ends
+            // at the first ] and must be non-empty.
+            if (v >= text.size() || text[v] != '[') continue;
+            const size_t close = text.find(']', v + 1);
+            if (close == std::string::npos || close == v + 1) continue;
+            hit = {v + 1, close, close + 1};
+            return true;
+        }
+        const size_t e = (kind == ValueKind::Digits) ? scanDigits(text, v) : scanNumber(text, v);
+        if (e == v) continue;
+        hit = {v, e, e};
+        return true;
+    }
+    return false;
+}
+
+std::string valueOf(const std::string& text, const KeyHit& hit) {
+    return text.substr(hit.begin, hit.end - hit.begin);
+}
+
 double parseJsonDouble(const std::string& text, const std::string& key) {
-    const std::regex re("\"" + key + "\"\\s*:\\s*([-+0-9.eE]+)");
-    std::smatch m;
-    if (std::regex_search(text, m, re)) return std::stod(m[1].str());
+    KeyHit hit;
+    if (findKeyValue(text, 0, "\"" + key + "\"", ValueKind::Number, hit)) {
+        return std::stod(valueOf(text, hit));
+    }
     return 0;
 }
 
@@ -79,33 +165,65 @@ struct ParsedRecoverable {
     double vMax = std::numeric_limits<double>::quiet_NaN();
 };
 
+// Linear equivalent of the old cylinder pattern:
+//   "type"\s*:\s*"cylinder" [\s\S]*? "radius"\s*:\s*(num)
+//   [\s\S]*? "loc"\s*:\s*\[(list)\] [\s\S]*? "dir"\s*:\s*\[(list)\]
+//   [\s\S]*? "nSides"\s*:\s*(int)
+//   (?: [\s\S]*? "vMin"\s*:\s*(num) [\s\S]*? "vMax"\s*:\s*(num) )?
+// Each lazy prefix is "the next occurrence of the following key", so the whole
+// pattern is one forward walk. Note the two behaviours this deliberately keeps:
+// the fields are picked up wherever they next appear (so a cylinder entry with
+// no "nSides" of its own borrows a later entry's -- linkage_bores_chamfer's
+// sidecar documents relying on that), and the trailing group is greedy, so it is
+// taken whenever some "vMin" with a following "vMax" exists later in the file.
 std::vector<ParsedRecoverable> parseRecoverables(const std::string& text) {
     std::vector<ParsedRecoverable> out;
-    const std::regex cylRe(
-        "\"type\"\\s*:\\s*\"cylinder\"[\\s\\S]*?\"radius\"\\s*:\\s*([-+0-9.eE]+)"
-        "[\\s\\S]*?\"loc\"\\s*:\\s*\\[([^\\]]+)\\][\\s\\S]*?\"dir\"\\s*:\\s*\\[([^\\]]+)\\]"
-        "[\\s\\S]*?\"nSides\"\\s*:\\s*([0-9]+)(?:[\\s\\S]*?\"vMin\"\\s*:\\s*([-+0-9.eE]+)[\\s\\S]*?\"vMax\"\\s*:\\s*([-+0-9.eE]+))?",
-        std::regex::ECMAScript);
-    auto begin = std::sregex_iterator(text.begin(), text.end(), cylRe);
-    auto end = std::sregex_iterator();
-    for (auto it = begin; it != end; ++it) {
+    static const std::string kType = "\"type\"";
+    static const std::string kCylinder = "\"cylinder\"";
+    size_t searchFrom = 0;
+    while (true) {
+        const size_t typeAt = text.find(kType, searchFrom);
+        if (typeAt == std::string::npos) break;
+        // Any failure below retries from the next candidate start, as the regex
+        // engine's leftmost-match scan did.
+        searchFrom = typeAt + 1;
+        const size_t typeVal = matchKeyColon(text, typeAt, kType);
+        if (typeVal == std::string::npos) continue;
+        if (text.compare(typeVal, kCylinder.size(), kCylinder) != 0) continue;
+
         ParsedRecoverable r;
         r.type = "cylinder";
-        r.radius = std::stod((*it)[1].str());
+        KeyHit radius, loc, dir, nSides;
+        size_t p = typeVal + kCylinder.size();
+        if (!findKeyValue(text, p, "\"radius\"", ValueKind::Number, radius)) continue;
+        if (!findKeyValue(text, radius.after, "\"loc\"", ValueKind::Array, loc)) continue;
+        if (!findKeyValue(text, loc.after, "\"dir\"", ValueKind::Array, dir)) continue;
+        if (!findKeyValue(text, dir.after, "\"nSides\"", ValueKind::Digits, nSides)) continue;
+        r.radius = std::stod(valueOf(text, radius));
         {
-            std::istringstream ls((*it)[2].str());
+            std::istringstream ls(valueOf(text, loc));
             char c;
             ls >> r.axis.loc.x >> c >> r.axis.loc.y >> c >> r.axis.loc.z;
         }
         {
-            std::istringstream ds((*it)[3].str());
+            std::istringstream ds(valueOf(text, dir));
             char c;
             ds >> r.axis.dir.x >> c >> r.axis.dir.y >> c >> r.axis.dir.z;
         }
-        r.nSides = std::stoi((*it)[4].str());
-        if ((*it)[5].matched) r.vMin = std::stod((*it)[5].str());
-        if ((*it)[6].matched) r.vMax = std::stod((*it)[6].str());
+        r.nSides = std::stoi(valueOf(text, nSides));
+        p = nSides.after;
+        // The trailing group is optional but greedy, so it is taken whenever it
+        // can be. Only the first "vMin" needs trying: a later one starts further
+        // in, so it can only see a subset of this one's candidate "vMax".
+        KeyHit vMin, vMax;
+        if (findKeyValue(text, p, "\"vMin\"", ValueKind::Number, vMin) &&
+            findKeyValue(text, vMin.after, "\"vMax\"", ValueKind::Number, vMax)) {
+            r.vMin = std::stod(valueOf(text, vMin));
+            r.vMax = std::stod(valueOf(text, vMax));
+            p = vMax.after;
+        }
         out.push_back(r);
+        searchFrom = p;  // resume past the whole match, as sregex_iterator did
     }
     return out;
 }
@@ -126,13 +244,24 @@ int countLiveEntries(const std::string& text) {
     return count;
 }
 
+// Linear equivalent of:
+//   \{\s*"index"\s*:\s*<index>[\s\S]*?"degenerateTriangles"\s*:\s*([0-9]+)
+// The index is compared as a bare digit prefix, exactly as the pattern did.
 int parseSidecarComponentDegens(const std::string& text, int index) {
-    const std::regex blockRe(
-        "\\{\\s*\"index\"\\s*:\\s*" + std::to_string(index) +
-        "[\\s\\S]*?\"degenerateTriangles\"\\s*:\\s*([0-9]+)",
-        std::regex::ECMAScript);
-    std::smatch m;
-    if (std::regex_search(text, m, blockRe)) return std::stoi(m[1].str());
+    static const std::string kIndex = "\"index\"";
+    const std::string digits = std::to_string(index);
+    for (size_t brace = text.find('{'); brace != std::string::npos;
+         brace = text.find('{', brace + 1)) {
+        const size_t indexVal = matchKeyColon(text, skipJsonSpace(text, brace + 1), kIndex);
+        if (indexVal == std::string::npos) continue;
+        if (text.compare(indexVal, digits.size(), digits) != 0) continue;
+        KeyHit degens;
+        if (!findKeyValue(text, indexVal + digits.size(), "\"degenerateTriangles\"",
+                          ValueKind::Digits, degens)) {
+            continue;
+        }
+        return std::stoi(valueOf(text, degens));
+    }
     return -1;
 }
 
