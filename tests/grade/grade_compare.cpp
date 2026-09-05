@@ -297,7 +297,7 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
     doc.stlBytes = fileSize(stl);
     doc.stepBytes = fileSize(step);
     if (!loadStl(stl, doc.mesh, err)) return false;
-    buildOracle(doc.mesh, doc.oracle, cfg.reverseSeeds);
+    buildOracle(doc.mesh, doc.oracle, cfg.reverseSeeds, cfg.seedOrder);
     if (!loadStep(step, doc.mesh, doc.step, err, !cfg.skipVolume)) return false;
 
     doc.watertight = doc.step.watertight;

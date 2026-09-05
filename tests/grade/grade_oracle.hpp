@@ -58,7 +58,10 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
 double distToSurf(const Vec3& v, const SurfParams& S);
 Vec3 normalAt(const SurfParams& S, const Vec3& p);
 
-void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds);
+// `reverseSeeds` / `seedOrder` are the §8 case-9 growth-order probe: they
+// permute the seed enumeration of the coverage pass. The partition they
+// produce is invariant under them by construction (see buildOracle).
+void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder = 0);
 
 void assignFeatureIds(const Mesh& m, OracleSet& set);
 

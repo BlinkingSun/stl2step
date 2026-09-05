@@ -3,6 +3,7 @@
 
 #include <clocale>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -40,6 +41,7 @@ int main(int argc, char** argv) {
     std::setlocale(LC_ALL, "C");
     std::string stl, step, outDir, jsonPath, mdPath, engine;
     bool quiet = false;
+    int seedOrder = 0;          // §8 case 9 third permutation (test-only probe)
     bool reverseSeeds = false;  // §8 case 9 growth-order probe, exposed for the
                                 // training set (the selftest can only reach the
                                 // corpus fixtures). Diagnostic only: it changes
@@ -58,6 +60,8 @@ int main(int argc, char** argv) {
             quiet = true;
         } else if (std::strcmp(a, "--reverse-seeds") == 0) {
             reverseSeeds = true;
+        } else if (std::strcmp(a, "--seed-order") == 0 && i + 1 < argc) {
+            seedOrder = std::atoi(argv[++i]);
         } else if (a[0] != '-') {
             if (stl.empty()) stl = a;
             else if (step.empty()) step = a;
@@ -69,7 +73,7 @@ int main(int argc, char** argv) {
     if (stl.empty() || step.empty()) {
         std::fprintf(stderr,
                      "usage: stl2step_grade <stl> <step> [-o dir] [--json p] [--md p] "
-                     "[--engine-bin p] [--quiet] [--reverse-seeds]\n");
+                     "[--engine-bin p] [--quiet] [--reverse-seeds] [--seed-order n]\n");
         return 1;
     }
     const std::string stem = stemOf(step);
@@ -84,6 +88,7 @@ int main(int argc, char** argv) {
     cfg.quiet = quiet;
     cfg.engineBin = engine;
     cfg.reverseSeeds = reverseSeeds;
+    cfg.seedOrder = seedOrder;
     grade::GradeDocument doc;
     std::string err;
     if (!grade::gradeFiles(stl, step, cfg, doc, err)) {

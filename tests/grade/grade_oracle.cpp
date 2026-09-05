@@ -1492,7 +1492,7 @@ void assignFeatureIds(const Mesh& m, OracleSet& set) {
     }
 }
 
-void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
+void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder) {
     out = OracleSet{};
     out.owner.assign(m.tris.size(), -1);
     std::vector<char> claimed(m.tris.size(), 0);
@@ -1511,6 +1511,22 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
             for (int i = 0; i < static_cast<int>(m.tris.size()); ++i) s.push_back(i);
         } else {
             for (int i = static_cast<int>(m.tris.size()) - 1; i >= 0; --i) s.push_back(i);
+        }
+        if (seedOrder != 0) {
+            // §8 case 9 third permutation, test-only: enter the mesh in
+            // triangle-centroid order instead of file order — a permutation
+            // taken from the geometry itself, so it introduces no constant.
+            // seedOrder > 0 ascending, < 0 descending; ties by index, so the
+            // order is total and platform-independent.
+            const bool desc = seedOrder < 0;
+            std::stable_sort(s.begin(), s.end(), [&](int a, int b) {
+                const Vec3& ca = m.tris[static_cast<size_t>(a)].centroid;
+                const Vec3& cb = m.tris[static_cast<size_t>(b)].centroid;
+                if (ca.x != cb.x) return desc ? (ca.x > cb.x) : (ca.x < cb.x);
+                if (ca.y != cb.y) return desc ? (ca.y > cb.y) : (ca.y < cb.y);
+                if (ca.z != cb.z) return desc ? (ca.z > cb.z) : (ca.z < cb.z);
+                return a < b;
+            });
         }
         return s;
     };
@@ -1576,24 +1592,79 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
         }
     };
 
+    // Stage A of each class phase: WHICH COMPONENTS CARRY THIS CLASS.
+    // `ambient` is the unclaimed set at the phase's start and is frozen for
+    // the whole pass, so no seed consumes another seed's triangles and R(t) —
+    // the maximal region grown from t — is a pure function of
+    // (mesh, ambient, class, t). Write CORE(c) = { t : R(t) certifies }; it
+    // names no seed order. The pass grows from every seed it finds uncovered,
+    // so a seed is skipped only when some certifying region already covers it:
+    //   * t in CORE(c) grown        => t is covered;
+    //   * t in CORE(c) skipped      => t was already covered.
+    // Either way `cov` meets every connected component of the unclaimed set
+    // that CORE(c) meets, and meets no other — and THAT is the quantity the
+    // partition is taken over (see `mine` below). Which triangle inside a
+    // component gets covered still depends on the walk (growth stops after a
+    // fixed run, so a seed entering a tessellated band mid-way chops it
+    // differently); which components are met does not.
+    auto coverage = [&](SurfClass c, const std::vector<int>& seeds,
+                        const std::vector<char>& ambient, const std::vector<int>& compId,
+                        int nComp) {
+        std::vector<char> carries(static_cast<size_t>(nComp) + 1, 0);
+        std::vector<char> amb = ambient;  // tryGrow reads it; the pass never writes it
+        std::vector<char> skipComp(m.tris.size(), 0);
+        for (int seed : seeds) {
+            if (amb[static_cast<size_t>(seed)]) continue;
+            const int k = compId[static_cast<size_t>(seed)];
+            if (carries[static_cast<size_t>(k)]) continue;  // already answered for this component
+            Oracle o;
+            if (!tryGrow(m, amb, c, seed, false, o, skipComp)) continue;
+            carries[static_cast<size_t>(k)] = 1;
+        }
+        return carries;
+    };
+
+    // Edge-connected components of the unclaimed set. Derived from the mesh's
+    // own adjacency; no tolerance, no constant.
+    auto componentsOf = [&](const std::vector<char>& ambient, std::vector<int>& compId) {
+        compId.assign(m.tris.size(), -1);
+        int n = 0;
+        for (int t = 0; t < static_cast<int>(m.tris.size()); ++t) {
+            if (ambient[static_cast<size_t>(t)] || compId[static_cast<size_t>(t)] >= 0) continue;
+            compId[static_cast<size_t>(t)] = n;
+            std::vector<int> stack{t};
+            while (!stack.empty()) {
+                const int x = stack.back();
+                stack.pop_back();
+                for (int nb : m.adj[static_cast<size_t>(x)]) {
+                    if (ambient[static_cast<size_t>(nb)] || compId[static_cast<size_t>(nb)] >= 0)
+                        continue;
+                    compId[static_cast<size_t>(nb)] = n;
+                    stack.push_back(nb);
+                }
+            }
+            ++n;
+        }
+        return n;
+    };
+
     for (SurfClass c : order) {
-        std::vector<Oracle> grown, grownHeld;
-        walk(c, seedList(), claimed, grown, grownHeld);
-        // SPEC §5.4 asserts growth order affects nothing. It does not hold of
-        // the greedy walk by itself: θ_q coplanarity is a tolerance, not an
-        // equivalence, so a tessellated band whose quads are pairwise within
-        // θ_q but not transitively is chopped where the walk entered it —
-        // handle-pickup swaps 35 two-triangle planes and 37 ten-triangle
-        // cylinders between the forward and reversed walks. Re-run the same
-        // walk over exactly this class's own output, entered at the lowest
-        // triangle index of each component: an order the seed direction
-        // cannot change. Same certificate, canonical entry point. Triangles
-        // the canonical walk does not re-take go back to unclaimed.
+        std::vector<int> compId;
+        const int nComp = componentsOf(claimed, compId);
+        // Stage A — the growth-order probe runs here, over seedList().
+        const std::vector<char> carries = coverage(c, seedList(), claimed, compId, nComp);
+        // Stage B — CANONICAL PARTITION. The domain is every unclaimed
+        // triangle of every component the class was certified in — a set the
+        // seed direction cannot change (proof above). Re-run §5.4's walk over
+        // it, entered at the lowest triangle index: same certificate,
+        // canonical entry point. Triangles the canonical walk does not take
+        // go back to unclaimed, and a component in which nothing certified is
+        // never entered at all.
         std::vector<int> mine;
-        for (const Oracle& o : grown) mine.insert(mine.end(), o.tris.begin(), o.tris.end());
-        for (const Oracle& o : grownHeld) mine.insert(mine.end(), o.tris.begin(), o.tris.end());
-        std::sort(mine.begin(), mine.end());
-        mine.erase(std::unique(mine.begin(), mine.end()), mine.end());
+        for (int t = 0; t < static_cast<int>(m.tris.size()); ++t)
+            if (!claimed[static_cast<size_t>(t)] &&
+                carries[static_cast<size_t>(compId[static_cast<size_t>(t)])])
+                mine.push_back(t);
         std::vector<char> mask(m.tris.size(), 1);
         for (int t : mine) mask[static_cast<size_t>(t)] = 0;
         std::vector<Oracle> canon, canonHeld;

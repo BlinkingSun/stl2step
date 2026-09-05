@@ -56,6 +56,7 @@ struct UnmatchedFace {
 
 struct GradeConfig {
     bool reverseSeeds = false;
+    int seedOrder = 0;  // 0 = file order; n != 0 = deterministic permutation n
     bool quiet = false;
     bool skipVolume = false;
     std::string engineBin;
