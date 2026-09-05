@@ -250,6 +250,40 @@ set_tests_properties(torus_math_unit PROPERTIES
     LABELS "unit;torus-math"
     TIMEOUT 120)
 
+# ellipse-math (SPEC-ellipse PART A, D-140-9 §2) — the closed forms behind the
+# ELLIPSE bind class in src/refit_ellipse_math.cpp: the EXACT `ellipse-on-plane`
+# supremum (quartic critical set) and the certified `ellipse-on-cylinder-bound`
+# (section identity + Bernstein hull + Chebyshev remainder), certified against a
+# >= 10^4-sample refined oracle on OCCT's own pcurves (GeomAPI::To2d,
+# GeomProjLib::Curve2d) and S11-b's measured degree-8 poles. Same construction as
+# cone_math_unit for the same reason: it COMPILES the one pure-gp_ TU instead of
+# linking stl2step::core, so `--target ellipse_math_unit` never drags in
+# refit_build.cpp.
+add_executable(ellipse_math_unit
+    ellipse_math_test.cpp
+    "${_stl2step_root}/src/refit_ellipse_math.cpp")
+target_compile_features(ellipse_math_unit PRIVATE cxx_std_17)
+set_target_properties(ellipse_math_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_include_directories(ellipse_math_unit PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/include")
+target_link_libraries(ellipse_math_unit PRIVATE OpenCASCADE::OpenCASCADE)
+if(MSVC)
+    target_compile_definitions(ellipse_math_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(ellipse_math_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(ellipse_math_unit)
+endif()
+
+add_test(NAME ellipse_math_unit COMMAND ellipse_math_unit)
+set_tests_properties(ellipse_math_unit PROPERTIES
+    LABELS "unit;ellipse-math"
+    TIMEOUT 300)
+
 # 130-ABSORB-3 (D-130-12) — the mesh file's own coordinate quantization.
 # Compiles src/stl_quant.cpp directly rather than linking stl2step::core: the TU
 # is pure <cstdio>/<cmath> with no OCCT and no engine header, so the test needs

@@ -46,6 +46,7 @@ add_library(stl2step_core
     src/refit_math.cpp
     src/refit_cone_math.cpp
     src/refit_torus_math.cpp
+    src/refit_ellipse_math.cpp
     src/refit_cone_bind.cpp
     src/refit_union_census.cpp
     src/refit_grow.cpp
