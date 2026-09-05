@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""gate_130 — 1.3.0 battery (B1–B6). Expected-red until Wave 2 detectors land.
+"""gate_130 — 1.3.0 battery (B1–B6). B6 is a recorded deferral (D-130-23).
 
 For every corpus sidecar with `"battery": "130"`: convert with `--smooth
 --no-verify`, assert ok / solids=1 / openShells=0 / reverted=0, distinct
@@ -18,9 +18,11 @@ Volume cell (D-130-15(1)): where the sidecar carries `exactVolume` (the
 generator's exact analytic volume, B2–B6) the STEP B-Rep volume is compared
 against it; otherwise against the mesh volume as before. Threshold unchanged.
 
-CTest invert: LABELS gates;expected-red + PASS_REGULAR_EXPRESSION
-GATE_130_EXPECTED_RED. Flip protocol: remove PASS_REGULAR_EXPRESSION when
-the battery is green; keep GATE_130_STRICT=1.
+D-130-23: B6 (`cyl_meets_chamfer`) is listed in
+`tests/gates/baseline/expected-red.json`. A listed FAIL is XFAIL (exit 0);
+a listed row that turns green prints ``XPASS <fixture> — shrink
+expected-red.json`` and does not fail; an unlisted FAIL exits 1. CMake
+does not invert this test.
 """
 
 from __future__ import annotations
@@ -38,8 +40,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = REPO / "tests" / "corpus"
+EXPECTED_RED_FILE = REPO / "tests" / "gates" / "baseline" / "expected-red.json"
 ENV_STRICT = "GATE_130_STRICT"
-MARKER_EXPECTED_RED = "GATE_130_EXPECTED_RED"
 MARKER_UNEXPECTED = "GATE_130_UNEXPECTED"
 MARKER_FLOORS_MET = "GATE_130_FLOORS_MET"
 
@@ -719,7 +721,7 @@ def format_table(rows: List[Dict[str, Any]]) -> str:
         "vol%",
         "curves / fails",
     )
-    lines = ["gate_130 battery (expected-red until Wave 2):", "  " + "  ".join(headers)]
+    lines = ["gate_130 battery (D-130-23 recorded deferrals are XFAIL):", "  " + "  ".join(headers)]
     for r in rows:
         cone_got = (
             r["coneSurfaces"]
@@ -761,6 +763,19 @@ def current_blob(rows: List[Dict[str, Any]]) -> str:
         cyl_s = r["cylSurfaces"] if r["cylSurfaces"] >= 0 else r["builtCyl"]
         parts.append(f"{label}={cyl_s}/{cone_got}/{r['reverted']}")
     return " ".join(parts)
+
+
+def load_expected_red_section(gate: str, path: Path = EXPECTED_RED_FILE) -> Dict[str, str]:
+    """D-130-23 recorded-deferral list for one gate."""
+    if not path.is_file():
+        raise RuntimeError(f"required file missing: {path}")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise RuntimeError(f"{path}: expected a JSON object")
+    section = doc.get(gate) or {}
+    if not isinstance(section, dict):
+        raise RuntimeError(f"{path}: {gate} must be an object")
+    return {str(k): str(v) for k, v in section.items()}
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -807,17 +822,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         named = ", ".join(r["id"] for r in infra)
         print(f"{MARKER_UNEXPECTED}  infra fail(s): {named}", file=sys.stderr, flush=True)
         return 1
-    if battery_fail:
-        named = ", ".join(f"{r['label']}:{r['id']}" for r in battery_fail)
-        print(f"{MARKER_EXPECTED_RED}  unmet battery: {named}", flush=True)
-        print(f"gate_130 FAIL  expected-red: {named}", file=sys.stderr, flush=True)
+
+    try:
+        listed = load_expected_red_section("gate_130")
+    except (RuntimeError, json.JSONDecodeError, OSError) as exc:
+        print(f"{MARKER_UNEXPECTED}  expected-red.json: {exc}", file=sys.stderr, flush=True)
         return 1
-    print(f"{MARKER_FLOORS_MET}  battery B1–B6 MET", flush=True)
-    print(
-        "FLIP PROTOCOL: remove PASS_REGULAR_EXPRESSION from "
-        "tests/gates/CMakeLists.txt (gate_130). Keep GATE_130_STRICT=1.",
-        flush=True,
-    )
+
+    unlisted_fail = [r for r in battery_fail if r["id"] not in listed]
+    listed_fail = [r for r in battery_fail if r["id"] in listed]
+    by_id = {r["id"]: r for r in rows}
+    if unlisted_fail:
+        named = ", ".join(f"{r['label']}:{r['id']}" for r in unlisted_fail)
+        print(f"{MARKER_UNEXPECTED}  unmet battery: {named}", file=sys.stderr, flush=True)
+        print(f"gate_130 FAIL  unlisted red: {named}", file=sys.stderr, flush=True)
+        return 1
+    for r in listed_fail:
+        print(f"XFAIL {r['id']} — {listed[r['id']]}", flush=True)
+    for fid in listed:
+        r = by_id.get(fid)
+        if r is not None and not r["fails"] and not r["infra"]:
+            print(f"XPASS {fid} — shrink expected-red.json", flush=True)
+    if not battery_fail:
+        print(f"{MARKER_FLOORS_MET}  battery B1–B6 MET", flush=True)
+        print("gate_130 PASS", flush=True)
+        return 0
     print("gate_130 PASS", flush=True)
     return 0
 

@@ -494,9 +494,11 @@ endif()
 unset(_nwcyl_script)
 unset(_nwcyl_baseline)
 
-# --- 130-FIXTURES battery gate (expected-red until Wave 2 detectors land) ---
-# STRICT default ON, PASS_REGULAR_EXPRESSION invert, UNEXPECTED stays loud.
-# Flip: remove PASS_REGULAR_EXPRESSION; keep GATE_130_STRICT=1.
+# --- 130-FIXTURES battery gate (D-130-23) ---
+# B6 is listed in tests/gates/baseline/expected-red.json (XFAIL, not a
+# CMake WILL_FAIL / PASS_REGULAR_EXPRESSION invert). A listed row that
+# turns green prints XPASS and the test still passes so the list can shrink.
+# Keep GATE_130_STRICT=1. An unlisted FAIL is a hard fail.
 set(_g130 "${CMAKE_CURRENT_SOURCE_DIR}/gate_130.py")
 if(EXISTS "${_g130}")
     if(TARGET stl2step)
@@ -511,10 +513,9 @@ if(EXISTS "${_g130}")
         endif()
         add_test(NAME gate_130 COMMAND ${_g130_cmd})
         set_tests_properties(gate_130 PROPERTIES
-            LABELS "gates;expected-red"
+            LABELS "gates"
             TIMEOUT 600
             ENVIRONMENT "GATE_130_STRICT=1"
-            PASS_REGULAR_EXPRESSION "GATE_130_EXPECTED_RED"
             REQUIRED_FILES "${_g130_req}")
         if(TARGET stl2step_corpus_gen)
             set_tests_properties(gate_130 PROPERTIES DEPENDS corpus_generate)
