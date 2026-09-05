@@ -1196,7 +1196,6 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             }
         }
         std::sort(R.begin(), R.end());
-        if (reverse) std::reverse(R.begin(), R.end());
         SurfParams S;
         const bool fitOk = fitClass(m, R, c, S);
         const bool adOk = fitOk && admits(m, R, c, S);

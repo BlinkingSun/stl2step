@@ -297,6 +297,41 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
 
     doc.watertight = doc.step.watertight;
     doc.valid = doc.step.valid;
+
+    // Verbatim cylinder walls unify to |S|>1 planar faces. Those are
+    // tessellation facets of a curved oracle, not design planes. Mark them
+    // so curved oracles grade as faceted (SPEC §8 case 4).
+    for (StepFace& F : doc.step.faces) {
+        if (F.facet || F.cls != SurfClass::Plane) continue;
+        std::unordered_set<int> wire(F.meshVerts.begin(), F.meshVerts.end());
+        wire.erase(-1);
+        if (wire.empty()) continue;
+        std::vector<int> S;
+        for (int t = 0; t < static_cast<int>(doc.mesh.tris.size()); ++t) {
+            const Tri& tr = doc.mesh.tris[static_cast<size_t>(t)];
+            if (!wire.count(tr.v[0]) || !wire.count(tr.v[1]) || !wire.count(tr.v[2])) continue;
+            bool on = true;
+            for (int k = 0; k < 3; ++k)
+                if (distToSurf(doc.mesh.verts[static_cast<size_t>(tr.v[k])], F.S) > doc.mesh.tau) {
+                    on = false;
+                    break;
+                }
+            if (on) S.push_back(t);
+        }
+        if (S.size() < 2) continue;
+        bool curved = !S.empty();
+        for (int t : S) {
+            const int ow = doc.oracle.owner[static_cast<size_t>(t)];
+            if (ow < 0 || doc.oracle.oracles[static_cast<size_t>(ow)].cls == SurfClass::Plane) {
+                curved = false;
+                break;
+            }
+        }
+        if (!curved) continue;
+        F.facet = true;
+        ++doc.step.nFacet;
+        for (int t : S) doc.step.cover[static_cast<size_t>(t)] = F.entity;
+    }
     doc.Vmesh = doc.mesh.volume;
     doc.Vstep = doc.step.volume;
     doc.volumeQ = doc.mesh.q * doc.mesh.surfaceArea;
@@ -383,11 +418,32 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
         taken[static_cast<size_t>(c.g)] = 1;
     }
 
-    // Spanned: a non-facet face whose untrimmed surface is within tau of two oracles' vertices.
+    // Spanned: untrimmed surface within tau of two oracles, AND (for planes)
+    // the oracle centroid sits inside the face wire — otherwise every z=const
+    // disc is "hit" by every other coplanar face (S03 3b vs case 4).
+    auto evenOdd = [](const std::vector<Vec3>& poly, double x, double y) {
+        bool in = false;
+        const int n = static_cast<int>(poly.size());
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+            const double xi = poly[static_cast<size_t>(i)].x, yi = poly[static_cast<size_t>(i)].y;
+            const double xj = poly[static_cast<size_t>(j)].x, yj = poly[static_cast<size_t>(j)].y;
+            const bool hit = ((yi > y) != (yj > y)) &&
+                             (x < (xj - xi) * (y - yi) / ((yj - yi) == 0.0 ? 1.0 : (yj - yi)) + xi);
+            if (hit) in = !in;
+        }
+        return in;
+    };
     std::vector<char> spanned(doc.oracle.oracles.size(), 0);
     for (const StepFace& F : doc.step.faces) {
         if (F.facet) continue;
         std::vector<int> hit;
+        Vec3 u{}, v{};
+        if (F.cls == SurfClass::Plane && F.wireVerts.size() >= 3) {
+            const Vec3 n = F.S.n;
+            Vec3 tmp = (std::fabs(n.z) < 0.9) ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
+            u = normalized(cross(tmp, n));
+            v = cross(n, u);
+        }
         for (int oi = 0; oi < static_cast<int>(doc.oracle.oracles.size()); ++oi) {
             const Oracle& O = doc.oracle.oracles[static_cast<size_t>(oi)];
             if (O.cls != F.cls) continue;
@@ -398,7 +454,26 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
                     break;
                 }
             }
-            if (all) hit.push_back(oi);
+            if (!all) continue;
+            if (F.cls == SurfClass::Plane && F.wireVerts.size() >= 3 && !O.tris.empty()) {
+                std::vector<Vec3> poly;
+                poly.reserve(F.wireVerts.size());
+                for (const Vec3& p : F.wireVerts) {
+                    const Vec3 d = p - F.S.p0;
+                    poly.push_back(Vec3{dot(d, u), dot(d, v), 0});
+                }
+                Vec3 c{};
+                double w = 0;
+                for (int t : O.tris) {
+                    const Tri& tr = doc.mesh.tris[static_cast<size_t>(t)];
+                    c = c + tr.centroid * tr.area;
+                    w += tr.area;
+                }
+                if (w > 0.0) c = c * (1.0 / w);
+                const Vec3 d = c - F.S.p0;
+                if (!evenOdd(poly, dot(d, u), dot(d, v))) continue;
+            }
+            hit.push_back(oi);
         }
         if (hit.size() >= 2) {
             for (int oi : hit) spanned[static_cast<size_t>(oi)] = 1;
