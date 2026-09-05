@@ -209,10 +209,6 @@ struct Result {
     int smoothBuiltFillets = 0;
     int smoothBuiltComponents = 0;
     int smoothRevertedComponents = 0;
-    // D-140-3 / D-130-10: regions contained to facets so the component
-    // could close. Both 0 on every existing fixture and on Body11.
-    int smoothContainedRegions = 0;
-    int smoothContainedTriangles = 0;
 
     // D-130-2 edge-class census over the shipped shells: every edge two
     // analytic faces share, classified by the closed-form bind-site supremum

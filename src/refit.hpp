@@ -234,10 +234,6 @@ struct RefitStats {
     int    radiusN = 0;
     double radiusMaxAbs = 0;     // max |R_built - R_lsq| (mm)
     double radiusMaxRel = 0;     // max |R_built - R_lsq| / R_lsq
-    // D-140-3 / D-130-10: regions demoted to eprimeFill facets so the
-    // component could close. 0 on every existing fixture.
-    int containedRegions = 0;
-    int containedTriangles = 0;
 };
 
 struct RegionSet {                  // exactly one per CLEAN component

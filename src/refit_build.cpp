@@ -13869,17 +13869,6 @@ bool tryStageP(const MeshView& mv, RegionSet& rs, std::vector<TopoDS_Face>& out)
 bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vertex>& verts,
                 std::vector<TopoDS_Face>& out, WarnFn warn) {
     out.clear();
-    // D-140-4 §2: containment is reported only for a component that shipped.
-    // Snapshot before anything can demote, and restore on every return false
-    // out of buildFaces — otherwise a component that contains one region, still
-    // fails to close, and whole-component-reverts would ship verbatim facets
-    // while reporting a containment it did not keep.
-    const int containedRegions0 = rs.stats.containedRegions;
-    const int containedTriangles0 = rs.stats.containedTriangles;
-    auto resetContained = [&]() {
-        rs.stats.containedRegions = containedRegions0;
-        rs.stats.containedTriangles = containedTriangles0;
-    };
     try {
         gCompNTri = (int)mv.nTri;
         gReconnectFires = 0;
@@ -15377,7 +15366,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
             if (built.empty()) {
-                resetContained();
                 out.clear();
                 return false;
             }
@@ -15422,10 +15410,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         }
 
-        if (built.empty()) {
-            resetContained();
-            return false;
-        }
+        if (built.empty()) return false;
 
         auto diagStageInvalid = [&](const char* stage) {
             if (!collapseDiagEnabled()) return;
@@ -15799,7 +15784,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     sameParameterKeepingTier2(sh, std::min(sewTol * 10.0, spCap));
             }
         } catch (const Standard_Failure&) {
-            resetContained();
             return false;
         }
 
@@ -15872,58 +15856,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // Revert-class (Body9/12/18/20): after the heal, do not explode
             // recover — that dirties vertex TShapes and worsens R2 volΔ.
             // Body11 never enters this branch (nTri >= 10000 skips the heal).
-            // D-140-3: J6 hands to per-region containment before it reverts.
-            // return false stays the terminal outcome (S16-R2-ChainUnstable).
             if (j6UncollapsePass > 0) {
-                if (freeE > 0) {
-                    const int admittedBefore = countAdmittedRegions(rs, eprimeFill);
-                    auto demotions = collectClosureHealDemotions(
-                        sh, built, builtRid, eprimeFill, rs, mv, meshE, geom, collapsed,
-                        exploded, sewTol);
-                    if (!demotions.empty()) {
-                        std::sort(demotions.begin(), demotions.end(),
-                                  [&](const ClosureHealAttrib& a, const ClosureHealAttrib& b) {
-                                      const Region* ra = regionById(rs, a.rid);
-                                      const Region* rb = regionById(rs, b.rid);
-                                      const size_t na = ra ? ra->tris.size() : 0;
-                                      const size_t nb = rb ? rb->tris.size() : 0;
-                                      if (na != nb) return na < nb;
-                                      return a.rid < b.rid;
-                                  });
-                        const ClosureHealAttrib& h = demotions.front();
-                        if (h.rid >= 0 && (size_t)h.rid < eprimeFill.size() &&
-                            !eprimeFill[(size_t)h.rid] &&
-                            regionClosureHealEligible(h.rid, rs, eprimeFill, exploded)) {
-                            Region* rr = regionByIdMut(rs, h.rid);
-                            // D-140-4 §2: snapshot builtAs before mutating, so the
-                            // stall unwind below restores the RegionSet in full and
-                            // the caller reverts and censuses what it started with.
-                            const BuiltAs prevBuilt = rr ? rr->builtAs : BuiltAs::NotBuilt;
-                            eprimeFill[(size_t)h.rid] = 1;
-                            if (rr) rr->builtAs = BuiltAs::ExplodedToFacets;
-                            const char* kind =
-                                (rr && rr->type == SurfType::Plane) ? "plane" : "cyl";
-                            const size_t nTri = rr ? rr->tris.size() : 0;
-                            if (diagP2Enabled())
-                                std::fprintf(stderr,
-                                             "DIAG_CONTAIN rid=%d kind=%s nTri=%zu from=%s "
-                                             "freeBefore=%d freeAfter=-1\n",
-                                             h.rid, kind, nTri, h.from ? h.from : "?",
-                                             freeE);
-                            const int admittedAfter = countAdmittedRegions(rs, eprimeFill);
-                            if (admittedAfter < admittedBefore) {
-                                rs.stats.containedRegions++;
-                                rs.stats.containedTriangles += (int)nTri;
-                                restoreShared();
-                                goto try_rebuild;
-                            }
-                            eprimeFill[(size_t)h.rid] = 0;
-                            if (rr) rr->builtAs = prevBuilt;
-                        }
-                    }
-                }
                 restoreShared();
-                resetContained();
                 out.clear();
                 return false;
             }
@@ -16000,7 +15934,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             restoreShared();
             dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
-            resetContained();
             out.clear();
             return false;
         }
@@ -16047,7 +15980,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (plan.hostR2 || cascadeSt.u2Done || !shValid) {
                 restoreShared();
                 dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
-                resetContained();
                 out.clear();
                 return false;
             }
@@ -16090,7 +16022,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (plan.hostR2 && tightFail && !cascadeSt.u2Done) {
                     restoreShared();
                     dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
-                    resetContained();
                     out.clear();
                     return false;
                 }
@@ -16116,11 +16047,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         out = std::move(built);
         return true;
     } catch (const Standard_Failure&) {
-        resetContained();
         out.clear();
         return false;
     } catch (const std::exception&) {
-        resetContained();
         out.clear();
         return false;
     }
