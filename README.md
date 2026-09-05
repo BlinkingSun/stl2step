@@ -8,6 +8,18 @@ It ships as both an **embeddable C++ library** (one header, one call) and a
 **standalone command-line tool**, and builds from the same source on **Linux,
 macOS, and Windows**.
 
+> [!IMPORTANT]
+> **Geometry definition — what converts well.** stl2step works best on **purely
+> geometric shapes**: parts built from planes, cylinders, arcs, fillets and
+> other analytic surfaces — the kind of geometry a CAD kernel authored in the
+> first place. Organic, freeform, sculpted or 3D-scanned meshes still convert
+> and still produce a valid solid, but their curved surfaces stay faceted,
+> because a parametric surface can only be recovered where one actually
+> existed. The set of shapes recognised analytically is **getting better
+> daily** — anything that falls back today is a gap on the roadmap, not a
+> permanent ceiling. See [What it is and isn't](#what-it-is-and-isnt) for the
+> current, specific list.
+
 ```
 part.stl  ──►  weld ─► split into solids ─► build B-Rep (parallel) ─► repair
           ─►  merge coplanar facets ─► fit tolerances ─► verify  ──►  part.step
