@@ -1,5 +1,6 @@
 *.stl
 *.expected.json
+*.exact.step
 corpus.stamp
 
 # Committed real CAD exports (not generator output) — targeted un-ignore.

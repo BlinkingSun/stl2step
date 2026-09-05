@@ -50,7 +50,10 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <IFSelect_ReturnStatus.hxx>
+#include <Interface_Static.hxx>
 #include <Standard_Failure.hxx>
+#include <STEPControl_Writer.hxx>
 
 namespace fs = std::filesystem;
 using namespace corpus;
@@ -60,6 +63,7 @@ namespace {
 struct FixtureResult {
     Sidecar sidecar;
     MeshData mesh;
+    TopoDS_Shape exact;  // D-140-1(7): kept so writeFixture can emit <id>.exact.step
 };
 
 Recoverable cylRec(double R, const Vec3& loc, const Vec3& dir, int count, int nSides,
@@ -379,6 +383,7 @@ FixtureResult emitShape(const std::string& id, const std::string& desc, TopoDS_S
     out.sidecar.description = desc;
     out.sidecar.deflection = deflection;
     fillMeshSidecar(out);
+    out.exact = shape;
     return out;
 }
 
@@ -397,7 +402,19 @@ bool writeFixture(const fs::path& dir, const FixtureResult& fx) {
     }
     const std::string label = ("stl2step corpus " + fx.sidecar.id).substr(0, 79);
     if (!writeBinaryStl(stlPath.string(), fx.mesh, label.c_str())) return false;
-    return writeTextFile(jsonPath.string(), writeSidecarJson(fx.sidecar));
+    if (!writeTextFile(jsonPath.string(), writeSidecarJson(fx.sidecar))) return false;
+    // D-140-1(7): exact STEP for S01–S04 only. Generated, gitignored; STL/sidecar
+    // bytes are unchanged by this extra write.
+    if (fx.sidecar.id == "S01" || fx.sidecar.id == "S02" || fx.sidecar.id == "S03" ||
+        fx.sidecar.id == "S04") {
+        if (fx.exact.IsNull()) return false;
+        Interface_Static::SetCVal("write.step.schema", "AP214IS");
+        STEPControl_Writer writer;
+        if (writer.Transfer(fx.exact, STEPControl_AsIs) < 1) return false;
+        const fs::path stepPath = dir / (fx.sidecar.id + ".exact.step");
+        if (writer.Write(stepPath.string().c_str()) != IFSelect_RetDone) return false;
+    }
+    return true;
 }
 
 // ---- S01: 10 mm cube -------------------------------------------------------
