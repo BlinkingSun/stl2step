@@ -45,6 +45,7 @@ add_library(stl2step_core
     src/mesh.cpp
     src/refit_math.cpp
     src/refit_cone_math.cpp
+    src/refit_torus_math.cpp
     src/refit_cone_bind.cpp
     src/refit_grow.cpp
     src/refit_fillet.cpp

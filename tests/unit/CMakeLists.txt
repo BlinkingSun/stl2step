@@ -218,6 +218,38 @@ set_tests_properties(cone_bind_unit PROPERTIES
     LABELS "unit;cone-math"
     TIMEOUT 60)
 
+# torus-math (SPEC-torus PART B, D-140-6 §3(4)) — the closed-form
+# `circle-on-torus` supremum in src/refit_torus_math.cpp, certified against a
+# numeric distance oracle built from the OCCT parametric equation (meridian
+# circles), GeomAPI_ProjectPointOnSurf on a Geom_ToroidalSurface, and the S04 /
+# S19 tangency circles. Same construction as cone_math_unit for the same reason:
+# it COMPILES the one pure-gp_ TU instead of linking stl2step::core, so
+# `--target torus_math_unit` never drags in refit_build.cpp.
+add_executable(torus_math_unit
+    torus_math_test.cpp
+    "${_stl2step_root}/src/refit_torus_math.cpp")
+target_compile_features(torus_math_unit PRIVATE cxx_std_17)
+set_target_properties(torus_math_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_include_directories(torus_math_unit PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/include")
+target_link_libraries(torus_math_unit PRIVATE OpenCASCADE::OpenCASCADE)
+if(MSVC)
+    target_compile_definitions(torus_math_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(torus_math_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(torus_math_unit)
+endif()
+
+add_test(NAME torus_math_unit COMMAND torus_math_unit)
+set_tests_properties(torus_math_unit PROPERTIES
+    LABELS "unit;torus-math"
+    TIMEOUT 120)
+
 # 130-ABSORB-3 (D-130-12) — the mesh file's own coordinate quantization.
 # Compiles src/stl_quant.cpp directly rather than linking stl2step::core: the TU
 # is pure <cstdio>/<cmath> with no OCCT and no engine header, so the test needs
