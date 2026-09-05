@@ -305,6 +305,38 @@ if(TARGET stl2step)
         DEPENDS corpus_generate)
 endif()
 
+# 140-UNION-CENSUS (SPEC-union PART B, D-140-8 U-R5..U-R8, U-R13) -- the
+# same-surface union census in src/refit_union_census.cpp: `claimChordSagitta`
+# against a closed form and a numerical supremum along every welded edge, and
+# the U-R6/U-R7/U-R8 counts on hand-built rings. Same construction as
+# cone_math_unit for the same reason: it compiles the one TU rather than
+# linking stl2step::core, so `--target union_census_unit` never drags in
+# refit_grow.cpp or refit_build.cpp, which other lanes own.
+add_executable(union_census_unit
+    union_census_test.cpp
+    "${_stl2step_root}/src/refit_union_census.cpp")
+target_compile_features(union_census_unit PRIVATE cxx_std_17)
+set_target_properties(union_census_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_include_directories(union_census_unit PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/include")
+target_link_libraries(union_census_unit PRIVATE OpenCASCADE::OpenCASCADE)
+if(MSVC)
+    target_compile_definitions(union_census_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(union_census_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(union_census_unit)
+endif()
+
+add_test(NAME union_census_unit COMMAND union_census_unit)
+set_tests_properties(union_census_unit PROPERTIES
+    LABELS "unit;union-census"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

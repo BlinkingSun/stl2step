@@ -3291,6 +3291,215 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
         }
     }
 
+    // D-140-8 U-R13 -- THE UNION CENSUS, READABLE WITH THE DOOR CLOSED.
+    //
+    // With STL2STEP_UNION off, the D-130-13(2) islands and the same-surface
+    // merge above do not run, so the plate's R=10 cross bore reaches this
+    // point as two bands (108 and 106) and handle-pickup's R=4 wall as one
+    // (42): a census taken on `claimTris` reports the DOOR, not the surface.
+    // So the census takes its own COPY of every band's claim and applies
+    // U-R1..U-R4 to the copy -- the same admission (every vertex within
+    // max(bandResid, q) of the certified cylinder, lateral facets only), the
+    // same refit-and-roll-back (U-R2), the same axial-extent overlap (U-R3),
+    // in the same band order -- then measures U-R5..U-R8 on the result
+    // (refit_union_census.cpp). Nothing is written back: `claimTris`,
+    // `bandLoc/Dir/R` and every Region the loop below emits are untouched, so
+    // the shipped STEP is byte-identical with the diag on or off (the
+    // diag.p2-step-leak lesson). With the door OPEN the copy finds nothing
+    // left to absorb or merge, so the census reads the same in both states.
+    if (lawbandDiagOn()) {
+        const double qU = std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0 ? mv.quantFloor : 0.0;
+        const EdgeAdj eaU = buildEdgeAdj(mv);
+        const double latBoundU = std::sin(tol.thetaSharp);
+        struct CensusClaim {
+            std::vector<int> tris;
+            gp_XYZ loc = gp_XYZ(0, 0, 0);
+            gp_XYZ dir = gp_XYZ(0, 0, 1);
+            double R = 0.0;
+            double tau = 0.0;
+        };
+        std::vector<CensusClaim> cc(accepted.size());
+        std::vector<char> ownedU(static_cast<size_t>(mv.nTri), 0);
+        for (const auto& ts : claimTris)
+            for (int t : ts)
+                if (t >= 0 && static_cast<size_t>(t) < mv.nTri) ownedU[static_cast<size_t>(t)] = 1;
+        auto triOnU = [&](int t, const gp_XYZ& loc, const gp_XYZ& ax, double R, double tau) {
+            for (int c = 0; c < 3; c++) {
+                const gp_XYZ d = localTriVert(mv, t, c) - loc;
+                if (std::abs((d - ax * d.Dot(ax)).Modulus() - R) > tau) return false;
+            }
+            return true;
+        };
+        auto allOnU = [&](const std::vector<int>& ts, const CensusClaim& s) {
+            for (int t : ts)
+                if (!triOnU(t, s.loc, s.dir, s.R, s.tau)) return false;
+            return true;
+        };
+        auto spanU = [&](const std::vector<int>& ts, const gp_XYZ& o, const gp_XYZ& a, double& lo,
+                         double& hi) {
+            lo = 1e300;
+            hi = -1e300;
+            for (int t : ts) {
+                for (int c = 0; c < 3; c++) {
+                    const double x = (localTriVert(mv, t, c) - o).Dot(a);
+                    lo = std::min(lo, x);
+                    hi = std::max(hi, x);
+                }
+            }
+        };
+        auto overlapU = [&](const std::vector<int>& p, const std::vector<int>& r, const gp_XYZ& o,
+                            const gp_XYZ& a) {
+            double lp = 0, hp = 0, lr = 0, hr = 0;
+            spanU(p, o, a, lp, hp);
+            spanU(r, o, a, lr, hr);
+            return lp < hr && lr < hp;
+        };
+        auto refitU = [&](const std::vector<int>& trial, const gp_XYZ& seed, gp_XYZ& loc, gp_XYZ& dir,
+                          double& R, double& resid) {
+            gp_Dir fitAx;
+            gp_Pnt fitC;
+            double fitR = 0.0;
+            if (!cylinderFitLS(mv, trial, gp_Dir(seed.X(), seed.Y(), seed.Z()), fitAx, fitC, fitR,
+                               resid) ||
+                !(fitR > 0.0))
+                return false;
+            loc = fitC.XYZ();
+            dir = fitAx.XYZ();
+            R = fitR;
+            return true;
+        };
+        // (1) every band's claim, plus its same-surface ISLANDS (D-130-13(2)):
+        // edge-connected components of the lateral facets on the certified
+        // cylinder, admitted by the joint refit, in ascending minimum id (I5).
+        for (size_t bi = 0; bi < accepted.size(); bi++) {
+            const LawBand& b = accepted[bi];
+            if (b.tris.size() < 3 || !(b.R > 0.0) || b.N < 2) continue;
+            if (claimTris[bi].empty()) continue;
+            CensusClaim& c = cc[bi];
+            c.tris = claimTris[bi];
+            if (bandR[bi] > 0.0) {
+                c.loc = bandLoc[bi];
+                c.dir = bandDir[bi].XYZ();
+                c.R = bandR[bi];
+            } else {
+                c.loc = b.axis.Location().XYZ();
+                c.dir = b.axis.Direction().XYZ();
+                c.R = b.R;
+            }
+            c.tau = std::max(b.maxVertResid, qU);
+            bool grew = true;
+            while (grew && mv.triEdges) {
+                grew = false;
+                std::vector<int> cand;
+                for (int t = 0; t < static_cast<int>(mv.nTri); t++) {
+                    if (ownedU[static_cast<size_t>(t)]) continue;
+                    const gp_Dir nd = triNormalLocal(mv, t);
+                    if (std::abs(gp_XYZ(nd.X(), nd.Y(), nd.Z()).Dot(c.dir)) >= latBoundU) continue;
+                    if (triOnU(t, c.loc, c.dir, c.R, c.tau)) cand.push_back(t);
+                }
+                if (cand.empty()) break;
+                std::vector<char> isCand(static_cast<size_t>(mv.nTri), 0);
+                for (int t : cand) isCand[static_cast<size_t>(t)] = 1;
+                std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
+                std::vector<std::vector<int>> comps;
+                for (int t : cand) {
+                    if (seen[static_cast<size_t>(t)]) continue;
+                    std::vector<int> comp, stk{t};
+                    seen[static_cast<size_t>(t)] = 1;
+                    while (!stk.empty()) {
+                        const int x = stk.back();
+                        stk.pop_back();
+                        comp.push_back(x);
+                        for (int sIdx = 0; sIdx < 3; sIdx++) {
+                            const int e = mv.triEdges[x][sIdx];
+                            const int u2 = (eaU.tri[e][0] == x) ? eaU.tri[e][1] : eaU.tri[e][0];
+                            if (u2 < 0 || !isCand[static_cast<size_t>(u2)] ||
+                                seen[static_cast<size_t>(u2)])
+                                continue;
+                            seen[static_cast<size_t>(u2)] = 1;
+                            stk.push_back(u2);
+                        }
+                    }
+                    std::sort(comp.begin(), comp.end());
+                    comps.push_back(std::move(comp));
+                }
+                std::sort(comps.begin(), comps.end(),
+                          [](const std::vector<int>& x, const std::vector<int>& y) {
+                              return x.front() < y.front();
+                          });
+                for (const std::vector<int>& comp : comps) {
+                    std::vector<int> trial = c.tris;
+                    trial.insert(trial.end(), comp.begin(), comp.end());
+                    std::sort(trial.begin(), trial.end());
+                    trial.erase(std::unique(trial.begin(), trial.end()), trial.end());
+                    gp_XYZ loc, dir;
+                    double R = 0.0, resid = 0.0;
+                    if (!refitU(trial, c.dir, loc, dir, R, resid) || resid > c.tau)
+                        continue;  // rollback: this island is not on this surface
+                    for (int t : comp) ownedU[static_cast<size_t>(t)] = 1;
+                    c.tris = std::move(trial);
+                    c.loc = loc;
+                    c.dir = dir;
+                    c.R = R;
+                    grew = true;
+                }
+            }
+        }
+        // (2) U-R1..U-R4 across the copies: mutual containment at each side's
+        // own max(bandResid, q), axial-extent overlap, joint refit inside
+        // max(tau_i, tau_j) or the merge is not taken.
+        bool mU = true;
+        while (mU) {
+            mU = false;
+            for (size_t i = 0; i < cc.size() && !mU; i++) {
+                if (cc[i].tris.size() < 3 || !(cc[i].R > 0.0)) continue;
+                for (size_t j = i + 1; j < cc.size(); j++) {
+                    if (cc[j].tris.size() < 3 || !(cc[j].R > 0.0)) continue;
+                    if (!allOnU(cc[j].tris, cc[i])) continue;
+                    if (!allOnU(cc[i].tris, cc[j])) continue;
+                    if (!overlapU(cc[i].tris, cc[j].tris, cc[i].loc, cc[i].dir)) continue;
+                    std::vector<int> trial = cc[i].tris;
+                    trial.insert(trial.end(), cc[j].tris.begin(), cc[j].tris.end());
+                    std::sort(trial.begin(), trial.end());
+                    trial.erase(std::unique(trial.begin(), trial.end()), trial.end());
+                    gp_XYZ loc, dir;
+                    double R = 0.0, resid = 0.0;
+                    if (!refitU(trial, cc[i].dir, loc, dir, R, resid) ||
+                        resid > std::max(cc[i].tau, cc[j].tau))
+                        continue;
+                    cc[i].tris = std::move(trial);
+                    cc[j].tris.clear();
+                    cc[i].loc = loc;
+                    cc[i].dir = dir;
+                    cc[i].R = R;
+                    mU = true;
+                    break;
+                }
+            }
+        }
+        // (3) one line per certified surface: U-R5..U-R8 measured on the copy.
+        for (size_t bi = 0; bi < cc.size(); bi++) {
+            const CensusClaim& c = cc[bi];
+            if (c.tris.empty()) continue;
+            const gp_Ax1 axU(gp_Pnt(c.loc.X(), c.loc.Y(), c.loc.Z()),
+                             gp_Dir(c.dir.X(), c.dir.Y(), c.dir.Z()));
+            const UnionCensus u = unionCensus(mv, c.tris, axU, c.R);
+            std::fprintf(stderr,
+                         "  DIAG_LAWUNION rid=%d R=%.6f nTri=%zu sigma=%.9f punctures=%zu "
+                         "edgePieces=%zu domainFaces=%zu pinchVertices=%zu sizes=[",
+                         c.tris.front(), c.R, u.nTri, u.sigma, u.punctures, u.edgePieces,
+                         u.domainFaces, u.pinchVertices);
+            for (size_t k = 0; k < u.sizes.size(); k++)
+                std::fprintf(stderr, "%s%zu", k ? "," : "", u.sizes[k]);
+            std::fprintf(stderr, "] pieces=[");
+            for (size_t k = 0; k < u.pieces.size(); k++)
+                std::fprintf(stderr, "%s%zu", k ? "," : "", u.pieces[k]);
+            std::fprintf(stderr, "] domainTris=%zu loc=(%.9g,%.9g,%.9g) dir=(%.9g,%.9g,%.9g)\n",
+                         u.domainTris, c.loc.X(), c.loc.Y(), c.loc.Z(), c.dir.X(), c.dir.Y(),
+                         c.dir.Z());
+        }
+    }
+
     for (size_t bi = 0; bi < accepted.size(); bi++) {
         LawBand b = accepted[bi];
         if (b.tris.size() < 3 || !(b.R > 0.0) || b.N < 2) continue;
@@ -3363,75 +3572,6 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                       [](const std::vector<int>& x, const std::vector<int>& y) {
                           return x.front() < y.front();
                       });
-        }
-        if (lawbandDiagOn()) {
-            const EdgeAdj eaP = buildEdgeAdj(mv);
-            std::vector<char> inb(static_cast<size_t>(mv.nTri), 0);
-            for (int t : b.tris)
-                if (t >= 0 && static_cast<size_t>(t) < mv.nTri) inb[static_cast<size_t>(t)] = 1;
-            std::vector<char> seen(static_cast<size_t>(mv.nTri), 0);
-            size_t nEdgePieces = 0;
-            for (int t : b.tris) {
-                if (t < 0 || static_cast<size_t>(t) >= mv.nTri || seen[static_cast<size_t>(t)])
-                    continue;
-                ++nEdgePieces;
-                std::vector<int> stk{t};
-                seen[static_cast<size_t>(t)] = 1;
-                while (!stk.empty()) {
-                    const int x = stk.back();
-                    stk.pop_back();
-                    for (int sIdx = 0; sIdx < 3 && mv.triEdges; sIdx++) {
-                        const int e = mv.triEdges[x][sIdx];
-                        const int u2 = (eaP.tri[e][0] == x) ? eaP.tri[e][1] : eaP.tri[e][0];
-                        if (u2 < 0 || !inb[static_cast<size_t>(u2)] ||
-                            seen[static_cast<size_t>(u2)])
-                            continue;
-                        seen[static_cast<size_t>(u2)] = 1;
-                        stk.push_back(u2);
-                    }
-                }
-            }
-            // D-130-16: a surface component that is made of SEVERAL
-            // edge-connected pieces is a PINCHED domain -- its pieces meet only
-            // at isolated mesh vertices, and the face's boundary must pass
-            // through each of those vertices twice. That is the number the
-            // union's face path lives or dies on, so it is measured here and
-            // not inferred: pieces=[k1,k2,...], one entry per surface face.
-            std::fprintf(stderr,
-                         "  DIAG_LAWUNION rid=%d R=%.6f nTri=%zu edgePieces=%zu "
-                         "surfaceFaces=%zu sizes=[",
-                         b.tris.empty() ? -1 : b.tris.front(), b.R, b.tris.size(), nEdgePieces,
-                         surfComps.size());
-            for (size_t k = 0; k < surfComps.size(); k++)
-                std::fprintf(stderr, "%s%zu", k ? "," : "", surfComps[k].size());
-            std::fprintf(stderr, "] pieces=[");
-            for (size_t k = 0; k < surfComps.size(); k++) {
-                std::vector<char> inc(static_cast<size_t>(mv.nTri), 0);
-                for (int t : surfComps[k]) inc[static_cast<size_t>(t)] = 1;
-                std::vector<char> sn(static_cast<size_t>(mv.nTri), 0);
-                size_t nP = 0;
-                for (int t : surfComps[k]) {
-                    if (sn[static_cast<size_t>(t)]) continue;
-                    ++nP;
-                    std::vector<int> stk{t};
-                    sn[static_cast<size_t>(t)] = 1;
-                    while (!stk.empty()) {
-                        const int x = stk.back();
-                        stk.pop_back();
-                        for (int sIdx = 0; sIdx < 3 && mv.triEdges; sIdx++) {
-                            const int e2 = mv.triEdges[x][sIdx];
-                            const int u3 = (eaP.tri[e2][0] == x) ? eaP.tri[e2][1] : eaP.tri[e2][0];
-                            if (u3 < 0 || !inc[static_cast<size_t>(u3)] ||
-                                sn[static_cast<size_t>(u3)])
-                                continue;
-                            sn[static_cast<size_t>(u3)] = 1;
-                            stk.push_back(u3);
-                        }
-                    }
-                }
-                std::fprintf(stderr, "%s%zu", k ? "," : "", nP);
-            }
-            std::fprintf(stderr, "]\n");
         }
         const std::vector<int> whole = b.tris;
         for (const std::vector<int>& comp : surfComps) {

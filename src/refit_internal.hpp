@@ -298,6 +298,51 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const Derive
 
 bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
 
+// --- D-140-8 U-R5..U-R8, U-R13: the same-surface UNION CENSUS -----------------
+// Implemented in src/refit_union_census.cpp, its own translation unit (the
+// D-130-3 CONE-MATH shape): pure measurement on MeshView against a certified
+// cylinder, no Region, no build path, so union_census_unit compiles that one
+// file. Declared here rather than in a header of its own because refit_grow.cpp
+// (the only caller) is on the D5.3 include allowlist.
+// closed-form supremum of the tessellation's departure from the claimed surface,
+// computed from the claim's own welded mesh edges.  D-140-8 U-R5.
+//
+//   sigma(S, C) = max over the welded mesh edges of C of (R - dist(axis, edge midpoint))
+//
+// the inscribed-chord deviation of the tessellation the exporter actually wrote.
+// A DOMAIN tolerance (which mesh points the face's wires enclose), never a FIT
+// tolerance: the certificate stays tau = 2q (D-130-13(2)). Each welded edge is
+// visited once; an axial generator edge contributes exactly 0. Returns 0 for an
+// empty claim or a MeshView without an edge table.
+double claimChordSagitta(const MeshView& mv, const std::vector<int>& claim,
+                         const gp_Ax1& axis, double R);
+
+// The census a `DIAG_LAWUNION` line prints (U-R13). Every count is measured on
+// the mesh; nothing is inferred from a Region or from RESULT.
+struct UnionCensus {
+    double      sigma         = 0.0;  // U-R5, mm
+    std::size_t nTri          = 0;    // claim triangles (deduplicated, in range)
+    std::size_t edgePieces    = 0;    // edge-connected pieces of the claim
+    std::size_t punctures     = 0;    // U-R6: non-claim vertices incident to the claim's
+                                      //       neighbourhood with dist(v, S) <= sigma
+    std::size_t domainTris    = 0;    // claim + the on-surface part of its punctures' stars
+    std::size_t domainFaces   = 0;    // U-R7: connected components of the domain graph
+    std::size_t pinchVertices = 0;    // U-R8: vertices whose link inside a component is
+                                      //       disconnected (>= 2 edge-connected fans)
+    std::vector<std::size_t> sizes;   // claim triangles per domain component
+    std::vector<std::size_t> pieces;  // edge-pieces of the claim per domain component
+};
+
+// U-R6 domain graph: the claim's triangles plus, for every puncture vertex, the
+// triangles of its mesh star whose every vertex is a claim vertex or a puncture
+// (the star's on-surface part -- U1's 24 on the plate), connected by shared
+// mesh VERTICES (a shared vertex is a shared point of S -- D-130-14's
+// surface-side connectivity); components ascending minimum triangle id (I5).
+// Punctures are found to a fixed point over the domain's own neighbourhood; a
+// vertex farther than sigma from S is exterior and stays so.
+UnionCensus unionCensus(const MeshView& mv, const std::vector<int>& claim,
+                        const gp_Ax1& axis, double R);
+
 // Pratt / LS circle in the owning plane. N≥6 unique loop verts; accept iff
 // max vertex residual ≤ max(sewTol, chordSagitta(R,N)). Stadium/slot mixed
 // loops fail residual. Builder (agent 06) calls this during collapse to emit
