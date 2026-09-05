@@ -131,6 +131,7 @@ _nl_status() {
 }
 _nl_cleanup() {
   [ -n "${PREFLIGHT_SELF_COPY:-}" ] && rm -f "$0" 2>/dev/null
+  if [ -n "${GIT_SYNC_TMP:-}" ]; then rm -rf "$GIT_SYNC_TMP"; fi
   if [ "$LOCK_HELD" = 1 ]; then
     _nl_release >/dev/null 2>&1 || true
     LOCK_HELD=0
@@ -158,15 +159,45 @@ echo "== preflight: sync repo -> $HOST:~/$WS/repo (HEAD $SYNC_SHA)"
 ssh "$HOST" mkdir -p "$WS/repo"
 # .git rides along: the gate suite's baseline build checks out a pinned
 # ancestor commit and needs full history.
+#
+# A git WORKTREE's .git is a pointer FILE holding the absolute path of the main
+# checkout's gitdir, so copying it verbatim ships a path that does not exist on
+# the node: every git call there fails, build_baseline.sh exits 128, and the
+# 187ead0 twin run disappears -- G0.1 XFAILs on all 33 fixtures and G0.3 falls
+# back to comparing a --force-sew run against a NON-force-sew run, which is not
+# its twin (measured 2026-09-04 at c995151, identically on Linux and Windows:
+# gates_full FAIL(hard)=2 on cross_bores and handle-pickup, both "force-sew
+# exit 2 != off-path exit 0", both PASS again once the baseline exists).
+# Materialise a real, self-contained gitdir for the sync instead, detached at
+# the commit being synced. Excluding the main checkout's index keeps its
+# staged state out of the node; `git reset` on the node rebuilds it from HEAD.
+GIT_SYNC_TMP=""
+GIT_SYNC_EXCLUDE=()
+if [ -f "$REPO_ROOT/.git" ]; then
+  GIT_SYNC_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ci-preflight-git-XXXXXX")"
+  rsync -a --exclude '/worktrees/' --exclude '/modules/' --exclude '/index' \
+    "$(git -C "$REPO_ROOT" rev-parse --git-common-dir)/" "$GIT_SYNC_TMP/"
+  printf '%s\n' "$SYNC_SHA" > "$GIT_SYNC_TMP/HEAD"
+  GIT_SYNC_EXCLUDE=(--exclude '/.git')
+  echo "== preflight: worktree .git is a pointer file; shipping a standalone gitdir detached at $SYNC_SHA_SHORT"
+fi
 # Excludes are ANCHORED (leading /): an unanchored 'build*/' silently drops
 # tests/gates/build_fixtures/ and 11 p2buildtest cases vanish — the exact
 # historical trap the fixtures dir was renamed to dodge.
-rsync -a --delete \
+rsync -a --delete "${GIT_SYNC_EXCLUDE[@]+"${GIT_SYNC_EXCLUDE[@]}"}" \
   --exclude '/build*/' --exclude '/_team/' --exclude '/.stl2step-*' \
   --exclude '/.ci-local/' \
   --exclude '/tests/gates/baseline/.worktree-*' \
   --exclude '/tests/gates/baseline/.build/' \
   "$REPO_ROOT/" "$HOST:$WS/repo/"
+if [ -n "$GIT_SYNC_TMP" ]; then
+  # A previous run may have left the dangling pointer file in place.
+  ssh "$HOST" "if [ -f \"$WS/repo/.git\" ]; then rm -f \"$WS/repo/.git\"; fi"
+  # --exclude '/worktrees/' protects the baseline worktree admin the node
+  # created for tests/gates/baseline/.worktree-187ead0 from --delete.
+  rsync -a --delete --exclude '/worktrees/' "$GIT_SYNC_TMP/" "$HOST:$WS/repo/.git/"
+  ssh "$HOST" "git -C \"$WS/repo\" reset -q"
+fi
 
 LOG="$(mktemp)"
 

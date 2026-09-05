@@ -140,6 +140,7 @@ _nl_status() {
 }
 _nl_cleanup() {
   [ -n "${PREFLIGHT_SELF_COPY:-}" ] && rm -f "$0" 2>/dev/null
+  if [ -n "${GIT_SYNC_TMP:-}" ]; then rm -rf "$GIT_SYNC_TMP"; fi
   if [ "$LOCK_HELD" = 1 ]; then
     _nl_release >/dev/null 2>&1 || true
     LOCK_HELD=0
@@ -172,6 +173,13 @@ ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\
 entries=()
 while IFS= read -r e; do
   case "$e" in build*|_team|.stl2step-*|.ci-local) continue ;; esac
+  # A git WORKTREE's .git is a pointer FILE holding the absolute path of the
+  # main checkout's gitdir; shipping it verbatim gives the node a path that does
+  # not exist, so build_baseline.sh exits 128 and the pinned 187ead0 twin run
+  # disappears (measured 2026-09-04 at c995151, identically on Windows and
+  # Linux: G0.1 XFAIL on all 33 fixtures and gates_full FAIL(hard)=2 from G0.3
+  # falling back off its twin). A standalone gitdir is shipped below instead.
+  if [ "$e" = ".git" ] && [ -f "$REPO_ROOT/.git" ]; then continue; fi
   if [[ "$e" == "tests" ]]; then
     while IFS= read -r rel; do
       entries+=("$rel")
@@ -187,12 +195,27 @@ done < <(ls -A "$REPO_ROOT")
 # they extract as literal files on Windows and corrupt *.expected.json globs.
 COPYFILE_DISABLE=1 tar -czf - -C "$REPO_ROOT" "${entries[@]}" \
   | ssh "$HOST" "cmd /c tar -xzf - -C D:\\stl2step-ci\\repo"
+if [ -f "$REPO_ROOT/.git" ]; then
+  echo "== preflight: worktree .git is a pointer file; shipping a standalone gitdir detached at $SYNC_SHA_SHORT"
+  GIT_SYNC_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ci-preflight-git-XXXXXX")"
+  # The main checkout's index describes the main checkout, not this worktree;
+  # baseline-cleanup.sh rebuilds it from HEAD with `git reset` on the node.
+  rsync -a --exclude '/worktrees/' --exclude '/modules/' --exclude '/index' \
+    "$(git -C "$REPO_ROOT" rev-parse --git-common-dir)/" "$GIT_SYNC_TMP/.git/"
+  printf '%s\n' "$SYNC_SHA" > "$GIT_SYNC_TMP/.git/HEAD"
+  COPYFILE_DISABLE=1 tar -czf - -C "$GIT_SYNC_TMP" .git \
+    | ssh "$HOST" "cmd /c tar -xzf - -C D:\\stl2step-ci\\repo"
+fi
 
 echo "== preflight: build + ctest (Release)"
 cat > /tmp/stl2step-baseline-cleanup.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 COMMIT=187ead0d8cf3d3694153cbcff9314d65324fec63
+# The synced gitdir carries no index (it belongs to the Mac checkout); rebuild
+# it from HEAD so git sees a clean tree before build_baseline.sh adds the
+# pinned baseline worktree.
+git -C repo reset -q
 for wt in repo/tests/gates/baseline/.worktree-*; do
   [ -e "$wt" ] || continue
   head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || true)"
