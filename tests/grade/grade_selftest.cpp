@@ -376,6 +376,19 @@ TopoDS_Shape cubeWithSliverTop() {
     return sew.SewedShape();
 }
 
+TopoDS_Shape cubeSpanned() {
+    // SPEC §8 case 7: S01 top face enlarged in +Y (0..20) so it overhangs
+    // the +Y oracle plane. No +Y face in the STEP.
+    BRepBuilderAPI_Sewing sew;
+    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, -1)), 0, 10, 0, 10).Face());
+    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 0)), 0, 10, 0, 10).Face());
+    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(10, 0, 0), gp_Dir(1, 0, 0)), 0, 10, 0, 10).Face());
+    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, -1, 0)), 0, 10, 0, 10).Face());
+    sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 10), gp_Dir(0, 0, 1)), 0, 10, 0, 20).Face());
+    sew.Perform();
+    return sew.SewedShape();
+}
+
 bool writeBinaryStl(const std::string& path,
                     const std::vector<std::array<grade::Vec3, 3>>& tris) {
     std::FILE* f = std::fopen(path.c_str(), "wb");
@@ -574,10 +587,29 @@ int syntheticTests(const std::string& corpus, const std::string& argv0) {
         check(!hzValid, "case6 hardZero does not contain valid");
     }
 
-    // Case 7: spanned — two disjoint coplanar oracles, one STEP face
-    // (SPEC: "top face enlarged to overhang a second oracle plane"; the
-    // vertex-hit test needs both oracles on the untrimmed surface, so the
-    // construction is two coplanar squares + one combined face).
+    // Case 7: SPEC §8 — S01 with the top face enlarged to overhang the +Y
+    // oracle plane. Both oracles spanned, credit 0. Six planes proves the
+    // mesh is S01, not the two-square substitute.
+    {
+        const std::string p = join(tmp, "S01.span.step");
+        writeStep(cubeSpanned(), p);
+        grade::GradeDocument d;
+        std::string err;
+        check(grade::gradeFiles(join(corpus, "S01.stl"), p, cfg, d, err), "case7 grades");
+        int nSpan = 0;
+        for (const auto& f : d.features) {
+            if (f.status == grade::Status::Spanned) {
+                ++nSpan;
+                check(f.credit == 0.0, "case7 spanned credit 0");
+            }
+        }
+        std::fprintf(stderr, "  case7 spanned=%d planeOracles=%d\n", nSpan,
+                     countClass(d, grade::SurfClass::Plane));
+        check(countClass(d, grade::SurfClass::Plane) == 6, "case7 S01 six planes");
+        check(nSpan >= 2, "case7 both oracles spanned");
+    }
+
+    // Case 7b: two-square substitute kept as an additional case (addendum B).
     {
         const std::string stl = join(tmp, "span.stl");
         const std::string p = join(tmp, "span.step");
@@ -587,20 +619,20 @@ int syntheticTests(const std::string& corpus, const std::string& argv0) {
             {{{20, 0, 0}, {30, 0, 0}, {30, 10, 0}}},
             {{{20, 0, 0}, {30, 10, 0}, {20, 10, 0}}},
         };
-        check(writeBinaryStl(stl, tris), "case7 write stl");
+        check(writeBinaryStl(stl, tris), "case7b write stl");
         BRepBuilderAPI_Sewing sew;
         sew.Add(BRepBuilderAPI_MakeFace(gp_Pln(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 0, 30, 0, 10).Face());
         sew.Perform();
         writeStep(sew.SewedShape(), p);
         grade::GradeDocument d;
         std::string err;
-        check(grade::gradeFiles(stl, p, cfg, d, err), "case7 grades");
+        check(grade::gradeFiles(stl, p, cfg, d, err), "case7b grades");
         int nSpan = 0;
         for (const auto& f : d.features)
             if (f.status == grade::Status::Spanned && f.credit == 0.0) ++nSpan;
-        std::fprintf(stderr, "  case7 spanned=%d planeOracles=%d\n", nSpan,
+        std::fprintf(stderr, "  case7b spanned=%d planeOracles=%d\n", nSpan,
                      countClass(d, grade::SurfClass::Plane));
-        check(nSpan >= 2, "case7 both oracles spanned");
+        check(nSpan >= 2, "case7b both oracles spanned");
     }
 
     // Case 8: open shell

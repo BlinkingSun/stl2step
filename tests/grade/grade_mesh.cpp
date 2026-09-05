@@ -75,6 +75,19 @@ void fillMetrics(Mesh& m) {
     }
     m.volume /= 6.0;
     m.meanCircumdiam = circumN ? circumSum / circumN : 1.0;
+    m.meshDiag = 0;
+    if (!m.verts.empty()) {
+        Vec3 mn = m.verts[0], mx = m.verts[0];
+        for (const Vec3& p : m.verts) {
+            mn.x = std::min(mn.x, p.x);
+            mn.y = std::min(mn.y, p.y);
+            mn.z = std::min(mn.z, p.z);
+            mx.x = std::max(mx.x, p.x);
+            mx.y = std::max(mx.y, p.y);
+            mx.z = std::max(mx.z, p.z);
+        }
+        m.meshDiag = dist(mn, mx);
+    }
 
     struct EH {
         size_t operator()(uint64_t k) const { return static_cast<size_t>(k ^ (k >> 32)); }

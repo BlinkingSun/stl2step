@@ -100,6 +100,7 @@ struct Mesh {
     double surfaceArea = 0;
     double volume = 0;
     double meanCircumdiam = 0;
+    double meshDiag = 0;
     double q = 0;
     double tau = 0;
     stl2step::StlQuantFloor qf{};

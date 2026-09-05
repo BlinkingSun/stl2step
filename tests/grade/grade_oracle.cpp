@@ -849,6 +849,34 @@ bool surroundsAxis(const Mesh& m, const std::vector<int>& triIds, Vec3 axis) {
     return maxGap <= M_PI;
 }
 
+// Centroids wrap an axis (max azimuth gap ≤ π). A torus latitude ring
+// around the boss wraps; an S02 octant in a cube corner does not.
+bool wrapsAxis(const Mesh& m, const std::vector<int>& triIds, const Vec3& origin, Vec3 axis,
+               double maxGapLim) {
+    axis = normalized(axis);
+    if (!(norm2(axis) > 0.0)) return false;
+    Vec3 uu, vv;
+    frameFromAxis(axis, uu, vv);
+    const int bins = paramCount(SurfClass::Cylinder) + 1;
+    unsigned seen = 0;
+    int nAng = 0;
+    for (int t : triIds) {
+        const Vec3 w = m.tris[static_cast<size_t>(t)].centroid - origin;
+        const Vec3 p = w - axis * dot(w, axis);
+        if (!(norm2(p) > 0.0)) continue;
+        const Vec3 pn = normalized(p);
+        const double ang = std::atan2(dot(pn, vv), dot(pn, uu));
+        int b = static_cast<int>(std::floor((ang + M_PI) / (2.0 * M_PI) * bins));
+        if (b < 0) b = 0;
+        if (b >= bins) b = bins - 1;
+        seen |= 1u << b;
+        ++nAng;
+    }
+    (void)maxGapLim;
+    if (nAng < 3) return false;
+    return seen == (1u << bins) - 1u;
+}
+
 bool cylinderNormalsOk(const Mesh& m, const std::vector<int>& triIds, const SurfParams& S) {
     for (int t : triIds) {
         const Tri& tr = m.tris[static_cast<size_t>(t)];
@@ -866,7 +894,10 @@ bool cylinderNormalsOk(const Mesh& m, const std::vector<int>& triIds, const Surf
 // SPEC §5.3 analog for spheres: the region's normals must span ℝ³. A fillet
 // band or plane cluster is rank ≤ 2. Noise floor is Σ area·sin²(θ_q) — no
 // size constant. Emit-only (a 2-tri seed is rank 2).
-bool sphereNormalsSpan(const Mesh& m, const std::vector<int>& triIds) {
+// Radial Gauss-map (port 49345f6): n(t) must track (centroid − centre)
+// within the patch's own Gauss radius + θ_q. Handle-lock leftovers were
+// rank-3 with maxNormalDev ≈ 0.75 rad — larger than their own span.
+bool sphereNormalsSpan(const Mesh& m, const std::vector<int>& triIds, const SurfParams& S) {
     double G[3][3] = {};
     double noise = 0;
     double wsum = 0;
@@ -894,7 +925,27 @@ bool sphereNormalsSpan(const Mesh& m, const std::vector<int>& triIds) {
     double lmin = eval[0];
     if (eval[1] < lmin) lmin = eval[1];
     if (eval[2] < lmin) lmin = eval[2];
-    return lmin > noise;
+    if (!(lmin > noise)) return false;
+    if (!(S.R > 0.0)) return false;
+    Vec3 nmean{};
+    double thMax = 0;
+    for (int t : triIds) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        nmean = nmean + tr.n;
+        thMax = std::max(thMax, tr.thetaQ);
+    }
+    nmean = normalized(nmean);
+    if (!(norm2(nmean) > 0.0)) return false;
+    double gaussRad = 0;
+    for (int t : triIds)
+        gaussRad = std::max(gaussRad, angleUnit(m.tris[static_cast<size_t>(t)].n, nmean));
+    for (int t : triIds) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        const Vec3 rad = normalized(tr.centroid - S.p0);
+        if (!(norm2(rad) > 0.0)) return false;
+        if (angleUnit(tr.n, rad) > gaussRad + thMax) return false;
+    }
+    return true;
 }
 
 bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
@@ -925,7 +976,10 @@ bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const
     uniqueVerts(m, region, verts, st);
     if (static_cast<int>(verts.size()) < paramCount(c) + 1) return false;
     if (!admits(m, region, c, S)) return false;
-    if (c == SurfClass::Sphere && !sphereNormalsSpan(m, region)) return false;
+    if (c == SurfClass::Sphere && !sphereNormalsSpan(m, region, S)) return false;
+    if ((c == SurfClass::Cylinder || c == SurfClass::Sphere) && S.R > m.meshDiag)
+        return false;
+    if (c == SurfClass::Torus && (S.R > m.meshDiag || S.r > m.meshDiag)) return false;
     double maxR = 0;
     for (int vi : verts) maxR = std::max(maxR, distToSurf(m.verts[static_cast<size_t>(vi)], S));
     double maxNd = 0;
@@ -1291,45 +1345,31 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             SurfParams P;
             if (fitPlane(m, R, P) && certifies(m, R, SurfClass::Plane, P)) return false;
         }
+        if (c == SurfClass::Sphere) {
+            const double tess =
+                2.0 * M_PI / static_cast<double>(paramCount(SurfClass::Cylinder) + 1);
+            const Vec3 axes[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+            bool wrap = false;
+            for (const Vec3& ax : axes) {
+                if (wrapsAxis(m, R, S.p0, ax, tess)) {
+                    wrap = true;
+                    break;
+                }
+            }
+            if (wrap) return false;
+        }
         // N>=6 is the cylinder/prism law (AGENTS.md): a closed prism with
         // fewer than d_C+1 triangles cannot be a cylinder. Cone is gated
         // only by certifies (|V| >= d_C+1, |R| >= 2).
         if (c == SurfClass::Cylinder) {
             if (static_cast<int>(R.size()) < paramCount(SurfClass::Cylinder) + 1)
                 return false;
-            // S02 cube-face circumcylinders have R larger than the whole
-            // mesh (R=53 on a 20 mm cube). A cylinder the mesh can round
-            // cannot exceed the mesh's own bounding diagonal.
-            if (!m.verts.empty()) {
-                Vec3 mn = m.verts[0], mx = m.verts[0];
-                for (const Vec3& p : m.verts) {
-                    mn.x = std::min(mn.x, p.x);
-                    mn.y = std::min(mn.y, p.y);
-                    mn.z = std::min(mn.z, p.z);
-                    mx.x = std::max(mx.x, p.x);
-                    mx.y = std::max(mx.y, p.y);
-                    mx.z = std::max(mx.z, p.z);
-                }
-                if (S.R > dist(mn, mx)) return false;
-            }
         }
-        if (c == SurfClass::Torus && !m.verts.empty()) {
-            Vec3 mn = m.verts[0], mx = m.verts[0];
-            for (const Vec3& p : m.verts) {
-                mn.x = std::min(mn.x, p.x);
-                mn.y = std::min(mn.y, p.y);
-                mn.z = std::min(mn.z, p.z);
-                mx.x = std::max(mx.x, p.x);
-                mx.y = std::max(mx.y, p.y);
-                mx.z = std::max(mx.z, p.z);
-            }
-            const double diag = dist(mn, mx);
-            if (S.R > diag || S.r > diag) return false;
-        }
-        // Torus is tried before sphere so a rim-blend is not eaten as
-        // osculating-sphere patches, but a true sphere (S02 corners)
-        // also certifies as a degenerate torus — refuse, leave for sphere.
+        // SPEC §5.4 tries sphere before torus. A true sphere (S02) is
+        // already claimed; refuse a leftover patch that still certifies
+        // as a sphere so it is not emitted as a degenerate torus.
         if (c == SurfClass::Torus) {
+            if (!(S.R > S.r) || !(S.r > m.tau)) return false;
             SurfParams Sph;
             if (fitClassEx(m, R, SurfClass::Sphere, Sph, true) &&
                 certifies(m, R, SurfClass::Sphere, Sph))
@@ -1366,6 +1406,11 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
         SurfParams S;
         if (!fitClass(m, R, c, S) || !admits(m, R, c, S)) continue;
         if (finish(R, S)) return true;
+        if (c == SurfClass::Sphere &&
+            static_cast<int>(R.size()) >= paramCount(SurfClass::Sphere) + 1) {
+            for (int t : R) skipComp[static_cast<size_t>(t)] = 1;
+            break;
+        }
     }
     // Cone / torus: a local patch is under-determined and looks like a
     // cylinder/sphere. Take the whole unclaimed connected component (the
@@ -1434,12 +1479,11 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
     out = OracleSet{};
     out.owner.assign(m.tris.size(), -1);
     std::vector<char> claimed(m.tris.size(), 0);
-    // Sphere is after torus: a torus band's osculating-sphere patches (S04)
-    // must not consume the band before the torus class sees it. A true
-    // sphere does not certify as a torus (degenerate Rmaj/Rmin) and is
-    // still claimed next. Plane remains first (S04 boss-top class order).
+    // SPEC §5.4: fewest parameters first {plane, cylinder, cone, sphere, torus}.
+    // S04 boss-top stays plane (d=3 before d=7). If the torus band then
+    // falls to sphere, that is sphereNormalsSpan's defect — never reorder.
     const SurfClass order[5] = {SurfClass::Plane, SurfClass::Cylinder, SurfClass::Cone,
-                                SurfClass::Torus, SurfClass::Sphere};
+                                SurfClass::Sphere, SurfClass::Torus};
 
     std::vector<Oracle> heldPlanes;  // |R|==2 tessellation quads; curved classes may claim them
 
@@ -1454,13 +1498,34 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
         return s;
     };
 
+    auto restabilize = [&]() {
+        for (Oracle& o : out.oracles) {
+            o.w = regionArea(m, o.tris);
+            o.minVertIndex = minVertOf(m, o.tris);
+            std::sort(o.tris.begin(), o.tris.end());
+        }
+        std::stable_sort(out.oracles.begin(), out.oracles.end(),
+                         [](const Oracle& A, const Oracle& B) {
+                             if (A.cls != B.cls)
+                                 return static_cast<int>(A.cls) < static_cast<int>(B.cls);
+                             if (A.w != B.w) return A.w > B.w;
+                             return A.minVertIndex < B.minVertIndex;
+                         });
+        out.owner.assign(m.tris.size(), -1);
+        for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i) {
+            out.oracles[static_cast<size_t>(i)].id = i;
+            for (int t : out.oracles[static_cast<size_t>(i)].tris)
+                out.owner[static_cast<size_t>(t)] = i;
+        }
+    };
+
     for (SurfClass c : order) {
         std::vector<char> skipComp(m.tris.size(), 0);
         const auto seeds = seedList();
         for (int seed : seeds) {
             if (claimed[static_cast<size_t>(seed)]) continue;
             Oracle o;
-            if (!tryGrow(m, claimed, c, seed, reverseSeeds, o, skipComp)) continue;
+            if (!tryGrow(m, claimed, c, seed, false, o, skipComp)) continue;
             if (c == SurfClass::Plane && static_cast<int>(o.tris.size()) == 2) {
                 // Tessellated cylinders/spheres are planar quads. Hold a 2-tri
                 // plane whose neighbour dihedral is the tessellation step
@@ -1498,6 +1563,7 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
             o.id = static_cast<int>(out.oracles.size());
             out.oracles.push_back(std::move(o));
         }
+        restabilize();
         // Claim pass (islands). Triangle order is always ascending — seed
         // reversal is a growth-order probe; SPEC §5.4's claim/merge must be
         // a canonical maximal partition (area desc, then min welded-vertex
@@ -1539,6 +1605,8 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
                     Oracle& Rk = out.oracles[static_cast<size_t>(best)];
                     Rk.tris.push_back(u);
                     Rk.S = bestS;
+                    Rk.w = regionArea(m, Rk.tris);
+                    Rk.minVertIndex = minVertOf(m, Rk.tris);
                     claimed[static_cast<size_t>(u)] = 1;
                     out.owner[static_cast<size_t>(u)] = best;
                     claimChanged = true;
@@ -1588,9 +1656,16 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds) {
                 }
             }
         }
+        restabilize();
     }
 
     // Commit held 2-triangle planes that curved classes did not take.
+    std::sort(heldPlanes.begin(), heldPlanes.end(), [](const Oracle& A, const Oracle& B) {
+        const int ma = A.tris.empty() ? 0 : *std::min_element(A.tris.begin(), A.tris.end());
+        const int mb = B.tris.empty() ? 0 : *std::min_element(B.tris.begin(), B.tris.end());
+        if (ma != mb) return ma < mb;
+        return A.w > B.w;
+    });
     for (Oracle& hp : heldPlanes) {
         std::vector<int> left;
         for (int t : hp.tris)

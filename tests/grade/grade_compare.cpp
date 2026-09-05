@@ -464,6 +464,9 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
     // Spanned: one STEP face overlaps two oracle surfaces (mesh-vertex
     // identity, not unordered-wire even-odd — that marked S03's five z=4
     // discs spanned of each other).
+    // SPEC §8 case 7: an enlarged face that overhangs a neighbouring
+    // oracle (S01 top UV past a shared edge) also spans both — neighbour
+    // centroid projects strictly IN (not ON) F. Exact cube edges are ON.
     std::vector<char> spanned(doc.oracle.oracles.size(), 0);
     for (const StepFace& F : doc.step.faces) {
         if (F.facet) continue;
@@ -477,6 +480,45 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
         }
         if (hit.size() >= 2) {
             for (int oi : hit) spanned[static_cast<size_t>(oi)] = 1;
+            continue;
+        }
+        if (hit.size() != 1 || F.face.IsNull()) continue;
+        const int primary = hit[0];
+        const Oracle& O0 = doc.oracle.oracles[static_cast<size_t>(primary)];
+        // Enlarged face: area(F) exceeds the matched oracle by more than
+        // areaQ. Exact recovered faces are within areaQ and must not span.
+        if (!(F.area > O0.w + areaQ(doc.mesh, O0.tris))) continue;
+        Handle(Geom_Surface) surf = BRep_Tool::Surface(F.face);
+        if (surf.IsNull()) continue;
+        BRepTopAdaptor_FClass2d cls(F.face, Precision::PConfusion());
+        for (int oi = 0; oi < static_cast<int>(doc.oracle.oracles.size()); ++oi) {
+            if (oi == primary) continue;
+            const Oracle& Op = doc.oracle.oracles[static_cast<size_t>(oi)];
+            if (Op.cls != F.cls) continue;
+            if (sameSurface(Op.S, F.S, Op, doc.mesh)) continue;
+            if (!shareMeshEdge(doc.mesh, O0, Op)) continue;
+            // Cube overhang is orthogonal (S01 top vs +Y). Shallow dihedrals
+            // project a neighbour centroid into F and must not span.
+            double th = 0;
+            for (int t : O0.tris) th = std::max(th, doc.mesh.tris[static_cast<size_t>(t)].thetaQ);
+            for (int t : Op.tris) th = std::max(th, doc.mesh.tris[static_cast<size_t>(t)].thetaQ);
+            if (std::fabs(dot(O0.S.n, Op.S.n)) > std::sin(th)) continue;
+            bool inside = false;
+            for (int t : Op.tris) {
+                const Vec3& c = doc.mesh.tris[static_cast<size_t>(t)].centroid;
+                GeomAPI_ProjectPointOnSurf proj(gp_Pnt(c.x, c.y, c.z), surf);
+                if (proj.NbPoints() < 1) continue;
+                Standard_Real u = 0, v = 0;
+                proj.LowerDistanceParameters(u, v);
+                if (cls.Perform(gp_Pnt2d(u, v)) == TopAbs_IN) {
+                    inside = true;
+                    break;
+                }
+            }
+            if (inside) {
+                spanned[static_cast<size_t>(primary)] = 1;
+                spanned[static_cast<size_t>(oi)] = 1;
+            }
         }
     }
 
