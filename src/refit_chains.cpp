@@ -17,10 +17,9 @@
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Torus.hxx>
 #include <gp_Vec.hxx>
 #include <gp_XYZ.hxx>
-
-#include "refit_torus_math.hpp"
 
 namespace stl2step {
 namespace refit {
@@ -851,12 +850,16 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                 int n = 0;
                 if (reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend) {
                     const gp_Torus gt(reg.ax, reg.radius, reg.radius2);
+                    const gp_Pnt loc = gt.Location();
+                    const gp_Dir za = gt.Axis().Direction();
+                    const double Rmaj = gt.MajorRadius();
                     for (int lv : vs) {
                         const gp_Pnt p(localPnt(mv, lv).X(), localPnt(mv, lv).Y(),
                                        localPnt(mv, lv).Z());
-                        const double rho = torusRadialCoord(gt, p);
-                        const double z = torusAxialCoord(gt, p);
-                        sum += torusVOfProfilePoint(gt, rho, z);
+                        const gp_Vec d(loc, p);
+                        const double z = d.Dot(za);
+                        const double rho = (d - gp_Vec(za) * z).Magnitude();
+                        sum += std::atan2(z, rho - Rmaj);
                         ++n;
                     }
                 } else {
