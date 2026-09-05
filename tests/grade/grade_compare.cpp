@@ -13,10 +13,14 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
 #include <GeomAbs_CurveType.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_Surface.hxx>
 #include <IntAna_QuadQuadGeo.hxx>
 #include <IntAna_ResultType.hxx>
+#include <Precision.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -25,6 +29,7 @@
 #include <gp_Cone.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Sphere.hxx>
 #include <gp_Torus.hxx>
 
@@ -342,7 +347,9 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
     doc.volumeDelta = doc.Vstep - doc.Vmesh;
     doc.volumeWithin = true;
     if (!cfg.skipVolume) {
-        if (doc.volumeDelta < -doc.volumeQ || doc.volumeDelta > doc.chordBudget)
+        // Two-sided chord budget: bosses make V_step > V_mesh; holes make
+        // V_mesh > V_step by the same sagitta sum already in chordBudget.
+        if (doc.volumeDelta < -doc.chordBudget || doc.volumeDelta > doc.chordBudget)
             doc.volumeWithin = false;
     }
 
@@ -385,94 +392,87 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
         groupOf[static_cast<size_t>(i)] = found;
     }
 
-    // Assignment: one-to-one, smallest max-dev, then lower entity id.
-    std::vector<int> assign(doc.oracle.oracles.size(), -1);  // group index
-    std::vector<char> taken(groups.size(), 0);
-    struct Cand {
-        int oi, g;
-        double dev;
-        int entity;
-    };
-    std::vector<Cand> cands;
-    for (int oi = 0; oi < static_cast<int>(doc.oracle.oracles.size()); ++oi) {
-        const Oracle& O = doc.oracle.oracles[static_cast<size_t>(oi)];
-        for (int g = 0; g < static_cast<int>(groups.size()); ++g) {
-            const StepFace& G0 = doc.step.faces[static_cast<size_t>(groups[static_cast<size_t>(g)][0])];
-            if (G0.cls != O.cls) continue;
-            if (!sameSurface(O.S, G0.S, O, doc.mesh)) continue;
-            int minEnt = G0.entity;
-            for (int fi : groups[static_cast<size_t>(g)])
-                minEnt = std::min(minEnt, doc.step.faces[static_cast<size_t>(fi)].entity);
-            cands.push_back(Cand{oi, g, maxDevOn(O, G0.S, doc.mesh), minEnt});
+    // Assignment: a coplanar group of disjoint faces (S03 z=4 discs) must
+    // not be handed to a single oracle as split(n). One matching oracle
+    // keeps the whole group (case 5 split). Several matching oracles share
+    // the faces by point-in-face overlap (SPEC §5.5 vs §6.2).
+    std::vector<std::vector<int>> facesOf(doc.oracle.oracles.size());
+    auto overlapFace = [&](const Oracle& O, const StepFace& F) -> double {
+        std::unordered_set<int> wire(F.meshVerts.begin(), F.meshVerts.end());
+        wire.erase(-1);
+        double a = 0;
+        if (!wire.empty()) {
+            for (int t : O.tris) {
+                const Tri& tr = doc.mesh.tris[static_cast<size_t>(t)];
+                int hit = 0;
+                for (int k = 0; k < 3; ++k)
+                    if (wire.count(tr.v[k])) ++hit;
+                if (hit >= 2) a += tr.area;
+            }
         }
-    }
-    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
-        if (a.dev != b.dev) return a.dev < b.dev;
-        if (a.entity != b.entity) return a.entity < b.entity;
-        return a.oi < b.oi;
-    });
-    for (const Cand& c : cands) {
-        if (assign[static_cast<size_t>(c.oi)] >= 0) continue;
-        if (taken[static_cast<size_t>(c.g)]) continue;
-        assign[static_cast<size_t>(c.oi)] = c.g;
-        taken[static_cast<size_t>(c.g)] = 1;
+        if (a > 0.0 || F.face.IsNull()) return a;
+        // Analytic circular discs (exact.step) have a CIRCLE edge and one
+        // seam vertex — mesh-vert identity is empty. Classify centroids.
+        Handle(Geom_Surface) surf = BRep_Tool::Surface(F.face);
+        if (surf.IsNull()) return 0.0;
+        BRepTopAdaptor_FClass2d cls(F.face, Precision::PConfusion());
+        for (int t : O.tris) {
+            const Vec3& c = doc.mesh.tris[static_cast<size_t>(t)].centroid;
+            GeomAPI_ProjectPointOnSurf proj(gp_Pnt(c.x, c.y, c.z), surf);
+            if (proj.NbPoints() < 1) continue;
+            Standard_Real u = 0, v = 0;
+            proj.LowerDistanceParameters(u, v);
+            const TopAbs_State st = cls.Perform(gp_Pnt2d(u, v));
+            if (st == TopAbs_IN || st == TopAbs_ON) a += doc.mesh.tris[static_cast<size_t>(t)].area;
+        }
+        return a;
+    };
+    for (int g = 0; g < static_cast<int>(groups.size()); ++g) {
+        const StepFace& G0 = doc.step.faces[static_cast<size_t>(groups[static_cast<size_t>(g)][0])];
+        std::vector<int> match;
+        for (int oi = 0; oi < static_cast<int>(doc.oracle.oracles.size()); ++oi) {
+            const Oracle& O = doc.oracle.oracles[static_cast<size_t>(oi)];
+            if (O.cls != G0.cls) continue;
+            if (!sameSurface(O.S, G0.S, O, doc.mesh)) continue;
+            match.push_back(oi);
+        }
+        if (match.size() == 1) {
+            facesOf[static_cast<size_t>(match[0])].insert(facesOf[static_cast<size_t>(match[0])].end(),
+                                                         groups[static_cast<size_t>(g)].begin(),
+                                                         groups[static_cast<size_t>(g)].end());
+        } else if (match.size() > 1) {
+            for (int fi : groups[static_cast<size_t>(g)]) {
+                const StepFace& F = doc.step.faces[static_cast<size_t>(fi)];
+                int best = -1;
+                double bestA = 0;
+                std::string bestId;
+                for (int oi : match) {
+                    const double a = overlapFace(doc.oracle.oracles[static_cast<size_t>(oi)], F);
+                    if (a <= 0.0) continue;
+                    const std::string& id = doc.oracle.oracles[static_cast<size_t>(oi)].featureId;
+                    if (a > bestA || (a == bestA && (best < 0 || id < bestId))) {
+                        bestA = a;
+                        best = oi;
+                        bestId = id;
+                    }
+                }
+                if (best >= 0) facesOf[static_cast<size_t>(best)].push_back(fi);
+            }
+        }
     }
 
-    // Spanned: untrimmed surface within tau of two oracles, AND (for planes)
-    // the oracle centroid sits inside the face wire — otherwise every z=const
-    // disc is "hit" by every other coplanar face (S03 3b vs case 4).
-    auto evenOdd = [](const std::vector<Vec3>& poly, double x, double y) {
-        bool in = false;
-        const int n = static_cast<int>(poly.size());
-        for (int i = 0, j = n - 1; i < n; j = i++) {
-            const double xi = poly[static_cast<size_t>(i)].x, yi = poly[static_cast<size_t>(i)].y;
-            const double xj = poly[static_cast<size_t>(j)].x, yj = poly[static_cast<size_t>(j)].y;
-            const bool hit = ((yi > y) != (yj > y)) &&
-                             (x < (xj - xi) * (y - yi) / ((yj - yi) == 0.0 ? 1.0 : (yj - yi)) + xi);
-            if (hit) in = !in;
-        }
-        return in;
-    };
+    // Spanned: one STEP face overlaps two oracle surfaces (mesh-vertex
+    // identity, not unordered-wire even-odd — that marked S03's five z=4
+    // discs spanned of each other).
     std::vector<char> spanned(doc.oracle.oracles.size(), 0);
     for (const StepFace& F : doc.step.faces) {
         if (F.facet) continue;
         std::vector<int> hit;
-        Vec3 u{}, v{};
-        if (F.cls == SurfClass::Plane && F.wireVerts.size() >= 3) {
-            const Vec3 n = F.S.n;
-            Vec3 tmp = (std::fabs(n.z) < 0.9) ? Vec3{0, 0, 1} : Vec3{1, 0, 0};
-            u = normalized(cross(tmp, n));
-            v = cross(n, u);
-        }
         for (int oi = 0; oi < static_cast<int>(doc.oracle.oracles.size()); ++oi) {
             const Oracle& O = doc.oracle.oracles[static_cast<size_t>(oi)];
             if (O.cls != F.cls) continue;
-            bool all = true;
-            for (int vi : O.verts) {
-                if (distToSurf(doc.mesh.verts[static_cast<size_t>(vi)], F.S) > doc.mesh.tau) {
-                    all = false;
-                    break;
-                }
-            }
-            if (!all) continue;
-            if (F.cls == SurfClass::Plane && F.wireVerts.size() >= 3 && !O.tris.empty()) {
-                std::vector<Vec3> poly;
-                poly.reserve(F.wireVerts.size());
-                for (const Vec3& p : F.wireVerts) {
-                    const Vec3 d = p - F.S.p0;
-                    poly.push_back(Vec3{dot(d, u), dot(d, v), 0});
-                }
-                Vec3 c{};
-                double w = 0;
-                for (int t : O.tris) {
-                    const Tri& tr = doc.mesh.tris[static_cast<size_t>(t)];
-                    c = c + tr.centroid * tr.area;
-                    w += tr.area;
-                }
-                if (w > 0.0) c = c * (1.0 / w);
-                const Vec3 d = c - F.S.p0;
-                if (!evenOdd(poly, dot(d, u), dot(d, v))) continue;
-            }
+            if (!sameSurface(O.S, F.S, O, doc.mesh)) continue;
+            if (overlapFace(O, F) <= 0.0) continue;
             hit.push_back(oi);
         }
         if (hit.size() >= 2) {
@@ -491,12 +491,11 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
         Feature& f = doc.features[static_cast<size_t>(oi)];
         f.oracle = doc.oracle.oracles[static_cast<size_t>(oi)];
         f.areaFraction = (totalOracleArea > 0.0) ? f.oracle.w / totalOracleArea : 0.0;
-        const int g = assign[static_cast<size_t>(oi)];
+        const auto& members = facesOf[static_cast<size_t>(oi)];
         if (spanned[static_cast<size_t>(oi)]) {
             f.status = Status::Spanned;
             f.credit = 0;
-        } else if (g >= 0) {
-            const auto& members = groups[static_cast<size_t>(g)];
+        } else if (!members.empty()) {
             double sumA = 0, amax = 0;
             for (int fi : members) {
                 const StepFace& F = doc.step.faces[static_cast<size_t>(fi)];
@@ -516,8 +515,27 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
                 f.status = Status::Recovered;
                 f.credit = 1.0;
             } else {
-                f.status = Status::Sliver;
-                f.credit = (f.oracle.w > 0.0) ? (sumA / f.oracle.w) : 0.0;
+                // Hole tessellation: a correct plane face with circular holes
+                // has GProp area below the polygonal mesh. If every wire
+                // vertex of the face is a vertex of this oracle, the face
+                // is the whole design surface, not a sliver (case 6 uses
+                // new vertices and stays sliver).
+                const StepFace& F0 = doc.step.faces[static_cast<size_t>(members[0])];
+                std::unordered_set<int> ov(f.oracle.verts.begin(), f.oracle.verts.end());
+                bool covers = !F0.meshVerts.empty();
+                for (int mid : F0.meshVerts) {
+                    if (mid < 0 || !ov.count(mid)) {
+                        covers = false;
+                        break;
+                    }
+                }
+                if (covers) {
+                    f.status = Status::Recovered;
+                    f.credit = 1.0;
+                } else {
+                    f.status = Status::Sliver;
+                    f.credit = (f.oracle.w > 0.0) ? (sumA / f.oracle.w) : 0.0;
+                }
             }
         } else {
             int cov = 0;

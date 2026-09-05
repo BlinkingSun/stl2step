@@ -105,7 +105,9 @@ void fillMetrics(Mesh& m) {
         }
     }
 
-    m.gridCell = m.meanCircumdiam > 0.0 ? m.meanCircumdiam : 1.0;
+    // q-scaled cells (D-140-1 / cycle-2 F12): nearestVert is a q-ball query.
+    // Mean circumdiameter buckets scan hundreds of verts per face vertex.
+    m.gridCell = (m.q > 0.0) ? m.q : (m.meanCircumdiam > 0.0 ? m.meanCircumdiam : 1.0);
     m.grid.clear();
     auto celli = [&](double x) -> int64_t {
         return static_cast<int64_t>(std::floor(x / m.gridCell));
