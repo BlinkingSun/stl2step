@@ -18,7 +18,7 @@ import textwrap
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 import smooth_on as so
 
@@ -35,6 +35,7 @@ PARKED_GATES = so.PARKED_GATES
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = REPO_ROOT / "tests" / "corpus"
 DEFAULT_BASELINE = REPO_ROOT / "tests" / "gates" / "baseline"
+EXPECTED_RED_FILE = DEFAULT_BASELINE / "expected-red.json"
 SMOKE_STL = REPO_ROOT / "tests" / "cube.stl"
 
 ALL_GATE_IDS = (
@@ -380,6 +381,51 @@ def xfail_not_landed(gate_id: str, fixture_id: str, phase: str) -> GateOutcome:
         f"{gate_id}: phase {phase} not landed — expected fail until downstream lane ships",
         hard=gate_id in HARD_GATES,
     )
+
+
+def load_expected_red(path: Optional[Path] = None) -> Dict[str, Any]:
+    """D-130-23 recorded-deferral list. Missing file is empty (no silent XFAIL)."""
+    p = path if path is not None else EXPECTED_RED_FILE
+    if not p.is_file():
+        return {}
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise ValueError(f"{p}: expected a JSON object")
+    return doc
+
+
+def apply_recorded_deferrals(
+    outcomes: List[GateOutcome],
+    listed: Mapping[str, str],
+) -> Tuple[List[GateOutcome], List[str]]:
+    """D-130-23: a listed gates_full SIDECAR FAIL is the existing XFAIL category.
+
+    A listed I-checker FAIL becomes XFAIL (totals show it). A listed row that
+    is green is returned in the XPASS list (printed after the summary so it is
+    visible) and stays PASS (does not fail). Unlisted FAILs are unchanged.
+    """
+    xpass: List[str] = []
+    if not listed:
+        return outcomes, xpass
+    original_ichecker: Dict[str, GateOutcome] = {
+        o.fixture_id: o for o in outcomes if o.gate_id == "I-checker"
+    }
+    out: List[GateOutcome] = []
+    for o in outcomes:
+        note = listed.get(o.fixture_id)
+        if note and o.gate_id == "I-checker" and o.status == "FAIL":
+            xf = xfail_not_landed(o.gate_id, o.fixture_id, note)
+            xf.message = f"XFAIL {o.fixture_id}: {note} — {o.message}"
+            xf.details = {**(o.details or {}), "expectedRed": note, "wouldBe": "FAIL"}
+            xf.hard = o.hard
+            out.append(xf)
+            continue
+        out.append(o)
+    for fid in listed:
+        o = original_ichecker.get(fid)
+        if o is not None and o.status == "PASS":
+            xpass.append(fid)
+    return out, xpass
 
 
 def go(
@@ -1339,12 +1385,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
     all_outcomes = so.apply_parking(all_outcomes, unpark)
+    gates_full_listed = load_expected_red().get("gates_full") or {}
+    if not isinstance(gates_full_listed, dict):
+        gates_full_listed = {}
+    all_outcomes, xpass_ids = apply_recorded_deferrals(all_outcomes, gates_full_listed)
 
     report = build_report(fixtures, gate_ids, all_outcomes, args)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     print(summarize(all_outcomes))
     print(so.format_gate_table(all_outcomes))
+    for o in all_outcomes:
+        note = (o.details or {}).get("expectedRed")
+        if o.status == "XFAIL" and note:
+            print(f"XFAIL {o.fixture_id} — {note}", flush=True)
+    for fid in xpass_ids:
+        print(f"XPASS {fid} — shrink expected-red.json", flush=True)
     print(f"report: {args.report}")
 
     hard_failures = [o for o in all_outcomes if is_hard_failure(o)]
