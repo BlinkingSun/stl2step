@@ -6694,6 +6694,31 @@ bool regionClosureHealEligible(int rid, const RegionSet& rs, const std::vector<c
     return r && r->builtAs == BuiltAs::Single;
 }
 
+// D-140-2: takeFullCap may not mint a 2π circle against an unbuilt partner.
+// Topology only — region ids and the three status vectors already in hand.
+// No tolerance: the heal removes an invented curve.
+int capPartnerRid(int ci, const Region& r, const RegionSet& rs) {
+    if (ci < 0 || (size_t)ci >= rs.chains.size()) return -1;
+    const BoundaryChain& ch = rs.chains[(size_t)ci];
+    return (ch.regA == r.id) ? ch.regB : ch.regA;
+}
+
+bool partnerBuildable(int ci, const Region& r, const RegionSet& rs,
+                      const std::vector<char>* eprimeFill, const std::vector<char>* exploded) {
+    const int other = capPartnerRid(ci, r, rs);
+    if (other < 0) return false;
+    if (eprimeFill && (size_t)other < eprimeFill->size() && (*eprimeFill)[(size_t)other])
+        return false;
+    if (exploded && regionExploded(*exploded, other)) return false;
+    return isAnalytic(regionById(rs, other));
+}
+
+void diagCapMint(int rid, int ci, int partner, int partnerBuilt, int minted) {
+    if (!diagP2Enabled()) return;
+    std::fprintf(stderr, "DIAG_CAPMINT rid=%d ci=%d partner=%d partnerBuilt=%d minted=%d\n", rid,
+                 ci, partner, partnerBuilt, minted);
+}
+
 int matchFreeEdgeChain(const TopoDS_Edge& e, const gp_Pnt& p0, const gp_Pnt& p1,
                        const MeshView& mv, const RegionSet& rs,
                        const std::vector<TopoDS_Edge>& meshE, const std::vector<ChainGeom>& geom,
@@ -11206,7 +11231,8 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                   const std::vector<TopoDS_Vertex>& verts, std::vector<ChainGeom>& geom,
                   std::vector<char>& collapsed, const std::vector<TopoDS_Edge>& meshE,
                   const std::vector<char>& edgeOk, double sewTol, WarnFn warn, TopoDS_Face& outF,
-                  const std::vector<char>* exploded = nullptr) {
+                  const std::vector<char>* exploded = nullptr,
+                  const std::vector<char>* eprimeFill = nullptr) {
     if (!isAnalytic(&r)) return false;
     const Loop *capL = nullptr, *capH = nullptr;
     std::vector<TopoDS_Wire> inners;
@@ -11439,6 +11465,12 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     snapVertexToCurve(verts[(size_t)vL], acL, snapCap);
     snapVertexToCurve(verts[(size_t)vH], acH, snapCap);
 
+    // D-140-2 Q2: mint a full-2π CIRCLE only when the chain's other region
+    // is a real analytic partner that will carry the same TShape. An island
+    // (reg = -1), an eprimeFill facet, an exploded region, or a non-analytic
+    // neighbour cannot share it — makeFacet builds those wires from meshE.
+    // Topology only; no tolerance. The existing collapsed-reuse branch is
+    // unchanged (a already-shared circle is never re-minted).
     auto takeFullCap = [&](int ci, const gp_Circ& circ, const TopoDS_Vertex& V,
                            TopoDS_Edge& e) -> bool {
         if (ci >= 0 && (size_t)ci < geom.size() && geom[(size_t)ci].collapsed) {
@@ -11446,9 +11478,19 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             e = TopoDS::Edge(geom[(size_t)ci].edges[0].Oriented(TopAbs_FORWARD));
             return edgeSpansFullCircle(e);
         }
+        const int other = capPartnerRid(ci, r, rs);
+        if (!partnerBuildable(ci, r, rs, eprimeFill, exploded)) {
+            diagCapMint(r.id, ci, other, 0, 0);
+            return false;
+        }
+        diagCapMint(r.id, ci, other, 1, 1);
         e = makeFullCircle(circ, V);
         return !e.IsNull();
     };
+    // Set when takeFullCap refuses an unbuilt partner (D-140-2). Captured by
+    // buildWithInners / the composite UV path so a mesh-polyline rim keeps
+    // meshE TShapes (makeFaceKeep) and retries outer-wire sense.
+    bool mintRefused = false;
 
     // The seam names the face's parameter domain [u0, u0+2pi] (D-130-16); every
     // wire the face carries has to be written on that branch. Declared here so
@@ -11605,32 +11647,42 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             }
         }
         if (!faceIsValid(got)) {
-            try {
-                ShapeFix_Face sff(got);
-                sff.FixMissingSeamMode() = 1;
-                sff.FixAddNaturalBoundMode() = 0;
-                sff.FixOrientationMode() = 1;
-                sff.Perform();
-                TopoDS_Shape res = sff.Result();
-                if (res.IsNull()) res = sff.Face();
-                int nF = 0;
-                TopoDS_Face g2;
-                for (TopExp_Explorer fx(res, TopAbs_FACE); fx.More(); fx.Next()) {
-                    nF++;
-                    g2 = TopoDS::Face(fx.Current());
+            // D-140-2 / e7c00a8 / F7: ShapeFix_Face displaces verts[] shared
+            // with the island fill (measured 18.8 mm on S02). A mint-refused
+            // polyline rim is that construction; skip the rung.
+            if (!mintRefused) {
+                try {
+                    ShapeFix_Face sff(got);
+                    sff.FixMissingSeamMode() = 1;
+                    sff.FixAddNaturalBoundMode() = 0;
+                    sff.FixOrientationMode() = 1;
+                    sff.Perform();
+                    TopoDS_Shape res = sff.Result();
+                    if (res.IsNull()) res = sff.Face();
+                    int nF = 0;
+                    TopoDS_Face g2;
+                    for (TopExp_Explorer fx(res, TopAbs_FACE); fx.More(); fx.Next()) {
+                        nF++;
+                        g2 = TopoDS::Face(fx.Current());
+                    }
+                    if (nF == 1) got = g2;
+                } catch (const Standard_Failure&) {
                 }
-                if (nF == 1) got = g2;
-            } catch (const Standard_Failure&) {
+                setFaceOutward(got, r.outwardNormal);
+                addPcurvesOnFace(got, sewTol, true);
+                assertSeamPair();
+                if (gSeamSet) rebranchEdges(got, gSeamU0, gSeamE);
             }
-            setFaceOutward(got, r.outwardNormal);
-            addPcurvesOnFace(got, sewTol, true);
-            assertSeamPair();
-            if (gSeamSet) rebranchEdges(got, gSeamU0, gSeamE);
             if (diagP2Enabled())
-                std::fprintf(stderr, "DIAG_SEAM360_SHAPEFIX rid=%d valid=%d\n", r.id,
-                             faceIsValid(got) ? 1 : 0);
+                std::fprintf(stderr, "DIAG_SEAM360_SHAPEFIX rid=%d valid=%d mintRefused=%d\n",
+                             r.id, faceIsValid(got) ? 1 : 0, mintRefused ? 1 : 0);
         }
-        if (!faceIsValid(got) && !ensureFaceValid(got, meshTolCap(mv, &r))) {
+        // D-140-2 Q2: the composite (polyline-rim) path's validity cap is the
+        // region's own measured residual, never meshTolCap alone. The simple
+        // (already-shared circle) path keeps meshTolCap so B0 is inert.
+        const double faceCap =
+            publishSimple ? meshTolCap(mv, &r) : partialFaceTolCap(mv, r);
+        if (!faceIsValid(got) && !ensureFaceValid(got, faceCap)) {
             if (diagP2Enabled()) {
                 char faceSt[256] = "[]", wireSt[256] = "[]";
                 try {
@@ -11751,7 +11803,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // monotone cap branch this face is assembled on. A union face carries
         // an inner wire and cannot survive that, so it takes makeFaceKeep
         // first; faces without an inner wire keep the order they had.
-        const bool keepFirst = composite360;
+        const bool keepFirst = composite360 || mintRefused;
         if (keepFirst) {
             if (!makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2) &&
                 !makeFaceCopy(surf, ow2, inners, r.outwardNormal, out2))
@@ -11760,7 +11812,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                    !makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2)) {
             return false;
         }
-        if (!composite360) return true;
+        if (!composite360 && !mintRefused) return true;
         // D-130-16: an inner wire's sense on the FACE is opposite the outer's,
         // and the wire P1 hands over is oriented for the REGION boundary. Which
         // sense is right cannot be judged on the bare face: the inner wire's
@@ -11822,6 +11874,19 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             return ok;
         };
         if (prepare(out2)) return true;
+        if (inners.empty()) {
+            // D-140-2: a polyline-vs-island 360 face has no inner wire; the
+            // other sense that can make BRepCheck accept it is the OUTER
+            // wire reversed. ShapeFix_Face is forbidden here (e7c00a8 /
+            // F7: it displaces verts[] shared with the island fill).
+            TopoDS_Face alt;
+            const TopoDS_Wire owR = TopoDS::Wire(ow2.Reversed());
+            if ((makeFaceKeep(surf, owR, inners, r.outwardNormal, alt) ||
+                 makeFaceCopy(surf, owR, inners, r.outwardNormal, alt)) &&
+                prepare(alt))
+                out2 = alt;
+            return true;
+        }
         std::vector<TopoDS_Wire> rev;
         rev.reserve(inners.size());
         for (const TopoDS_Wire& iw : inners) rev.push_back(TopoDS::Wire(iw.Reversed()));
@@ -11867,11 +11932,16 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // A cap that is ONE chain but a tier-2 polyline loop (the R5 bore's end on
     // the R8 wall) is not a circle and takeFullCap would construct one in its
     // place; it takes the composite path with its own mesh edges.
-    const bool simple =
-        !capHasPolyline &&
-        capL->chainIdx.size() == 1 && capH->chainIdx.size() == 1 &&
-        takeFullCap(ciL0, circL, verts[(size_t)vL], eL) &&
-        takeFullCap(ciH0, circH, verts[(size_t)vH], eH);
+    // D-140-2: takeFullCap now refuses an unbuilt partner, so simple is false
+    // and the hole ships with a mesh-polyline rim. That face still needs the
+    // composite360 UV-sense / seam-pair binding or BRepCheck answers
+    // UnorientableShape (st=27) with a clockwise UV outer wire.
+    const bool capsOneChain = !capHasPolyline && capL->chainIdx.size() == 1 &&
+                              capH->chainIdx.size() == 1;
+    const bool tookL = capsOneChain && takeFullCap(ciL0, circL, verts[(size_t)vL], eL);
+    const bool tookH = capsOneChain && takeFullCap(ciH0, circH, verts[(size_t)vH], eH);
+    const bool simple = tookL && tookH;
+    mintRefused = capsOneChain && !simple;
 
     try {
         if (simple) {
@@ -11912,10 +11982,10 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             emit(warn, "seamed360: composite cap wire failed — try TwoHalves");
             return false;
         }
-        if (composite360 ||
-            !rotateEdgesToVertex(pathH, verts[(size_t)vH]) ||
-            !rotateEdgesToVertex(pathL, verts[(size_t)vL])) {
-            if (!composite360) {
+        const bool rotatedOK = rotateEdgesToVertex(pathH, verts[(size_t)vH]) &&
+                               rotateEdgesToVertex(pathL, verts[(size_t)vL]);
+        if (composite360 || mintRefused || !rotatedOK) {
+            if (!composite360 && !mintRefused) {
                 emit(warn, "seamed360: cap wire does not pass seam vertex — try TwoHalves");
                 return false;
             }
@@ -12060,7 +12130,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             // face cannot: TwoHalves has no inner wire to give the enclosed
             // interruption. Bind the pair here exactly as the single-circle
             // path does, at the seam generator's own azimuth.
-            if (composite360) {
+            if (composite360 || mintRefused) {
                 BRep_Builder Bs;
                 const double u0 = azimuthOf(r, BRep_Tool::Pnt(seamVL));
                 if (!inners.empty() && seamCrossesInner(u0)) {
@@ -14795,6 +14865,12 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             e = TopoDS::Edge(geom[(size_t)ci].edges[0].Oriented(TopAbs_FORWARD));
                             return edgeSpansFullCircle(e);
                         }
+                        const int other = capPartnerRid(ci, r, rs);
+                        if (!partnerBuildable(ci, r, rs, &eprimeFill, &exploded)) {
+                            diagCapMint(r.id, ci, other, 0, 0);
+                            return false;
+                        }
+                        diagCapMint(r.id, ci, other, 1, 1);
                         e = makeFullCircle(circ, V);
                         return !e.IsNull();
                     };
@@ -15023,7 +15099,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (r.closed360 && r.type == SurfType::Cylinder) {
                 TopoDS_Face f360;
                 if (trySeamed360(r, rs, mv, verts, geom, collapsed, meshE, edgeOk, sewTol, warn,
-                                 f360, &exploded) &&
+                                 f360, &exploded, &eprimeFill) &&
                     cylinderPostFitOk(r, mv, rs)) {
                     r.builtAs = BuiltAs::Seamed360;
                     acc.push_back(f360);
