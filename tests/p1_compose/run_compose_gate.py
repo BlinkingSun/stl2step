@@ -123,9 +123,9 @@ def check_fillet_nbrs(rs: dict) -> list[str]:
 
 
 # The origin label the region dump prints for an Origin::NgonWall claim
-# (D-130-18(2)). dump_regionset.cpp's originName() has cases only for
-# PlaneGrow/CylGrow/FilletStrip and falls through to "planeGrow" for NgonWall.
-NGON_WALL_DUMP_ORIGIN = "planeGrow"
+# (D-130-18(2)). The dumper names NgonWall claims "ngonWall" since 24ab832
+# (D-130-22(2)).
+NGON_WALL_DUMP_ORIGIN = "ngonWall"
 
 
 def check_recognition(stl_name: str, rs: dict) -> list[str]:
