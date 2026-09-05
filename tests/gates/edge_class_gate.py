@@ -16,12 +16,18 @@ polyline that was analytic yesterday was silently converted), a decrease
 PASSES and prints the re-baselining instruction.  The gate never rewrites
 the ratchet itself.
 
-A fixture whose red line is already violated on the branch that seeded the
-ratchet is listed in ``expectedRed`` with the lines it violates.  That entry
-is an admission, not a waiver: it is loud on every run, a fixture that heals
-prints the instruction to delete its entry, and a NEW violation — a fixture
-not listed, or a listed fixture violating a line its entry does not name —
-is a hard FAIL.  Widening ``expectedRed`` to make a run green is a defect.
+    A fixture whose red line is already violated on the branch that seeded the
+    ratchet is listed in ``expectedRed`` with the lines it violates.  That entry
+    is an admission, not a waiver: it is loud on every run, a fixture that heals
+    prints the instruction to delete its entry, and a NEW violation — a fixture
+    not listed, or a listed fixture violating a line its entry does not name —
+    is a hard FAIL.  Widening ``expectedRed`` to make a run green is a defect.
+
+    Process exit (D-130-23) is the recorded list in
+    ``tests/gates/baseline/expected-red.json`` ``edge_class_gate``: exit 0 iff
+    the red fixture set ⊆ that list; a listed fixture that is green prints
+    ``XPASS <fixture> — shrink expected-red.json``; an unlisted red exits 1.
+    The red lines themselves are unchanged.
 
 Usage:
   edge_class_gate.py --self-test
@@ -41,12 +47,13 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "tests" / "corpus"
 BUILD_FIXTURES = REPO / "tests" / "gates" / "build_fixtures"
 DEFAULT_RATCHET = REPO / "tests" / "gates" / "baseline" / "edge-class-ratchet.json"
+EXPECTED_RED_FILE = REPO / "tests" / "gates" / "baseline" / "expected-red.json"
 RATCHET_NAME = "edge-class-ratchet.json"
 
 RED_LINES = ("unhandled", "overTol", "overCap")
@@ -299,6 +306,39 @@ def totals(censuses: Mapping[str, Census]) -> Dict[str, int]:
     return t
 
 
+def load_expected_red_section(gate: str, path: Path = EXPECTED_RED_FILE) -> Dict[str, str]:
+    """D-130-23 recorded-deferral list for one gate. Missing file is a hard fail."""
+    if not path.is_file():
+        raise GateError(f"required file missing: {path}")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise GateError(f"{path}: expected a JSON object")
+    section = doc.get(gate) or {}
+    if not isinstance(section, dict):
+        raise GateError(f"{path}: {gate} must be an object")
+    return {str(k): str(v) for k, v in section.items()}
+
+
+def honour_expected_red_list(
+    red_fixtures: Set[str],
+    listed: Mapping[str, str],
+    measured: Optional[Set[str]] = None,
+) -> Tuple[List[str], List[str], List[str]]:
+    """Return (unlisted-red, listed-red, listed-green) fixture names.
+
+    Exit 0 iff the first list is empty (red set ⊆ listed). Listed-but-green
+    (XPASS) is only reported for fixtures this run actually measured.
+    """
+    listed_ids = set(listed)
+    unexpected = sorted(red_fixtures - listed_ids)
+    xfail = sorted(red_fixtures & listed_ids)
+    green = listed_ids - red_fixtures
+    if measured is not None:
+        green &= measured
+    xpass = sorted(green)
+    return unexpected, xfail, xpass
+
+
 def run_live(binary: Path, ratchet_path: Path, jobs: int) -> int:
     if not binary.is_file():
         raise GateError(f"stl2step binary missing: {binary}")
@@ -314,6 +354,22 @@ def run_live(binary: Path, ratchet_path: Path, jobs: int) -> int:
         flush=True,
     )
     named = failing_names(checks)
+    red_fixtures = {name for name, c in censuses.items() if c.red()}
+    listed = load_expected_red_section("edge_class_gate")
+    unexpected, xfail, xpass = honour_expected_red_list(
+        red_fixtures, listed, measured=set(censuses)
+    )
+    for n in xfail:
+        print(f"XFAIL {n} — {listed[n]}", flush=True)
+    for n in xpass:
+        print(f"XPASS {n} — shrink expected-red.json", flush=True)
+    if unexpected:
+        print(
+            f"edge_class_gate FAIL  unlisted red fixture(s): {', '.join(unexpected)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
     if named:
         print(
             f"edge_class_gate FAIL  failing assertion(s): {', '.join(named)}",
@@ -501,6 +557,17 @@ def _self_test() -> int:
     fx = dict(fixtures())
     check(len(fx) >= 32, f"fixture list covers the corpus (+ build fixtures): {len(fx)}")
     check(DEFAULT_RATCHET.is_file(), f"{RATCHET_NAME} present")
+    check(EXPECTED_RED_FILE.is_file(), "expected-red.json present")
+
+    listed = {"alpha": "note-a", "gamma": "note-g"}
+    unexpected, xfail, xpass = honour_expected_red_list(
+        {"alpha", "beta"}, listed, measured={"alpha", "beta", "gamma"}
+    )
+    check(unexpected == ["beta"], "unlisted red fixture is unexpected (exit 1)")
+    check(xfail == ["alpha"], "listed red fixture is XFAIL")
+    check(xpass == ["gamma"], "listed-but-green is XPASS")
+    subset_ok, _, _ = honour_expected_red_list({"alpha"}, listed, measured={"alpha", "gamma"})
+    check(subset_ok == [], "red set ⊆ listed is not a process fail")
     return 1 if fails else 0
 
 
