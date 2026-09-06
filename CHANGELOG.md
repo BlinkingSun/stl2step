@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1] - 2026-09-06
+
+### Fixed
+- Version string fix: the v1.4.0 binary reported `stl2step 1.3.0` because `project(stl2step VERSION …)` in `CMakeLists.txt` and `STL2STEP_VERSION_*` in the public header were never bumped for the 1.4.0 release.
+
+### Added
+- Per-platform engine bundles (`stl2step-engine-<tag>-macos-arm64.tar.gz`, `windows-x64.zip`) and `engine-manifest.json` for the SolidOut in-app updater (published with the release).
+
 ## [1.4.0] - 2026-09-06
 
 ### Added
