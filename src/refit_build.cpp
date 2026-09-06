@@ -1478,16 +1478,9 @@ AnalyticCurve pickIntAna(const IntAna_QuadQuadGeo& iq, const MeshView& mv, const
     return best;
 }
 
-// D-130-14 / D-130-16 -- the union's landing stage (see refit_grow.cpp).
-// With it off every face this file builds is exactly what the branch tip built.
-bool unionBuildOn() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char* v = std::getenv("STL2STEP_UNION");
-        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
+// D-140-8 U-R14: the union door is deleted. Sunset: two-arc mint and
+// closed360 inner-wire emit stay off (U-R9 did not close).
+bool unionBuildOn() { return false; }
 
 bool diagP2Enabled() {
     static int cached = -1;

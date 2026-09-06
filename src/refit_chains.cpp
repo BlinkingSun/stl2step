@@ -55,17 +55,9 @@ bool unionDiagOn() {
     return cached != 0;
 }
 
-// D-130-14 / D-130-16 -- the union's landing stage (see refit_grow.cpp).
-// With it off the loop stitch and the seam generator are exactly what the
-// branch tip produced.
-bool unionOn() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char* v = std::getenv("STL2STEP_UNION");
-        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
+// D-140-8 U-R14: the union door is deleted. Sunset: emit/merge stay off
+// (U-R9 did not close); pairAcrossInterruption is compiled in but not armed.
+bool unionOn() { return false; }
 
 inline int otherVert(const std::pair<int, int>& e, int v) {
     return e.first == v ? e.second : e.first;

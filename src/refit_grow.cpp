@@ -61,14 +61,9 @@ bool lawbandDiagOn() {
 // region, chain and face is bit-for-bit what the branch tip produced. It is a
 // landing stage, not a per-part switch -- it names no part and reads no
 // geometry.
-bool lawUnionOn() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char* v = std::getenv("STL2STEP_UNION");
-        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
-    }
-    return cached != 0;
-}
+// D-140-8 U-R14: the union door is deleted. Sunset: the same-surface merge
+// and domain emit stay off (U-R9 did not close).
+bool lawUnionOn() { return false; }
 
 // Diag only (STL2STEP_DIAG_A2): A2 grows PLANAR provisionals, so every link it
 // refuses is a statement about the mesh. Naming the predicate per refused link
@@ -3293,7 +3288,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
 
     // D-140-8 U-R13 -- THE UNION CENSUS, READABLE WITH THE DOOR CLOSED.
     //
-    // With STL2STEP_UNION off, the D-130-13(2) islands and the same-surface
+    // With the union door gone and merge off (sunset), the D-130-13(2) islands and the same-surface
     // merge above do not run, so the plate's R=10 cross bore reaches this
     // point as two bands (108 and 106) and handle-pickup's R=4 wall as one
     // (42): a census taken on `claimTris` reports the DOOR, not the surface.
