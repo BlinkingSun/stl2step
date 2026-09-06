@@ -16207,7 +16207,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
             if (torusU3Failed) {
-                resetContained();
                 out.clear();
                 return false;
             }
