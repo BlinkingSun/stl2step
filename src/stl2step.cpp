@@ -642,14 +642,22 @@ Result Converter::run() {
                 fillMeshView(cs, mv);
                 refit::RegionSet rs = pit->second;
                 std::vector<TopoDS_Face> rf;
-                auto tryBuild = [&](refit::RegionSet& rset) -> bool {
+                std::vector<std::string> torusProbeWarn;
+                auto tryBuild = [&](refit::RegionSet& rset, bool capture) -> bool {
                     rf.clear();
-                    return refit::buildFaces(mv, rset, verts, rf,
-                                             [&](const std::string& m) { warn(m); })
+                    return refit::buildFaces(
+                               mv, rset, verts, rf,
+                               [&](const std::string& m) {
+                                   if (capture) torusProbeWarn.push_back(m);
+                                   else warn(m);
+                               })
                         && !rf.empty();
                 };
-                bool ok = tryBuild(rs);
+                const bool torusProbe = rs.torusRevertValid && !rs.torusRevertApplied;
+                torusProbeWarn.clear();
+                bool ok = tryBuild(rs, torusProbe);
                 if (!ok && rs.torusRevertValid && !rs.torusRevertApplied) {
+                    torusProbeWarn.clear();
                     parallelFor(subThreads, nV, [&](size_t i) {
                         BRep_Builder bb;
                         bb.MakeVertex(verts[i], gp_Pnt(pts[cs.vtx[i]]), Precision::Confusion());
@@ -666,7 +674,9 @@ Result Converter::run() {
                     pre.stats = rs.stats;
                     pre.stats.tori = 0;
                     rs = pre;
-                    ok = tryBuild(rs);
+                    ok = tryBuild(rs, false);
+                } else if (ok && torusProbe) {
+                    for (const auto& m : torusProbeWarn) warn(m);
                 }
                 if (ok) {
                     TopoDS_Shell probe;
