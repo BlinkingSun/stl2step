@@ -5,17 +5,28 @@
 //
 // SPDX-License-Identifier: MIT
 
-#include "../support/posix_compat.hpp"
-
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+
+#include <cmath>
 #include <cstring>
 #include <string>
 
 namespace {
 
-std::string shellQuote(const std::string& p) {
+#ifdef _WIN32
+std::string quoteArg(const std::string& p) {
+    // cmd.exe quoting: wrap in double quotes; double any embedded quotes.
+    std::string o = "\"";
+    for (char c : p) {
+        if (c == '"') o += "\"\"";
+        else o += c;
+    }
+    o += "\"";
+    return o;
+}
+#else
+std::string quoteArg(const std::string& p) {
     std::string o = "'";
     for (char c : p) {
         if (c == '\'') o += "'\\''";
@@ -23,6 +34,44 @@ std::string shellQuote(const std::string& p) {
     }
     o += "'";
     return o;
+}
+#endif
+
+bool setVolidEnv() {
+#ifdef _WIN32
+    return _putenv_s("STL2STEP_VOLID", "1") == 0;
+#else
+    return setenv("STL2STEP_VOLID", "1", 1) == 0;
+#endif
+}
+
+const char* tempDir() {
+#ifdef _WIN32
+    const char* tmp = std::getenv("TEMP");
+    if (!tmp || !tmp[0]) tmp = std::getenv("TMP");
+    if (!tmp || !tmp[0]) tmp = ".";
+    return tmp;
+#else
+    const char* tmp = std::getenv("TMPDIR");
+    if (!tmp || !tmp[0]) tmp = "/tmp";
+    return tmp;
+#endif
+}
+
+FILE* launch(const char* cmd) {
+#ifdef _WIN32
+    return _popen(cmd, "rb");
+#else
+    return popen(cmd, "r");
+#endif
+}
+
+int finish(FILE* fp) {
+#ifdef _WIN32
+    return _pclose(fp);
+#else
+    return pclose(fp);
+#endif
 }
 
 bool getD(const std::string& line, const char* key, double& out) {
@@ -53,17 +102,22 @@ void check(bool ok, const char* name) {
 }
 
 int runOne(const char* bin, const char* stl, const char* tag) {
-    const char* tmp = std::getenv("TMPDIR");
-    if (!tmp || !tmp[0]) tmp = "/tmp";
-    const std::string out = std::string(tmp) + "/volid-" + tag + ".step";
-    const std::string cmd = shellQuote(bin) + " --engine trueform --threads 1 --no-verify --quiet " +
-                            shellQuote(stl) + " -o " + shellQuote(out) + " 2>&1";
-    if (setenv("STL2STEP_VOLID", "1", 1) != 0) {
+    const std::string out = std::string(tempDir()) + "/volid-" + tag + ".step";
+    // No env-var / shell prefix. 2>&1 is valid in cmd.exe and POSIX sh so
+    // DIAG_VOLID_SUM on stderr is read through the pipe. On Windows, wrap the
+    // whole command in an extra pair of quotes so cmd.exe /c (used by _popen)
+    // does not strip the argv0 quotes (KB 156212).
+    std::string cmd = quoteArg(bin) + " --engine trueform --threads 1 --no-verify --quiet " +
+                       quoteArg(stl) + " -o " + quoteArg(out) + " 2>&1";
+#ifdef _WIN32
+    cmd = "\"" + cmd + "\"";
+#endif
+    if (!setVolidEnv()) {
         std::fprintf(stderr, "FAIL %s: setenv STL2STEP_VOLID\n", tag);
         ++gFail;
         return 1;
     }
-    FILE* fp = popen(cmd.c_str(), "r");
+    FILE* fp = launch(cmd.c_str());
     if (!fp) {
         std::fprintf(stderr, "FAIL %s: popen\n", tag);
         ++gFail;
@@ -77,7 +131,7 @@ int runOne(const char* bin, const char* stl, const char* tag) {
             if (std::strstr(buf, "site=ship")) ship = buf;
         }
     }
-    const int rc = pclose(fp);
+    const int rc = finish(fp);
     const std::string& line = !ship.empty() ? ship : last;
     if (line.empty()) {
         std::fprintf(stderr, "FAIL %s: no DIAG_VOLID_SUM (pclose=%d)\n", tag, rc);
