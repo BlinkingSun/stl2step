@@ -24,14 +24,16 @@ if [[ -z "${PYTHON:-}" ]]; then
   echo "FAIL: no usable Python (set PYTHON=... or install CPython)" >&2
   exit 1
 fi
+T=$(mktemp -d "${TMPDIR:-/tmp}/stl2step-run_engine_check.XXXXXX")
+trap 'rm -rf "$T"' EXIT
 FAIL=0
 for stl in "$CORPUS"/*.stl; do
   [[ -f "$stl" ]] || continue
   id=$(basename "$stl" .stl)
   sidecar="$CORPUS/${id}.expected.json"
-  out="/tmp/${id}.step"
+  out="$T/${id}.step"
   set +e
-  "$STL2STEP" "$stl" "$out" --quiet --no-verify >/tmp/"${id}"_result.json 2>/tmp/"${id}"_stderr.txt
+  "$STL2STEP" "$stl" "$out" --quiet --no-verify >"$T/${id}_result.json" 2>"$T/${id}_stderr.txt"
   rc=$?
   set -e
   if [[ ! -f "$sidecar" ]]; then
@@ -39,7 +41,7 @@ for stl in "$CORPUS"/*.stl; do
     FAIL=1
     continue
   fi
-  "$PYTHON" - "$id" "$rc" "$sidecar" /tmp/"${id}"_result.json <<'PY' || { FAIL=1; continue; }
+  "$PYTHON" - "$id" "$rc" "$sidecar" "$T/${id}_result.json" <<'PY' || { FAIL=1; continue; }
 import json, sys
 id, rc, sc_path, res_path = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 sc = json.load(open(sc_path))
@@ -70,16 +72,16 @@ PY
 
   smooth_exit=$("$PYTHON" -c "import json; print(json.load(open('$sidecar')).get('smoothExpectedExit', -1))")
   if [[ "$smooth_exit" != "-1" ]]; then
-    sout="/tmp/${id}_smooth.step"
+    sout="$T/${id}_smooth.step"
     set +e
     if grep -q '"demotedSeedsShipped"' "$sidecar" 2>/dev/null; then
-      STL2STEP_EPRIME_DIAG=1 "$STL2STEP" "$stl" "$sout" --quiet --smooth >/tmp/"${id}"_smooth_result.json 2>/tmp/"${id}"_smooth_stderr.txt
+      STL2STEP_EPRIME_DIAG=1 "$STL2STEP" "$stl" "$sout" --quiet --smooth >"$T/${id}_smooth_result.json" 2>"$T/${id}_smooth_stderr.txt"
     else
-      "$STL2STEP" "$stl" "$sout" --quiet --smooth >/tmp/"${id}"_smooth_result.json 2>/tmp/"${id}"_smooth_stderr.txt
+      "$STL2STEP" "$stl" "$sout" --quiet --smooth >"$T/${id}_smooth_result.json" 2>"$T/${id}_smooth_stderr.txt"
     fi
     src=$?
     set -e
-    "$PYTHON" - "$id" "$src" "$sidecar" /tmp/"${id}"_smooth_result.json <<'PY' || { FAIL=1; continue; }
+    "$PYTHON" - "$id" "$src" "$sidecar" "$T/${id}_smooth_result.json" <<'PY' || { FAIL=1; continue; }
 import json, sys
 id, rc, sc_path, res_path = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 sc = json.load(open(sc_path))
@@ -129,7 +131,7 @@ if ok:
 sys.exit(0 if ok else 1)
 PY
     if [[ -n "$CENSUS" && -x "$CENSUS" ]]; then
-      "$PYTHON" - "$id" "$sidecar" "$sout" "$CENSUS" "/tmp/${id}_smooth_stderr.txt" <<'PY' || { FAIL=1; continue; }
+      "$PYTHON" - "$id" "$sidecar" "$sout" "$CENSUS" "$T/${id}_smooth_stderr.txt" <<'PY' || { FAIL=1; continue; }
 import json, re, subprocess, sys
 id, sc_path, step, census = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 stderr_path = sys.argv[5] if len(sys.argv) > 5 else ""
