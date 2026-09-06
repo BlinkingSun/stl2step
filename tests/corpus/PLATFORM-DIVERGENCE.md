@@ -41,3 +41,12 @@ Ceiling stays **0** (macOS). Raising it to 25 would widen an existing cell. Linu
 ## Body28 polylineTier2 (not tightened)
 
 macOS still measures **1442** (same as the committed ceiling / platforms.macos at c995151). Linux d508c32 prints RATCHET-TIGHTEN at **1433**. B.6 / D-130-24: ceiling is the maximum; left at 1442.
+
+## S04 edge-class (torus U-3, D-140-6 §4(e))
+
+| fixture | assertion | macOS / Homebrew OCCT 7.9.3 (seeds-140b, validated by round 2) | Linux / Windows (pre-torus, stale) |
+|---|---|---|---|
+| S04 | `polylineTier2` | **0** (torus face analytic) | **140** (d508c32; faceted blend) |
+| S04 | `overCap` / `overTol` | **0** / **0** (healed) | **43** / **1** |
+
+`tier2Ceiling` seeded **0** from macOS. Linux/Windows rows in `edge-class-ratchet.json` platforms are left as pre-torus reference until round 2 remeasure.
