@@ -31,14 +31,16 @@
   },
   "edge_class_gate": {
     "Body11": "D-130-23 / 082194b red lines not relaxed",
+    "Body244": "D-140-3 §4(b) first measure; overCap at seed (D-130-24)",
     "Body28": "D-130-23 / 082194b red lines not relaxed",
     "S03": "D-130-23 / 082194b red lines not relaxed",
     "S04": "D-130-23 / 082194b red lines not relaxed",
     "S09": "D-130-23 / 082194b red lines not relaxed",
-    "S11-b": "D-130-23 / 082194b red lines not relaxed",
+    "S19_mouth_round": "D-140-6 §4 first measure; overCap at seed while torus engine is not in this tree",
     "S16-R1-explode-success": "D-130-23 / 082194b red lines not relaxed",
     "handle-pickup": "D-130-23 / 082194b red lines not relaxed",
-    "linkage_bores_chamfer": "D-130-23 / 082194b red lines not relaxed"
+    "linkage_bores_chamfer": "D-130-23 / 082194b red lines not relaxed",
+    "shelf_bracket": "D-140-3 §4(b) first measure; overCap at seed (D-130-24)"
   },
   "gate_130": {
     "cyl_meets_chamfer": "D-130-23 (B6 deferred)"

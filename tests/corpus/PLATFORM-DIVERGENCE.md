@@ -28,3 +28,16 @@ another — not the case today.
 API solid on Windows is healthy (35 faces / 17 cyl pre-unify, vol exact).
 The 2026-08-30 red was a hardcoded `/tmp/` write path (class a), not
 census divergence.
+
+## S16-R2-ChainUnstable edge-class (1.4.0 / d508c32, D-140-9)
+
+| fixture | assertion | macOS / Homebrew OCCT 7.9.3 (this lane, `edge_class_gate.py --measure`) | Linux / conda-forge OCCT 7.9.3 (`linux-d508c32.log`) | Windows |
+|---|---|---|---|---|
+| S16-R2-ChainUnstable | `polylineTier2` | **0** | **25** | not in log (suite still in `corpus_engine_convert` at seed) |
+| S16-R2-ChainUnstable | `overCap` | **0** | **1** | not in log |
+
+Ceiling stays **0** (macOS). Raising it to 25 would widen an existing cell. Linux remains red on this row. Do not union expectedRed overCap onto this fixture from the Linux number alone (D-130-24 wants all three platforms; D-140-9 B.6).
+
+## Body28 polylineTier2 (not tightened)
+
+macOS still measures **1442** (same as the committed ceiling / platforms.macos at c995151). Linux d508c32 prints RATCHET-TIGHTEN at **1433**. B.6 / D-130-24: ceiling is the maximum; left at 1442.
