@@ -11372,7 +11372,8 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                   std::vector<char>& collapsed, const std::vector<TopoDS_Edge>& meshE,
                   const std::vector<char>& edgeOk, double sewTol, WarnFn warn, TopoDS_Face& outF,
                   const std::vector<char>* exploded = nullptr,
-                  const std::vector<char>* eprimeFill = nullptr) {
+                  const std::vector<char>* eprimeFill = nullptr,
+                  bool* mintRefusedOut = nullptr) {
     if (!isAnalytic(&r)) return false;
     const Loop *capL = nullptr, *capH = nullptr;
     std::vector<TopoDS_Wire> inners;
@@ -12095,6 +12096,10 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     const bool tookH = capsOneChain && takeFullCap(ciH0, circH, verts[(size_t)vH], eH);
     const bool simple = tookL && tookH;
     mintRefused = capsOneChain && !simple;
+    // D-140-13: persist onto the component. A mintRefused composite may still
+    // close a shell (shelf / Body244); if it does not, buildFaces takes the
+    // existing ChainUnstable facet path instead of returning false.
+    if (mintRefused && mintRefusedOut) *mintRefusedOut = true;
     // Reused collapsed circles were birthed from each chain's own terminal,
     // which need not be the shared seam vertex (D-130-16). Mint both rims
     // onto verts[vL]/verts[vH] so the generator meets them; publish then
@@ -14578,6 +14583,12 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         int rounds = 0;
         int fallbackGuardPass = 0;
         int j6UncollapsePass = 0;
+        // D-140-13: any trySeamed360 that took the mintRefused composite path.
+        // Survives try_rebuild so a later open/invalid shell can take the
+        // existing ChainUnstable facet path. Components without this flag keep
+        // the previous shell-failure return false.
+        bool hadMintRefused = false;
+        bool mintRefusedFacetTried = false;
         CascadeState cascadeSt;
         emitFailRidWarningOnce(warn);
         diagCascadeInject();
@@ -16078,7 +16089,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (r.closed360 && r.type == SurfType::Cylinder) {
                 TopoDS_Face f360;
                 if (trySeamed360(r, rs, mv, verts, geom, collapsed, meshE, edgeOk, sewTol, warn,
-                                 f360, &exploded, &eprimeFill) &&
+                                 f360, &exploded, &eprimeFill, &hadMintRefused) &&
                     cylinderPostFitOk(r, mv, rs)) {
                     r.builtAs = BuiltAs::Seamed360;
                     acc.push_back(f360);
@@ -16161,6 +16172,12 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         };
 
         bool unstable = false;
+        auto tryMintRefusedFacetFallback = [&]() -> bool {
+            if (!hadMintRefused || mintRefusedFacetTried) return false;
+            mintRefusedFacetTried = true;
+            unstable = true;
+            return true;
+        };
         std::vector<TopoDS_Face> built;
         std::vector<int> builtRid;
         TopoDS_Shell sh;
@@ -16337,6 +16354,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         }
 
         if (unstable) {
+        unstable_fallback:
+            mintRefusedFacetTried = true;
             for (Region& r : rs.regions) {
                 if (r.reject == Reject::FaceBuildFailed) r.reject = Reject::ChainUnstable;
             }
@@ -16777,6 +16796,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         bool shClosed = BRep_Tool::IsClosed(sh);
         sh.Closed(shClosed ? Standard_True : Standard_False);
         if (wasClosed && !shClosed) {
+            // D-140-13 (option c): a mintRefused composite can still close a
+            // shell (shelf / Body244). When it does not, take the existing
+            // ChainUnstable → all-facet path rather than fail the component.
+            // Leave mint sites returning true. Components with no mintRefused
+            // face keep the J6 / recover / return-false semantics below.
+            if (tryMintRefusedFacetFallback()) {
+                restoreShared();
+                goto unstable_fallback;
+            }
             int freeE = 0;
             TopTools_IndexedDataMapOfShapeListOfShape anc;
             TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
@@ -16844,6 +16872,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // Body11 never enters this branch (nTri >= 10000 skips the heal).
             if (j6UncollapsePass > 0) {
                 restoreShared();
+                if (tryMintRefusedFacetFallback()) goto unstable_fallback;
                 out.clear();
                 return false;
             }
@@ -16921,6 +16950,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             restoreShared();
             dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
             dumpVolAttrib("open", mv, rs, built, builtRid, eprimeFill, exploded);
+            if (tryMintRefusedFacetFallback()) goto unstable_fallback;
             out.clear();
             return false;
         }
@@ -16968,6 +16998,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 restoreShared();
                 dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
                 dumpVolAttrib("invalid", mv, rs, built, builtRid, eprimeFill, exploded);
+                if (tryMintRefusedFacetFallback()) goto unstable_fallback;
                 out.clear();
                 return false;
             }
