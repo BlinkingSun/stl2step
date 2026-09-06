@@ -8,6 +8,18 @@ It ships as both an **embeddable C++ library** (one header, one call) and a
 **standalone command-line tool**, and builds from the same source on **Linux,
 macOS, and Windows**.
 
+> [!IMPORTANT]
+> **Geometry definition — what converts well.** stl2step works best on **purely
+> geometric shapes**: parts built from planes, cylinders, arcs, fillets and
+> other analytic surfaces — the kind of geometry a CAD kernel authored in the
+> first place. Organic, freeform, sculpted or 3D-scanned meshes still convert
+> and still produce a valid solid, but their curved surfaces stay faceted,
+> because a parametric surface can only be recovered where one actually
+> existed. The set of shapes recognised analytically is **getting better
+> daily** — anything that falls back today is a gap on the roadmap, not a
+> permanent ceiling. See [What it is and isn't](#what-it-is-and-isnt) for the
+> current, specific list.
+
 ```
 part.stl  ──►  weld ─► split into solids ─► build B-Rep (parallel) ─► repair
           ─►  merge coplanar facets ─► fit tolerances ─► verify  ──►  part.step
@@ -60,11 +72,13 @@ TrueForm does **not** recover cones, spheres, or tori (reported, left faceted), 
 
 Output is always written in **millimetres**. STL is unitless, so tell the engine the input units (see `--units` / `Options::inchInput` / `Options::scale`).
 
-## SolidOut: the desktop app (macOS)
+## SolidOut: the desktop app (macOS and Windows)
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
 Download: [SolidOut 1.3.0 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/download/v1.3.0/SolidOut-macOS-AppleSilicon.dmg) from the [1.3.0 release](https://github.com/BlinkingSun/stl2step/releases/tag/v1.3.0), or grab the [newest build](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from whatever release is latest. Signed with Developer ID and notarized by Apple.
+
+Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/download/v1.3.0/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/download/v1.3.0/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/download/v1.3.0/SHA256SUMS.txt). Same 1.3.0 engine, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
 
 ![SolidOut with the Handle pickup mesh loaded (3,338 triangles)](https://github.com/BlinkingSun/stl2step/releases/download/v1.2.0/solidout-import-mesh.png)
 
