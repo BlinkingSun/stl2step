@@ -35,6 +35,7 @@
       "builtPlanesFloor": 32,
       "faceCount": 636,
       "surfaceCensus": {"plane": 616, "cylinder": 20, "cone": 0, "planar_facets": 0},
+      "volumeBudgetMM3": 2.7233616528,
       "smoothContainedRegions": 0,
       "smoothContainedTriangles": 0
     }
