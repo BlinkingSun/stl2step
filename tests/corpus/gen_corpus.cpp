@@ -768,11 +768,14 @@ FixtureResult buildS19MouthRound() {
 
     Sidecar sc;
     sc.recoverable = {planeRec({0, 0, 1}, 1), planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
-                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1), planeRec({0, -1, 0}, 1),
-                      cylRec(10.0, {30, 30, 10}, {0, 0, 1}, 1, 0, true),
-                      torusRec(12.0, 2.0, {30, 30, 18}, {0, 0, 1}, 1, /*closed360=*/true),
-                      torusRec(11.0, 1.0, {30, 30, 1}, {0, 0, 1}, 1, /*closed360=*/true)};
-    sc.mustRemainFaceted.clear();
+                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1), planeRec({0, -1, 0}, 1)};
+    // D-140-6 §4(e): recoverable6/7/8 stay out until S19.mouth-round-not-built sunsets.
+    // recoverable6 — cylRec(10.0, {30, 30, 10}, {0, 0, 1}, 1, 0, true),
+    // recoverable7 — torusRec(12.0, 2.0, {30, 30, 18}, {0, 0, 1}, 1, true),
+    // recoverable8 — torusRec(11.0, 1.0, {30, 30, 1}, {0, 0, 1}, 1, true);
+    sc.mustRemainFaceted = {
+        {"hole", 1, "R=10 closed360 through hole between mouth rounds (S19.mouth-round-not-built)"},
+        {"torus", 2, "mouth rounds r=2 top / r=1 bottom (TorusNYI; S19.mouth-round-not-built)"}};
     sc.exactVolume = exactVolumeS19();  // D-130-15(1)
     certifyExactVolume(shape, sc.exactVolume, "S19_mouth_round");  // A.3
     return emitShape("S19_mouth_round",
