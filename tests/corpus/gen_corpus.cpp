@@ -351,6 +351,13 @@ void fillLiveExpectations(FixtureResult& out) {
             live.disposition = "PASS";
             live.surfaceCensus = {recPlanes, recCyl, 0};
             live.faceCount = recPlanes + recCyl + 1;  // + the recovered torus
+        } else if (sc.id == "S20_cross_bore_union") {
+            live.disposition = "ESCALATE";
+            live.escalateReason =
+                "Union engine deferred (D-140-8); S20.union-not-built. The shipped engine "
+                "has no domain-component emit; the union bore ships as edge-pieces.";
+            live.surfaceCensus = {recPlanes, recCyl, 0};
+            live.faceCount = recPlanes + recCyl;
         } else if (sc.id == "S05") {
             live.surfaceCensus = {10, 2, 0};
             live.faceCount = 12;

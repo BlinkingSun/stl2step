@@ -26,6 +26,7 @@ All notable changes to this project are documented here. The format follows
 - **The `STL2STEP_UNION` door** (D-140-8 U-R14): cycle 1 did not close U-R9 (plate seamed cylinder with 2 inner window wires = `UnorientableShape` st=27; domain-boundary extraction yields window-sized caps and fragment loops, not a face-construction miss). The door is deleted; merge/emit stay off so no partial construction lands. S20 fixture, census, and expected-red rows stay. The union engine is deferred to 1.5.
 
 ### Tests (1.4.0)
+- **1.4.0 instrument seeds (lane seeds-140, D-130-24)** — Body244 / shelf_bracket live `volumeBudgetMM3` from `volumeBudgetMM3(|meshVolume|)` (D-140-3 §4(b)); edge-class new cells for Body244, shelf_bracket, S19_mouth_round, S20_cross_bore_union from `edge_class_gate.py --measure`; S11-b expected-red shrink; S20 live[] disposition ESCALATE (`S20.union-not-built` sunset). S04 / recoverable7 torus rows left unseeded. Body28 `polylineTier2` left at 1442 (macOS still 1442). S16-R2 Linux 25 vs macOS 0 recorded in `tests/corpus/PLATFORM-DIVERGENCE.md`, ceiling not widened.
 - **Per-run scratch dirs in corpus engine check** — `run_engine_check.sh` writes fixture artefacts under `mktemp -d` instead of fixed `/tmp/${id}_*` paths, so concurrent ctest batteries no longer truncate each other's RESULT JSON.
 
 ### Fixed
