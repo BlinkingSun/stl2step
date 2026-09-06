@@ -67,7 +67,11 @@ if(TARGET stl2step AND EXISTS "${_stl2step_gates_runner}")
         LABELS "gates"
         # G0.1 twin-builds the pinned baseline inside this test; an MSVC
         # cold build alone can exceed 600s, so the budget covers build+gates.
-        TIMEOUT 3600
+        # 1.4.0 budget from measurement (2026-09-06, tree 5ff406b): Windows/MSVC shop PC
+        # gates_full wall time ~3870 s (driver 06:26:40-07:31 outside ctest; Body244 alone
+        # ~55 min, >10x its macOS time - Windows I/O pathology, 1.4.1 follow-up);
+        # macOS 883 s, Linux NUC 1174 s. Budget = measured x1.5 rounded up to 600 s.
+        TIMEOUT 6000
         REQUIRED_FILES "${_gates_full_required}")
     if(_gates_full_depends)
         set_tests_properties(gates_full PROPERTIES DEPENDS "${_gates_full_depends}")
