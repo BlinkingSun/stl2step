@@ -79,10 +79,35 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
         if (!claimFilletsC1(mv, p, tol, work)) return false;
     }
 
+    const SegmentWork preTorus = work;
+
     if (!claimToriT(mv, p, tol, work)) return false;
 
     if (!commitPlanesA3(mv, p, tol, work)) return false;
+
+    TorusTopologySnapshot torusRevertSnap;
+    bool torusRevertValidSnap = false;
+    if (work.torusAdmitted) {
+        SegmentWork revW = preTorus;
+        if (!commitPlanesA3(mv, p, tol, revW)) return false;
+        RegionSet revRs;
+        revRs.compRoot = out.compRoot;
+        if (!buildTopologyD(mv, p, tol, revW, revRs)) return false;
+        torusRevertSnap.regions = revRs.regions;
+        torusRevertSnap.rejected = revRs.rejected;
+        torusRevertSnap.chains = revRs.chains;
+        torusRevertSnap.triRegion = revRs.triRegion;
+        torusRevertSnap.triIsland = revRs.triIsland;
+        torusRevertSnap.nIslands = revRs.nIslands;
+        torusRevertValidSnap = true;
+    }
+
     if (!buildTopologyD(mv, p, tol, work, out)) return false;
+
+    if (torusRevertValidSnap) {
+        out.torusRevert = std::move(torusRevertSnap);
+        out.torusRevertValid = true;
+    }
 
     for (const Region& r : out.regions)
         if (r.origin == Origin::TorusBlend) out.stats.tori++;

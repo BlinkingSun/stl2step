@@ -59,6 +59,7 @@ enum class ProvClaim : uint8_t {
     ConsumedCylinder,   // B1 committed; permanently ineligible
     InFilletClaim,      // transient C1 member; rollback restores Unclaimed
     ConsumedFillet,     // C1 committed; permanently ineligible
+    PendingTorus,       // stage T admitted; A3 skips; commit or revert at U-3
     ConsumedTorus,      // toroidal-round stage committed; permanently ineligible
     CommittedPlane      // A3 committed as PlaneGrow
 };
@@ -124,6 +125,8 @@ inline bool archChainBand(const MeshView& mv) {
     return mv.nTri >= 500 && mv.nTri <= 8000;
 }
 
+// Stage T: cylinders are not removed until U-3 ships the torus face (D-140-6 heal).
+
 // Working state threaded A1 -> D. Region ids and loops are filled in buildTopologyD.
 struct SegmentWork {
     std::vector<int> triChart;          // size mv.nTri
@@ -131,6 +134,8 @@ struct SegmentWork {
     std::vector<Provisional> provisionals;
     std::vector<Region> accepted;       // geometry from B1/C1/A3; topology from D
     std::vector<Region> rejected;       // B1 G1-G4 rollbacks only (G5 silent)
+    std::vector<TorusPendingReclaim> torusPending;
+    bool torusAdmitted = false;         // stage T committed at least one candidate
 };
 
 // --- Stage entry points (one per D1 §1.2 stage; bool = stage ok, never throws) -

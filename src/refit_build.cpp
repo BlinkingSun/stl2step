@@ -1374,6 +1374,19 @@ bool isTorusBlendR(const Region& r) {
     return r.type == SurfType::Torus && r.origin == Origin::TorusBlend;
 }
 
+void commitTorusPendingReclaim(RegionSet& rs, int torId) {
+    Region* torp = regionByIdMut(rs, torId);
+    if (!torp || torp->torusPending < 0 ||
+        (std::size_t)torp->torusPending >= rs.torusPending.size())
+        return;
+    TorusPendingReclaim& pack = rs.torusPending[(std::size_t)torp->torusPending];
+    if (pack.committed) return;
+    pack.committed = true;
+    rs.torusRevertValid = false;
+}
+
+void revertTorusPendingReclaim(RegionSet& /*rs*/, Region& /*tor*/) {}
+
 // SIGNED axial offset from the R_lo rim (the region's Location) to the R_hi rim,
 // measured along +Direction. Negative when the taper runs against the canonical
 // axis; detector C never flips the axis, it carries the sign here, so a cone and
@@ -14566,6 +14579,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         CascadeState cascadeSt;
         emitFailRidWarningOnce(warn);
         diagCascadeInject();
+        bool torusTopologyReverted = false;
+        bool torusU3Failed = false;
+        auto revertTorusTopology = [&]() -> bool {
+            if (torusTopologyReverted || !rs.torusRevertValid) return false;
+            torusTopologyReverted = true;
+            torusU3Failed = true;
+            return true;
+        };
 
         auto rebuildCollapsed = [&]() {
             chainEdgeFail.assign(rs.chains.size(), 0);
@@ -15690,7 +15711,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     return true;
                 }
                 if (r.type == SurfType::Torus && r.origin == Origin::TorusBlend) {
-                    auto torusFail = [&](const char* why) {
+                    auto torusFail = [&](const char* why) -> bool {
+                        revertTorusTopology();
                         if (diagP2Enabled() || diag130Enabled())
                             std::fprintf(stderr,
                                          "DIAG_TORUSFACE rid=%d Rmaj=%.4f Rmin=%.4f nTri=%zu why=%s\n",
@@ -15728,6 +15750,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             return false;
                         r.builtAs = as;
                         rs.stats.tori++;
+                        commitTorusPendingReclaim(rs, r.id);
                         acc.push_back(cand);
                         if (diagP2Enabled() || diag130Enabled()) {
                             std::fprintf(stderr,
@@ -16170,18 +16193,23 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             for (size_t oi : buildOrder) {
                 Region& r = rs.regions[oi];
                 if (regionExploded(exploded, r.id)) continue;
-                std::vector<TopoDS_Face> acc;
-                if (!buildOneRegion(r, acc)) {
-                    anyFail = true;
-                    failedIds.push_back(r.id);
-                    r.reject = Reject::FaceBuildFailed;
-                    r.builtAs = BuiltAs::NotBuilt;
-                } else {
-                    for (auto& f : acc) {
-                        built.push_back(f);
-                        builtRid.push_back(r.id);
+                    std::vector<TopoDS_Face> acc;
+                    if (!buildOneRegion(r, acc)) {
+                        anyFail = true;
+                        failedIds.push_back(r.id);
+                        r.reject = Reject::FaceBuildFailed;
+                        r.builtAs = BuiltAs::NotBuilt;
+                    } else {
+                        for (auto& f : acc) {
+                            built.push_back(f);
+                            builtRid.push_back(r.id);
                     }
                 }
+            }
+            if (torusU3Failed) {
+                resetContained();
+                out.clear();
+                return false;
             }
             // Edge-failure R1 (DECISION §5). A region whose analytic reconstruction
             // failed — MakeFace not done, or the face is BRepCheck-invalid after
@@ -16205,6 +16233,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 for (size_t oi : buildOrder) {
                     Region& r = rs.regions[oi];
                     if (regionExploded(exploded, r.id)) continue;
+                    if (r.tris.empty()) continue;
                     std::vector<TopoDS_Face> acc;
                     if (!buildOneRegion(r, acc)) {
                         anyFail = true;

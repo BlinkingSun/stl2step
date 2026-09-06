@@ -642,9 +642,32 @@ Result Converter::run() {
                 fillMeshView(cs, mv);
                 refit::RegionSet rs = pit->second;
                 std::vector<TopoDS_Face> rf;
-                bool ok = refit::buildFaces(mv, rs, verts, rf,
-                                           [&](const std::string& m) { warn(m); })
-                    && !rf.empty();
+                auto tryBuild = [&](refit::RegionSet& rset) -> bool {
+                    rf.clear();
+                    return refit::buildFaces(mv, rset, verts, rf,
+                                             [&](const std::string& m) { warn(m); })
+                        && !rf.empty();
+                };
+                bool ok = tryBuild(rs);
+                if (!ok && rs.torusRevertValid && !rs.torusRevertApplied) {
+                    parallelFor(subThreads, nV, [&](size_t i) {
+                        BRep_Builder bb;
+                        bb.MakeVertex(verts[i], gp_Pnt(pts[cs.vtx[i]]), Precision::Confusion());
+                    });
+                    refit::RegionSet pre;
+                    pre.compRoot = rs.compRoot;
+                    pre.regions = rs.torusRevert.regions;
+                    pre.chains = rs.torusRevert.chains;
+                    pre.triRegion = rs.torusRevert.triRegion;
+                    pre.triIsland = rs.torusRevert.triIsland;
+                    pre.nIslands = rs.torusRevert.nIslands;
+                    pre.rejected = rs.torusRevert.rejected;
+                    pre.torusRevertApplied = true;
+                    pre.stats = rs.stats;
+                    pre.stats.tori = 0;
+                    rs = pre;
+                    ok = tryBuild(rs);
+                }
                 if (ok) {
                     TopoDS_Shell probe;
                     BRep_Builder pb;

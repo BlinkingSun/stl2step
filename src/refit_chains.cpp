@@ -362,6 +362,8 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         if (a.minTri != b.minTri) return a.minTri < b.minTri;
         return a.inIdx < b.inIdx;
     });
+    out.torusPending = work.torusPending;
+    for (auto& pack : out.torusPending) pack.denseCylIds.clear();
     out.regions.resize(acc.size());
     std::vector<int> accRemap(work.accepted.size(), -1);
     for (int i = 0; i < (int)acc.size(); ++i) {
@@ -372,6 +374,13 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
         for (int t : out.regions[i].tris) {
             if (out.triRegion[t] >= 0) return false;            // overlap
             out.triRegion[t] = i;
+        }
+    }
+    for (int pi = 0; pi < (int)out.torusPending.size(); ++pi) {
+        TorusPendingReclaim& pack = out.torusPending[(size_t)pi];
+        for (int ai : pack.reclaimAccIdx) {
+            if (ai >= 0 && ai < (int)accRemap.size() && accRemap[ai] >= 0)
+                pack.denseCylIds.push_back(accRemap[ai]);
         }
     }
     std::vector<int> provToDense((int)work.provisionals.size(), -1);

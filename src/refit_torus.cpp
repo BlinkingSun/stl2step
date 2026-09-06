@@ -743,8 +743,23 @@ bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& /
 
                     const gp_XYZ centre = axLoc + axis * final.z0;
                     const int nSides = std::max(final.cols, 1);
+                    const double bandArc = kTwoPi / (double)nSides;
+                    double hMin = 0.0;
+                    for (int t : allTris) {
+                        const gp_XYZ a = triVert(mv, t, 0);
+                        const gp_XYZ b = triVert(mv, t, 1);
+                        const gp_XYZ c = triVert(mv, t, 2);
+                        const gp_XYZ ab = b - a, bc = c - b, ca = a - c;
+                        const double la = bc.Modulus(), lb = ca.Modulus(), lc = ab.Modulus();
+                        const double aa = 0.5 * ab.Crossed(ca).Modulus();
+                        if (!(aa > gp::Resolution())) continue;
+                        const double h = 2.0 * aa / std::max({la, lb, lc});
+                        if (h > 0.0 && (hMin <= 0.0 || h < hMin)) hMin = h;
+                    }
+                    const double uSlop =
+                        (hMin > gp::Resolution()) ? std::asin(std::min(1.0, tau / hMin)) : 0.0;
                     const bool closed360 =
-                        final.cols >= 3 && uGap <= 1.5 * (kTwoPi / (double)nSides);
+                        final.cols >= 3 && uGap <= bandArc + uSlop;
 
                     double sigma = 0.0;
                     const double gamma = kTwoPi / (double)nSides;
@@ -792,6 +807,19 @@ bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& /
                         if (m.kind == MemKind::Prov)
                             work.provisionals[(std::size_t)m.idx].claim = ProvClaim::ConsumedTorus;
                     }
+
+                    TorusPendingReclaim pend;
+                    for (const MemKey& m : members) {
+                        if (m.kind == MemKind::Prov) pend.provIdx.push_back(m.idx);
+                    }
+                    for (int ci : reclaimCyl) {
+                        pend.stashedCylinders.push_back(work.accepted[(std::size_t)ci]);
+                        pend.reclaimAccIdx.push_back(ci);
+                    }
+                    const int packIdx = (int)work.torusPending.size();
+                    work.torusPending.push_back(std::move(pend));
+                    r.torusPending = packIdx;
+
                     for (int ci : reclaimCyl) cylReclaimed[(std::size_t)ci] = 1;
 
                     std::vector<Region> kept;
@@ -806,6 +834,7 @@ bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& /
 
                     std::vector<char> newReclaimed(work.accepted.size(), 0);
                     cylReclaimed.swap(newReclaimed);
+                    work.torusAdmitted = true;
 
                     for (const MemKey& m : members)
                         if (m.kind == MemKind::Prov) provUsed[(std::size_t)m.idx] = 1;

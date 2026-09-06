@@ -196,6 +196,7 @@ struct Region {
     int     filletNbrA = -1, filletNbrB = -1;  // Origin::FilletStrip ONLY; -1 otherwise.
                                     // Provenance, not a build instruction: P2 keys the
                                     // constructed-generator rule off BoundaryChain::tangent.
+    int     torusPending = -1;      // Origin::TorusBlend: index into RegionSet::torusPending
 };
 
 struct BoundaryChain {
@@ -238,6 +239,23 @@ struct RefitStats {
     double radiusMaxRel = 0;     // max |R_built - R_lsq| / R_lsq
 };
 
+struct TorusPendingReclaim {
+    std::vector<Region> stashedCylinders;
+    std::vector<int> reclaimAccIdx;
+    std::vector<int> denseCylIds;
+    std::vector<int> provIdx;
+    bool committed = false;
+};
+
+struct TorusTopologySnapshot {
+    std::vector<Region>        regions;
+    std::vector<Region>        rejected;
+    std::vector<BoundaryChain> chains;
+    std::vector<int>           triRegion;
+    std::vector<int>           triIsland;
+    int                        nIslands = 0;
+};
+
 struct RegionSet {                  // exactly one per CLEAN component
     int compRoot = -1;
     std::vector<Region>        regions;   // accepted only (reject == None)
@@ -247,6 +265,11 @@ struct RegionSet {                  // exactly one per CLEAN component
     std::vector<int>           triIsland; // local tri -> island id, else -1
     int                        nIslands = 0;
     RefitStats                 stats;
+    std::vector<TorusPendingReclaim> torusPending;
+    // Pre-stage-T topology; restored when U-3 fails to ship a torus face (D-140-6).
+    bool torusRevertValid = false;
+    bool torusRevertApplied = false;
+    TorusTopologySnapshot torusRevert;
 };
 
 // P1 entry point. Pure math. Links no OCCT topology: gp_ value types and math_ solvers
