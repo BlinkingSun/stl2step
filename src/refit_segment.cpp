@@ -99,6 +99,7 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
         torusRevertSnap.triRegion = revRs.triRegion;
         torusRevertSnap.triIsland = revRs.triIsland;
         torusRevertSnap.nIslands = revRs.nIslands;
+        torusRevertSnap.stats = revRs.stats;
         torusRevertValidSnap = true;
     }
 

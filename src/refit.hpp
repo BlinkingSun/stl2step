@@ -254,6 +254,10 @@ struct TorusTopologySnapshot {
     std::vector<int>           triRegion;
     std::vector<int>           triIsland;
     int                        nIslands = 0;
+    // Construction census of the pre-T RegionSet (planes/cylinders/fillets/…).
+    // Restored with the topology so RESULT keys count the shipped pass, not the
+    // discarded U-3 probe (D-140-6, D-140-11).
+    RefitStats                 stats;
 };
 
 struct RegionSet {                  // exactly one per CLEAN component

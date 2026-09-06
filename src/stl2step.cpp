@@ -671,7 +671,10 @@ Result Converter::run() {
                     pre.nIslands = rs.torusRevert.nIslands;
                     pre.rejected = rs.torusRevert.rejected;
                     pre.torusRevertApplied = true;
-                    pre.stats = rs.stats;
+                    // Discard the probe's construction census the same way
+                    // torusProbeWarn is discarded: RESULT must count the
+                    // shipped (pre-T) pass, not the U-3 attempt that reverted.
+                    pre.stats = rs.torusRevert.stats;
                     pre.stats.tori = 0;
                     rs = pre;
                     ok = tryBuild(rs, false);
