@@ -26,8 +26,7 @@
     "union.canal-cylcyl-pieces": "D-140-8 U6/U7/U-R17: Handle pickup's R 100 / 92.5 / 72.5 walls, 2077.806 + 568.193 + 322.106 = 2968.105 mm^2, stay at 3 / 3 / 2 edge-pieces at 20000 q = 0.5286 mm = 17 sigma (sigma = 0.030815552 on R 100). Those separators are real bands, not punctures: the blend between them is blend.canal-cylcyl (D-140-6 sec 2), deferred to 1.5. The union must NOT merge them -- doing so is a FAILURE, not an XPASS."
   },
   "gates_full": {
-    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)",
-    "S19_mouth_round": "D-140-6 4(d),(e) — see reverts/S19.mouth-round-not-built. S04's torus now builds; S19 still does not (smoothBuiltTori=0, 64 osculating cylinders). I-checker SIDECAR FAIL recoverable6,recoverable7,recoverable8 remains the honest red."
+    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)"
   },
   "edge_class_gate": {
     "Body11": "D-130-23 / 082194b red lines not relaxed",
