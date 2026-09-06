@@ -6772,7 +6772,9 @@ bool regionBuiltAnalytic(int rid, const RegionSet& rs, const std::vector<char>& 
 
 bool regionClosureHealEligible(int rid, const RegionSet& rs, const std::vector<char>& eprimeFill,
                                const std::vector<char>& exploded) {
-    return regionBuiltAnalytic(rid, rs, eprimeFill, exploded);
+    if (!regionBuiltAnalytic(rid, rs, eprimeFill, exploded)) return false;
+    const Region* r = regionById(rs, rid);
+    return r && r->builtAs == BuiltAs::Single;
 }
 
 // D-140-2: takeFullCap may not mint a 2π circle against an unbuilt partner.
@@ -16524,7 +16526,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         // that own free edges via eprimeFill (never exploded[]). Full rebuild
         // with eprimeFill-aware chain admission; no uncollapse (opens neighbours).
         if (!closureHealStop && !unstable && recoverPass == 0 && j6UncollapsePass == 0 &&
-            fallbackGuardPass <= 2) {
+            fallbackGuardPass == 0) {
             if (!closureHealCapSet) {
                 closureHealAdmitted0 = countAdmittedRegions(rs, eprimeFill);
                 closureHealCapSet = true;
