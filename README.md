@@ -4,6 +4,16 @@
 solids (STEP).** Point it at an `.stl`, get back a clean `.step` solid that CAD
 and CAM kernels can consume as real boundary geometry — not triangle soup.
 
+<p align="center">
+  <a href="https://makerinparadise.com/"><img src="docs/assets/makerinparadise-lockup.svg" alt="Maker in Paradise" height="140"></a>
+</p>
+<p align="center">
+  <strong><a href="https://makerinparadise.com/solidout/">Try it on the web</a> — https://makerinparadise.com/solidout/</strong>
+</p>
+<p align="center">
+The same engine runs in your browser via WebAssembly; nothing is uploaded, and the page always uses the newest engine release.
+</p>
+
 It ships as both an **embeddable C++ library** (one header, one call) and a
 **standalone command-line tool**, and builds from the same source on **Linux,
 macOS, and Windows**.
@@ -76,9 +86,9 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut 0.2.0 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/download/v1.4.1/SolidOut-macOS-AppleSilicon.dmg) from the [1.4.1 release](https://github.com/BlinkingSun/stl2step/releases/tag/v1.4.1). SolidOut 0.2.0 ships with engine 1.4.1 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
+Download: [SolidOut 0.2.0 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest). SolidOut 0.2.0 ships with engine 1.4.1 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
 
-Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/download/v1.4.1/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/download/v1.4.1/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/download/v1.4.1/SHA256SUMS.txt). Same SolidOut 0.2.0 with engine 1.4.1 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
+Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same SolidOut 0.2.0 with engine 1.4.1 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
 
 **Updating the engine.** The Engine card in the right panel shows the engine in use and an **Update engine** button. On launch and on the button the app checks this repository's latest release; when a newer engine exists the line under the button turns amber and one press downloads, verifies (SHA-256 from the manifest; Developer ID Team ID on macOS) and installs it into the app's data folder. Nothing in the app bundle changes, and the next conversion uses the new engine without a restart. A release without `engine-manifest.json` is not an engine candidate.
 
@@ -100,30 +110,41 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 | `SHA256SUMS.txt` | SHA-256 checksums of the app files | people |
 | `stl2step-engine-<tag>-macos-arm64.tar.gz` | Engine + OCCT dylibs for macOS | the updater |
 | `stl2step-engine-<tag>-windows-x64.zip` | Engine + DLLs for Windows | the updater |
+| `stl2step-engine-<tag>-web-wasm.tar.gz` | Engine + OCCT compiled to WebAssembly | the in-browser tool (`web-wasm` exists since 1.4.1) |
 | `engine-manifest.json` | Schema 1 index of engine bundles | the updater |
 | `SHA256SUMS-engine.txt` | SHA-256 checksums of the engine files | the updater |
+
+**What changed in 1.4.2.** `--threads 1` now constructs zero worker threads (Safari wasm). See [CHANGELOG.md](CHANGELOG.md).
 
 ```json
 {
   "schema": 1,
-  "engineVersion": "1.4.1",
+  "engineVersion": "1.4.2",
   "assets": {
     "macos-arm64": {
-      "name": "stl2step-engine-v1.4.1-macos-arm64.tar.gz",
+      "name": "stl2step-engine-v1.4.2-macos-arm64.tar.gz",
       "sha256": "201d8514bf7885291e9c6247fcb2ea234d8b3559d3b7700aace311e87d5aa49d",
       "size": 13242159,
       "minOS": "26.0",
       "teamId": "L3LP86Z6L4"
     },
     "windows-x64": {
-      "name": "stl2step-engine-v1.4.1-windows-x64.zip",
+      "name": "stl2step-engine-v1.4.2-windows-x64.zip",
       "sha256": "e7762ae52237cc48ebf427a662fbecb6ef43fa8d67d9fb8d4b6dd500c286e98b",
       "size": 16014624,
       "minWindows": "10"
+    },
+    "web-wasm": {
+      "name": "stl2step-engine-v1.4.2-web-wasm.tar.gz",
+      "emscripten": "6.0.5",
+      "occt": "7.9.3",
+      "threads": "1"
     }
   }
 }
 ```
+
+The `web-wasm` bundle exists since 1.4.1.
 
 ---
 
