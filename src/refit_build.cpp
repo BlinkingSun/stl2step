@@ -9,6 +9,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit.hpp"
+#include "parallel.hpp"
 #include "refit_cone_bind.hpp"
 #include "refit_ellipse_bind.hpp"
 #include "refit_cone_math.hpp"
@@ -12844,20 +12845,15 @@ void collectNonRegionNeighbourhood(const TopoDS_Shape& sh, const std::vector<Top
 template <typename Fn>
 void cascadeParallelFor(size_t n, Fn fn) {
     if (n == 0) return;
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned hw = std::max(1u, detail::resolveThreadCount(detail::currentRequestedThreads()));
     const size_t workers = std::min((size_t)hw, n);
     if (workers <= 1) {
         for (size_t i = 0; i < n; i++) fn(i);
         return;
     }
-    std::vector<std::thread> pool;
-    pool.reserve(workers);
-    for (size_t w = 0; w < workers; w++) {
-        pool.emplace_back([=]() {
-            for (size_t i = w; i < n; i += workers) fn(i);
-        });
-    }
-    for (auto& t : pool) t.join();
+    detail::runPool(static_cast<unsigned>(workers), [&](unsigned w) {
+        for (size_t i = w; i < n; i += workers) fn(i);
+    });
 }
 
 double meshTriChordVol(const MeshView& mv, int localTri) {

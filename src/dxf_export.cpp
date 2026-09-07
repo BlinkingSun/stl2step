@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "dxf_export.hpp"
+#include "parallel.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -295,16 +296,15 @@ int emitProfilesDxf(const std::vector<Profile>& profs, const PrismLevels& lv,
     if (n == 0) return 0;
 
     std::vector<int> ok(n, 0);
-    std::vector<std::thread> workers;
-    workers.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        workers.emplace_back([&, i]() {
+    unsigned nw = detail::resolveThreadCount(detail::currentRequestedThreads());
+    if (nw > n) nw = static_cast<unsigned>(n);
+    detail::runPool(nw, [&](unsigned w) {
+        for (size_t i = w; i < n; i += nw) {
             const std::string path =
                 (std::filesystem::path(dir) / makeProfileDxfName(profs[i], lv)).string();
             ok[i] = writeProfileDxf(profs[i], lv, path) ? 1 : 0;
-        });
-    }
-    for (auto& t : workers) t.join();
+        }
+    });
 
     int written = 0;
     for (int v : ok) {

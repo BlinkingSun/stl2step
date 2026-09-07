@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit_internal.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1715,23 +1716,17 @@ bool chainAreaAngCV(const MeshView& mv, const std::vector<int>& chain,
 
 template <typename F>
 void parallelFor(size_t n, F&& fn) {
-    unsigned hw = std::thread::hardware_concurrency();
-    if (hw == 0) hw = 1;
-    if (n < 32 || hw == 1) {
+    unsigned hw = detail::resolveThreadCount(detail::currentRequestedThreads());
+    if (n < 32 || hw <= 1) {
         for (size_t i = 0; i < n; i++) fn(i);
         return;
     }
-    std::vector<std::thread> pool;
     const size_t chunk = (n + hw - 1) / hw;
-    for (unsigned t = 0; t < hw; t++) {
+    detail::runPool(hw, [&](unsigned t) {
         const size_t lo = static_cast<size_t>(t) * chunk;
         const size_t hi = std::min(n, lo + chunk);
-        if (lo >= hi) break;
-        pool.emplace_back([&, lo, hi]() {
-            for (size_t i = lo; i < hi; i++) fn(i);
-        });
-    }
-    for (auto& th : pool) th.join();
+        for (size_t i = lo; i < hi; i++) fn(i);
+    });
 }
 
 void buildEdgeTriAdj(const MeshView& mv, std::vector<std::array<int, 2>>& e2t) {

@@ -2,6 +2,7 @@
 // B1 gate structure: DECISION-p1-growx (D1.3-A1..A6, D2.3-A1).
 
 #include "refit_internal.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -76,23 +77,17 @@ bool a2DiagOn() {
 
 template <typename F>
 void lawParallelFor(size_t n, F&& fn) {
-    unsigned hw = std::thread::hardware_concurrency();
-    if (hw == 0) hw = 1;
-    if (n < 8 || hw == 1) {
+    unsigned hw = detail::resolveThreadCount(detail::currentRequestedThreads());
+    if (n < 8 || hw <= 1) {
         for (size_t i = 0; i < n; i++) fn(i);
         return;
     }
-    std::vector<std::thread> pool;
     const size_t chunk = (n + hw - 1) / hw;
-    for (unsigned t = 0; t < hw; t++) {
+    detail::runPool(hw, [&](unsigned t) {
         const size_t lo = static_cast<size_t>(t) * chunk;
         const size_t hi = std::min(n, lo + chunk);
-        if (lo >= hi) break;
-        pool.emplace_back([&, lo, hi]() {
-            for (size_t i = lo; i < hi; i++) fn(i);
-        });
-    }
-    for (auto& th : pool) th.join();
+        for (size_t i = lo; i < hi; i++) fn(i);
+    });
 }
 
 bool triInLawBand(const SegmentWork& work, int t) {

@@ -371,6 +371,42 @@ set_tests_properties(union_census_unit PROPERTIES
     LABELS "unit;union-census"
     TIMEOUT 60)
 
+# D-142-1: --threads 1 constructs zero std::thread; threads=4 spawns and
+# produces identical canonical STEP DATA.
+add_executable(threads_spawn_test threads_spawn_test.cpp)
+target_compile_features(threads_spawn_test PRIVATE cxx_std_17)
+set_target_properties(threads_spawn_test PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(threads_spawn_test PRIVATE stl2step::core)
+target_include_directories(threads_spawn_test PRIVATE
+    "${_stl2step_root}/include")
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(threads_spawn_test)
+endif()
+
+set(_threads_scratch "${CMAKE_BINARY_DIR}/threads1-test")
+set(_mesh_cyl "${_stl2step_root}/tests/mesh/seamed_cylinder.step")
+add_test(NAME threads1_no_spawn
+    COMMAND threads_spawn_test no_spawn
+        "${_stl2step_root}/tests/corpus"
+        "${_mesh_cyl}"
+        "${_threads_scratch}")
+set_tests_properties(threads1_no_spawn PROPERTIES
+    LABELS "unit;threads"
+    TIMEOUT 300)
+add_test(NAME threads_default_spawns
+    COMMAND threads_spawn_test default_spawns
+        "${_stl2step_root}/tests/corpus"
+        "${_mesh_cyl}"
+        "${_threads_scratch}")
+set_tests_properties(threads_default_spawns PROPERTIES
+    LABELS "unit;threads"
+    TIMEOUT 300)
+unset(_threads_scratch)
+unset(_mesh_cyl)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.2] - 2026-09-07
+
+### Fixed
+- `--threads 1` (and `Options.threads = 1` / `MeshOptions.threads = 1`) now constructs **zero** `std::thread` in convert, refit, mesh, and DXF emission (D-142-1). Previously every parallel stage sized its own pool from `hardware_concurrency()`, so `--threads 1 --engine trueform` still spawned tens of workers (Handle pickup: 62 concurrent) and exhausted the Safari wasm pthread pool. Off-path RESULT JSON is unchanged (no new keys; G0.1 vs 187ead0).
+
 ## [1.4.1] - 2026-09-06
 
 ### Fixed

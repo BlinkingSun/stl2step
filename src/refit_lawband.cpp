@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit_internal.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -875,8 +876,7 @@ bool extractChain(const MeshView& mv, const std::vector<int>& ids, const Derived
     const double tau = tauSurf(mv);
     double maxRes = 0.0;
     const unsigned nV = static_cast<unsigned>(verts.size());
-    unsigned nTh = std::thread::hardware_concurrency();
-    if (nTh == 0) nTh = 2;
+    unsigned nTh = detail::resolveThreadCount(detail::currentRequestedThreads());
     if (nV < 48) nTh = 1;
     nTh = std::min(nTh, nV);
     if (nTh <= 1) {
@@ -884,17 +884,12 @@ bool extractChain(const MeshView& mv, const std::vector<int>& ids, const Derived
             maxRes = std::max(maxRes, std::abs(rhoOf(p, origin, axis) - out.R));
     } else {
         std::vector<double> part(nTh, 0.0);
-        std::vector<std::thread> pool;
-        pool.reserve(nTh);
-        for (unsigned t = 0; t < nTh; ++t) {
-            pool.emplace_back([&, t]() {
-                double m = 0.0;
-                for (unsigned i = t; i < nV; i += nTh)
-                    m = std::max(m, std::abs(rhoOf(verts[i], origin, axis) - out.R));
-                part[t] = m;
-            });
-        }
-        for (auto& th : pool) th.join();
+        detail::runPool(nTh, [&](unsigned t) {
+            double m = 0.0;
+            for (unsigned i = t; i < nV; i += nTh)
+                m = std::max(m, std::abs(rhoOf(verts[i], origin, axis) - out.R));
+            part[t] = m;
+        });
         for (double m : part) maxRes = std::max(maxRes, m);
     }
     out.maxVertResid = maxRes;

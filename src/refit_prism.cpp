@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit_prism.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -67,25 +68,20 @@ void emitDiag(const RegionSet& rs, const PrismLevels& lv, const PrismTols& t,
 
 template <class Fn>
 void parallelFor(size_t n, Fn fn) {
-    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const unsigned hw = std::max(1u, detail::resolveThreadCount(detail::currentRequestedThreads()));
     if (n < 2 || hw < 2) {
         for (size_t i = 0; i < n; ++i) fn(i);
         return;
     }
     const unsigned w = static_cast<unsigned>(std::min<size_t>(hw, n));
     std::atomic<size_t> next{0};
-    std::vector<std::thread> pool;
-    pool.reserve(w);
-    for (unsigned k = 0; k < w; ++k) {
-        pool.emplace_back([&]() {
-            for (;;) {
-                const size_t i = next.fetch_add(1);
-                if (i >= n) break;
-                fn(i);
-            }
-        });
-    }
-    for (auto& th : pool) th.join();
+    detail::runPool(w, [&](unsigned) {
+        for (;;) {
+            const size_t i = next.fetch_add(1);
+            if (i >= n) break;
+            fn(i);
+        }
+    });
 }
 
 double triArea(const MeshView& mv, int localTri) {

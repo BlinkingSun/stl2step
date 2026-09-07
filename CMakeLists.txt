@@ -12,7 +12,7 @@ endfunction()
 
 
 project(stl2step
-    VERSION 1.4.1
+    VERSION 1.4.2
     DESCRIPTION "Universal STL (mesh) -> STEP (B-Rep solid) conversion engine"
     LANGUAGES CXX)
 
@@ -41,6 +41,7 @@ find_package(OpenCASCADE REQUIRED)
 # ---------------------------------------------------------------------------
 add_library(stl2step_core
     src/stl2step.cpp
+    src/parallel.cpp
     src/stl_quant.cpp
     src/mesh.cpp
     src/refit_math.cpp

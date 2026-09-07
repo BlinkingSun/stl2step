@@ -22,6 +22,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "stl2step/stl2step.hpp"
+#include "parallel.hpp"
 #include "refit.hpp"
 #include "stl_quant.hpp"
 
@@ -135,6 +136,7 @@ std::string jsonEscape(const std::string& s) {
 
 // Chunked parallel-for over [0, n). Serial below 4096 items (thread spawn costs
 // more than tiny workloads); each worker claims 1024-item chunks off an atomic.
+// Construction goes through detail::runPool (D-142-1): threads<=1 => zero std::thread.
 template <typename F>
 void parallelFor(unsigned threads, size_t n, F&& fn) {
     if (threads <= 1 || n < 4096) {
@@ -143,17 +145,14 @@ void parallelFor(unsigned threads, size_t n, F&& fn) {
     }
     unsigned k = (unsigned)std::min<size_t>(threads, (n + 4095) / 4096);
     std::atomic<size_t> next{ 0 };
-    std::vector<std::thread> pool;
-    for (unsigned t = 0; t < k; t++)
-        pool.emplace_back([&]() {
-            for (;;) {
-                size_t base = next.fetch_add(1024);
-                if (base >= n) break;
-                size_t end = std::min(n, base + 1024);
-                for (size_t i = base; i < end; i++) fn(i);
-            }
-        });
-    for (auto& th : pool) th.join();
+    detail::runPool(k, [&](unsigned) {
+        for (;;) {
+            size_t base = next.fetch_add(1024);
+            if (base >= n) break;
+            size_t end = std::min(n, base + 1024);
+            for (size_t i = base; i < end; i++) fn(i);
+        }
+    });
 }
 
 // Exact-bit vertex key (normalises -0.0 -> +0.0); tolerance welding quantises instead.
@@ -311,9 +310,8 @@ Result Converter::run() {
         fs::create_directories(opt.dxfDir, ec);
     }
 
-    unsigned hw = opt.threads > 0 ? (unsigned)opt.threads
-                                  : std::thread::hardware_concurrency();
-    if (hw == 0) hw = 4;
+    unsigned hw = detail::resolveThreadCount(opt.threads);
+    detail::ThreadBudgetScope threadBudget(opt.threads);
 
     // Silence OCCT's own console chatter; convert crashes/signals into C++ exceptions.
     Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
@@ -578,6 +576,7 @@ Result Converter::run() {
             segp.epsPlane = opt.smoothTolMM;
             segp.thetaPlaneDeg = opt.smoothAngleDeg;
             segp.doFillets = opt.smoothFillets;
+            segp.requestedThreads = opt.threads;
             std::mutex planMu;
             parallelFor(hw, order.size(), [&](size_t idx) {
                 int root = order[idx];
@@ -846,25 +845,22 @@ Result Converter::run() {
         };
 
         {
-            std::vector<std::thread> pool;
-            for (unsigned k = 0; k < nOuter; k++)
-                pool.emplace_back([&]() {
-                    for (;;) {
-                        size_t i = nextComp.fetch_add(1);
-                        if (i >= order.size()) break;
-                        try {
-                            buildComponent(order[i], outs[i], nInner);
-                        } catch (const Standard_Failure& f) {
-                            warn(std::string("component build failed (") +
-                                 (f.GetMessageString() ? f.GetMessageString() : "?") +
-                                 ") -- component dropped");
-                        } catch (const std::exception& e) {
-                            warn(std::string("component build failed (") + e.what() +
-                                 ") -- component dropped");
-                        }
+            detail::runPool(nOuter, [&](unsigned) {
+                for (;;) {
+                    size_t i = nextComp.fetch_add(1);
+                    if (i >= order.size()) break;
+                    try {
+                        buildComponent(order[i], outs[i], nInner);
+                    } catch (const Standard_Failure& f) {
+                        warn(std::string("component build failed (") +
+                             (f.GetMessageString() ? f.GetMessageString() : "?") +
+                             ") -- component dropped");
+                    } catch (const std::exception& e) {
+                        warn(std::string("component build failed (") + e.what() +
+                             ") -- component dropped");
                     }
-                });
-            for (auto& th : pool) th.join();
+                }
+            });
         }
 
         std::vector<TopoDS_Shape> parts;
@@ -949,17 +945,14 @@ Result Converter::run() {
                         { (size_t)hw, parts.size(), (size_t)10 });
                     std::atomic<size_t> nextPart{ 0 };
                     std::atomic<bool> anyFail{ false };
-                    std::vector<std::thread> pool;
-                    for (unsigned k = 0; k < uThreads; k++)
-                        pool.emplace_back([&]() {
-                            for (;;) {
-                                size_t i = nextPart.fetch_add(1);
-                                if (i >= parts.size()) break;
-                                try { unifyOne(parts[i], partKeep[i], angleDeg); }
-                                catch (...) { anyFail = true; }   // that body keeps its facets
-                            }
-                        });
-                    for (auto& th : pool) th.join();
+                    detail::runPool(uThreads, [&](unsigned) {
+                        for (;;) {
+                            size_t i = nextPart.fetch_add(1);
+                            if (i >= parts.size()) break;
+                            try { unifyOne(parts[i], partKeep[i], angleDeg); }
+                            catch (...) { anyFail = true; }   // that body keeps its facets
+                        }
+                    });
                     TopoDS_Compound comp;
                     BRep_Builder B;
                     B.MakeCompound(comp);
@@ -1093,9 +1086,7 @@ Result Converter::run() {
         {
             Timer wt;
             if (overlapped) {
-                std::thread bg(runAnalysis);
-                wst = writeStep();
-                bg.join();
+                detail::overlap(opt.threads, runAnalysis, [&]() { wst = writeStep(); });
             } else {
                 runAnalysis();
                 wst = writeStep();
@@ -1186,6 +1177,7 @@ Result Converter::run() {
 
         // ---- assemble the result -----------------------------------------------
         r.seconds = total.lap();
+        r.threadsUsed = (int)hw;
         r.triangles = nTri;
         r.vertices = nVert;
         r.components = nComp;

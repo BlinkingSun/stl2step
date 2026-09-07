@@ -11,6 +11,7 @@
 
 #include "refit.hpp"
 #include "refit_internal.hpp"
+#include "parallel.hpp"
 
 namespace stl2step {
 namespace refit {
@@ -234,6 +235,7 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
 bool segment(const MeshView& mv, const SegmentParams& p, RegionSet& out, WarnFn warn) {
     try {
         out = RegionSet{};
+        detail::ThreadBudgetScope threadBudget(p.requestedThreads);
 
         SegmentParams params = p;
         adaptCoarseSegmentParams(mv, params);

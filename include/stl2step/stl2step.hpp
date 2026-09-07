@@ -16,6 +16,7 @@
 #ifndef STL2STEP_STL2STEP_HPP
 #define STL2STEP_STL2STEP_HPP
 
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -28,8 +29,8 @@ namespace stl2step {
 // below for preprocessor checks).
 #define STL2STEP_VERSION_MAJOR 1
 #define STL2STEP_VERSION_MINOR 4
-#define STL2STEP_VERSION_PATCH 1
-#define STL2STEP_VERSION_STRING "1.4.1"
+#define STL2STEP_VERSION_PATCH 2
+#define STL2STEP_VERSION_STRING "1.4.2"
 
 // Returns the runtime version string ("1.0.0"). Useful for logging which engine
 // build a host application linked against.
@@ -174,6 +175,10 @@ struct Result {
 
     double seconds = 0.0;         // wall-clock time of the whole conversion
 
+    // D-142-1: resolved worker budget (0 = unset). Never emitted on the off-path
+    // RESULT JSON (G0.1 key-set identity vs 1.0.0 / 187ead0).
+    int threadsUsed = 0;
+
     // D-130-10(2): warnings are emitted from parallel component builds, so
     // arrival order is not a property of the mesh. The list is sorted before
     // it is handed back, which makes the RESULT line deterministic; the live
@@ -232,6 +237,13 @@ struct Result {
     // set and ordering; safe to parse. Does not include the "RESULT " prefix.
     std::string toJson() const;
 };
+
+// Test hook (D-142-1). Incremented only when the engine constructs a std::thread.
+// Not a RESULT key. Reset between conversions in tests.
+namespace detail {
+std::uint64_t threadsSpawnedForTest();
+void          resetThreadsSpawnedForTest();
+}
 
 // --------------------------------------------------------------------- engine
 

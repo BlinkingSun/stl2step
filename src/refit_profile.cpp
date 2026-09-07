@@ -3,6 +3,7 @@
 
 #include "refit_prism.hpp"
 #include "refit_internal.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -73,8 +74,7 @@ std::mutex& diagMu() {
 }
 
 unsigned workerCount(unsigned work) {
-    unsigned hw = std::thread::hardware_concurrency();
-    if (hw == 0) hw = 1;
+    unsigned hw = detail::resolveThreadCount(detail::currentRequestedThreads());
     return std::max(1u, std::min(work, hw));
 }
 
@@ -1015,19 +1015,14 @@ bool sliceProfiles(const MeshView& mv, const RegionSet& rs, const PrismLevels& l
         out.assign(static_cast<size_t>(nSlab), Profile{});
         std::vector<char> ok(static_cast<size_t>(nSlab), 0);
         const unsigned nw = workerCount(static_cast<unsigned>(nSlab));
-        std::vector<std::thread> pool;
-        pool.reserve(nw);
         const int chunk = (nSlab + static_cast<int>(nw) - 1) / static_cast<int>(nw);
-        for (unsigned w = 0; w < nw; ++w) {
-            pool.emplace_back([&, w]() {
-                const int begin = static_cast<int>(w) * chunk;
-                const int end = std::min(nSlab, begin + chunk);
-                for (int k = begin; k < end; ++k)
-                    ok[static_cast<size_t>(k)] =
-                        sliceOneSlab(mv, rs, lv, t, fr, k, out[static_cast<size_t>(k)]) ? 1 : 0;
-            });
-        }
-        for (auto& th : pool) th.join();
+        detail::runPool(nw, [&](unsigned w) {
+            const int begin = static_cast<int>(w) * chunk;
+            const int end = std::min(nSlab, begin + chunk);
+            for (int k = begin; k < end; ++k)
+                ok[static_cast<size_t>(k)] =
+                    sliceOneSlab(mv, rs, lv, t, fr, k, out[static_cast<size_t>(k)]) ? 1 : 0;
+        });
         for (char v : ok)
             if (!v) {
                 out.clear();

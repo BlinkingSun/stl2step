@@ -73,6 +73,9 @@ struct SegmentParams {
     bool   doFillets     = true;  // Phase C                           [Options::smoothFillets]
     // --- determinism (I5): every iterative step is hard-capped ------------
     int    maxRefineIters = 8;    // geometric (c,R) refinement cap
+    // D-142-1: 0 = all cores (same as Options.threads). Thread construction
+    // goes through detail::runPool; this field is the budget segment() installs.
+    int    requestedThreads = 0;
 };
 
 enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus };

@@ -6,6 +6,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "stl2step/stl2step.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -194,9 +195,8 @@ MeshResult meshFromStep(const MeshOptions& opt, const LogCallback& log) {
     }
     // --edges is explicit-only: never invent a default edges path.
 
-    unsigned hw = opt.threads > 0 ? (unsigned)opt.threads
-                                  : std::thread::hardware_concurrency();
-    if (hw == 0) hw = 4;
+    unsigned hw = detail::resolveThreadCount(opt.threads);
+    detail::ThreadBudgetScope threadBudget(opt.threads);
 
     Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
     OSD::SetSignal(Standard_False);
