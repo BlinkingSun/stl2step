@@ -117,7 +117,7 @@ INCLUDE_ALLOWED_STDLIB = frozenset(
         "vector",
     }
 )
-INCLUDE_ALLOWED_PROJECT = frozenset({"refit.hpp", "refit_internal.hpp"})
+INCLUDE_ALLOWED_PROJECT = frozenset({"refit.hpp", "refit_internal.hpp", "parallel.hpp"})
 INCLUDE_BANNED_PREFIXES = (
     "GProp_",
     "GeomConvert_",
