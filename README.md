@@ -5,7 +5,7 @@ solids (STEP).** Point it at an `.stl`, get back a clean `.step` solid that CAD
 and CAM kernels can consume as real boundary geometry — not triangle soup.
 
 <p align="center">
-  <a href="https://makerinparadise.com/"><img src="docs/assets/makerinparadise-lockup.svg" alt="Maker in Paradise" height="140"></a>
+  <a href="https://makerinparadise.com/solidout/"><img src="docs/assets/makerinparadise-banner.jpg" alt="Maker in Paradise — try stl2step on the web" width="100%"></a>
 </p>
 <p align="center">
   <strong><a href="https://makerinparadise.com/solidout/">Try it on the web</a> — https://makerinparadise.com/solidout/</strong>
