@@ -12,6 +12,24 @@
 #   * C++17, no new third-party dependencies
 #   * EXCLUDE_FROM_ALL is NOT used: a tool that does not build is a red build
 
+# GitHub #7: RESULT / MESH_RESULT must appear as the last stdout line when
+# the CLI's stdout is a file or a pipe (not a TTY). Python stdlib subprocess.
+if(TARGET stl2step)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    set(_redir_py "${CMAKE_CURRENT_SOURCE_DIR}/result_line_redirected.py")
+    set(_redir_stl "${CMAKE_CURRENT_SOURCE_DIR}/corpus/shelf_bracket.stl")
+    add_test(NAME result_line_redirected
+        COMMAND ${Python3_EXECUTABLE} "${_redir_py}"
+            --binary "$<TARGET_FILE:stl2step>"
+            --stl "${_redir_stl}")
+    set_tests_properties(result_line_redirected PROPERTIES
+        LABELS "cli;stdout"
+        TIMEOUT 180
+        REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_redir_py};${_redir_stl}")
+    unset(_redir_py)
+    unset(_redir_stl)
+endif()
+
 foreach(_stl2step_test_dir harness corpus gates unit mesh grade)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_stl2step_test_dir}/CMakeLists.txt")
         add_subdirectory(${_stl2step_test_dir})

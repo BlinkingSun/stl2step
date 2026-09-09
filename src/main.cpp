@@ -7,9 +7,33 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 
+#ifdef _WIN32
+#include <io.h>
+#endif
+
 using namespace stl2step;
+
+// Piped/file stdout is fully buffered; SolidOut (CREATE_NO_WINDOW) and
+// `> out.txt` both lose the last contract line if we return without a
+// flush (#7). Progress Info lines already fflush. Do both the C++ stream
+// and C stdio: they may be unsynced.
+static void flushContractStdout() {
+    std::cout.flush();
+    std::fflush(stdout);
+}
+
+// MSVC treats _IOLBF as _IOFBF. Unbuffer only when stdout is not a TTY.
+// POSIX: leave the CRT default; the explicit flushes above are the contract.
+static void unbufferPipedStdout() {
+#ifdef _WIN32
+    if (!_isatty(_fileno(stdout))) {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+    }
+#endif
+}
 
 static void usage() {
     printf(
@@ -113,10 +137,13 @@ static int runMeshMode(int argc, char** argv) {
 
     MeshResult r = meshFromStep(opt, logcb);
     printf("MESH_RESULT %s\n", r.toJson().c_str());
+    flushContractStdout();
     return r.exitCode;
 }
 
 int main(int argc, char** argv) {
+    unbufferPipedStdout();
+
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--mesh")
             return runMeshMode(argc, argv);
@@ -207,5 +234,6 @@ int main(int argc, char** argv) {
 
     // The final stdout line is always the machine-readable contract.
     printf("RESULT %s\n", r.toJson().c_str());
+    flushContractStdout();
     return r.exitCode;
 }

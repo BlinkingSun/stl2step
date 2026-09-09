@@ -4,6 +4,11 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] - unreleased
+
+### Fixed
+- CLI flushes `RESULT` and `MESH_RESULT` on both the C++ stream and C stdio after printing, and on Windows sets unbuffered stdout (`_IONBF`, never `_IOLBF`) when stdout is not a TTY. Piped/file hosts (SolidOut's `CREATE_NO_WINDOW` pipe, `> out.txt`) no longer lose the contract line to a full stdio buffer (#7). STEP bytes and RESULT text are unchanged. ctest `result_line_redirected` asserts the last stdout line through a file and through a pipe.
+
 ## [1.4.2] - 2026-09-07
 
 ### Fixed
