@@ -134,6 +134,28 @@ std::string jsonEscape(const std::string& s) {
     return o;
 }
 
+// Bounded numeric append. Never uses snprintf(nullptr, 0) + string((size_t)n)
+// (MSVC: n == -1 wraps the size to 0 and the subsequent write overflows the
+// 16-byte SSO into whatever follows, including main's /GS cookie).
+void jsonAppendFmt(std::string& o, const char* fmt, ...) STL2STEP_PRINTF(2, 3);
+void jsonAppendFmt(std::string& o, const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if ((size_t)n < sizeof buf) {
+        o.append(buf, (size_t)n);
+        return;
+    }
+    std::string tmp((size_t)n + 1, '\0');
+    va_start(ap, fmt);
+    vsnprintf(&tmp[0], tmp.size(), fmt, ap);
+    va_end(ap);
+    o.append(tmp.c_str(), (size_t)n);
+}
+
 // Chunked parallel-for over [0, n). Serial below 4096 items (thread spawn costs
 // more than tiny workloads); each worker claims 1024-item chunks off an atomic.
 // Construction goes through detail::runPool (D-142-1): threads<=1 => zero std::thread.
@@ -1261,85 +1283,65 @@ bool parseSchema(const std::string& text, Schema& out) {
 // toJson() splices smooth* keys iff convert() filled them (Options::smooth).
 // Frozen header has no Result::smoothEnabled — splice is member-keyed, not
 // thread_local. Hand-filled Results must set facesAfterSmooth to emit keys.
+//
+// Built by append (same shape as MeshResult::toJson). The previous two-pass
+// snprintf(nullptr,0) + string((size_t)n+1) writer overflowed MSVC's 16-byte
+// SSO when n < 0 (size wraps to 0) and smashed main's /GS cookie next to the
+// hidden Result (D-I-4, GitHub #7).
 std::string Result::toJson() const {
     if (!ok)
         return std::string("{\"ok\":false,\"error\":\"") + jsonEscape(error) + "\"}";
 
-    std::string wjson;
-    for (auto& w : warnings) {
-        if (!wjson.empty()) wjson += ",";
-        wjson += "\"" + jsonEscape(w) + "\"";
+    std::string o;
+    o.reserve(512);
+    o += "{\"ok\":true,\"input\":\"";
+    o += jsonEscape(input);
+    o += "\",\"output\":\"";
+    o += jsonEscape(output);
+    jsonAppendFmt(o,
+        "\",\"triangles\":%d,\"vertices\":%d,\"components\":%d,\"solids\":%d,"
+        "\"openShells\":%d,\"facesBeforeUnify\":%d,\"facesAfterUnify\":%d,"
+        "\"meshVolumeMM3\":%.6f,\"stepVolumeMM3\":%.6f,\"volumeDeltaPct\":%.6f,"
+        "\"watertight\":%s,\"seconds\":%.2f,\"warnings\":[",
+        triangles, vertices, components, solids, openShells, facesBeforeUnify,
+        facesAfterUnify, meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
+        watertight ? "true" : "false", seconds);
+    bool first = true;
+    for (const auto& w : warnings) {
+        if (!first) o += ',';
+        first = false;
+        o += '"';
+        o += jsonEscape(w);
+        o += '"';
     }
-    const char* fmt =
-        "{\"ok\":true,\"input\":\"%s\",\"output\":\"%s\",\"triangles\":%d,"
-        "\"vertices\":%d,\"components\":%d,\"solids\":%d,\"openShells\":%d,"
-        "\"facesBeforeUnify\":%d,\"facesAfterUnify\":%d,\"meshVolumeMM3\":%.6f,"
-        "\"stepVolumeMM3\":%.6f,\"volumeDeltaPct\":%.6f,\"watertight\":%s,"
-        "\"seconds\":%.2f,\"warnings\":[%s]}";
-    const char* fmtSmooth =
-        "{\"ok\":true,\"input\":\"%s\",\"output\":\"%s\",\"triangles\":%d,"
-        "\"vertices\":%d,\"components\":%d,\"solids\":%d,\"openShells\":%d,"
-        "\"facesBeforeUnify\":%d,\"facesAfterUnify\":%d,\"meshVolumeMM3\":%.6f,"
-        "\"stepVolumeMM3\":%.6f,\"volumeDeltaPct\":%.6f,\"watertight\":%s,"
-        "\"seconds\":%.2f,\"warnings\":[%s],"
-        "\"smoothPlanes\":%d,\"smoothCylinders\":%d,\"smoothFillets\":%d,"
-        "\"smoothDistinctRadii\":%d,\"smoothRejected\":%d,\"smoothFacetFaces\":%d,"
-        "\"facesAfterSmooth\":%d,\"smoothSkippedComponents\":%d,"
-        "\"smoothMaxDevMM\":%.6f,\"smoothMaxEdgeTolMM\":%.6f,"
-        "\"smoothVolPredictedMM3\":%.6f,"
-        "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltCones\":%d,"
-        "\"smoothBuiltTori\":%d,\"smoothBuiltFillets\":%d,"
-        "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d,"
-        "\"edgeClasses\":{\"analytic\":%d,\"polylineTier2\":%d,\"unhandled\":%d,"
-        "\"overTol\":%d,\"overCap\":%d},"
-        "\"radiusDrift\":{\"n\":%d,\"maxAbs\":%.9f,\"maxRel\":%.9f}}";
-    std::string ei = jsonEscape(input), eo = jsonEscape(output);
+    o += ']';
     const bool emitSmooth = facesAfterSmooth != 0 || smoothSkippedComponents != 0
         || smoothPlanes != 0 || smoothCylinders != 0 || smoothFillets != 0;
-    int n;
     if (emitSmooth) {
-        n = std::snprintf(nullptr, 0, fmtSmooth, ei.c_str(), eo.c_str(), triangles, vertices,
-                          components, solids, openShells, facesBeforeUnify, facesAfterUnify,
-                          meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
-                          watertight ? "true" : "false", seconds, wjson.c_str(),
-                          smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
-                          smoothRejected, smoothFacetFaces, facesAfterSmooth,
-                          smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
-                          smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
-                          smoothBuiltCones, smoothBuiltTori, smoothBuiltFillets,
-                          smoothBuiltComponents, smoothRevertedComponents,
-                          edgeClassAnalytic, edgeClassPolylineTier2,
-                          edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
-                          radiusDriftMaxAbs, radiusDriftMaxRel);
-    } else {
-        n = std::snprintf(nullptr, 0, fmt, ei.c_str(), eo.c_str(), triangles, vertices,
-                          components, solids, openShells, facesBeforeUnify, facesAfterUnify,
-                          meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
-                          watertight ? "true" : "false", seconds, wjson.c_str());
+        jsonAppendFmt(o,
+            ",\"smoothPlanes\":%d,\"smoothCylinders\":%d,\"smoothFillets\":%d,"
+            "\"smoothDistinctRadii\":%d,\"smoothRejected\":%d,\"smoothFacetFaces\":%d,"
+            "\"facesAfterSmooth\":%d,\"smoothSkippedComponents\":%d,"
+            "\"smoothMaxDevMM\":%.6f,\"smoothMaxEdgeTolMM\":%.6f,"
+            "\"smoothVolPredictedMM3\":%.6f,"
+            "\"smoothBuiltPlanes\":%d,\"smoothBuiltCylinders\":%d,\"smoothBuiltCones\":%d,"
+            "\"smoothBuiltTori\":%d,\"smoothBuiltFillets\":%d,"
+            "\"smoothBuiltComponents\":%d,\"smoothRevertedComponents\":%d,"
+            "\"edgeClasses\":{\"analytic\":%d,\"polylineTier2\":%d,\"unhandled\":%d,"
+            "\"overTol\":%d,\"overCap\":%d},"
+            "\"radiusDrift\":{\"n\":%d,\"maxAbs\":%.9f,\"maxRel\":%.9f}",
+            smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
+            smoothRejected, smoothFacetFaces, facesAfterSmooth,
+            smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
+            smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
+            smoothBuiltCones, smoothBuiltTori, smoothBuiltFillets,
+            smoothBuiltComponents, smoothRevertedComponents,
+            edgeClassAnalytic, edgeClassPolylineTier2,
+            edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
+            radiusDriftMaxAbs, radiusDriftMaxRel);
     }
-    std::string s((size_t)n + 1, '\0');
-    if (emitSmooth) {
-        std::snprintf(&s[0], s.size(), fmtSmooth, ei.c_str(), eo.c_str(), triangles, vertices,
-                      components, solids, openShells, facesBeforeUnify, facesAfterUnify,
-                      meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
-                      watertight ? "true" : "false", seconds, wjson.c_str(),
-                      smoothPlanes, smoothCylinders, smoothFillets, smoothDistinctRadii,
-                      smoothRejected, smoothFacetFaces, facesAfterSmooth,
-                      smoothSkippedComponents, smoothMaxDevMM, smoothMaxEdgeTolMM,
-                      smoothVolPredictedMM3, smoothBuiltPlanes, smoothBuiltCylinders,
-                      smoothBuiltCones, smoothBuiltTori, smoothBuiltFillets,
-                      smoothBuiltComponents, smoothRevertedComponents,
-                      edgeClassAnalytic, edgeClassPolylineTier2,
-                      edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
-                      radiusDriftMaxAbs, radiusDriftMaxRel);
-    } else {
-        std::snprintf(&s[0], s.size(), fmt, ei.c_str(), eo.c_str(), triangles, vertices,
-                      components, solids, openShells, facesBeforeUnify, facesAfterUnify,
-                      meshVolumeMM3, stepVolumeMM3, volumeDeltaPct,
-                      watertight ? "true" : "false", seconds, wjson.c_str());
-    }
-    s.resize((size_t)n);
-    return s;
+    o += '}';
+    return o;
 }
 
 Result convert(const Options& opt, const LogCallback& log) {

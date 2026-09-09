@@ -21,6 +21,7 @@
 #include <climits>
 #include <cfloat>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14806,7 +14807,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     {
                         size_t k = 0;
                         while (k < seq.size() && seq[k] != lvSeam) k++;
-                        if (k < seq.size()) std::rotate(seq.begin(), seq.begin() + (long)k, seq.end());
+                        if (k < seq.size())
+                            std::rotate(seq.begin(),
+                                        seq.begin() + static_cast<std::ptrdiff_t>(k), seq.end());
                         else lvSeam = seq.front();
                     }
                     const int n = (int)seq.size();

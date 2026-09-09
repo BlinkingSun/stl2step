@@ -16,6 +16,13 @@ All notable changes to this project are documented here. The format follows
   failing on uncalibrated OCCT; hosted CI still pins 7.9. Set
   `STL2STEP_TEST_OCCT_VERSION` to exercise the skip path locally.
 
+### Fixed
+- **Windows `/GS` cookie smash after convert (GitHub #7, D-I-4).** `Result::toJson` used two-pass `snprintf(nullptr, 0)` then `std::string((size_t)n + 1)`. On MSVC `n < 0` wraps that size to 0 and the second write overflows the 16-byte SSO into the hidden `Result` in `main` (cookie immediately after, 320-byte slot vs 336-byte `sizeof(Result)`). Mac/Linux ASan missed it: libc++ SSO is 23 bytes and there is no `/GS`. The writer is now the same append path as `MeshResult::toJson`. Iterator offsets that went through `long` (32-bit on MSVC) now use `std::ptrdiff_t`. `fflush(stdout)` after `RESULT` / `MESH_RESULT`.
+
+### Added
+- Unit test `result_tojson_unit`: the exact bad size (`int n = -1` → `(size_t)n + 1 == 0`, write past 16-byte SSO) plus `toJson` on paths longer than MSVC SSO.
+- CMake option `STL2STEP_SANITIZE=ON` — ASan+UBSan (Clang) or `/fsanitize=address` (MSVC) on the engine so CI can smoke the CLI under a sanitizer.
+
 ## [1.4.2] - 2026-09-07
 
 ### Fixed

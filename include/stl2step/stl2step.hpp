@@ -29,8 +29,8 @@ namespace stl2step {
 // below for preprocessor checks).
 #define STL2STEP_VERSION_MAJOR 1
 #define STL2STEP_VERSION_MINOR 4
-#define STL2STEP_VERSION_PATCH 2
-#define STL2STEP_VERSION_STRING "1.4.2"
+#define STL2STEP_VERSION_PATCH 3
+#define STL2STEP_VERSION_STRING "1.4.3"
 
 // Returns the runtime version string ("1.0.0"). Useful for logging which engine
 // build a host application linked against.
