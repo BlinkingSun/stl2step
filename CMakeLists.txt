@@ -12,7 +12,7 @@ endfunction()
 
 
 project(stl2step
-    VERSION 1.4.2
+    VERSION 1.4.3
     DESCRIPTION "Universal STL (mesh) -> STEP (B-Rep solid) conversion engine"
     LANGUAGES CXX)
 
@@ -170,6 +170,21 @@ if(MSVC)
     target_compile_options(stl2step_core PRIVATE /EHsc)
 endif()
 
+# Optional sanitizer instrumentation for the engine + anything that links it
+# (CLI smoke, unit tests). Clang: ASan+UBSan. MSVC: /fsanitize=address.
+# OCCT stays uninstrumented (we only add flags to our targets).
+option(STL2STEP_SANITIZE "Build with AddressSanitizer (and UBSan on Clang)" OFF)
+if(STL2STEP_SANITIZE)
+    if(MSVC)
+        target_compile_options(stl2step_core PUBLIC /fsanitize=address /Zi)
+        target_link_options(stl2step_core PUBLIC /INCREMENTAL:NO)
+    else()
+        target_compile_options(stl2step_core PUBLIC
+            -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(stl2step_core PUBLIC -fsanitize=address,undefined)
+    endif()
+endif()
+
 # ---------------------------------------------------------------------------
 # Command-line tool
 # ---------------------------------------------------------------------------
@@ -177,6 +192,16 @@ if(STL2STEP_BUILD_CLI)
     add_executable(stl2step src/main.cpp)
     target_link_libraries(stl2step PRIVATE stl2step::core)
     set_target_properties(stl2step PROPERTIES OUTPUT_NAME stl2step)
+    if(STL2STEP_SANITIZE)
+        if(MSVC)
+            target_compile_options(stl2step PRIVATE /fsanitize=address /Zi)
+            target_link_options(stl2step PRIVATE /INCREMENTAL:NO)
+        else()
+            target_compile_options(stl2step PRIVATE
+                -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(stl2step PRIVATE -fsanitize=address,undefined)
+        endif()
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

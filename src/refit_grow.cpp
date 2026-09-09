@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1168,7 +1169,7 @@ void mergeCoaxialCylinders(const MeshView& mv, const DerivedTols& tol, SegmentWo
                 Region reg;
                 fillCylinderRegion(mv, ev, axis, mergedTris, reg);
                 A = reg;
-                work.accepted.erase(work.accepted.begin() + static_cast<long>(j));
+                work.accepted.erase(work.accepted.begin() + static_cast<std::ptrdiff_t>(j));
                 changed = true;
                 break;
             }

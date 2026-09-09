@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1167,10 +1168,10 @@ bool fitProfile(const MeshView& mv, const PrismTols& t, Profile& p, int& nDeclin
                     }
                 }
                 if (rot > 0) {
-                    std::rotate(verts.begin(), verts.begin() + static_cast<long>(rot),
-                                verts.end());
-                    std::rotate(vrids.begin(), vrids.begin() + static_cast<long>(rot),
-                                vrids.end());
+                    std::rotate(verts.begin(),
+                                verts.begin() + static_cast<std::ptrdiff_t>(rot), verts.end());
+                    std::rotate(vrids.begin(),
+                                vrids.begin() + static_cast<std::ptrdiff_t>(rot), vrids.end());
                 }
             }
 

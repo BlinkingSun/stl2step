@@ -113,6 +113,7 @@ static int runMeshMode(int argc, char** argv) {
 
     MeshResult r = meshFromStep(opt, logcb);
     printf("MESH_RESULT %s\n", r.toJson().c_str());
+    fflush(stdout);
     return r.exitCode;
 }
 
@@ -207,5 +208,6 @@ int main(int argc, char** argv) {
 
     // The final stdout line is always the machine-readable contract.
     printf("RESULT %s\n", r.toJson().c_str());
+    fflush(stdout);
     return r.exitCode;
 }

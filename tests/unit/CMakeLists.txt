@@ -407,6 +407,25 @@ set_tests_properties(threads_default_spawns PROPERTIES
 unset(_threads_scratch)
 unset(_mesh_cyl)
 
+# D-I-4: Result::toJson must not wrap a negative snprintf count into a 0-size
+# string (MSVC SSO 16). Portable: the wrap itself is the unit condition.
+add_executable(result_tojson_test result_tojson_test.cpp)
+target_compile_features(result_tojson_test PRIVATE cxx_std_17)
+set_target_properties(result_tojson_test PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(result_tojson_test PRIVATE stl2step::core)
+target_include_directories(result_tojson_test PRIVATE
+    "${_stl2step_root}/include")
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(result_tojson_test)
+endif()
+add_test(NAME result_tojson_unit COMMAND result_tojson_test)
+set_tests_properties(result_tojson_unit PROPERTIES
+    LABELS "unit;tojson"
+    TIMEOUT 30)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)
