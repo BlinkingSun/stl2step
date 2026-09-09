@@ -86,7 +86,7 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut 0.2.1 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.4.2 + SolidOut 0.2.1 for macOS and Windows). SolidOut 0.2.1 ships with engine 1.4.2 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
+Download: [SolidOut 0.2.2 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.4.2 + SolidOut 0.2.1 for macOS and Windows). SolidOut 0.2.1 ships with engine 1.4.2 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
 
 Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same current release with engine 1.4.2 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
 
@@ -114,7 +114,7 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 | `engine-manifest.json` | Schema 1 index of engine bundles | the updater |
 | `SHA256SUMS-engine.txt` | SHA-256 checksums of the engine files | the updater |
 
-**What changed in 1.4.2.** `--threads 1` now constructs zero worker threads (Safari wasm). See [CHANGELOG.md](CHANGELOG.md).
+**What changed in 1.4.3.** Windows: the bundled engine no longer aborts at the end of a conversion (a small-string overrun in the RESULT JSON builder, MSVC only); RESULT/MESH_RESULT are flushed explicitly; calibrated tests skip with a reason on OpenCASCADE below 7.9. SolidOut 0.2.2: native menu, 60-minute visible limit with Cancel, diagnosable engine errors. 1.4.2: `--threads 1` constructs zero worker threads (Safari wasm). See [CHANGELOG.md](CHANGELOG.md).
 
 ```json
 {
