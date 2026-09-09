@@ -119,23 +119,23 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 ```json
 {
   "schema": 1,
-  "engineVersion": "1.4.2",
+  "engineVersion": "1.4.3",
   "assets": {
     "macos-arm64": {
-      "name": "stl2step-engine-v1.4.2-macos-arm64.tar.gz",
+      "name": "stl2step-engine-v1.4.3-macos-arm64.tar.gz",
       "sha256": "201d8514bf7885291e9c6247fcb2ea234d8b3559d3b7700aace311e87d5aa49d",
       "size": 13242159,
       "minOS": "26.0",
       "teamId": "L3LP86Z6L4"
     },
     "windows-x64": {
-      "name": "stl2step-engine-v1.4.2-windows-x64.zip",
+      "name": "stl2step-engine-v1.4.3-windows-x64.zip",
       "sha256": "e7762ae52237cc48ebf427a662fbecb6ef43fa8d67d9fb8d4b6dd500c286e98b",
       "size": 16014624,
       "minWindows": "10"
     },
     "web-wasm": {
-      "name": "stl2step-engine-v1.4.2-web-wasm.tar.gz",
+      "name": "stl2step-engine-v1.4.3-web-wasm.tar.gz",
       "emscripten": "6.0.5",
       "occt": "7.9.3",
       "threads": "1"
