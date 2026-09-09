@@ -44,6 +44,8 @@
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
 
+#include "occt_calibrated.hpp"
+
 #ifndef STL2STEP_EXPECTED_RED_JSON
 #define STL2STEP_EXPECTED_RED_JSON ""
 #endif
@@ -804,6 +806,10 @@ int asciiTest(const std::string& corpus) {
 
 int main(int argc, char** argv) {
     std::setlocale(LC_ALL, "C");
+    const int skipRc = stl2step::test::skipExitIfUncalibrated();
+    if (skipRc >= 0) {
+        return skipRc;
+    }
     if (argc < 3) {
         std::fprintf(stderr, "usage: stl2step_grade_selftest core|synthetic|ascii <corpusDir>\n");
         return 1;

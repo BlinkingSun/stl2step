@@ -23,6 +23,24 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 import check_regionset as cr
 import smooth_on as so
 
+# D-I-5: generated occt_calibrated.py (CMake configure_file).
+def _import_occt_calibrated():
+    gen = os.environ.get("STL2STEP_OCCT_GENERATED_DIR", "").strip()
+    if gen:
+        sys.path.insert(0, gen)
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if entry and entry not in sys.path:
+            sys.path.insert(0, entry)
+    from occt_calibrated import (  # noqa: WPS433
+        G01_BASELINE_COMMIT,
+        occt_calibrated,
+        skip_message,
+    )
+    return G01_BASELINE_COMMIT, occt_calibrated, skip_message
+
+
+G01_BASELINE_COMMIT, occt_calibrated, skip_message = _import_occt_calibrated()
+
 # Re-export frozen thresholds (single source: smooth_on.py).
 G3_RATIO_LO = so.G3_RATIO_LO
 G3_RATIO_HI = so.G3_RATIO_HI
@@ -520,6 +538,23 @@ def _bash_executable() -> Optional[str]:
     return None
 
 
+def baseline_commit_resolvable() -> bool:
+    """True when the pinned G0.1 ancestor exists in this clone."""
+    proc = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(REPO_ROOT),
+            "cat-file",
+            "-e",
+            f"{G01_BASELINE_COMMIT}^{{commit}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
+
+
 def ensure_baseline(
     baseline_dir: Optional[Path],
     current_build: Optional[Path] = None,
@@ -614,7 +649,8 @@ def gate_g0_1_off_path_identity(ctx: GateContext) -> GateOutcome:
         return xfail_not_landed(gate_id, ctx.fixture.id, "P0-baseline")
 
     if ctx.baseline_error:
-        return go(ctx, gate_id, "XFAIL", ctx.baseline_error)
+        status = "SKIP" if ctx.baseline_error.startswith("SKIP:") else "XFAIL"
+        return go(ctx, gate_id, status, ctx.baseline_error)
 
     if ctx.baseline_bin is None or not ctx.baseline_bin.is_file():
         return go(
@@ -975,6 +1011,8 @@ def gate_g5_editability(ctx: GateContext) -> GateOutcome:
     """SPEC-P0 G5 — editability censuses; smoothMaxEdgeTolMM threshold (SOFT)."""
     if "G5" not in LIVE_GATES:
         return xfail_not_landed("G5", ctx.fixture.id, "P3-engine/smooth")
+    if not occt_calibrated():
+        return go(ctx, "G5", "SKIP", skip_message())
     return outcome_from_so(so.check_g5(smooth_ctx(ctx)))
 
 
@@ -1371,9 +1409,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     baseline_bin: Optional[Path] = None
     baseline_error: Optional[str] = None
     if "G0.1" in gate_ids:
-        baseline_bin, baseline_error = ensure_baseline(
-            baseline_dir, current_build_from_binary(binary)
-        )
+        if not baseline_commit_resolvable():
+            short = G01_BASELINE_COMMIT[:7]
+            baseline_error = (
+                f"SKIP: G0.1 baseline commit {short} not in this clone "
+                "(git cat-file -e)"
+            )
+        else:
+            baseline_bin, baseline_error = ensure_baseline(
+                baseline_dir, current_build_from_binary(binary)
+            )
 
     all_outcomes: List[GateOutcome] = []
     if args.jobs > 1 and len(fixtures) > 1:

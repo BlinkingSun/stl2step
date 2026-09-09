@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.3] - Unreleased
+
+### Changed
+- **Calibrated tests skip with a reason on OCCT < 7.9** (D-I-5, GitHub #8).
+  `volid_identity`, `grade_selftest`, `gates_full` G0.1 (when the `187ead0`
+  baseline is not in the clone), and G5 soft rows report `SKIP` instead of
+  failing on uncalibrated OCCT; hosted CI still pins 7.9. Set
+  `STL2STEP_TEST_OCCT_VERSION` to exercise the skip path locally.
+
 ## [1.4.2] - 2026-09-07
 
 ### Fixed

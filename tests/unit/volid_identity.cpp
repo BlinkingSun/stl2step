@@ -12,6 +12,8 @@
 #include <cstring>
 #include <string>
 
+#include "occt_calibrated.hpp"
+
 namespace {
 
 #ifdef _WIN32
@@ -172,6 +174,10 @@ int runOne(const char* bin, const char* stl, const char* tag) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    const int skipRc = stl2step::test::skipExitIfUncalibrated();
+    if (skipRc >= 0) {
+        return skipRc;
+    }
     if (argc < 5) {
         std::fprintf(stderr, "usage: volid_identity_test <stl2step> <S01.stl> <S02.stl> <S03.stl>\n");
         return 2;

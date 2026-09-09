@@ -36,6 +36,19 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 find_package(Threads REQUIRED)
 find_package(OpenCASCADE REQUIRED)
 
+# D-I-5 / #8 — expose OCCT version to calibrated tests (one range: >= 7.9.x).
+include("${CMAKE_CURRENT_SOURCE_DIR}/tests/support/occt_calibrated.cmake")
+set(STL2STEP_OCCT_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${STL2STEP_OCCT_GENERATED_DIR}")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/occt_calibrated.hpp.in"
+    "${STL2STEP_OCCT_GENERATED_DIR}/occt_calibrated.hpp"
+    @ONLY)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/occt_calibrated.py.in"
+    "${STL2STEP_OCCT_GENERATED_DIR}/occt_calibrated.py"
+    @ONLY)
+
 # ---------------------------------------------------------------------------
 # Engine library
 # ---------------------------------------------------------------------------

@@ -72,7 +72,9 @@ if(TARGET stl2step AND EXISTS "${_stl2step_gates_runner}")
         # ~55 min, >10x its macOS time - Windows I/O pathology, 1.4.1 follow-up);
         # macOS 883 s, Linux NUC 1174 s. Budget = measured x1.5 rounded up to 600 s.
         TIMEOUT 6000
-        REQUIRED_FILES "${_gates_full_required}")
+        REQUIRED_FILES "${_gates_full_required}"
+        ENVIRONMENT
+            "PYTHONPATH=${CMAKE_BINARY_DIR}/generated;STL2STEP_OCCT_GENERATED_DIR=${CMAKE_BINARY_DIR}/generated")
     if(_gates_full_depends)
         set_tests_properties(gates_full PROPERTIES DEPENDS "${_gates_full_depends}")
     endif()
@@ -96,7 +98,9 @@ if(TARGET stl2step AND EXISTS "${_stl2step_gates_runner}" AND EXISTS "${_stl2ste
     set_tests_properties(gates_smoke PROPERTIES
         LABELS "gates;smoke"
         TIMEOUT 600
-        REQUIRED_FILES "${_gates_smoke_required}")
+        REQUIRED_FILES "${_gates_smoke_required}"
+        ENVIRONMENT
+            "PYTHONPATH=${CMAKE_BINARY_DIR}/generated;STL2STEP_OCCT_GENERATED_DIR=${CMAKE_BINARY_DIR}/generated")
     unset(_gates_smoke_cmd)
     unset(_gates_smoke_required)
 endif()

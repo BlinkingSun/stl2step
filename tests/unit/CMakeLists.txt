@@ -2,6 +2,9 @@
 cmake_minimum_required(VERSION 3.16)
 
 get_filename_component(_stl2step_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+if(NOT DEFINED STL2STEP_OCCT_SKIP_EXIT_CODE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/../support/occt_calibrated.cmake")
+endif()
 
 if(NOT TARGET stl2step::core)
     project(stl2step_unit LANGUAGES CXX)
@@ -320,7 +323,7 @@ if(TARGET stl2step)
         CXX_EXTENSIONS OFF
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
     target_include_directories(volid_identity_test PRIVATE
-        "${_stl2step_root}/tests/support")
+        "${CMAKE_BINARY_DIR}/generated")
     if(MSVC)
         target_compile_definitions(volid_identity_test PRIVATE _USE_MATH_DEFINES NOMINMAX)
     endif()
@@ -336,7 +339,8 @@ if(TARGET stl2step)
     set_tests_properties(volid_identity PROPERTIES
         LABELS "unit;volid"
         TIMEOUT 180
-        DEPENDS corpus_generate)
+        DEPENDS corpus_generate
+        SKIP_RETURN_CODE ${STL2STEP_OCCT_SKIP_EXIT_CODE})
 endif()
 
 # 140-UNION-CENSUS (SPEC-union PART B, D-140-8 U-R5..U-R8, U-R13) -- the
