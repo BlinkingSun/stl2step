@@ -806,15 +806,17 @@ int asciiTest(const std::string& corpus) {
 
 int main(int argc, char** argv) {
     std::setlocale(LC_ALL, "C");
-    const int skipRc = stl2step::test::skipExitIfUncalibrated();
-    if (skipRc >= 0) {
-        return skipRc;
-    }
     if (argc < 3) {
         std::fprintf(stderr, "usage: stl2step_grade_selftest core|synthetic|ascii <corpusDir>\n");
         return 1;
     }
     const std::string mode = argv[1];
+    if (mode == "core") {
+        const int skipRc = stl2step::test::skipExitIfUncalibrated();
+        if (skipRc >= 0) {
+            return skipRc;
+        }
+    }
     const std::string corpus = argv[2];
     gExpectedRed = loadExpectedRedGrader(STL2STEP_EXPECTED_RED_JSON);
     int rc = 0;
