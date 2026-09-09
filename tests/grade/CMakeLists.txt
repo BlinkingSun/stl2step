@@ -5,6 +5,9 @@ cmake_minimum_required(VERSION 3.16)
 get_filename_component(_stl2step_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 
 list(APPEND CMAKE_MODULE_PATH "${_stl2step_root}/cmake")
+if(NOT DEFINED STL2STEP_OCCT_SKIP_EXIT_CODE)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/../support/occt_calibrated.cmake")
+endif()
 if(NOT TARGET OpenCASCADE::OpenCASCADE)
     project(stl2step_grade_tool LANGUAGES CXX)
     find_package(OpenCASCADE REQUIRED)
@@ -44,7 +47,8 @@ set_target_properties(stl2step_grade_selftest PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 target_include_directories(stl2step_grade_selftest PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${_stl2step_root}/src")
+    "${_stl2step_root}/src"
+    "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(stl2step_grade_selftest PRIVATE OpenCASCADE::OpenCASCADE)
 # D-140-7 / D-130-23: recorded-deferral list, resolved from the source tree at
 # configure time (the same file run_gates.py's DEFAULT_BASELINE resolves).
@@ -72,7 +76,12 @@ add_test(NAME grade_selftest_ascii
     COMMAND stl2step_grade_selftest ascii "${_stl2step_root}/tests/corpus")
 add_test(NAME grade_independence
     COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_SOURCE_DIR}/check_independence.cmake")
-set_tests_properties(grade_selftest grade_synthetic grade_selftest_ascii grade_independence
+set_tests_properties(grade_selftest
+    PROPERTIES
+        LABELS "grade"
+        TIMEOUT 300
+        SKIP_RETURN_CODE ${STL2STEP_OCCT_SKIP_EXIT_CODE})
+set_tests_properties(grade_synthetic grade_selftest_ascii grade_independence
     PROPERTIES LABELS "grade" TIMEOUT 300)
 
 unset(_grade_srcs)

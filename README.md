@@ -154,8 +154,9 @@ The `web-wasm` bundle exists since 1.4.1.
 
 - A **C++17** compiler (Clang, GCC, or MSVC).
 - **[OpenCASCADE Technology (OCCT)]** 7.x — the geometry kernel that does the STL
-  reading, B-Rep construction, healing, and STEP writing. (Tested against 7.9;
-  7.6+ is expected to work.)
+  reading, B-Rep construction, healing, and STEP writing. The engine builds and
+  converts on older OCCT; `ctest --preset dev` is calibrated on OCCT 7.9.x and
+  numeric/oracle tests skip with a reason on older versions. Hosted CI pins 7.9.
 - **CMake** 3.16+.
 
 Install OCCT per platform:

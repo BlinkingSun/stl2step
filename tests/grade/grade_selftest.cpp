@@ -44,6 +44,8 @@
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
 
+#include "occt_calibrated.hpp"
+
 #ifndef STL2STEP_EXPECTED_RED_JSON
 #define STL2STEP_EXPECTED_RED_JSON ""
 #endif
@@ -809,6 +811,12 @@ int main(int argc, char** argv) {
         return 1;
     }
     const std::string mode = argv[1];
+    if (mode == "core") {
+        const int skipRc = stl2step::test::skipExitIfUncalibrated();
+        if (skipRc >= 0) {
+            return skipRc;
+        }
+    }
     const std::string corpus = argv[2];
     gExpectedRed = loadExpectedRedGrader(STL2STEP_EXPECTED_RED_JSON);
     int rc = 0;

@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 - CLI flushes `RESULT` and `MESH_RESULT` on both the C++ stream and C stdio after printing, and on Windows sets unbuffered stdout (`_IONBF`, never `_IOLBF`) when stdout is not a TTY. Piped/file hosts (SolidOut's `CREATE_NO_WINDOW` pipe, `> out.txt`) no longer lose the contract line to a full stdio buffer (#7). STEP bytes and RESULT text are unchanged. ctest `result_line_redirected` asserts the last stdout line through a file and through a pipe.
+## [1.4.3] - Unreleased
+
+### Changed
+- **Calibrated tests skip with a reason on OCCT < 7.9** (D-I-5, GitHub #8).
+  `volid_identity`, `grade_selftest`, `gates_full` G0.1 (when the `187ead0`
+  baseline is not in the clone), and G5 soft rows report `SKIP` instead of
+  failing on uncalibrated OCCT; hosted CI still pins 7.9. Set
+  `STL2STEP_TEST_OCCT_VERSION` to exercise the skip path locally.
 
 ## [1.4.2] - 2026-09-07
 
