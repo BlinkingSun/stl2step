@@ -15477,6 +15477,45 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         std::fabs(mL.Radius() - Rlo) <= std::fabs(mH.Radius() - Rlo);
                     const Loop* loopLo = loIsCapL ? capL : capH;
                     const Loop* loopHi = loIsCapL ? capH : capL;
+                    if (diag130Enabled()) {
+                        auto roleName = [](LoopRole role) -> const char* {
+                            switch (role) {
+                                case LoopRole::Outer: return "Outer";
+                                case LoopRole::Inner: return "Inner";
+                                case LoopRole::CapLow: return "CapLow";
+                                case LoopRole::CapHigh: return "CapHigh";
+                            }
+                            return "?";
+                        };
+                        for (const Loop& lp : r.loops) {
+                            const int isLo = (&lp == loopLo) ? 1 : 0;
+                            const int isHi = (&lp == loopHi) ? 1 : 0;
+                            std::fprintf(stderr,
+                                         "DIAG_CONELOOP rid=%d role=%s nChain=%zu loopLo=%d "
+                                         "loopHi=%d\n",
+                                         r.id, roleName(lp.role), lp.chainIdx.size(), isLo, isHi);
+                            for (int cix : lp.chainIdx) {
+                                if (cix < 0 || (size_t)cix >= rs.chains.size()) continue;
+                                const BoundaryChain& ch = rs.chains[(size_t)cix];
+                                const int prid = capPartnerRid(cix, r, rs);
+                                const Region* pr = regionById(rs, prid);
+                                const double ndot =
+                                    pr ? std::fabs(pr->ax.Direction().Dot(r.ax.Direction())) : -1.0;
+                                const int coll =
+                                    ((size_t)cix < geom.size() && geom[(size_t)cix].collapsed) ? 1
+                                                                                              : 0;
+                                std::fprintf(stderr,
+                                             "DIAG_CONECHAIN rid=%d ci=%d partner=%d type=%d "
+                                             "origin=%s R=%.6f nTri=%zu ndot=%.8g closed360=%d "
+                                             "meshVerts=%zu meshEdges=%zu collapsed=%d\n",
+                                             r.id, cix, prid, pr ? (int)pr->type : -1,
+                                             pr ? originName(pr->origin) : "-",
+                                             pr ? pr->radius : 0.0, pr ? pr->tris.size() : 0,
+                                             ndot, pr && pr->closed360 ? 1 : 0, ch.meshVerts.size(),
+                                             ch.meshEdges.size(), coll);
+                            }
+                        }
+                    }
                     const gp_Circ circLo = coneIsoCircle(r, 0.0);
                     const gp_Circ circHi = coneIsoCircle(r, h);
 
@@ -15711,13 +15750,56 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                          pb.X(), pb.Y(), pb.Z(), BRep_Tool::Tolerance(ew));
                         }
                     }
+                    dumpFaceTopo(r.id, f, "coneface", "pre-ensure");
                     const bool fv = ensureFaceValid(f, meshTolCap(mv, &r));
-                    if (diagP2Enabled() || diag130Enabled())
+                    dumpFaceTopo(r.id, f, "coneface", "post-ensure");
+                    if (diagP2Enabled() || diag130Enabled()) {
                         std::fprintf(stderr,
                                      "DIAG_CONEFACE rid=%d R=%.4f nTri=%zu why=BUILT simple=%d "
                                      "valid=%d Rlo=%.6f Rhi=%.6f ang=%.9f h=%.6f\n",
                                      r.id, r.radius, r.tris.size(), simple ? 1 : 0, fv ? 1 : 0,
                                      Rlo, Rhi, ang, h);
+                        try {
+                            BRepCheck_Analyzer anSt(f, Standard_True);
+                            char faceCtx[160];
+                            formatStatusInContext(anSt.Result(f), f, faceCtx, sizeof(faceCtx));
+                            std::fprintf(stderr, "DIAG_CONE_STATUS rid=%d shape=face onShape=%s\n",
+                                         r.id, faceCtx);
+                            int wi = 0;
+                            for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                                const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                                char wctx[160];
+                                formatStatusInContext(anSt.Result(w), f, wctx, sizeof(wctx));
+                                const double area = pcurveSignedArea(f, w);
+                                std::fprintf(stderr,
+                                             "DIAG_CONE_STATUS rid=%d shape=wire wi=%d onShape=%s "
+                                             "uvA=%.6f\n",
+                                             r.id, wi, wctx, area);
+                                int ei = 0;
+                                for (TopExp_Explorer ex(w, TopAbs_EDGE); ex.More();
+                                     ex.Next(), ++ei) {
+                                    const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                                    char ectx[160];
+                                    formatStatusInContext(anSt.Result(e), f, ectx, sizeof(ectx));
+                                    std::fprintf(stderr,
+                                                 "DIAG_CONE_STATUS rid=%d shape=edge wi=%d ei=%d "
+                                                 "onShape=%s\n",
+                                                 r.id, wi, ei, ectx);
+                                }
+                            }
+                            const double vLoP = coneVAtRadius(csurf->Cone(), Rlo);
+                            const double vHiP = coneVAtRadius(csurf->Cone(), Rhi);
+                            const double chart = 2.0 * kPi * std::fabs(vHiP - vLoP);
+                            std::fprintf(stderr,
+                                         "DIAG_OUTERSENSE rid=%d chart=%.7f dv=%.7f\n", r.id, chart,
+                                         std::fabs(vHiP - vLoP));
+                        } catch (const Standard_Failure&) {
+                        }
+                    }
+                    // Heal-not-revert (D-train-cone-2 3): an invalid cone face must
+                    // not publish. buildOneRegion returning false takes the landed
+                    // Edge-failure R1 rung (explode this region, keep the component).
+                    if (!fv) return coneFail("face-invalid", simple ? 1.0 : 0.0, 0.0);
                     r.builtAs = BuiltAs::Seamed360;
                     acc.push_back(f);
                     return true;
