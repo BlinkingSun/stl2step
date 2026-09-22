@@ -40,7 +40,8 @@
     "shelf_bracket": "D-140-3 §4(b) first measure; overCap at seed (D-130-24)"
   },
   "gate_130": {
-    "cyl_meets_chamfer": "D-130-23 (B6 deferred)"
+    "cyl_meets_chamfer": "D-130-23 (B6 deferred)",
+    "linkage_bores_chamfer": "D-train-cone 6 (fixture-first): 637aa6c raised this fixture's recoverable cone ground truth to 3 — the cross-bore mouth frustum (45.0 deg, Rlo/Rhi 10/12, axis (0,-20,-25) dir +X, 200 tris, 195.406476 mm^2, D-140-6 SS1/SS2) is measured from the MESH and is correct. The engine ships 2 cones: Origin::ChamferCone does not seed from the open cross-bore cylinder, so B1 reads cones 2/3. Registered RED here, in gate_130's own section, because 637aa6c registered only reverts.cone.open-seed-no-synthetic, which gate_130 never reads (gate_130.py:768 load_expected_red_section). The sidecar is NOT lowered. Retired by cone-claim-r3 (SPEC-cone-claim REV 3) when the frustum ships; see also reverts.plate.mouth-cone-unclaimed."
   },
   "grader": {}
 }
