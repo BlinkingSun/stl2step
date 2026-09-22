@@ -495,7 +495,7 @@ int coreTests(const std::string& corpus) {
         check(planes == 54, "T1 plate 54 plane oracles");
     }
 
-    // T2 — S20 R=10 is exactly two oracles, disjoint spans, union bore 4 pieces.
+    // T2 — S20 R=10 is exactly two oracles, disjoint spans, union bore 96/38/1.
     {
         grade::GradeDocument d;
         std::string err;
@@ -529,11 +529,13 @@ int coreTests(const std::string& corpus) {
             const bool spanLo = r10[0].x0 < 5.0 && r10[0].x1 > 25.0 && r10[0].x1 < 40.0;
             const bool spanHi = r10[1].x0 > 40.0 && r10[1].x0 < 55.0 && r10[1].x1 > 75.0;
             check(spanLo && spanHi, "T2 spans [0,30] and [50,80]");
-            check(r10[0].pieces == 4, "T2 union bore 4 edge pieces in one domain");
+            check(r10[0].tris == 96 && r10[0].pieces == 38, "T2 union bore 96 tris / 38 edge pieces");
+            check(r10[1].tris == 96 && r10[1].pieces == 1, "T2 control bore 96 tris / 1 piece");
         } else {
             check(false, "T2 axial overlap 0");
             check(false, "T2 spans [0,30] and [50,80]");
-            check(false, "T2 union bore 4 edge pieces in one domain");
+            check(false, "T2 union bore 96 tris / 38 edge pieces");
+            check(false, "T2 control bore 96 tris / 1 piece");
         }
     }
     return gFail;
