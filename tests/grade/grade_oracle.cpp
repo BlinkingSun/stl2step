@@ -2348,9 +2348,10 @@ void addMissingTris(std::vector<int>& tris, const std::vector<int>& more) {
 // removes T only. A region is never erased. Sphere and torus keep the
 // exemption already at this site. commitFailures appends planes no curved
 // oracle takes; otherwise they stay in `held`.
-void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
+bool releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
                        std::vector<char>* claimed, bool commitFailures,
                        std::vector<Oracle>* swallowed) {
+    bool touched = false;
     const int axisDof = paramCount(SurfClass::Cylinder) - 1;
     const int patch = axisDof - paramCount(SurfClass::Plane) + 1;
     const int dSection =
@@ -2367,7 +2368,16 @@ void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
         const Oracle& O = set.oracles[static_cast<size_t>(oi)];
         if (O.cls == SurfClass::Plane || O.tris.empty()) continue;
         acc[static_cast<size_t>(oi)].perHp.assign(static_cast<size_t>(nH), {});
+        const int quadV = paramCount(SurfClass::Plane) + 1;
         for (int hi = 0; hi < nH; ++hi) {
+            // A face larger than a quad reaches a cylinder only. Sphere and
+            // torus keep the quads; a boss top is not a torus patch.
+            if (O.cls != SurfClass::Cylinder) {
+                thread_local Scratch qsc;
+                qsc.ensure(m.verts.size());
+                uniqueVerts(m, held[static_cast<size_t>(hi)].tris, qsc.verts, qsc.st);
+                if (static_cast<int>(qsc.verts.size()) != quadV) continue;
+            }
             for (int t : held[static_cast<size_t>(hi)].tris) {
                 const Tri& tr = m.tris[static_cast<size_t>(t)];
                 bool on = true;
@@ -2415,27 +2425,53 @@ void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
         }
         if (best >= 0) {
             const std::vector<int>& T = acc[static_cast<size_t>(best)].perHp[static_cast<size_t>(hi)];
-            const std::unordered_set<int> Tset(T.begin(), T.end());
-            if (swallowed) {
+            // Per-triangle T (D-train-grader-4 (2)): a triangle of the overlap
+            // moves only when the oracle still certifies with it. A batch that
+            // fails the certificate is what deleted S03's bores (52 -> 76).
+            Oracle& dest = set.oracles[static_cast<size_t>(best)];
+            std::unordered_set<int> inDest(dest.tris.begin(), dest.tris.end());
+            std::vector<int> moved;
+            moved.reserve(T.size());
+            for (int t : T) {
+                if (inDest.count(t)) {
+                    moved.push_back(t);
+                    continue;
+                }
+                dest.tris.push_back(t);
+                if (certifies(m, dest.tris, dest.cls, dest.S)) {
+                    inDest.insert(t);
+                    moved.push_back(t);
+                    touched = true;
+                } else {
+                    dest.tris.pop_back();
+                }
+            }
+            const std::unordered_set<int> movedSet(moved.begin(), moved.end());
+            if (swallowed && !moved.empty()) {
                 Oracle part = hp;
-                part.tris = T;
+                part.tris = moved;
                 swallowed->push_back(std::move(part));
             }
             std::unordered_set<int> rest;
             for (int t : hp.tris)
-                if (!Tset.count(t)) rest.insert(t);
+                if (!movedSet.count(t)) rest.insert(t);
             for (int oi = 0; oi < nO; ++oi) {
                 if (set.oracles[static_cast<size_t>(oi)].cls == SurfClass::Plane) continue;
                 if (oi == best) {
                     if (!rest.empty()) eraseTris(set.oracles[static_cast<size_t>(oi)].tris, rest);
                     continue;
                 }
-                eraseTris(set.oracles[static_cast<size_t>(oi)].tris, Tset);
+                eraseTris(set.oracles[static_cast<size_t>(oi)].tris, movedSet);
                 if (!rest.empty()) eraseTris(set.oracles[static_cast<size_t>(oi)].tris, rest);
             }
-            addMissingTris(set.oracles[static_cast<size_t>(best)].tris, T);
             if (claimed) {
-                for (int t : T) (*claimed)[static_cast<size_t>(t)] = 1;
+                for (int t : moved) (*claimed)[static_cast<size_t>(t)] = 1;
+            }
+            for (Oracle& po : set.oracles) {
+                if (po.cls != SurfClass::Plane) continue;
+                const size_t before = po.tris.size();
+                eraseTris(po.tris, movedSet);
+                if (po.tris.size() != before) touched = true;
             }
             std::vector<int> keep;
             keep.reserve(rest.size());
@@ -2452,7 +2488,10 @@ void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
                 std::unordered_set<int> overlap;
                 for (int t : set.oracles[static_cast<size_t>(oi)].tris)
                     if (mine.count(t)) overlap.insert(t);
-                if (!overlap.empty()) eraseTris(set.oracles[static_cast<size_t>(oi)].tris, overlap);
+                if (!overlap.empty()) {
+                    eraseTris(set.oracles[static_cast<size_t>(oi)].tris, overlap);
+                    touched = true;
+                }
             }
             if (claimed) {
                 for (int t : hp.tris) (*claimed)[static_cast<size_t>(t)] = 0;
@@ -2468,6 +2507,7 @@ void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
         if (!o.tris.empty()) kept.push_back(std::move(o));
     for (Oracle& o : commit) kept.push_back(std::move(o));
     set.oracles.swap(kept);
+    return touched;
 }
 
 }  // namespace
@@ -2509,6 +2549,14 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                                 SurfClass::Sphere, SurfClass::Torus};
     std::vector<Oracle> heldPlanes;
     std::vector<Oracle> swallowedPlanes;
+    // |V| of a triangle region. The cylinder ambient test is this count.
+    auto vertCount = [&](const std::vector<int>& region) {
+        thread_local Scratch sc;
+        sc.ensure(m.verts.size());
+        uniqueVerts(m, region, sc.verts, sc.st);
+        return static_cast<int>(sc.verts.size());
+    };
+    const int quadV = paramCount(SurfClass::Plane) + 1;
 
     auto seedList = [&]() {
         std::vector<int> s;
@@ -2570,12 +2618,9 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             Oracle o;
             if (!tryGrow(m, claimedV, c, seed, false, o, skipComp, nullptr, &prior, &priorOwner))
                 continue;
-            // Planes smaller than a cylinder's vertex floor stay held so the
-            // release can see them. Holding every plane (the ruling's deletion
-            // of this gate) makes the cylinder walk scan the whole unclaimed
-            // mesh; measured on S20 it does not return. Larger faces commit.
-            if (c == SurfClass::Plane &&
-                static_cast<int>(o.tris.size()) < paramCount(SurfClass::Cylinder) + 1) {
+            // Every certified plane is held (D-train-grader-4 (2)). None commits.
+            // The cylinder ambient, not this gate, bounds the walk.
+            if (c == SurfClass::Plane) {
                 for (int t : o.tris) claimedV[static_cast<size_t>(t)] = 1;
                 held.push_back(std::move(o));
                 continue;
@@ -2749,6 +2794,16 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             out.oracles.push_back(std::move(o));
         }
         for (Oracle& o : canonHeld) heldPlanes.push_back(std::move(o));
+        // A face with |V| != 4 is not the cylinder ambient. It commits so the
+        // plane merge still sees it. A |V|==4 quad stays held (D-train-grader-4 (2)).
+        if (c == SurfClass::Plane) {
+            std::vector<Oracle> quads;
+            for (Oracle& o : heldPlanes) {
+                if (vertCount(o.tris) == quadV) quads.push_back(std::move(o));
+                else out.oracles.push_back(std::move(o));
+            }
+            heldPlanes.swap(quads);
+        }
         if (gdiag())
             std::fprintf(stderr, "GRADE_PHASE_OUT class=%s domain=%zu emitted=%zu held=%zu\n",
                          className(c), mine.size(), canon.size(), canonHeld.size());
@@ -2865,10 +2920,14 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         }
         restabilize();
         // Held planes were marked claimed so the plane walk would not re-seed
-        // them. Curved classes must see those triangles.
+        // them. The cylinder ambient includes a held region iff it is minimum
+        // evidence for a plane: |V| == paramCount(Plane)+1. Larger faces stay
+        // out and reach a cylinder only through H(O) (D-train-grader-4 (2)).
         if (c == SurfClass::Plane) {
-            for (const Oracle& o : heldPlanes)
+            for (const Oracle& o : heldPlanes) {
+                if (vertCount(o.tris) != quadV) continue;
                 for (int t : o.tris) claimed[static_cast<size_t>(t)] = 0;
+            }
         }
         // Give the bore its on-surface quads, and hand back patches that are
         // not a 2-D piece of a cylinder so cone / sphere / torus can grow.
@@ -2876,14 +2935,22 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             releaseHeldPlanes(m, heldPlanes, out, &claimed, false, &swallowedPlanes);
     }
 
-    releaseHeldPlanes(m, heldPlanes, out, &claimed, true, &swallowedPlanes);
-
-    // D-train-grader-3 (4): take-back and the uncertified-component drop run to
-    // a joint fixpoint with the claim and merge passes. A triangle either one
-    // releases is unclaimed, then re-claimed. The round count is reported.
+    // Large committed faces were not in the curved ambient. After every class
+    // has seeded, H(O) may move their on-cylinder triangles. Cone and torus
+    // have already claimed theirs.
+    for (const Oracle& o : out.oracles) {
+        if (o.cls != SurfClass::Plane) continue;
+        if (vertCount(o.tris) == quadV) continue;
+        heldPlanes.push_back(o);
+    }
+    // D-train-grader-4 (2): take-back (H(O), per triangle), the uncertified
+    // drop and the claim + merge passes run to a joint fixpoint. The round
+    // count is reported.
     int fixRounds = 0;
     for (;;) {
         ++fixRounds;
+        const bool released =
+            releaseHeldPlanes(m, heldPlanes, out, &claimed, false, &swallowedPlanes);
         bool dropped = false;
         {
             std::vector<Oracle> kept;
@@ -2907,7 +2974,13 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                 out.owner[static_cast<size_t>(t)] = i;
             }
         }
-        bool moved = false;
+        // Non-quad held faces stay out of the claim scan. A quad (|V|==4) is
+        // the ambient set and may join a cylinder here.
+        for (const Oracle& hp : heldPlanes) {
+            if (vertCount(hp.tris) == quadV) continue;
+            for (int t : hp.tris) claimed[static_cast<size_t>(t)] = 1;
+        }
+        bool moved = released;
         const SurfClass curved[4] = {SurfClass::Cylinder, SurfClass::Cone, SurfClass::Sphere,
                                      SurfClass::Torus};
         for (SurfClass c : curved) {
@@ -3007,6 +3080,15 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         if (!dropped && !moved) break;
         if (fixRounds > kMaxIters) break;
     }
+    {
+        // Copies of committed faces were held for H(O) only. Committing them
+        // again double-counts their triangles.
+        std::vector<Oracle> quads;
+        for (Oracle& o : heldPlanes)
+            if (vertCount(o.tris) == quadV) quads.push_back(std::move(o));
+        heldPlanes.swap(quads);
+    }
+    releaseHeldPlanes(m, heldPlanes, out, &claimed, true, &swallowedPlanes);
     std::fprintf(stderr, "GRADE_FIXPOINT rounds=%d\n", fixRounds);
 
     domainSplit(m, out, swallowedPlanes);
