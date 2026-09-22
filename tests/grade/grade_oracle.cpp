@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <numeric>
+#include <set>
 #include <unordered_set>
 
 namespace grade {
@@ -268,6 +269,12 @@ bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, Surf
     if (np == 0) return true;
     std::vector<double> r(static_cast<size_t>(nV)), J(static_cast<size_t>(nV * np));
     std::vector<double> p2 = p;
+    // Hoisted out of the iteration loop (D-train-grader-5 (1)(d)). Zeroed each
+    // iteration, so each entry starts at 0 as a fresh vector did.
+    std::vector<double> JtJ(static_cast<size_t>(np * np));
+    std::vector<double> Jtr(static_cast<size_t>(np));
+    std::vector<double> dp(static_cast<size_t>(np));
+    std::vector<double> pTry(static_cast<size_t>(np));
     double lam = 1e-3;
     double bestRss = rssSigned(m, verts, S);
     SurfParams best = S;
@@ -289,26 +296,33 @@ bool gaussNewton(const Mesh& m, const std::vector<int>& verts, SurfClass c, Surf
                 J[static_cast<size_t>(i * np + j)] = (rp - r[static_cast<size_t>(i)]) / fd;
             }
         }
-        std::vector<double> JtJ(static_cast<size_t>(np * np), 0.0), Jtr(static_cast<size_t>(np), 0.0);
+        std::fill(JtJ.begin(), JtJ.end(), 0.0);
+        std::fill(Jtr.begin(), Jtr.end(), 0.0);
         for (int i = 0; i < nV; ++i) {
             for (int j = 0; j < np; ++j) {
                 Jtr[static_cast<size_t>(j)] += J[static_cast<size_t>(i * np + j)] * r[static_cast<size_t>(i)];
-                for (int k = 0; k < np; ++k)
+                // Upper triangle including the diagonal. Each entry receives
+                // the same products in the same i-order as the full loop
+                // (D-train-grader-5 (1)(e)); the lower triangle is a copy.
+                for (int k = j; k < np; ++k)
                     JtJ[static_cast<size_t>(j * np + k)] +=
                         J[static_cast<size_t>(i * np + j)] * J[static_cast<size_t>(i * np + k)];
             }
         }
+        for (int j = 0; j < np; ++j)
+            for (int k = j + 1; k < np; ++k)
+                JtJ[static_cast<size_t>(k * np + j)] = JtJ[static_cast<size_t>(j * np + k)];
         for (int j = 0; j < np; ++j) {
             Jtr[static_cast<size_t>(j)] = -Jtr[static_cast<size_t>(j)];
             JtJ[static_cast<size_t>(j * np + j)] *= (1.0 + lam);
         }
-        std::vector<double> dp(static_cast<size_t>(np), 0.0);
+        std::fill(dp.begin(), dp.end(), 0.0);
         if (!solveN(np, JtJ.data(), Jtr.data(), dp.data())) {
             lam = std::min(lam * 10.0, 1e12);
             if (lam >= 1e12) break;
             continue;
         }
-        std::vector<double> pTry = p;
+        pTry = p;
         double maxStep = 0;
         for (int j = 0; j < np; ++j) {
             pTry[static_cast<size_t>(j)] += dp[static_cast<size_t>(j)];
@@ -380,6 +394,10 @@ bool gaussNewtonCone(const Mesh& m, const std::vector<int>& verts, SurfParams& S
     SurfParams best = S;
     const int np = 6;
     std::vector<double> r(static_cast<size_t>(nV)), J(static_cast<size_t>(nV * np));
+    std::vector<double> JtJ(static_cast<size_t>(np * np));
+    std::vector<double> Jtr(static_cast<size_t>(np));
+    std::vector<double> dp(static_cast<size_t>(np));
+    double pTry[6];
     for (int it = 0; it < kMaxIters; ++it) {
         SurfParams cur;
         apply(p, cur);
@@ -399,26 +417,29 @@ bool gaussNewtonCone(const Mesh& m, const std::vector<int>& verts, SurfParams& S
                 J[static_cast<size_t>(i * np + j)] = (rp - r[static_cast<size_t>(i)]) / fd;
             }
         }
-        std::vector<double> JtJ(static_cast<size_t>(np * np), 0.0), Jtr(static_cast<size_t>(np), 0.0);
+        std::fill(JtJ.begin(), JtJ.end(), 0.0);
+        std::fill(Jtr.begin(), Jtr.end(), 0.0);
         for (int i = 0; i < nV; ++i) {
             for (int j = 0; j < np; ++j) {
                 Jtr[static_cast<size_t>(j)] += J[static_cast<size_t>(i * np + j)] * r[static_cast<size_t>(i)];
-                for (int k = 0; k < np; ++k)
+                for (int k = j; k < np; ++k)
                     JtJ[static_cast<size_t>(j * np + k)] +=
                         J[static_cast<size_t>(i * np + j)] * J[static_cast<size_t>(i * np + k)];
             }
         }
+        for (int j = 0; j < np; ++j)
+            for (int k = j + 1; k < np; ++k)
+                JtJ[static_cast<size_t>(k * np + j)] = JtJ[static_cast<size_t>(j * np + k)];
         for (int j = 0; j < np; ++j) {
             Jtr[static_cast<size_t>(j)] = -Jtr[static_cast<size_t>(j)];
             JtJ[static_cast<size_t>(j * np + j)] *= (1.0 + lam);
         }
-        std::vector<double> dp(static_cast<size_t>(np), 0.0);
+        std::fill(dp.begin(), dp.end(), 0.0);
         if (!solveN(np, JtJ.data(), Jtr.data(), dp.data())) {
             lam = std::min(lam * 10.0, 1e12);
             if (lam >= 1e12) break;
             continue;
         }
-        double pTry[6];
         double maxStep = 0;
         for (int j = 0; j < np; ++j) {
             pTry[j] = p[j] + dp[static_cast<size_t>(j)];
@@ -817,9 +838,12 @@ Vec3 normalAt(const SurfParams& S, const Vec3& p) {
 bool fitClassEx(const Mesh& m, const std::vector<int>& region, SurfClass c, SurfParams& S,
                 bool refine) {
     if (region.empty()) return false;
-    Stamp st(static_cast<int>(m.verts.size()));
-    std::vector<int> verts;
-    uniqueVerts(m, region, verts, st);
+    // Same scratch rule as certifies/admits (grade_oracle.cpp Scratch): grown,
+    // never re-zeroed (D-train-grader-5 (1)(c)).
+    thread_local Scratch sc;
+    sc.ensure(m.verts.size());
+    uniqueVerts(m, region, sc.verts, sc.st);
+    const std::vector<int>& verts = sc.verts;
     S = SurfParams{};
     S.cls = c;
     switch (c) {
@@ -1200,13 +1224,13 @@ ProfileCensus profileCensus(const Mesh& m, const std::vector<int>& verts, const 
     return pc;
 }
 
-bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
-    // Growth admission: vertex-on-surface (and the plane normal clause). Size
-    // gates are applied only when a region is emitted (certifies).
-    thread_local Scratch sc;
-    sc.ensure(m.verts.size());
-    std::vector<int>& verts = sc.verts;
-    uniqueVerts(m, region, verts, sc.st);
+namespace {
+
+// The vertex-on-surface body. certifies and admits share one uniqueVerts per
+// certificate (D-train-grader-5 (1)(g)); the vertex list is the same
+// first-encounter order uniqueVerts produces.
+bool admitsOnVerts(const Mesh& m, const std::vector<int>& region, const std::vector<int>& verts,
+                   SurfClass c, const SurfParams& S) {
     for (int vi : verts) {
         if (distToSurf(m.verts[static_cast<size_t>(vi)], S) > m.tau) return false;
     }
@@ -1222,6 +1246,17 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
         if (!curvedNormalsOk(m, region, S)) return false;
     }
     return true;
+}
+
+}  // namespace
+
+bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S) {
+    // Growth admission: vertex-on-surface (and the plane normal clause). Size
+    // gates are applied only when a region is emitted (certifies).
+    thread_local Scratch sc;
+    sc.ensure(m.verts.size());
+    uniqueVerts(m, region, sc.verts, sc.st);
+    return admitsOnVerts(m, region, sc.verts, c, S);
 }
 
 // One cylinder emit predicate (D-train-grader-4 (1)). Section clause is
@@ -1248,7 +1283,7 @@ bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const
     std::vector<int>& verts = sc.verts;
     uniqueVerts(m, region, verts, sc.st);
     if (static_cast<int>(verts.size()) < paramCount(c) + 1) return false;
-    if (!admits(m, region, c, S)) return false;
+    if (!admitsOnVerts(m, region, verts, c, S)) return false;
     if (c == SurfClass::Sphere && !sphereNormalsSpan(m, region, S)) return false;
     if ((c == SurfClass::Cylinder || c == SurfClass::Sphere) && S.R > m.meshDiag)
         return false;
@@ -1326,8 +1361,9 @@ int minVertOf(const Mesh& m, const std::vector<int>& region) {
 }
 
 void fillOracleStats(const Mesh& m, Oracle& o) {
-    Stamp st(static_cast<int>(m.verts.size()));
-    uniqueVerts(m, o.tris, o.verts, st);
+    thread_local Scratch sc;
+    sc.ensure(m.verts.size());
+    uniqueVerts(m, o.tris, o.verts, sc.st);
     o.w = regionArea(m, o.tris);
     certifies(m, o.tris, o.cls, o.S, &o.maxResid, &o.maxNormalDev);
     bboxOf(m, o.tris, o.bboxMin, o.bboxMax);
@@ -1608,10 +1644,15 @@ std::string canonString(const Oracle& o, double q) {
 }
 
 bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vector<int>& R,
-              SurfParams& S, bool reverse) {
+              SurfParams& S, bool reverse, std::unordered_set<int>* inRKeep = nullptr) {
     bool changed = false;
     std::vector<int> cand;
-    std::unordered_set<int> inR(R.begin(), R.end());
+    // Membership is the set of R. A caller that keeps the set across the
+    // while-loop inserts each accepted triangle, so the next call does not
+    // rebuild it (D-train-grader-5 (1)(f)).
+    std::unordered_set<int> local;
+    std::unordered_set<int>& inR = inRKeep ? *inRKeep : local;
+    if (!inRKeep) inR.insert(R.begin(), R.end());
     for (int t : R) {
         for (int n : m.adj[static_cast<size_t>(t)]) {
             if (claimed[static_cast<size_t>(n)] || inR.count(n)) continue;
@@ -1622,13 +1663,14 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
     cand.erase(std::unique(cand.begin(), cand.end()), cand.end());
     (void)reverse;  // neighbour order is always ascending (SPEC §5.4)
     for (int u : cand) {
-        std::vector<int> R2 = R;
-        R2.push_back(u);
+        // push/pop is the copy R2 = R; R2.push_back(u). The vertex gate below
+        // reads R without u, matching the pre-swap region.
+        R.push_back(u);
         SurfParams S2;
-        if (fitClassEx(m, R2, c, S2, false) && admits(m, R2, c, S2)) {
-            R.swap(R2);
+        if (fitClassEx(m, R, c, S2, false) && admits(m, R, c, S2)) {
             S = S2;
             changed = true;
+            inR.insert(u);
             continue;
         }
         // Once the cylinder meets the section count certifies uses, keep that
@@ -1639,15 +1681,19 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
             // also once certifies accepts it (the section count). The vertex
             // gate is what lets an aligned strip reach that count
             // (D-train-grader-2 (1)(b), D-train-grader-3 (2)).
+            R.pop_back();
             thread_local Scratch hsc;
             hsc.ensure(m.verts.size());
             uniqueVerts(m, R, hsc.verts, hsc.st);
-            if (static_cast<int>(hsc.verts.size()) >= paramCount(SurfClass::Cylinder) + 1 &&
-                admits(m, R2, c, S)) {
-                R.swap(R2);
+            const bool over = static_cast<int>(hsc.verts.size()) >= paramCount(SurfClass::Cylinder) + 1;
+            R.push_back(u);
+            if (over && admits(m, R, c, S)) {
                 changed = true;
+                inR.insert(u);
+                continue;
             }
         }
+        R.pop_back();
     }
     return changed;
 }
@@ -1793,7 +1839,8 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
 
     auto finish = [&](std::vector<int>& R, SurfParams& S, bool regrow = true) -> bool {
         if (regrow) {
-            while (growOnce(m, claimed, c, R, S, reverse)) {
+            std::unordered_set<int> inR(R.begin(), R.end());
+            while (growOnce(m, claimed, c, R, S, reverse, &inR)) {
             }
         }
         if (tr) tr->bestGrown = std::max(tr->bestGrown, R.size());
@@ -1922,11 +1969,20 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             std::unordered_set<int> inR;
             inR.insert(seed);
             const int minV = paramCount(SurfClass::Cylinder) + 1;
+            // Append-only walk: vs is the previous uniqueVerts plus the new
+            // triangle's unseen vertices in first-encounter order
+            // (D-train-grader-5 (1)(a)). The frontier's minimum is the same
+            // nxt the full neighbour scan returned (1)(b).
+            thread_local Scratch walkSc;
+            walkSc.ensure(m.verts.size());
+            std::vector<int> vs;
+            uniqueVerts(m, R, vs, walkSc.st);
+            std::set<int> frontier;
+            for (int nb : m.adj[static_cast<size_t>(seed)]) {
+                if (claimed[static_cast<size_t>(nb)] || inR.count(nb)) continue;
+                frontier.insert(nb);
+            }
             while (static_cast<int>(R.size()) <= static_cast<int>(m.tris.size())) {
-                thread_local Scratch sc;
-                sc.ensure(m.verts.size());
-                std::vector<int> vs;
-                uniqueVerts(m, R, vs, sc.st);
                 if (static_cast<int>(vs.size()) >= minV) {
                     SurfParams plane;
                     const bool isPlane =
@@ -1943,17 +1999,11 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
                         if (fitClassEx(m, R, c, S, true) && certifies(m, R, c, S)) {
                             std::vector<int> grown = R;
                             SurfParams Sg = S;
-                            while (growOnce(m, claimed, c, grown, Sg, false)) {
+                            std::unordered_set<int> grownIn(grown.begin(), grown.end());
+                            while (growOnce(m, claimed, c, grown, Sg, false, &grownIn)) {
                             }
-                            bool neighbourLeft = false;
-                            for (int t : R) {
-                                for (int nb : m.adj[static_cast<size_t>(t)]) {
-                                    if (claimed[static_cast<size_t>(nb)] || inR.count(nb)) continue;
-                                    neighbourLeft = true;
-                                    break;
-                                }
-                                if (neighbourLeft) break;
-                            }
+                            // frontier is the unclaimed neighbours of R not in R.
+                            const bool neighbourLeft = !frontier.empty();
                             // A certified prefix that growOnce cannot extend
                             // is not yet the seed — keep the ascending walk.
                             if ((grown.size() > R.size() || !neighbourLeft) &&
@@ -1962,15 +2012,18 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
                         }
                     }
                 }
-                int nxt = -1;
-                for (int t : R)
-                    for (int nb : m.adj[static_cast<size_t>(t)]) {
-                        if (claimed[static_cast<size_t>(nb)] || inR.count(nb)) continue;
-                        if (nxt < 0 || nb < nxt) nxt = nb;
-                    }
-                if (nxt < 0) break;
+                if (frontier.empty()) break;
+                const int nxt = *frontier.begin();
+                frontier.erase(frontier.begin());
                 R.push_back(nxt);
                 inR.insert(nxt);
+                const Tri& ntr = m.tris[static_cast<size_t>(nxt)];
+                for (int k = 0; k < 3; ++k)
+                    if (walkSc.st.mark(ntr.v[k])) vs.push_back(ntr.v[k]);
+                for (int nb : m.adj[static_cast<size_t>(nxt)]) {
+                    if (claimed[static_cast<size_t>(nb)] || inR.count(nb)) continue;
+                    frontier.insert(nb);
+                }
             }
         }
     }
@@ -2397,12 +2450,12 @@ bool releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
             acc[static_cast<size_t>(oi)].ok = true;
             continue;
         }
-        Stamp st(static_cast<int>(m.verts.size()));
-        std::vector<int> vs;
-        uniqueVerts(m, acc[static_cast<size_t>(oi)].H, vs, st);
+        thread_local Scratch relSc;
+        relSc.ensure(m.verts.size());
+        uniqueVerts(m, acc[static_cast<size_t>(oi)].H, relSc.verts, relSc.st);
         SurfParams axisS = O.S;
         if (O.cls == SurfClass::Cone) axisS.p0 = O.S.apex;
-        const ProfileCensus pc = profileCensus(m, vs, axisS);
+        const ProfileCensus pc = profileCensus(m, relSc.verts, axisS);
         const int needCols = (O.cls == SurfClass::Cylinder) ? (dSection + 1) : patch;
         acc[static_cast<size_t>(oi)].ok = pc.levels >= patch && pc.columns >= needCols;
     }
@@ -2816,12 +2869,21 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             std::vector<int> idx;
             for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i)
                 if (out.oracles[static_cast<size_t>(i)].cls == c) idx.push_back(i);
+            // Sort keys are invariants of the regions for this sort
+            // (D-train-grader-5 (1)(i)).
+            std::vector<double> areaKey(out.oracles.size());
+            std::vector<int> mvKey(out.oracles.size());
+            for (int id : idx) {
+                areaKey[static_cast<size_t>(id)] =
+                    regionArea(m, out.oracles[static_cast<size_t>(id)].tris);
+                mvKey[static_cast<size_t>(id)] =
+                    minVertOf(m, out.oracles[static_cast<size_t>(id)].tris);
+            }
             std::sort(idx.begin(), idx.end(), [&](int a, int b) {
-                const double wa = regionArea(m, out.oracles[static_cast<size_t>(a)].tris);
-                const double wb = regionArea(m, out.oracles[static_cast<size_t>(b)].tris);
+                const double wa = areaKey[static_cast<size_t>(a)];
+                const double wb = areaKey[static_cast<size_t>(b)];
                 if (wa != wb) return wa > wb;
-                return minVertOf(m, out.oracles[static_cast<size_t>(a)].tris) <
-                       minVertOf(m, out.oracles[static_cast<size_t>(b)].tris);
+                return mvKey[static_cast<size_t>(a)] < mvKey[static_cast<size_t>(b)];
             });
             for (size_t ii = 0; ii < idx.size() && !merged; ++ii) {
                 const int i = idx[ii];
@@ -2871,6 +2933,15 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         // Claim pass. A triangle joins the existing surface when that surface
         // already admits it. The surface is replaced only when the enlarged
         // set does not certify under the current parameters.
+        // area / minVert are invariants of each oracle until it gains a
+        // triangle (D-train-grader-5 (1)(h)).
+        std::vector<double> areaKey(out.oracles.size());
+        std::vector<int> mvKey(out.oracles.size());
+        for (int ri = 0; ri < static_cast<int>(out.oracles.size()); ++ri) {
+            if (out.oracles[static_cast<size_t>(ri)].cls != c) continue;
+            areaKey[static_cast<size_t>(ri)] = regionArea(m, out.oracles[static_cast<size_t>(ri)].tris);
+            mvKey[static_cast<size_t>(ri)] = minVertOf(m, out.oracles[static_cast<size_t>(ri)].tris);
+        }
         bool claimChanged = true;
         while (claimChanged) {
             claimChanged = false;
@@ -2884,16 +2955,16 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                 for (int ri = 0; ri < static_cast<int>(out.oracles.size()); ++ri) {
                     Oracle& Rk = out.oracles[static_cast<size_t>(ri)];
                     if (Rk.cls != c) continue;
-                    std::vector<int> R2 = Rk.tris;
-                    R2.push_back(u);
+                    Rk.tris.push_back(u);
                     SurfParams S2 = Rk.S;
                     double maxR = 0;
-                    if (!certifies(m, R2, c, S2, &maxR)) {
-                        if (!fitClassEx(m, R2, c, S2, false) || !certifies(m, R2, c, S2, &maxR))
-                            continue;
-                    }
-                    const double area = regionArea(m, Rk.tris);
-                    const int mv = minVertOf(m, Rk.tris);
+                    const bool took = certifies(m, Rk.tris, c, S2, &maxR) ||
+                                      (fitClassEx(m, Rk.tris, c, S2, false) &&
+                                       certifies(m, Rk.tris, c, S2, &maxR));
+                    Rk.tris.pop_back();
+                    if (!took) continue;
+                    const double area = areaKey[static_cast<size_t>(ri)];
+                    const int mv = mvKey[static_cast<size_t>(ri)];
                     const bool better =
                         (maxR < bestResid) ||
                         (maxR == bestResid && area > bestArea) ||
@@ -2910,8 +2981,10 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                     Oracle& Rk = out.oracles[static_cast<size_t>(best)];
                     Rk.tris.push_back(u);
                     Rk.S = bestS;
-                    Rk.w = regionArea(m, Rk.tris);
-                    Rk.minVertIndex = minVertOf(m, Rk.tris);
+                    areaKey[static_cast<size_t>(best)] = regionArea(m, Rk.tris);
+                    mvKey[static_cast<size_t>(best)] = minVertOf(m, Rk.tris);
+                    Rk.w = areaKey[static_cast<size_t>(best)];
+                    Rk.minVertIndex = mvKey[static_cast<size_t>(best)];
                     claimed[static_cast<size_t>(u)] = 1;
                     out.owner[static_cast<size_t>(u)] = best;
                     claimChanged = true;
@@ -2990,12 +3063,19 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                 std::vector<int> idx;
                 for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i)
                     if (out.oracles[static_cast<size_t>(i)].cls == c) idx.push_back(i);
+                std::vector<double> areaKey(out.oracles.size());
+                std::vector<int> mvKey(out.oracles.size());
+                for (int id : idx) {
+                    areaKey[static_cast<size_t>(id)] =
+                        regionArea(m, out.oracles[static_cast<size_t>(id)].tris);
+                    mvKey[static_cast<size_t>(id)] =
+                        minVertOf(m, out.oracles[static_cast<size_t>(id)].tris);
+                }
                 std::sort(idx.begin(), idx.end(), [&](int a, int b) {
-                    const double wa = regionArea(m, out.oracles[static_cast<size_t>(a)].tris);
-                    const double wb = regionArea(m, out.oracles[static_cast<size_t>(b)].tris);
+                    const double wa = areaKey[static_cast<size_t>(a)];
+                    const double wb = areaKey[static_cast<size_t>(b)];
                     if (wa != wb) return wa > wb;
-                    return minVertOf(m, out.oracles[static_cast<size_t>(a)].tris) <
-                           minVertOf(m, out.oracles[static_cast<size_t>(b)].tris);
+                    return mvKey[static_cast<size_t>(a)] < mvKey[static_cast<size_t>(b)];
                 });
                 for (size_t ii = 0; ii < idx.size() && !merged; ++ii) {
                     const int i = idx[ii];
@@ -3031,6 +3111,15 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                     }
                 }
             }
+            std::vector<double> areaKey(out.oracles.size());
+            std::vector<int> mvKey(out.oracles.size());
+            for (int ri = 0; ri < static_cast<int>(out.oracles.size()); ++ri) {
+                if (out.oracles[static_cast<size_t>(ri)].cls != c) continue;
+                areaKey[static_cast<size_t>(ri)] =
+                    regionArea(m, out.oracles[static_cast<size_t>(ri)].tris);
+                mvKey[static_cast<size_t>(ri)] =
+                    minVertOf(m, out.oracles[static_cast<size_t>(ri)].tris);
+            }
             bool claimChanged = true;
             while (claimChanged) {
                 claimChanged = false;
@@ -3044,16 +3133,16 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                     for (int ri = 0; ri < static_cast<int>(out.oracles.size()); ++ri) {
                         Oracle& Rk = out.oracles[static_cast<size_t>(ri)];
                         if (Rk.cls != c) continue;
-                        std::vector<int> R2 = Rk.tris;
-                        R2.push_back(u);
+                        Rk.tris.push_back(u);
                         SurfParams S2 = Rk.S;
                         double maxR = 0;
-                        if (!certifies(m, R2, c, S2, &maxR)) {
-                            if (!fitClassEx(m, R2, c, S2, false) || !certifies(m, R2, c, S2, &maxR))
-                                continue;
-                        }
-                        const double area = regionArea(m, Rk.tris);
-                        const int mv = minVertOf(m, Rk.tris);
+                        const bool took = certifies(m, Rk.tris, c, S2, &maxR) ||
+                                          (fitClassEx(m, Rk.tris, c, S2, false) &&
+                                           certifies(m, Rk.tris, c, S2, &maxR));
+                        Rk.tris.pop_back();
+                        if (!took) continue;
+                        const double area = areaKey[static_cast<size_t>(ri)];
+                        const int mv = mvKey[static_cast<size_t>(ri)];
                         const bool better =
                             (maxR < bestResid) || (maxR == bestResid && area > bestArea) ||
                             (maxR == bestResid && area == bestArea && (best < 0 || mv < bestMinV));
@@ -3069,6 +3158,8 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                         Oracle& Rk = out.oracles[static_cast<size_t>(best)];
                         Rk.tris.push_back(u);
                         Rk.S = bestS;
+                        areaKey[static_cast<size_t>(best)] = regionArea(m, Rk.tris);
+                        mvKey[static_cast<size_t>(best)] = minVertOf(m, Rk.tris);
                         claimed[static_cast<size_t>(u)] = 1;
                         out.owner[static_cast<size_t>(u)] = best;
                         claimChanged = true;

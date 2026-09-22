@@ -1140,7 +1140,8 @@ int syntheticTests(const std::string& corpus, const std::string& argv0) {
             std::fprintf(stderr, "  T4 oblique cones=%d cyls=%d rows=%zu\n", nC, nK,
                          d2.intersections.size());
         }
-        check(tier2 >= 1, "T4 non-coaxial cone|cylinder tier 2");
+        checkId(tier2 >= 1, "grade.synthetic-oblique-cone-unseeded",
+                "T4 non-coaxial cone|cylinder tier 2");
     }
     return gFail;
 }
