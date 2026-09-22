@@ -42,9 +42,14 @@ add_test(NAME p1_ac2_gates_baseline
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/check_gates_full_baseline.py
             --build-dir ${CMAKE_BINARY_DIR})
+# p1_ac2 runs one gates_full (check_gates_full_baseline.py), so it inherits
+# gates_full's budget (tests/gates/CMakeLists.txt:74). Slowest measured
+# platform: shop PC 3870 s (2026-09-06) / 3700.62 s (8a9e97b) → ×1.5 = 5805
+# → 6000 on the 600 s grid. Hosted linux nested 1788.63 s (run 34171646888),
+# hosted windows first pass 1952.55 s (run 34343987075). D-train-push-5.
 set_tests_properties(p1_ac2_gates_baseline PROPERTIES
     LABELS "p1_compose"
-    TIMEOUT 1800)
+    TIMEOUT 6000)
 
 unset(_root)
 unset(_p1_tus)
