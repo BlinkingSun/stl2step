@@ -1031,6 +1031,7 @@ bool curvedNormalsOk(const Mesh& m, const std::vector<int>& region, const SurfPa
 struct ProfileCensus {
     int levels = 0;      // distinct z, collapsed within tau
     int columns = 0;     // distinct azimuth columns, collapsed within tau of arc
+    int rulings = 0;     // columns that carry >= 2 distinct profile levels
     double lineRes = 0;  // max perpendicular residual of the best profile line
     double sectionLineRes = 0;  // same residual on the section points (rad·e1, rad·e2)
 };
@@ -1085,6 +1086,44 @@ ProfileCensus profileCensus(const Mesh& m, const std::vector<int>& verts, const 
         if (v - lastp > dphi) {
             ++pc.columns;
             lastp = v;
+        }
+    }
+    // rulings(V): same azimuth collapse (anchor updated only when the gap
+    // exceeds dphi), counting a column only when it carries >= 2 profile
+    // levels. D-train-grader-4 (1). No new tolerance.
+    {
+        std::vector<int> ord(phis.size());
+        for (size_t i = 0; i < ord.size(); ++i) ord[i] = static_cast<int>(i);
+        std::sort(ord.begin(), ord.end(), [&](int a, int b) {
+            return phis[static_cast<size_t>(a)] < phis[static_cast<size_t>(b)];
+        });
+        int colStart = 0;
+        double anchor = phis[static_cast<size_t>(ord[0])];
+        auto flush = [&](int end) {
+            if (end <= colStart) return;
+            std::vector<double> colz;
+            colz.reserve(static_cast<size_t>(end - colStart));
+            for (int i = colStart; i < end; ++i)
+                colz.push_back(zs[static_cast<size_t>(ord[static_cast<size_t>(i)])]);
+            std::sort(colz.begin(), colz.end());
+            int lv = 1;
+            double lz = colz.front();
+            for (double v : colz) {
+                if (v - lz > m.tau) {
+                    ++lv;
+                    lz = v;
+                }
+            }
+            if (lv >= 2) ++pc.rulings;
+        };
+        for (int i = 1; i <= static_cast<int>(ord.size()); ++i) {
+            if (i == static_cast<int>(ord.size()) ||
+                phis[static_cast<size_t>(ord[static_cast<size_t>(i)])] - anchor > dphi) {
+                flush(i);
+                colStart = i;
+                if (i < static_cast<int>(ord.size()))
+                    anchor = phis[static_cast<size_t>(ord[static_cast<size_t>(i)])];
+            }
         }
     }
     // best line through (rho, z) by total least squares, and its max
@@ -1185,6 +1224,21 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
     return true;
 }
 
+// One cylinder emit predicate (D-train-grader-4 (1)). Section clause is
+// D-train-grader-3 (1), not reopened. The triangle floor is re-sited from
+// finish so tryGrow, the keep-S hatch and the section seed share it.
+// rulings >= d_axis+1 (d_axis = paramCount(Cylinder) - d_section = 2) is the
+// retirement instrument of grade.cyl-emit-triangle-floor: requiring it in this
+// predicate drops the four R=3 walls and moves plate planes 54 -> 58.
+bool cylinderEmitOk(const Mesh& m, const ProfileCensus& pc, int nTri) {
+    const int dSection =
+        paramCount(SurfClass::Torus) - (paramCount(SurfClass::Cylinder) - 1);
+    if (pc.columns < dSection + 1) return false;
+    if (pc.sectionLineRes <= m.tau) return false;
+    if (nTri < paramCount(SurfClass::Cylinder) + 1) return false;
+    return true;
+}
+
 bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const SurfParams& S,
                double* maxResidOut, double* maxNDevOut) {
     if (static_cast<int>(region.size()) < 2) return false;
@@ -1199,15 +1253,10 @@ bool certifies(const Mesh& m, const std::vector<int>& region, SurfClass c, const
     if ((c == SurfClass::Cylinder || c == SurfClass::Sphere) && S.R > m.meshDiag)
         return false;
     if (c == SurfClass::Cylinder) {
-        // D-train-grader-3 (1): dist_cyl is the section-circle distance, so
-        // over-determination is counted in azimuth columns. d_section is the
-        // same three the torus profile already uses. A straight section is a
-        // plane (d = 3 < 5) and is refused here, not by a bound.
+        // D-train-grader-3 (1) + D-train-grader-4 (1): section, axis, and the
+        // re-sited triangle floor. One predicate, three call sites.
         const ProfileCensus pc = profileCensus(m, verts, S);
-        const int dSection =
-            paramCount(SurfClass::Torus) - (paramCount(SurfClass::Cylinder) - 1);
-        if (pc.columns < dSection + 1) return false;
-        if (pc.sectionLineRes <= m.tau) return false;
+        if (!cylinderEmitOk(m, pc, static_cast<int>(region.size()))) return false;
     }
     if (c == SurfClass::Torus) {
         if (S.R > m.meshDiag || S.r > m.meshDiag) return false;
@@ -1752,17 +1801,6 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             if (tr) ++tr->failFit;
             return false;
         }
-        // A cylinder the walk cannot grow past the vertex floor is the
-        // osculating 4-triangle patch of a later class (S04's torus tube) or
-        // the plane-plus-stray phantom. The real cylinders all grow past it:
-        // the slot wall to 39, the shallow R=5 bore to 6. paramCount+1 is the
-        // same floor certifies already uses on vertices; here it is the
-        // triangle count of a seed that never became that region.
-        if (c == SurfClass::Cylinder &&
-            static_cast<int>(R.size()) < paramCount(SurfClass::Cylinder) + 1) {
-            if (tr) ++tr->failSize;
-            return false;
-        }
         if (!certifies(m, R, c, S)) {
             if (tr) ++tr->failCert;
             return false;
@@ -1884,8 +1922,6 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             std::unordered_set<int> inR;
             inR.insert(seed);
             const int minV = paramCount(SurfClass::Cylinder) + 1;
-            const int dSection =
-                paramCount(SurfClass::Torus) - (paramCount(SurfClass::Cylinder) - 1);
             while (static_cast<int>(R.size()) <= static_cast<int>(m.tris.size())) {
                 thread_local Scratch sc;
                 sc.ensure(m.verts.size());
@@ -1895,15 +1931,14 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
                     SurfParams plane;
                     const bool isPlane =
                         fitPlane(m, R, plane) && certifies(m, R, SurfClass::Plane, plane);
-                    // Unrefined fit only, and only the section count, before
-                    // the refined certificate. A straight or 3-column prefix
-                    // is not a seed (D-train-grader-3 (1)).
+                    // Unrefined fit, then the one emit predicate, before the
+                    // refined certificate (D-train-grader-3 (1), D-train-grader-4 (1)).
                     SurfParams cheap;
                     const bool cheapOk =
                         !isPlane && fitClassEx(m, R, c, cheap, false);
                     const ProfileCensus pc =
                         cheapOk ? profileCensus(m, vs, cheap) : ProfileCensus{};
-                    if (cheapOk && pc.columns >= dSection + 1 && pc.sectionLineRes > m.tau) {
+                    if (cheapOk && cylinderEmitOk(m, pc, static_cast<int>(R.size()))) {
                         SurfParams S;
                         if (fitClassEx(m, R, c, S, true) && certifies(m, R, c, S)) {
                             std::vector<int> grown = R;
