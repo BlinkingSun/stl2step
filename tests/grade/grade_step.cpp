@@ -18,6 +18,7 @@
 #include <OSD.hxx>
 #include <Precision.hxx>
 #include <STEPControl_Reader.hxx>
+#include <mutex>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -28,6 +29,10 @@
 
 namespace grade {
 namespace {
+
+// loadStep is the only OCCT entry in a grade. Interface_Static is process-global
+// (D-train-grader-5 (2) S3).
+std::mutex gLoadStepMu;
 
 void silenceOcct() {
     Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
@@ -107,6 +112,7 @@ SurfParams fromAdaptor(const BRepAdaptor_Surface& ads, SurfClass& cls) {
 
 bool loadStep(const std::string& path, const Mesh& mesh, StepModel& out, std::string& err,
               bool computeVolume) {
+    std::lock_guard<std::mutex> lock(gLoadStepMu);
     silenceOcct();
     out = StepModel{};
     out.cover.assign(mesh.tris.size(), -1);

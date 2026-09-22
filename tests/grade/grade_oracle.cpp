@@ -27,6 +27,8 @@ bool gdiag() {
     return on;
 }
 
+thread_local std::string* gOracleStderr = nullptr;
+
 struct Stamp {
     std::vector<int> gen;
     int g = 1;
@@ -773,6 +775,8 @@ bool fitTorus(const Mesh& m, const std::vector<int>& region, const std::vector<i
 }
 
 }  // namespace
+
+void setOracleStderrSink(std::string* sink) { gOracleStderr = sink; }
 
 double distToSurf(const Vec3& v, const SurfParams& S) {
     switch (S.cls) {
@@ -3180,7 +3184,14 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         heldPlanes.swap(quads);
     }
     releaseHeldPlanes(m, heldPlanes, out, &claimed, true, &swallowedPlanes);
-    std::fprintf(stderr, "GRADE_FIXPOINT rounds=%d\n", fixRounds);
+    {
+        char fixBuf[64];
+        const int fixN = std::snprintf(fixBuf, sizeof fixBuf, "GRADE_FIXPOINT rounds=%d\n", fixRounds);
+        if (fixN > 0) {
+            if (gOracleStderr) gOracleStderr->append(fixBuf, static_cast<size_t>(fixN));
+            else std::fputs(fixBuf, stderr);
+        }
+    }
 
     domainSplit(m, out, swallowedPlanes);
 

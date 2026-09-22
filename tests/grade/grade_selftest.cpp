@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -17,6 +18,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -242,13 +244,94 @@ int coreTests(const std::string& corpus) {
     cfg.skipVolume = true;
     cfg.quiet = true;
 
+    // Every gradeFiles call below, in source order, produced up front. Checks
+    // stay on this thread and replay each grade's GRADE_FIXPOINT line where
+    // the call used to print it (D-train-grader-5 (2) S3).
+    struct Job {
+        std::string stl, step;
+        grade::GradeConfig cfg;
+        grade::GradeDocument doc;
+        std::string err;
+        std::string cap;
+        bool ok = false;
+    };
+    std::vector<Job> jobs;
+    auto enqueue = [&](const std::string& stl, const std::string& step, const grade::GradeConfig& c) {
+        Job j;
+        j.stl = stl;
+        j.step = step;
+        j.cfg = c;
+        jobs.push_back(std::move(j));
+    };
+    grade::GradeConfig rev = cfg;
+    rev.reverseSeeds = true;
+    const std::string s01 = join(corpus, "S01.stl");
+    const std::string s01step = join(corpus, "S01.exact.step");
+    const std::string s03 = join(corpus, "S03.stl");
+    const std::string s03step = join(corpus, "S03.exact.step");
+    const std::string hp = join(corpus, "handle-pickup.stl");
+    const std::string plate = join(corpus, "linkage_bores_chamfer.stl");
+    enqueue(s01, s01step, cfg);
+    enqueue(join(corpus, "S02.stl"), join(corpus, "S02.exact.step"), cfg);
+    enqueue(s03, s03step, cfg);
+    enqueue(join(corpus, "S04.stl"), join(corpus, "S04.exact.step"), cfg);
+    enqueue(s01, s01step, cfg);
+    enqueue(s01, s01step, cfg);
+    enqueue(s01, s01step, rev);
+    enqueue(s03, s03step, cfg);
+    enqueue(s03, s03step, cfg);
+    enqueue(s03, s03step, rev);
+    enqueue(hp, s01step, cfg);
+    enqueue(hp, s01step, cfg);
+    enqueue(hp, s01step, rev);
+    enqueue(plate, s01step, cfg);
+    if (!gPlateStep.empty()) enqueue(plate, gPlateStep, cfg);
+    enqueue(join(corpus, "S20_cross_bore_union.stl"),
+            join(corpus, "S20_cross_bore_union.exact.step"), cfg);
+
+    unsigned nJobs = std::thread::hardware_concurrency();
+    if (const char* e = std::getenv("STL2STEP_GRADE_SELFTEST_JOBS")) {
+        if (e[0]) {
+            const int v = std::atoi(e);
+            nJobs = v > 0 ? static_cast<unsigned>(v) : 1u;
+        }
+    }
+    if (nJobs == 0) nJobs = 1;
+    std::fprintf(stdout, "grade_selftest jobs=%u\n", nJobs);
+    std::fflush(stdout);
+    {
+        std::atomic<size_t> cursor{0};
+        auto worker = [&]() {
+            for (;;) {
+                const size_t i = cursor.fetch_add(1);
+                if (i >= jobs.size()) break;
+                grade::setOracleStderrSink(&jobs[i].cap);
+                jobs[i].ok = grade::gradeFiles(jobs[i].stl, jobs[i].step, jobs[i].cfg, jobs[i].doc,
+                                               jobs[i].err);
+                grade::setOracleStderrSink(nullptr);
+            }
+        };
+        const unsigned pool =
+            nJobs < static_cast<unsigned>(jobs.size()) ? nJobs : static_cast<unsigned>(jobs.size());
+        std::vector<std::thread> threads;
+        threads.reserve(pool);
+        for (unsigned t = 0; t < pool; ++t) threads.emplace_back(worker);
+        for (std::thread& t : threads) t.join();
+    }
+    size_t nextJob = 0;
+    auto take = [&](grade::GradeDocument& d, std::string& err) -> bool {
+        Job& j = jobs[nextJob++];
+        if (!j.cap.empty()) std::fputs(j.cap.c_str(), stderr);
+        d = std::move(j.doc);
+        err = std::move(j.err);
+        return j.ok;
+    };
+
     // Case 1: S01
     {
         grade::GradeDocument d;
         std::string err;
-        const std::string stl = join(corpus, "S01.stl");
-        const std::string step = join(corpus, "S01.exact.step");
-        check(grade::gradeFiles(stl, step, cfg, d, err), "S01 grade runs");
+        check(take(d, err), "S01 grade runs");
         if (!err.empty()) std::fprintf(stderr, "  S01 err: %s\n", err.c_str());
         check(d.mesh.tris.size() == 12, "S01 12 triangles");
         check(near(d.mesh.q, 8.2591e-07, 1e-10), "S01 q");
@@ -269,8 +352,7 @@ int coreTests(const std::string& corpus) {
     {
         grade::GradeDocument d;
         std::string err;
-        check(grade::gradeFiles(join(corpus, "S02.stl"), join(corpus, "S02.exact.step"), cfg, d, err),
-              "S02 grade runs");
+        check(take(d, err), "S02 grade runs");
         check(d.mesh.tris.size() == 412, "S02 412 triangles");
         check(near(d.mesh.q, 1.6518e-06, 1e-9), "S02 q");
         const int np = countClass(d, grade::SurfClass::Plane);
@@ -307,8 +389,7 @@ int coreTests(const std::string& corpus) {
     {
         grade::GradeDocument d;
         std::string err;
-        check(grade::gradeFiles(join(corpus, "S03.stl"), join(corpus, "S03.exact.step"), cfg, d, err),
-              "S03 grade runs");
+        check(take(d, err), "S03 grade runs");
         check(d.mesh.tris.size() == 584, "S03 584 triangles");
         check(near(d.mesh.q, 6.6072e-06, 1e-9), "S03 q");
         int nCyl4 = 0, nCyl76 = 0;
@@ -394,8 +475,7 @@ int coreTests(const std::string& corpus) {
     {
         grade::GradeDocument d;
         std::string err;
-        check(grade::gradeFiles(join(corpus, "S04.stl"), join(corpus, "S04.exact.step"), cfg, d, err),
-              "S04 grade runs");
+        check(take(d, err), "S04 grade runs");
         check(d.mesh.tris.size() == 652, "S04 652 triangles");
         int nT = 0, t512 = 0, nC = 0, nP = 0, top30 = 0;
         grade::Status tStat = grade::Status::Missing;
@@ -442,11 +522,12 @@ int coreTests(const std::string& corpus) {
             if (expectQ[i] > 0) check(near(mesh.q, expectQ[i], 1e-9), (std::string("q table ") + files[i]).c_str());
         }
         auto once = [&](bool rev, const std::string& stl, const std::string& step) {
-            grade::GradeConfig c = cfg;
-            c.reverseSeeds = rev;
+            (void)rev;
+            (void)stl;
+            (void)step;
             grade::GradeDocument d;
             std::string err;
-            grade::gradeFiles(stl, step, c, d, err);
+            take(d, err);
             return std::make_pair(grade::writeJson(d), grade::writeMd(d));
         };
         {
@@ -484,8 +565,7 @@ int coreTests(const std::string& corpus) {
     {
         grade::GradeDocument d;
         std::string err;
-        const std::string stl = join(corpus, "linkage_bores_chamfer.stl");
-        check(grade::gradeFiles(stl, join(corpus, "S01.exact.step"), cfg, d, err), "T1 plate grades");
+        check(take(d, err), "T1 plate grades");
         int planes = 0, cone200 = 0;
         for (const auto& f : d.features) {
             if (f.oracle.cls == grade::SurfClass::Plane) ++planes;
@@ -513,7 +593,7 @@ int coreTests(const std::string& corpus) {
         if (!gPlateStep.empty()) {
             grade::GradeDocument ps;
             std::string perr;
-            check(grade::gradeFiles(stl, gPlateStep, cfg, ps, perr), "T1 plate step grades");
+            check(take(ps, perr), "T1 plate step grades");
             int downgraded = 0, other = 0;
             struct FaceHit {
                 int entity;
@@ -574,9 +654,7 @@ int coreTests(const std::string& corpus) {
     {
         grade::GradeDocument d;
         std::string err;
-        check(grade::gradeFiles(join(corpus, "S20_cross_bore_union.stl"),
-                                join(corpus, "S20_cross_bore_union.exact.step"), cfg, d, err),
-              "T2 S20 grades");
+        check(take(d, err), "T2 S20 grades");
         struct Row {
             double x0, x1;
             int pieces;

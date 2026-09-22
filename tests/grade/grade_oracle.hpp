@@ -65,6 +65,10 @@ Vec3 normalAt(const SurfParams& S, const Vec3& p);
 // produce is invariant under them by construction (see buildOracle).
 void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder = 0);
 
+// Harness-only. When set on the calling thread, GRADE_FIXPOINT is appended
+// here instead of stderr so a parallel selftest can replay it in source order.
+void setOracleStderrSink(std::string* sink);
+
 void assignFeatureIds(const Mesh& m, OracleSet& set);
 
 }  // namespace grade
