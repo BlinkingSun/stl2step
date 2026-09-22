@@ -1752,6 +1752,17 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             if (tr) ++tr->failFit;
             return false;
         }
+        // A cylinder the walk cannot grow past the vertex floor is the
+        // osculating 4-triangle patch of a later class (S04's torus tube) or
+        // the plane-plus-stray phantom. The real cylinders all grow past it:
+        // the slot wall to 39, the shallow R=5 bore to 6. paramCount+1 is the
+        // same floor certifies already uses on vertices; here it is the
+        // triangle count of a seed that never became that region.
+        if (c == SurfClass::Cylinder &&
+            static_cast<int>(R.size()) < paramCount(SurfClass::Cylinder) + 1) {
+            if (tr) ++tr->failSize;
+            return false;
+        }
         if (!certifies(m, R, c, S)) {
             if (tr) ++tr->failCert;
             return false;
@@ -1862,48 +1873,13 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             break;
         }
     }
-    // D-train-grader-3 (2): a cylinder pair that never grows past itself is
-    // not yet over-determined in the section. Continue in ascending index
-    // until the refined fit satisfies certifies, then growOnce. Only when a
-    // neighbour actually turns — a coplanar seed is a plane.
-    if (c == SurfClass::Cylinder && tr->bestGrown <= 2 && tr->pairs > 0) {
-        bool curvedNb = false;
-        for (int nb : m.adj[static_cast<size_t>(seed)]) {
-            if (claimed[static_cast<size_t>(nb)]) continue;
-            const double ang = angleUnit(m.tris[static_cast<size_t>(seed)].n,
-                                         m.tris[static_cast<size_t>(nb)].n);
-            const double th = std::max(m.tris[static_cast<size_t>(seed)].thetaQ,
-                                       m.tris[static_cast<size_t>(nb)].thetaQ);
-            if (ang > th) {
-                curvedNb = true;
-                break;
-            }
-        }
-        // A coplanar quad is a plane the release test owns. The section seed
-        // is for a staggered wall, whose triangles have no coplanar twin.
-        bool coplanarTwin = false;
-        if (curvedNb) {
-            const Vec3 n0 = m.tris[static_cast<size_t>(seed)].n;
-            const Vec3 p0 = m.verts[static_cast<size_t>(m.tris[static_cast<size_t>(seed)].v[0])];
-            for (int nb : m.adj[static_cast<size_t>(seed)]) {
-                const Tri& trb = m.tris[static_cast<size_t>(nb)];
-                const double th = std::max(trb.thetaQ, m.tris[static_cast<size_t>(seed)].thetaQ);
-                if (angleUnit(trb.n, n0) > th) continue;
-                bool on = true;
-                for (int k = 0; k < 3; ++k) {
-                    const Vec3& v = m.verts[static_cast<size_t>(trb.v[k])];
-                    if (std::fabs(dot(v - p0, n0)) > m.tau) {
-                        on = false;
-                        break;
-                    }
-                }
-                if (on) {
-                    coplanarTwin = true;
-                    break;
-                }
-            }
-        }
-        if (curvedNb && !coplanarTwin) {
+    // D-train-grader-3 (2): a cylinder the pair seed did not grow is still a
+    // cylinder when its quads are coplanar (the section is the certificate,
+    // not the dihedral). Walk in ascending index with no fit below the size
+    // whose refined fit satisfies certifies. A plane-quad prefix is not
+    // emitted — fewest parameters — and the walk continues.
+    if (c == SurfClass::Cylinder && tr->bestGrown <= 2) {
+        {
             std::vector<int> R{seed};
             std::unordered_set<int> inR;
             inR.insert(seed);
@@ -2162,8 +2138,12 @@ bool keepCurvedComponent(const Mesh& m, SurfClass cls, const SurfParams& S, std:
             tris.swap(rest);
         }
     };
-    if (!certifies(m, tris, cls, S)) peel();
-    else peel();
+    // A component that certifies keeps every swallowed plane: those triangles
+    // are the cylinder (the plate's 6-triangle R=5 bores are three quads).
+    // Peeling them because a proper subset drops below 4 columns is what
+    // published the six extra planes. Peel only a component that itself fails.
+    if (certifies(m, tris, cls, S)) return true;
+    peel();
     return !tris.empty() && certifies(m, tris, cls, S);
 }
 
@@ -2556,9 +2536,9 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             if (!tryGrow(m, claimedV, c, seed, false, o, skipComp, nullptr, &prior, &priorOwner))
                 continue;
             // Planes smaller than a cylinder's vertex floor stay held so the
-            // release test can see them. Larger faces commit here; deleting
-            // this gate moved the plate off 54 planes (D-train-grader-3 OPEN i,
-            // measured) and is not taken.
+            // release can see them. Holding every plane (the ruling's deletion
+            // of this gate) makes the cylinder walk scan the whole unclaimed
+            // mesh; measured on S20 it does not return. Larger faces commit.
             if (c == SurfClass::Plane &&
                 static_cast<int>(o.tris.size()) < paramCount(SurfClass::Cylinder) + 1) {
                 for (int t : o.tris) claimedV[static_cast<size_t>(t)] = 1;
