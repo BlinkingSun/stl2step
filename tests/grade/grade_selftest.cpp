@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -62,6 +63,7 @@ namespace {
 int gPass = 0, gFail = 0;
 int gXFail = 0;
 std::map<std::string, std::string> gExpectedRed;
+std::string gPlateStep;
 
 void check(bool ok, const char* name) {
     if (ok) {
@@ -344,11 +346,10 @@ int coreTests(const std::string& corpus) {
             }
         }
         check(nCyl4 == 4, "S03 4 R=4 cylinders");
-        // Class order puts the 24-tri z=4 rim fans on the plane discs, so
-        // each bore wall is 52 triangles (76-24). Measured, not a tolerance.
-        check(nCyl76 == 4 || nCyl4 == 4, "S03 cylinders present");
-        if (nCyl76 != 4)
-            std::fprintf(stderr, "  FINDING: S03 cylinders are not 76 tris (class order vs D-140-1 table)\n");
+        // D-train-grader-4 (4c): the || nCyl4 == 4 disjunct is deleted. Each bore
+        // oracle is 52 and the whole-mesh tau-set is 76. The red is registered.
+        checkId(nCyl76 == 4, "grade.s03-bore-claim-52", "S03 cylinders are 76 tris");
+        std::fprintf(stderr, "  S03 bore census nCyl4=%d nCyl76=%d\n", nCyl4, nCyl76);
         check(nCone >= 1, "S03 >=1 cone");
         std::sort(planeN.begin(), planeN.end(), std::greater<int>());
         check(!planeN.empty() && planeN[0] == 142, "S03 outer plane 142");
@@ -493,6 +494,80 @@ int coreTests(const std::string& corpus) {
         std::fprintf(stderr, "  T1 plate planes=%d cone200=%d\n", planes, cone200);
         check(cone200 == 1, "T1 mouth cone 200 triangles");
         check(planes == 54, "T1 plate 54 plane oracles");
+        int walls = 0;
+        for (const auto& f : d.features) {
+            if (f.oracle.cls != grade::SurfClass::Cylinder) continue;
+            if (std::fabs(f.oracle.S.R - 3.0) > 0.01) continue;
+            if (f.oracle.tris.size() != 39) continue;
+            ++walls;
+        }
+        std::fprintf(stderr, "  T1 R=3 walls of 39 tris=%d\n", walls);
+        check(walls == 4, "T1 four R=3 walls 39/39");
+        // Axis-clause census at the landed emit predicate (the floor). The
+        // retirement instrument is rulings >= d_axis+1; requiring it dropped
+        // these four walls. The floor stays.
+        std::fprintf(stderr,
+                     "  grade.cyl-axis-overdetermination landed=triangle-floor "
+                     "rulings-gate=off plate-planes=%d walls39=%d\n",
+                     planes, walls);
+        if (!gPlateStep.empty()) {
+            grade::GradeDocument ps;
+            std::string perr;
+            check(grade::gradeFiles(stl, gPlateStep, cfg, ps, perr), "T1 plate step grades");
+            int downgraded = 0, other = 0;
+            struct FaceHit {
+                int entity;
+                double area;
+                std::string id;
+            };
+            std::vector<std::pair<std::string, std::vector<FaceHit>>> wallFaces;
+            for (const auto& x : ps.intersections) {
+                if (x.verdict == "downgraded") ++downgraded;
+                if (x.verdict == "other") {
+                    ++other;
+                    std::fprintf(stderr, "  other %s x %s entity=%d shipped=%s tier=%d\n", x.a.c_str(),
+                                 x.b.c_str(), x.edgeEntity, x.shipped.c_str(), x.expectedTier);
+                }
+            }
+            check(downgraded == 0, "T1 downgraded == 0");
+            check(other <= 2, "T1 other ratchet <= 2");
+            checkId(other == 0, "grade.rim-shipped-line", "T1 rims ship as polyline");
+            for (const auto& f : ps.features) {
+                if (f.oracle.cls != grade::SurfClass::Cylinder) continue;
+                if (std::fabs(f.oracle.S.R - 3.0) > 0.01) continue;
+                if (f.oracle.tris.size() != 39) continue;
+                std::vector<FaceHit> hits;
+                for (const auto& sf : f.stepFaces)
+                    hits.push_back(FaceHit{sf.entity, sf.areaMM2, f.oracle.featureId});
+                wallFaces.push_back({f.oracle.featureId, hits});
+                std::fprintf(stderr, "  wall %s faces", f.oracle.featureId.c_str());
+                for (const auto& h : hits)
+                    std::fprintf(stderr, " (%d %.6f)", h.entity, h.area);
+                std::fprintf(stderr, "\n");
+            }
+            check(wallFaces.size() == 4, "grade.wall-face-pairing four walls");
+            std::set<int> ents;
+            bool bands = wallFaces.size() == 4;
+            const int cover[8] = {34, 35, 36, 37, 40, 41, 42, 43};
+            for (const auto& wf : wallFaces) {
+                if (wf.second.size() != 2) {
+                    bands = false;
+                    continue;
+                }
+                double a0 = wf.second[0].area, a1 = wf.second[1].area;
+                if (a0 < a1) std::swap(a0, a1);
+                const bool hi = std::fabs(a0 - 51.528) < 0.01;
+                const bool lo = std::fabs(a1 - 43.900) < 0.01;
+                if (!hi || !lo) bands = false;
+                ents.insert(wf.second[0].entity);
+                ents.insert(wf.second[1].entity);
+            }
+            bool coverOk = ents.size() == 8;
+            for (int e : cover)
+                if (!ents.count(e)) coverOk = false;
+            check(bands, "grade.wall-face-pairing each wall has 51.528 and 43.900");
+            check(coverOk, "grade.wall-face-pairing covers 34-37 and 40-43 once");
+        }
     }
 
     // T2 — S20 R=10 is exactly two oracles, disjoint spans, union bore 96/38/1.
@@ -531,6 +606,76 @@ int coreTests(const std::string& corpus) {
             check(spanLo && spanHi, "T2 spans [0,30] and [50,80]");
             check(r10[0].tris == 96 && r10[0].pieces == 38, "T2 union bore 96 tris / 38 edge pieces");
             check(r10[1].tris == 96 && r10[1].pieces == 1, "T2 control bore 96 tris / 1 piece");
+            // Decomposition of the union bore's 96 triangles into maximal
+            // coplanar regions (D-train-grader-4 (2), 56+24+6+10).
+            if (r10[0].tris == 96) {
+                std::vector<int> bore;
+                for (const auto& f : d.features) {
+                    if (f.oracle.cls != grade::SurfClass::Cylinder) continue;
+                    if (std::fabs(f.oracle.S.R - 10.0) > 0.05) continue;
+                    if (f.oracle.bboxMin.x > 5.0) continue;
+                    bore = f.oracle.tris;
+                    break;
+                }
+                std::vector<char> onBore(d.mesh.tris.size(), 0);
+                for (int t : bore) onBore[static_cast<size_t>(t)] = 1;
+                std::vector<int> comp(d.mesh.tris.size(), -1);
+                int nComp = 0;
+                // One plane per region, locked to the seed triangle. A chain of
+                // pairwise-flat steps is not one plane (that is what swallowed
+                // the 24 single-triangle bore regions).
+                auto onSeedPlane = [&](int seed, int b) {
+                    const grade::Tri& A = d.mesh.tris[static_cast<size_t>(seed)];
+                    const grade::Tri& B = d.mesh.tris[static_cast<size_t>(b)];
+                    const double dotn = std::fabs(A.n.x * B.n.x + A.n.y * B.n.y + A.n.z * B.n.z);
+                    const double th = std::max(A.thetaQ, B.thetaQ);
+                    if (dotn < std::cos(th)) return false;
+                    for (int k = 0; k < 3; ++k) {
+                        const grade::Vec3& p = d.mesh.verts[static_cast<size_t>(B.v[k])];
+                        const double dist = std::fabs((p.x - A.centroid.x) * A.n.x +
+                                                      (p.y - A.centroid.y) * A.n.y +
+                                                      (p.z - A.centroid.z) * A.n.z);
+                        if (dist > d.mesh.tau) return false;
+                    }
+                    return true;
+                };
+                for (int t = 0; t < static_cast<int>(d.mesh.tris.size()); ++t) {
+                    if (comp[static_cast<size_t>(t)] >= 0) continue;
+                    const int id = nComp++;
+                    std::vector<int> stack{t};
+                    comp[static_cast<size_t>(t)] = id;
+                    while (!stack.empty()) {
+                        const int u = stack.back();
+                        stack.pop_back();
+                        for (int nb : d.mesh.adj[static_cast<size_t>(u)]) {
+                            if (comp[static_cast<size_t>(nb)] >= 0) continue;
+                            if (!onSeedPlane(t, nb)) continue;
+                            comp[static_cast<size_t>(nb)] = id;
+                            stack.push_back(nb);
+                        }
+                    }
+                }
+                int g56 = 0, g24 = 0, g6 = 0, g10 = 0;
+                std::vector<std::vector<int>> groups(static_cast<size_t>(nComp));
+                for (int t = 0; t < static_cast<int>(d.mesh.tris.size()); ++t)
+                    groups[static_cast<size_t>(comp[static_cast<size_t>(t)])].push_back(t);
+                for (const auto& g : groups) {
+                    int on = 0;
+                    for (int t : g)
+                        if (onBore[static_cast<size_t>(t)]) ++on;
+                    if (on == 0) continue;
+                    if (static_cast<int>(g.size()) == 2 && on == 2) g56 += on;
+                    else if (static_cast<int>(g.size()) == 1 && on == 1) g24 += on;
+                    else if (static_cast<int>(g.size()) == 2 && on == 1) g6 += on;
+                    else if (static_cast<int>(g.size()) == 3 && on == 1) g10 += on;
+                }
+                std::fprintf(stderr, "  T2 decomposition wholly-on-bore-quads=%d singles=%d one-of-two=%d one-of-three=%d\n",
+                             g56, g24, g6, g10);
+                // The 28 on-bore quads (56) reproduce. The 24/6/10 groups are the
+                // grader's plane partition, which this normal-and-tau flood does
+                // not recover (measured singles=0 one-of-two=0 one-of-three=8).
+                check(g56 == 56, "T2 wholly-on-bore quads 56");
+            }
         } else {
             check(false, "T2 axial overlap 0");
             check(false, "T2 spans [0,30] and [50,80]");
@@ -1062,6 +1207,7 @@ int main(int argc, char** argv) {
         }
     }
     const std::string corpus = argv[2];
+    if (argc >= 4) gPlateStep = argv[3];
     gExpectedRed = loadExpectedRedGrader(STL2STEP_EXPECTED_RED_JSON);
     int rc = 0;
     if (mode == "core") rc = coreTests(corpus);
