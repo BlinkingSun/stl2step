@@ -41,7 +41,14 @@ set_tests_properties(p1_compose_gate PROPERTIES
 add_test(NAME p1_ac2_gates_baseline
     COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/check_gates_full_baseline.py
-            --build-dir ${CMAKE_BINARY_DIR})
+            --build-dir ${CMAKE_BINARY_DIR}
+            --config $<CONFIG>)
+add_test(NAME p1_ac2_guard_selftest
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_check_gates_full_baseline.py)
+set_tests_properties(p1_ac2_guard_selftest PROPERTIES
+    LABELS "p1_compose"
+    TIMEOUT 60)
 # p1_ac2 runs one gates_full (check_gates_full_baseline.py), so it inherits
 # gates_full's budget (tests/gates/CMakeLists.txt:74). Slowest measured
 # platform: shop PC 3870 s (2026-09-06) / 3700.62 s (8a9e97b) → ×1.5 = 5805

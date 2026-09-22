@@ -1,0 +1,4 @@
+10/85 Test #10: gates_full ...........................   Passed  1811.53 sec
+56/85 Test #56: p1_ac2_gates_baseline ................   Passed  1788.63 sec
+100% tests passed, 0 tests failed out of 85
+S11 G1 FAIL

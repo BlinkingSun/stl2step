@@ -1,0 +1,11 @@
+Internal ctest changing into directory: /tmp/claude-502/-Users-jroberts/9c897005-5805-46a7-90f3-a0dcc55b539c/scratchpad/train/ci-linux-budget/skipgen/build
+Test project /tmp/claude-502/-Users-jroberts/9c897005-5805-46a7-90f3-a0dcc55b539c/scratchpad/train/ci-linux-budget/skipgen/build
+    Start 1: gates_full
+1/1 Test #1: gates_full .......................***Skipped   0.01 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.01 sec
+
+The following tests did not run:
+	  1 - gates_full (Skipped)

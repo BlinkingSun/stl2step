@@ -27,16 +27,23 @@ def parse_g1_fails(text: str) -> set[str]:
     return fails
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--build-dir", required=True)
-    args = ap.parse_args()
-    proc = subprocess.run(
-        ["ctest", "--test-dir", args.build_dir, "-R", "^gates_full$",
-         "--output-on-failure"],
-        capture_output=True, text=True,
+def nested_ran(text: str) -> bool:
+    return bool(re.search(r"Test\s+#\d+:\s+gates_full", text)) and bool(
+        re.search(r"[0-9]+% tests passed", text)
     )
-    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+
+def evaluate(text: str, cfg: str) -> int:
+    """Guard body. `cfg` is the nested ctest -C value, empty when unset."""
+    if not nested_ran(text):
+        tail = text.splitlines()[-20:]
+        if tail:
+            print("\n".join(tail), file=sys.stderr)
+        print(
+            f"nested ctest ran no gates_full (config={cfg}) — AC2-A1 did not execute",
+            file=sys.stderr,
+        )
+        return 1
     got = parse_g1_fails(text)
     print("gates_full G1 FAIL fixtures:", sorted(got))
     print("inherited baseline:         ", sorted(BASELINE_G1_FAIL))
@@ -50,6 +57,20 @@ def main() -> int:
         print("note: baseline fixtures not observed as G1 FAIL:", sorted(missing))
     print("AC2-A1 guard PASS")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--build-dir", required=True)
+    ap.add_argument("--config", default="")
+    args = ap.parse_args(argv)
+    cmd = [
+        "ctest", "--test-dir", args.build_dir, "-R", "^gates_full$",
+        "--output-on-failure",
+    ] + (["-C", args.config] if args.config else [])
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    return evaluate(text, args.config)
 
 
 if __name__ == "__main__":
