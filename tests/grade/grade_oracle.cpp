@@ -907,13 +907,10 @@ bool wrapsAxis(const Mesh& m, const std::vector<int>& triIds, const Vec3& origin
 }
 
 bool cylinderNormalsOk(const Mesh& m, const std::vector<int>& triIds, const SurfParams& S) {
-    for (int t : triIds) {
-        const Tri& tr = m.tris[static_cast<size_t>(t)];
-        if (std::fabs(dot(tr.n, S.n)) > std::sin(tr.thetaQ)) return false;
-    }
-    // Closed N<6 prisms (cube walls wrap an axis with 4 face-normals).
-    // Applied during growth too — a 2-tri seed does not surround, so fillets
-    // can still start. Partial strips stay.
+    // Closed-prism clause only (D-train-grader (4)). The axial-normal loop is
+    // not a certificate; curvedNormalsOk is the predicate the other curved
+    // classes already use. A 2-tri seed does not surround, so an open strip
+    // still starts. The clause sees the intact tau-set.
     if (surroundsAxis(m, triIds, S.n) &&
         distinctNormalClusters(m, triIds) < paramCount(SurfClass::Cylinder) + 1)
         return false;
@@ -1140,6 +1137,7 @@ bool admits(const Mesh& m, const std::vector<int>& region, SurfClass c, const Su
             if (angleUnit(tr.n, S.n) > tr.thetaQ) return false;
         }
     } else if (c == SurfClass::Cylinder) {
+        if (!curvedNormalsOk(m, region, S)) return false;
         if (!cylinderNormalsOk(m, region, S)) return false;
     } else if (c == SurfClass::Cone || c == SurfClass::Torus) {
         if (!curvedNormalsOk(m, region, S)) return false;
@@ -1527,10 +1525,19 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
         std::vector<int> R2 = R;
         R2.push_back(u);
         SurfParams S2;
-        if (!fitClassEx(m, R2, c, S2, false)) continue;
-        if (admits(m, R2, c, S2)) {
+        if (fitClassEx(m, R2, c, S2, false) && admits(m, R2, c, S2)) {
             R.swap(R2);
             S = S2;
+            changed = true;
+            continue;
+        }
+        // Once a cylinder is over-determined, keep that surface and take any
+        // triangle that still lies on it. A shorter seed must re-solve, so a
+        // bend (a torus) does not walk off on an under-determined fit.
+        if (c == SurfClass::Cylinder &&
+            static_cast<int>(R.size()) >= paramCount(SurfClass::Cylinder) + 1 &&
+            admits(m, R2, c, S)) {
+            R.swap(R2);
             changed = true;
         }
     }
@@ -1735,10 +1742,9 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
             }
             if (wrap) return false;
         }
-        // N>=6 is the cylinder/prism law (AGENTS.md): a closed prism with
-        // fewer than d_C+1 triangles cannot be a cylinder. Cone is gated
-        // only by certifies (|V| >= d_C+1, |R| >= 2).
-        if (c == SurfClass::Cylinder) {
+        // The triangle floor is the closed-prism clause (D-train-grader (3)).
+        // Open strips are governed by certifies' |V| >= d_C+1.
+        if (c == SurfClass::Cylinder && surroundsAxis(m, R, S.n)) {
             if (static_cast<int>(R.size()) < paramCount(SurfClass::Cylinder) + 1)
                 return false;
         }
@@ -1898,6 +1904,298 @@ bool tryGrow(const Mesh& m, std::vector<char>& claimed, SurfClass c, int seed, b
     return false;
 }
 
+double chordDeviation(const Vec3& mid, const SurfParams& S) {
+    switch (S.cls) {
+        case SurfClass::Plane:
+            return 0.0;
+        case SurfClass::Cylinder: {
+            const Vec3 w = mid - S.p0;
+            const double ax = dot(w, S.n);
+            return S.R - norm(w - S.n * ax);
+        }
+        case SurfClass::Cone: {
+            const Vec3 u = mid - S.apex;
+            const double ax = dot(u, S.n);
+            const double rho = norm(u - S.n * ax);
+            const double localR = std::fabs(ax) * std::tan(std::fabs(S.alpha));
+            return localR - rho;
+        }
+        case SurfClass::Sphere:
+            return S.R - norm(mid - S.p0);
+        case SurfClass::Torus: {
+            const Vec3 u = mid - S.p0;
+            const double ax = dot(u, S.n);
+            const Vec3 rad = u - S.n * ax;
+            const double rlen = norm(rad);
+            if (!(rlen > 0.0)) return 0.0;
+            const Vec3 onMaj = S.p0 + rad * (S.R / rlen);
+            return S.r - norm(mid - onMaj);
+        }
+        default:
+            return 0.0;
+    }
+}
+
+double sigmaOf(const Mesh& m, const Oracle& o) {
+    if (o.cls == SurfClass::Plane || o.tris.empty()) return 0.0;
+    std::unordered_set<uint64_t> seen;
+    double sigma = 0.0;
+    bool any = false;
+    auto ek = [](int a, int b) {
+        if (a > b) std::swap(a, b);
+        return (uint64_t(uint32_t(a)) << 32) | uint32_t(b);
+    };
+    for (int t : o.tris) {
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        for (int s = 0; s < 3; ++s) {
+            const uint64_t k = ek(tr.v[s], tr.v[(s + 1) % 3]);
+            if (!seen.insert(k).second) continue;
+            const Vec3 mid = (m.verts[static_cast<size_t>(tr.v[s])] +
+                              m.verts[static_cast<size_t>(tr.v[(s + 1) % 3])]) *
+                             0.5;
+            const double dev = chordDeviation(mid, o.S);
+            if (!any || dev > sigma) {
+                sigma = dev;
+                any = true;
+            }
+        }
+    }
+    return any ? sigma : 0.0;
+}
+
+// One oracle per connected component of the domain graph (D-train-grader (2)).
+// sigma decides connectivity only. Off-surface triangles that close a puncture
+// are not added to the oracle.
+void domainSplit(const Mesh& m, OracleSet& set) {
+    std::vector<Oracle> out;
+    out.reserve(set.oracles.size());
+    for (Oracle& src : set.oracles) {
+        const double sigma = sigmaOf(m, src);
+        std::vector<char> inClaim(m.tris.size(), 0);
+        for (int t : src.tris) inClaim[static_cast<size_t>(t)] = 1;
+        std::vector<char> claimVtx(m.verts.size(), 0);
+        for (int t : src.tris) {
+            const Tri& tr = m.tris[static_cast<size_t>(t)];
+            for (int k = 0; k < 3; ++k) claimVtx[static_cast<size_t>(tr.v[k])] = 1;
+        }
+        std::vector<char> inDom = inClaim;
+        std::vector<int> dom = src.tris;
+        std::vector<signed char> vClass(m.verts.size(), 0);
+        std::vector<int> punct;
+        auto onS = [&](int w) {
+            return claimVtx[static_cast<size_t>(w)] || vClass[static_cast<size_t>(w)] > 0;
+        };
+        for (bool changed = true; changed;) {
+            changed = false;
+            std::vector<char> domVtx(m.verts.size(), 0);
+            for (int t : dom) {
+                const Tri& tr = m.tris[static_cast<size_t>(t)];
+                for (int k = 0; k < 3; ++k) domVtx[static_cast<size_t>(tr.v[k])] = 1;
+            }
+            for (int v : punct) domVtx[static_cast<size_t>(v)] = 1;
+            for (size_t v = 0; v < m.verts.size(); ++v) {
+                if (!domVtx[v]) continue;
+                for (int t : m.vertTris[v]) {
+                    if (inDom[static_cast<size_t>(t)]) continue;
+                    const Tri& tr = m.tris[static_cast<size_t>(t)];
+                    for (int k = 0; k < 3; ++k) {
+                        const int w = tr.v[k];
+                        if (claimVtx[static_cast<size_t>(w)] || vClass[static_cast<size_t>(w)] != 0)
+                            continue;
+                        if (distToSurf(m.verts[static_cast<size_t>(w)], src.S) <= sigma) {
+                            vClass[static_cast<size_t>(w)] = 1;
+                            punct.push_back(w);
+                        } else {
+                            vClass[static_cast<size_t>(w)] = -1;
+                        }
+                        changed = true;
+                    }
+                }
+            }
+            for (int v : punct) {
+                for (int s : m.vertTris[static_cast<size_t>(v)]) {
+                    if (inDom[static_cast<size_t>(s)]) continue;
+                    const Tri& tr = m.tris[static_cast<size_t>(s)];
+                    if (!onS(tr.v[0]) || !onS(tr.v[1]) || !onS(tr.v[2])) continue;
+                    inDom[static_cast<size_t>(s)] = 1;
+                    dom.push_back(s);
+                    changed = true;
+                }
+            }
+        }
+        std::vector<int> compId(m.tris.size(), -1);
+        std::vector<std::vector<int>> groups;
+        for (int t0 : dom) {
+            if (compId[static_cast<size_t>(t0)] >= 0) continue;
+            const int cid = static_cast<int>(groups.size());
+            std::vector<int> comp, stk{t0};
+            compId[static_cast<size_t>(t0)] = cid;
+            while (!stk.empty()) {
+                const int x = stk.back();
+                stk.pop_back();
+                comp.push_back(x);
+                const Tri& tr = m.tris[static_cast<size_t>(x)];
+                for (int k = 0; k < 3; ++k) {
+                    const int v = tr.v[k];
+                    for (int u : m.vertTris[static_cast<size_t>(v)]) {
+                        if (!inDom[static_cast<size_t>(u)] || compId[static_cast<size_t>(u)] >= 0)
+                            continue;
+                        compId[static_cast<size_t>(u)] = cid;
+                        stk.push_back(u);
+                    }
+                }
+            }
+            std::vector<int> claim;
+            for (int t : comp)
+                if (inClaim[static_cast<size_t>(t)]) claim.push_back(t);
+            if (claim.empty()) continue;
+            std::sort(claim.begin(), claim.end());
+            groups.push_back(std::move(claim));
+        }
+        std::sort(groups.begin(), groups.end(),
+                  [](const std::vector<int>& a, const std::vector<int>& b) { return a.front() < b.front(); });
+        if (groups.size() <= 1) {
+            src.sigmaMM = sigma;
+            src.punctures = static_cast<int>(punct.size());
+            out.push_back(std::move(src));
+            continue;
+        }
+        for (const std::vector<int>& g : groups) {
+            Oracle c = src;
+            c.tris = g;
+            c.sigmaMM = sigmaOf(m, c);
+            c.punctures = 0;
+            // Punctures of this component: same predicate, this triangle set.
+            {
+                Oracle tmp = c;
+                // Recount with a fresh walk so the printed count matches the graph.
+                std::vector<char> subClaim(m.tris.size(), 0);
+                for (int t : g) subClaim[static_cast<size_t>(t)] = 1;
+                std::vector<char> subVtx(m.verts.size(), 0);
+                for (int t : g) {
+                    const Tri& tr = m.tris[static_cast<size_t>(t)];
+                    for (int k = 0; k < 3; ++k) subVtx[static_cast<size_t>(tr.v[k])] = 1;
+                }
+                std::vector<char> seenV(m.verts.size(), 0);
+                const double sig = c.sigmaMM;
+                for (int t : g) {
+                    const Tri& tr = m.tris[static_cast<size_t>(t)];
+                    for (int k = 0; k < 3; ++k) {
+                        for (int u : m.vertTris[static_cast<size_t>(tr.v[k])]) {
+                            const Tri& nb = m.tris[static_cast<size_t>(u)];
+                            for (int s = 0; s < 3; ++s) {
+                                const int w = nb.v[s];
+                                if (subVtx[static_cast<size_t>(w)] || seenV[static_cast<size_t>(w)])
+                                    continue;
+                                seenV[static_cast<size_t>(w)] = 1;
+                                if (distToSurf(m.verts[static_cast<size_t>(w)], tmp.S) <= sig)
+                                    ++c.punctures;
+                            }
+                        }
+                    }
+                }
+            }
+            out.push_back(std::move(c));
+        }
+    }
+    set.oracles.swap(out);
+}
+
+void eraseTris(std::vector<int>& tris, const std::unordered_set<int>& drop) {
+    std::vector<int> keep;
+    keep.reserve(tris.size());
+    for (int t : tris)
+        if (!drop.count(t)) keep.push_back(t);
+    tris.swap(keep);
+}
+
+void addMissingTris(std::vector<int>& tris, const std::vector<int>& more) {
+    std::unordered_set<int> have(tris.begin(), tris.end());
+    for (int t : more)
+        if (have.insert(t).second) tris.push_back(t);
+    std::sort(tris.begin(), tris.end());
+}
+
+// Held planes release to a curved oracle only when they cover a 2-D patch of
+// it (D-train-grader (1)). Otherwise the plane commits and its triangles are
+// taken back.
+// commitFailures: planes that no curved oracle takes are appended to `set`.
+// Otherwise they stay in `held` with their triangles removed from curved
+// oracles, so a later class can still grow on them.
+void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
+                       std::vector<char>* claimed, bool commitFailures) {
+    const int axisDof = paramCount(SurfClass::Cylinder) - 1;
+    const int patch = axisDof - paramCount(SurfClass::Plane) + 1;
+    std::vector<Oracle> commit;
+    std::vector<Oracle> still;
+    for (Oracle& hp : held) {
+        if (hp.tris.empty()) continue;
+        Stamp st(static_cast<int>(m.verts.size()));
+        std::vector<int> verts;
+        uniqueVerts(m, hp.tris, verts, st);
+        const std::unordered_set<int> mine(hp.tris.begin(), hp.tris.end());
+        int best = -1;
+        size_t bestN = 0;
+        const int n = static_cast<int>(set.oracles.size());
+        for (int oi = 0; oi < n; ++oi) {
+            const Oracle& O = set.oracles[static_cast<size_t>(oi)];
+            if (O.cls == SurfClass::Plane) continue;
+            if (O.tris.size() <= hp.tris.size()) continue;
+            std::vector<int> restT;
+            restT.reserve(O.tris.size());
+            for (int t : O.tris)
+                if (!mine.count(t)) restT.push_back(t);
+            if (restT.empty() || !certifies(m, restT, O.cls, O.S)) continue;
+            bool on = true;
+            for (int vi : verts) {
+                if (distToSurf(m.verts[static_cast<size_t>(vi)], O.S) > m.tau) {
+                    on = false;
+                    break;
+                }
+            }
+            if (!on) continue;
+            SurfParams axisS = O.S;
+            if (O.cls == SurfClass::Cone) axisS.p0 = O.S.apex;
+            const ProfileCensus pc = profileCensus(m, verts, axisS);
+            const bool profileOk = pc.levels >= patch && pc.columns >= patch;
+            // A sphere has no axis; a torus patch is already on the certified
+            // surface. Both keep a plane that lies on them. A cylinder or cone
+            // keeps it only when the plane covers a 2-D patch (two profile
+            // levels and two azimuth columns).
+            if (!profileOk && O.cls != SurfClass::Sphere && O.cls != SurfClass::Torus) continue;
+            if (best < 0 || O.tris.size() > bestN) {
+                best = oi;
+                bestN = O.tris.size();
+            }
+        }
+        if (best >= 0) {
+            for (int oi = 0; oi < n; ++oi) {
+                if (oi == best) continue;
+                eraseTris(set.oracles[static_cast<size_t>(oi)].tris, mine);
+            }
+            addMissingTris(set.oracles[static_cast<size_t>(best)].tris, hp.tris);
+            if (claimed) {
+                for (int t : hp.tris) (*claimed)[static_cast<size_t>(t)] = 1;
+            }
+        } else {
+            for (int oi = 0; oi < n; ++oi)
+                eraseTris(set.oracles[static_cast<size_t>(oi)].tris, mine);
+            if (claimed) {
+                for (int t : hp.tris) (*claimed)[static_cast<size_t>(t)] = 0;
+            }
+            if (commitFailures) commit.push_back(std::move(hp));
+            else still.push_back(std::move(hp));
+        }
+    }
+    held.swap(still);
+    std::vector<Oracle> kept;
+    kept.reserve(set.oracles.size() + commit.size());
+    for (Oracle& o : set.oracles)
+        if (!o.tris.empty()) kept.push_back(std::move(o));
+    for (Oracle& o : commit) kept.push_back(std::move(o));
+    set.oracles.swap(kept);
+}
+
 }  // namespace
 
 void assignFeatureIds(const Mesh& m, OracleSet& set) {
@@ -1935,8 +2233,7 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
     // falls to sphere, that is sphereNormalsSpan's defect — never reorder.
     const SurfClass order[5] = {SurfClass::Plane, SurfClass::Cylinder, SurfClass::Cone,
                                 SurfClass::Sphere, SurfClass::Torus};
-
-    std::vector<Oracle> heldPlanes;  // |R|==2 tessellation quads; curved classes may claim them
+    std::vector<Oracle> heldPlanes;
 
     auto seedList = [&]() {
         std::vector<int> s;
@@ -1998,29 +2295,13 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             Oracle o;
             if (!tryGrow(m, claimedV, c, seed, false, o, skipComp, nullptr, &prior, &priorOwner))
                 continue;
-            if (c == SurfClass::Plane && static_cast<int>(o.tris.size()) == 2) {
-                // Tessellated cylinders/spheres are planar quads. Hold a 2-tri
-                // plane whose neighbour dihedral is the tessellation step
-                // (≤ π / (d_C+1) would be a hex; use the cylinder over-
-                // determination count). Cube faces against a fillet also look
-                // shallow — cylinderNormalsOk keeps those off the cylinder,
-                // and they commit after the curved pass.
-                bool sharp = true;
-                std::unordered_set<int> inR(o.tris.begin(), o.tris.end());
-                const Vec3 pn = o.S.n;
-                for (int t : o.tris) {
-                    for (int n : m.adj[static_cast<size_t>(t)]) {
-                        if (inR.count(n)) continue;
-                        if (angleUnit(pn, m.tris[static_cast<size_t>(n)].n) <=
-                            2.0 * M_PI / static_cast<double>(paramCount(SurfClass::Cylinder) + 1))
-                            sharp = false;
-                    }
-                }
-                if (sharp) {
-                    for (int t : o.tris) claimedV[static_cast<size_t>(t)] = 1;
-                    sink.push_back(std::move(o));
-                    continue;
-                }
+            // A plane smaller than a cylinder's over-determination count is
+            // held: curved classes see it, and the release test either gives
+            // it to a curved oracle or commits it. Larger planes commit now.
+            // The dihedral test is gone (D-train-grader (1)).
+            if (c == SurfClass::Plane &&
+                static_cast<int>(o.tris.size()) < paramCount(SurfClass::Cylinder) + 1) {
+                for (int t : o.tris) claimedV[static_cast<size_t>(t)] = 1;
                 held.push_back(std::move(o));
                 continue;
             }
@@ -2197,10 +2478,69 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
             std::fprintf(stderr, "GRADE_PHASE_OUT class=%s domain=%zu emitted=%zu held=%zu\n",
                          className(c), mine.size(), canon.size(), canonHeld.size());
         restabilize();
-        // Claim pass (islands). Triangle order is always ascending — seed
-        // reversal is a growth-order probe; SPEC §5.4's claim/merge must be
-        // a canonical maximal partition (area desc, then min welded-vertex
-        // index — never input index / region id).
+        // Merge first, on the regions growth emitted, so coaxial islands become
+        // one surface before any later triangle joins that surface.
+        bool merged = true;
+        while (merged) {
+            merged = false;
+            std::vector<int> idx;
+            for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i)
+                if (out.oracles[static_cast<size_t>(i)].cls == c) idx.push_back(i);
+            std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+                const double wa = regionArea(m, out.oracles[static_cast<size_t>(a)].tris);
+                const double wb = regionArea(m, out.oracles[static_cast<size_t>(b)].tris);
+                if (wa != wb) return wa > wb;
+                return minVertOf(m, out.oracles[static_cast<size_t>(a)].tris) <
+                       minVertOf(m, out.oracles[static_cast<size_t>(b)].tris);
+            });
+            for (size_t ii = 0; ii < idx.size() && !merged; ++ii) {
+                const int i = idx[ii];
+                for (size_t jj = ii + 1; jj < idx.size(); ++jj) {
+                    const int j = idx[jj];
+                    std::vector<int> U = out.oracles[static_cast<size_t>(i)].tris;
+                    U.insert(U.end(), out.oracles[static_cast<size_t>(j)].tris.begin(),
+                             out.oracles[static_cast<size_t>(j)].tris.end());
+                    SurfParams S = out.oracles[static_cast<size_t>(i)].S;
+                    const bool solved = fitClassEx(m, U, c, S, false) && certifies(m, U, c, S);
+                    if (!solved) {
+                        S = out.oracles[static_cast<size_t>(i)].S;
+                        if (!certifies(m, U, c, S)) {
+                            S = out.oracles[static_cast<size_t>(j)].S;
+                            if (!certifies(m, U, c, S)) continue;
+                        }
+                    }
+                    const int lo = std::min(i, j), hi = std::max(i, j);
+                    out.oracles[static_cast<size_t>(lo)].tris.swap(U);
+                    out.oracles[static_cast<size_t>(lo)].S = S;
+                    for (int t : out.oracles[static_cast<size_t>(hi)].tris)
+                        out.owner[static_cast<size_t>(t)] = lo;
+                    out.oracles.erase(out.oracles.begin() + hi);
+                    for (int t = 0; t < static_cast<int>(m.tris.size()); ++t) {
+                        if (out.owner[static_cast<size_t>(t)] > hi)
+                            --out.owner[static_cast<size_t>(t)];
+                    }
+                    for (int k = 0; k < static_cast<int>(out.oracles.size()); ++k)
+                        out.oracles[static_cast<size_t>(k)].id = k;
+                    merged = true;
+                    break;
+                }
+            }
+        }
+        // Re-solve the merged region before triangles join it. An algebraic
+        // fit of a partial wall can sit far enough off the surface that the
+        // rest of the wall is outside tau; the iterated fit pulls it back
+        // only when the region still certifies.
+        for (Oracle& o : out.oracles) {
+            if (o.cls != c) continue;
+            SurfParams S = o.S;
+            double before = 0, after = 0;
+            if (!certifies(m, o.tris, c, o.S, &before)) continue;
+            if (!fitClassEx(m, o.tris, c, S, true) || !certifies(m, o.tris, c, S, &after)) continue;
+            if (after <= before) o.S = S;
+        }
+        // Claim pass. A triangle joins the existing surface when that surface
+        // already admits it. The surface is replaced only when the enlarged
+        // set does not certify under the current parameters.
         bool claimChanged = true;
         while (claimChanged) {
             claimChanged = false;
@@ -2216,10 +2556,12 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                     if (Rk.cls != c) continue;
                     std::vector<int> R2 = Rk.tris;
                     R2.push_back(u);
-                    SurfParams S2;
-                    if (!fitClassEx(m, R2, c, S2, false)) continue;
+                    SurfParams S2 = Rk.S;
                     double maxR = 0;
-                    if (!certifies(m, R2, c, S2, &maxR)) continue;
+                    if (!certifies(m, R2, c, S2, &maxR)) {
+                        if (!fitClassEx(m, R2, c, S2, false) || !certifies(m, R2, c, S2, &maxR))
+                            continue;
+                    }
                     const double area = regionArea(m, Rk.tris);
                     const int mv = minVertOf(m, Rk.tris);
                     const bool better =
@@ -2246,78 +2588,21 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
                 }
             }
         }
-        // Merge pass: oracles of this class in canonical order (area desc,
-        // min welded-vertex), then first certifying pair. Deterministic
-        // without an all-pairs scan each round (F12).
-        bool merged = true;
-        while (merged) {
-            merged = false;
-            std::vector<int> idx;
-            for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i)
-                if (out.oracles[static_cast<size_t>(i)].cls == c) idx.push_back(i);
-            std::sort(idx.begin(), idx.end(), [&](int a, int b) {
-                const double wa = regionArea(m, out.oracles[static_cast<size_t>(a)].tris);
-                const double wb = regionArea(m, out.oracles[static_cast<size_t>(b)].tris);
-                if (wa != wb) return wa > wb;
-                return minVertOf(m, out.oracles[static_cast<size_t>(a)].tris) <
-                       minVertOf(m, out.oracles[static_cast<size_t>(b)].tris);
-            });
-            for (size_t ii = 0; ii < idx.size() && !merged; ++ii) {
-                const int i = idx[ii];
-                for (size_t jj = ii + 1; jj < idx.size(); ++jj) {
-                    const int j = idx[jj];
-                    std::vector<int> U = out.oracles[static_cast<size_t>(i)].tris;
-                    U.insert(U.end(), out.oracles[static_cast<size_t>(j)].tris.begin(),
-                             out.oracles[static_cast<size_t>(j)].tris.end());
-                    SurfParams S;
-                    if (!fitClassEx(m, U, c, S, false)) continue;
-                    if (!certifies(m, U, c, S)) continue;
-                    const int lo = std::min(i, j), hi = std::max(i, j);
-                    out.oracles[static_cast<size_t>(lo)].tris.swap(U);
-                    out.oracles[static_cast<size_t>(lo)].S = S;
-                    for (int t : out.oracles[static_cast<size_t>(hi)].tris)
-                        out.owner[static_cast<size_t>(t)] = lo;
-                    out.oracles.erase(out.oracles.begin() + hi);
-                    for (int t = 0; t < static_cast<int>(m.tris.size()); ++t) {
-                        if (out.owner[static_cast<size_t>(t)] > hi)
-                            --out.owner[static_cast<size_t>(t)];
-                    }
-                    for (int k = 0; k < static_cast<int>(out.oracles.size()); ++k)
-                        out.oracles[static_cast<size_t>(k)].id = k;
-                    merged = true;
-                    break;
-                }
-            }
-        }
         restabilize();
+        // Held planes were marked claimed so the plane walk would not re-seed
+        // them. Curved classes must see those triangles.
+        if (c == SurfClass::Plane) {
+            for (const Oracle& o : heldPlanes)
+                for (int t : o.tris) claimed[static_cast<size_t>(t)] = 0;
+        }
+        // Give the bore its on-surface quads, and hand back patches that are
+        // not a 2-D piece of a cylinder so cone / sphere / torus can grow.
+        if (c == SurfClass::Cylinder)
+            releaseHeldPlanes(m, heldPlanes, out, &claimed, false);
     }
 
-    // Commit held 2-triangle planes that curved classes did not take.
-    std::sort(heldPlanes.begin(), heldPlanes.end(), [](const Oracle& A, const Oracle& B) {
-        const int ma = A.tris.empty() ? 0 : *std::min_element(A.tris.begin(), A.tris.end());
-        const int mb = B.tris.empty() ? 0 : *std::min_element(B.tris.begin(), B.tris.end());
-        if (ma != mb) return ma < mb;
-        return A.w > B.w;
-    });
-    for (Oracle& hp : heldPlanes) {
-        std::vector<int> left;
-        for (int t : hp.tris)
-            if (!claimed[static_cast<size_t>(t)]) left.push_back(t);
-        if (static_cast<int>(left.size()) < 2) continue;
-        SurfParams S;
-        if (!fitClass(m, left, SurfClass::Plane, S) || !certifies(m, left, SurfClass::Plane, S))
-            continue;
-        Oracle o;
-        o.cls = SurfClass::Plane;
-        o.S = S;
-        o.tris = std::move(left);
-        for (int t : o.tris) {
-            claimed[static_cast<size_t>(t)] = 1;
-            out.owner[static_cast<size_t>(t)] = static_cast<int>(out.oracles.size());
-        }
-        o.id = static_cast<int>(out.oracles.size());
-        out.oracles.push_back(std::move(o));
-    }
+    releaseHeldPlanes(m, heldPlanes, out, &claimed, true);
+    domainSplit(m, out);
 
     partitionPlanes(m, out.oracles);
     // Re-number owners after partition
@@ -2333,9 +2618,14 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         // torus reporting Rmin > Rmaj).
         {
             Oracle& oi = out.oracles[static_cast<size_t>(i)];
-            const SurfParams keep = oi.S;
-            if (!fitClass(m, oi.tris, oi.cls, oi.S) || !certifies(m, oi.tris, oi.cls, oi.S))
-                oi.S = keep;
+            // Keep the parameters the region was certified with when they
+            // still certify. A domain component of a shared axis must not
+            // grow its own canon string.
+            if (!certifies(m, oi.tris, oi.cls, oi.S)) {
+                const SurfParams keep = oi.S;
+                if (!fitClass(m, oi.tris, oi.cls, oi.S) || !certifies(m, oi.tris, oi.cls, oi.S))
+                    oi.S = keep;
+            }
         }
         for (int t : out.oracles[static_cast<size_t>(i)].tris)
             out.owner[static_cast<size_t>(t)] = i;
@@ -2427,33 +2717,26 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         return ia < ib;
     });
 
-    // unprovable singletons: leftover triangles that would certify a class alone
-    // if |R|>=2 / |V|>=d+1 were dropped — counted, never oracles.
+    // A residue triangle whose three welded vertices lie within tau of a
+    // certified oracle's untrimmed surface. Zero on a complete oracle.
+    std::vector<char> certified(out.oracles.size(), 0);
+    for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i) {
+        const Oracle& o = out.oracles[static_cast<size_t>(i)];
+        if (certifies(m, o.tris, o.cls, o.S)) certified[static_cast<size_t>(i)] = 1;
+    }
     for (int t : rest) {
-        bool any = false;
-        for (SurfClass c : order) {
-            std::vector<int> R{t};
-            SurfParams S;
-            if (!fitClass(m, R, c, S)) continue;
-            Stamp st(static_cast<int>(m.verts.size()));
-            std::vector<int> verts;
-            uniqueVerts(m, R, verts, st);
-            bool vertsOk = true;
-            for (int vi : verts) {
-                if (distToSurf(m.verts[static_cast<size_t>(vi)], S) > m.tau) {
-                    vertsOk = false;
-                    break;
-                }
-            }
-            if (!vertsOk) continue;
-            if (c == SurfClass::Plane) {
-                const Tri& tr = m.tris[static_cast<size_t>(t)];
-                if (angleUnit(tr.n, S.n) > tr.thetaQ) continue;
-            }
-            any = true;
+        const Tri& tr = m.tris[static_cast<size_t>(t)];
+        bool on = false;
+        for (int i = 0; i < static_cast<int>(out.oracles.size()); ++i) {
+            if (!certified[static_cast<size_t>(i)]) continue;
+            const SurfParams& S = out.oracles[static_cast<size_t>(i)].S;
+            if (distToSurf(m.verts[static_cast<size_t>(tr.v[0])], S) > m.tau) continue;
+            if (distToSurf(m.verts[static_cast<size_t>(tr.v[1])], S) > m.tau) continue;
+            if (distToSurf(m.verts[static_cast<size_t>(tr.v[2])], S) > m.tau) continue;
+            on = true;
             break;
         }
-        if (any) ++out.unprovableSingletons;
+        if (on) ++out.unprovableSingletons;
     }
 
     assignFeatureIds(m, out);

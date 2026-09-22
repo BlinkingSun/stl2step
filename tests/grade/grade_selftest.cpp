@@ -27,7 +27,14 @@
 
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
+#include <BRep_Tool.hxx>
+#include <Poly_Triangulation.hxx>
+#include <TopLoc_Location.hxx>
 #include <BRep_Builder.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
@@ -355,6 +362,31 @@ int coreTests(const std::string& corpus) {
         check(d.hasCone && near(d.gradeCone, 1.0, 1e-12), "S03 grade.cone 1");
         check(d.hasOverall && near(d.gradeOverall, 1.0, 1e-12), "S03 grade.overall 1");
         check(d.oracle.residueTris == 0, "S03 residue 0 (assert; finding if fail)");
+        int planeCone = 0, planeConeTier1 = 0, coneCyl = 0, coneCylTier2 = 0;
+        for (const auto& x : d.intersections) {
+            const bool aCone = x.a.rfind("cone:", 0) == 0;
+            const bool bCone = x.b.rfind("cone:", 0) == 0;
+            const bool aCyl = x.a.rfind("cylinder:", 0) == 0;
+            const bool bCyl = x.b.rfind("cylinder:", 0) == 0;
+            const bool aPln = x.a.rfind("plane:", 0) == 0;
+            const bool bPln = x.b.rfind("plane:", 0) == 0;
+            if ((aCone && bPln) || (bCone && aPln)) {
+                ++planeCone;
+                if (x.expectedTier == 1) ++planeConeTier1;
+            }
+            if ((aCone && bCyl) || (bCone && aCyl)) {
+                ++coneCyl;
+                if (x.expectedTier == 2) ++coneCylTier2;
+            }
+        }
+        std::fprintf(stderr, "  S03 plane|cone=%d tier1=%d cone|cyl=%d tier2=%d\n", planeCone,
+                     planeConeTier1, coneCyl, coneCylTier2);
+        check(planeCone > 0 && planeCone == planeConeTier1, "S03 plane|cone tier 1");
+        // S03's drafted cone shares no mesh edge with a non-coaxial cylinder.
+        // The tier-2 row is the in-test negative in synthetic mode; a count of
+        // zero here must not be the only guard.
+        (void)coneCyl;
+        (void)coneCylTier2;
     }
 
     // Case 3c / A2: S04 torus reported, not a 1.0 claim
@@ -444,6 +476,64 @@ int coreTests(const std::string& corpus) {
             check(a.first == b.first, "handle-pickup twice json identical");
             checkId(a.first == c.first, "grade.reverse-seed.handle-pickup",
                     "handle-pickup reverse-seed json identical");
+        }
+    }
+
+    // T1 — mouth band stays a 200-triangle cone; the plate has 54 plane oracles.
+    {
+        grade::GradeDocument d;
+        std::string err;
+        const std::string stl = join(corpus, "linkage_bores_chamfer.stl");
+        check(grade::gradeFiles(stl, join(corpus, "S01.exact.step"), cfg, d, err), "T1 plate grades");
+        int planes = 0, cone200 = 0;
+        for (const auto& f : d.features) {
+            if (f.oracle.cls == grade::SurfClass::Plane) ++planes;
+            if (f.oracle.cls == grade::SurfClass::Cone && f.oracle.tris.size() == 200) ++cone200;
+        }
+        std::fprintf(stderr, "  T1 plate planes=%d cone200=%d\n", planes, cone200);
+        check(cone200 == 1, "T1 mouth cone 200 triangles");
+        check(planes == 54, "T1 plate 54 plane oracles");
+    }
+
+    // T2 — S20 R=10 is exactly two oracles, disjoint spans, union bore 4 pieces.
+    {
+        grade::GradeDocument d;
+        std::string err;
+        check(grade::gradeFiles(join(corpus, "S20_cross_bore_union.stl"),
+                                join(corpus, "S20_cross_bore_union.exact.step"), cfg, d, err),
+              "T2 S20 grades");
+        struct Row {
+            double x0, x1;
+            int pieces;
+            int tris;
+        };
+        std::vector<Row> r10;
+        for (const auto& f : d.features) {
+            if (f.oracle.cls != grade::SurfClass::Cylinder) continue;
+            if (std::fabs(f.oracle.S.R - 10.0) > 0.05) continue;
+            Row r;
+            r.x0 = f.oracle.bboxMin.x;
+            r.x1 = f.oracle.bboxMax.x;
+            r.pieces = f.oracle.oraclePieces;
+            r.tris = static_cast<int>(f.oracle.tris.size());
+            r10.push_back(r);
+            std::fprintf(stderr, "  T2 R10 tris=%d pieces=%d x=[%.4f,%.4f]\n", r.tris, r.pieces, r.x0,
+                         r.x1);
+        }
+        std::fprintf(stderr, "  T2 R10 oracles=%zu (recorded ceiling 2)\n", r10.size());
+        check(r10.size() == 2, "T2 R=10 exactly two oracles");
+        if (r10.size() == 2) {
+            if (r10[0].x0 > r10[1].x0) std::swap(r10[0], r10[1]);
+            const bool overlap = !(r10[0].x1 < r10[1].x0 || r10[1].x1 < r10[0].x0);
+            check(!overlap, "T2 axial overlap 0");
+            const bool spanLo = r10[0].x0 < 5.0 && r10[0].x1 > 25.0 && r10[0].x1 < 40.0;
+            const bool spanHi = r10[1].x0 > 40.0 && r10[1].x0 < 55.0 && r10[1].x1 > 75.0;
+            check(spanLo && spanHi, "T2 spans [0,30] and [50,80]");
+            check(r10[0].pieces == 4, "T2 union bore 4 edge pieces in one domain");
+        } else {
+            check(false, "T2 axial overlap 0");
+            check(false, "T2 spans [0,30] and [50,80]");
+            check(false, "T2 union bore 4 edge pieces in one domain");
         }
     }
     return gFail;
@@ -752,6 +842,158 @@ int syntheticTests(const std::string& corpus, const std::string& argv0) {
         } else {
             check(false, "case8 missing S03.exact.step");
         }
+    }
+
+    // T3 — staggered-ring cylinder. N rises until the old axial gate would trip.
+    {
+        const std::string stl = join(tmp, "stagger.stl");
+        const std::string step = join(tmp, "stagger.step");
+        const double R = 10.0, H = 12.0;
+        const grade::Vec3 axis{0, 0, 1};
+        int N = grade::paramCount(grade::SurfClass::Cylinder) + 1;
+        double ratio = 0;
+        std::vector<std::array<grade::Vec3, 3>> tris;
+        // Raise N while the wall still trips the old axial gate. The finest
+        // such wall is the one the new predicate must still recover.
+        for (int nTry = grade::paramCount(grade::SurfClass::Cylinder) + 1; nTry <= 48;
+             nTry += grade::paramCount(grade::SurfClass::Cylinder) + 1) {
+            std::vector<std::array<grade::Vec3, 3>> trial;
+            auto at = [&](int ring, int i) {
+                const double ang = (2.0 * M_PI * static_cast<double>(i)) / nTry +
+                                   (ring ? M_PI / static_cast<double>(nTry) : 0.0);
+                return grade::Vec3{R * std::cos(ang), R * std::sin(ang), ring ? H : 0.0};
+            };
+            for (int i = 0; i < nTry; ++i) {
+                const int j = (i + 1) % nTry;
+                trial.push_back({at(0, i), at(0, j), at(1, i)});
+                trial.push_back({at(0, j), at(1, j), at(1, i)});
+            }
+            const grade::Vec3 cb{0, 0, 0}, ct{0, 0, H};
+            for (int i = 0; i < nTry; ++i) {
+                trial.push_back({cb, at(0, (i + 1) % nTry), at(0, i)});
+                trial.push_back({ct, at(1, i), at(1, (i + 1) % nTry)});
+            }
+            if (!writeBinaryStl(stl, trial)) continue;
+            grade::Mesh mesh;
+            std::string err;
+            if (!grade::loadStl(stl, mesh, err)) continue;
+            double rMax = 0;
+            for (const auto& tr : mesh.tris) {
+                const double rho =
+                    std::sqrt(tr.centroid.x * tr.centroid.x + tr.centroid.y * tr.centroid.y);
+                if (std::fabs(rho - R) > 1.0) continue;
+                const double s = std::sin(tr.thetaQ);
+                if (!(s > 0.0)) continue;
+                rMax = std::max(rMax, std::fabs(grade::dot(tr.n, axis)) / s);
+            }
+            if (rMax > 1.0) {
+                N = nTry;
+                ratio = rMax;
+                tris.swap(trial);
+            }
+        }
+        check(writeBinaryStl(stl, tris), "T3 write stl");
+        std::fprintf(stderr, "  T3 N=%d max|n·axis|/sin(theta_q)=%.6g\n", N, ratio);
+        check(ratio > 1.0, "T3 staggered wall trips the old normal gate");
+        writeStep(BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), R, H).Shape(),
+                  step);
+        grade::GradeDocument d;
+        std::string err;
+        check(grade::gradeFiles(stl, step, cfg, d, err), "T3 grades");
+        int cyl = 0, wall = 0, pcs = 0;
+        grade::Status st = grade::Status::Missing;
+        for (const auto& f : d.features) {
+            if (f.oracle.cls != grade::SurfClass::Cylinder) continue;
+            ++cyl;
+            wall = static_cast<int>(f.oracle.tris.size());
+            pcs = f.oracle.oraclePieces;
+            st = f.status;
+        }
+        std::fprintf(stderr, "  T3 cyl=%d tris=%d pieces=%d status=%s residue=%d sing=%d\n", cyl, wall,
+                     pcs, grade::statusName(st), d.oracle.residueTris, d.oracle.unprovableSingletons);
+        check(cyl == 1, "T3 one cylinder oracle");
+        check(wall == 2 * N, "T3 cylinder is the full wall");
+        check(pcs == 1, "T3 oraclePieces 1");
+        check(st == grade::Status::Recovered, "T3 recovered");
+        check(d.oracle.residueTris == 0, "T3 residue 0");
+        check(d.oracle.unprovableSingletons == 0, "T3 unprovableSingletons 0");
+    }
+
+    // T4 — coaxial chamfer is tier 1 exact; a tilted cone against a cylinder stays tier 2.
+    {
+        auto meshOf = [](const TopoDS_Shape& s, std::vector<std::array<grade::Vec3, 3>>& tris) {
+            tris.clear();
+            BRepMesh_IncrementalMesh(s, 0.4);
+            for (TopExp_Explorer ex(s, TopAbs_FACE); ex.More(); ex.Next()) {
+                TopLoc_Location loc;
+                Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(TopoDS::Face(ex.Current()), loc);
+                if (tri.IsNull()) continue;
+                for (int i = 1; i <= tri->NbTriangles(); ++i) {
+                    int n1, n2, n3;
+                    tri->Triangle(i).Get(n1, n2, n3);
+                    gp_Pnt p1 = tri->Node(n1).Transformed(loc);
+                    gp_Pnt p2 = tri->Node(n2).Transformed(loc);
+                    gp_Pnt p3 = tri->Node(n3).Transformed(loc);
+                    tris.push_back({grade::Vec3{p1.X(), p1.Y(), p1.Z()},
+                                    grade::Vec3{p2.X(), p2.Y(), p2.Z()},
+                                    grade::Vec3{p3.X(), p3.Y(), p3.Z()}});
+                }
+            }
+        };
+        const std::string stl = join(tmp, "coaxial.stl");
+        const std::string step = join(tmp, "coaxial.step");
+        TopoDS_Shape cyl = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 8.0, 16.0);
+        TopoDS_Shape cone =
+            BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(0, 0, 16), gp_Dir(0, 0, 1)), 8.0, 12.0, 4.0);
+        TopoDS_Shape fused = BRepAlgoAPI_Fuse(cyl, cone).Shape();
+        std::vector<std::array<grade::Vec3, 3>> tris;
+        meshOf(fused, tris);
+        check(writeBinaryStl(stl, tris), "T4 write coaxial stl");
+        writeStep(fused, step);
+        grade::GradeDocument d;
+        std::string err;
+        check(grade::gradeFiles(stl, step, cfg, d, err), "T4 coaxial grades");
+        int tier1Exact = 0;
+        for (const auto& x : d.intersections) {
+            const bool coneCyl = (x.a.rfind("cone:", 0) == 0 && x.b.rfind("cylinder:", 0) == 0) ||
+                                 (x.b.rfind("cone:", 0) == 0 && x.a.rfind("cylinder:", 0) == 0);
+            if (!coneCyl) continue;
+            std::fprintf(stderr, "  T4 coaxial %s × %s tier %d %s\n", x.a.c_str(), x.b.c_str(),
+                         x.expectedTier, x.verdict.c_str());
+            if (x.expectedTier == 1 && x.verdict == "exact") ++tier1Exact;
+        }
+        check(tier1Exact >= 1, "T4 coaxial cone|cylinder tier 1 exact");
+
+        const std::string stl2 = join(tmp, "oblique.stl");
+        const std::string step2 = join(tmp, "oblique.step");
+        TopoDS_Shape cyl2 = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 10.0, 20.0);
+        TopoDS_Shape cone2 =
+            BRepPrimAPI_MakeCone(gp_Ax2(gp_Pnt(-8, 0, 10), gp_Dir(1, 0, 0)), 4.0, 10.0, 16.0);
+        TopoDS_Shape fused2 = BRepAlgoAPI_Fuse(cyl2, cone2).Shape();
+        meshOf(fused2, tris);
+        check(writeBinaryStl(stl2, tris), "T4 write oblique stl");
+        writeStep(fused2, step2);
+        grade::GradeDocument d2;
+        check(grade::gradeFiles(stl2, step2, cfg, d2, err), "T4 oblique grades");
+        int tier2 = 0;
+        for (const auto& x : d2.intersections) {
+            const bool coneCyl = (x.a.rfind("cone:", 0) == 0 && x.b.rfind("cylinder:", 0) == 0) ||
+                                 (x.b.rfind("cone:", 0) == 0 && x.a.rfind("cylinder:", 0) == 0);
+            if (!coneCyl) continue;
+            std::fprintf(stderr, "  T4 oblique %s × %s tier %d %s\n", x.a.c_str(), x.b.c_str(),
+                         x.expectedTier, x.verdict.c_str());
+            if (x.expectedTier == 2) ++tier2;
+        }
+        if (tier2 < 1) {
+            int nC = 0, nK = 0;
+            for (const auto& f : d2.features) {
+                if (f.oracle.cls == grade::SurfClass::Cone) ++nC;
+                if (f.oracle.cls == grade::SurfClass::Cylinder) ++nK;
+            }
+            std::fprintf(stderr, "  T4 oblique cones=%d cyls=%d rows=%zu\n", nC, nK,
+                         d2.intersections.size());
+        }
+        check(tier2 >= 1, "T4 non-coaxial cone|cylinder tier 2");
     }
     return gFail;
 }

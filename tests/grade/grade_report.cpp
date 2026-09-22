@@ -104,7 +104,11 @@ std::string writeJson(const GradeDocument& d) {
       << ",\"degenerateDropped\":" << d.mesh.degenerateDropped
       << ",\"surfaceAreaMM2\":" << jnum(d.mesh.surfaceArea)
       << ",\"volumeMM3\":" << jnum(d.mesh.volume) << "},\n";
+    int facetCoveredTriangles = 0;
+    for (int c : d.step.cover)
+        if (c >= 0) ++facetCoveredTriangles;
     o << "\"step_census\":{\"faces\":" << d.step.faces.size() << ",\"facetFaces\":" << d.step.nFacet
+      << ",\"facetCoveredTriangles\":" << facetCoveredTriangles
       << ",\"planes\":" << d.step.nPlane << ",\"cylinders\":" << d.step.nCyl
       << ",\"cones\":" << d.step.nCone << ",\"spheres\":" << d.step.nSphere
       << ",\"tori\":" << d.step.nTorus << ",\"bsplines\":" << d.step.nBSpline
@@ -162,6 +166,8 @@ std::string writeJson(const GradeDocument& d) {
           << ",\"distinctVertices\":" << f.oracle.verts.size()
           << ",\"oraclePieces\":" << f.oracle.oraclePieces
           << ",\"oracleMinSeparation\":" << f.oracle.oracleMinSeparation
+          << ",\"sigmaMM\":" << jnum(f.oracle.sigmaMM)
+          << ",\"punctures\":" << f.oracle.punctures
           << ",\"maxResidMM\":" << jnum(f.oracle.maxResid)
           << ",\"maxNormalDevRad\":" << jnum(f.oracle.maxNormalDev)
           << ",\"coverage\":" << jnum(f.coverage) << ",\"params\":" << paramsJson(f.oracle)
@@ -209,7 +215,11 @@ std::string writeMd(const GradeDocument& d) {
     o << "mesh: " << d.mesh.tris.size() << " triangles, " << d.mesh.verts.size()
       << " welded vertices, openEdges " << d.mesh.openEdges << ", nonManifoldEdges "
       << d.mesh.nonManifoldEdges << "\n";
-    o << "step: " << d.step.faces.size() << " faces (" << d.step.nFacet << " facet), "
+    int facetCoveredTriangles = 0;
+    for (int c : d.step.cover)
+        if (c >= 0) ++facetCoveredTriangles;
+    o << "step: " << d.step.faces.size() << " faces (" << d.step.nFacet << " facet, "
+      << facetCoveredTriangles << " facet triangles), "
       << (d.valid ? "valid" : "invalid") << ", " << (d.watertight ? "watertight" : "open") << "\n";
     o << "volume: step " << fmtG(d.Vstep) << " mesh " << fmtG(d.Vmesh) << " delta "
       << fmtG(d.volumeDelta) << " chordBudget " << fmtG(d.chordBudget) << " volumeQ "

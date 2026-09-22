@@ -29,6 +29,8 @@ struct Oracle {
     double maxNormalDev = 0;
     int oraclePieces = 1;
     int oracleMinSeparation = 0;
+    double sigmaMM = 0;  // domain chord supremum; connectivity only
+    int punctures = 0;
     int minVertIndex = 0;
     Vec3 bboxMin{}, bboxMax{};
     std::string featureId;

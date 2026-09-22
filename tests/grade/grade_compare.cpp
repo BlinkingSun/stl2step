@@ -128,13 +128,95 @@ double sagittaVolume(const Mesh& m, int t, const SurfParams& S) {
     }
 }
 
-int expectedTier(const Oracle& A, const Oracle& B, double tau) {
+bool revolution(SurfClass c) {
+    return c == SurfClass::Cylinder || c == SurfClass::Cone || c == SurfClass::Torus ||
+           c == SurfClass::Sphere;
+}
+
+bool axisGeom(const Oracle& O, Vec3& p, Vec3& d) {
+    d = normalized(O.S.n);
+    if (!(norm2(d) > 0.0) && O.cls != SurfClass::Sphere) return false;
+    if (O.cls == SurfClass::Cone) {
+        p = O.S.apex;
+        return norm2(d) > 0.0;
+    }
+    p = O.S.p0;
+    if (O.cls == SurfClass::Sphere) return O.S.R > 0.0;
+    return norm2(d) > 0.0;
+}
+
+double repRadius(const Mesh& m, const Oracle& O, const Vec3& p, const Vec3& d) {
+    if (O.cls != SurfClass::Cone && O.S.R > 0.0) return O.S.R;
+    double s = 0.0;
+    int n = 0;
+    for (int vi : O.verts) {
+        const Vec3 w = m.verts[static_cast<size_t>(vi)] - p;
+        s += norm(w - d * dot(w, d));
+        ++n;
+    }
+    if (n <= 0) return m.tau;
+    return std::max(s / static_cast<double>(n), m.tau);
+}
+
+bool dirsAgree(const Vec3& a, const Vec3& b, double ang) {
+    return std::fabs(dot(normalized(a), normalized(b))) >= std::cos(ang);
+}
+
+double parallelSep(const Vec3& pA, const Vec3& dA, const Vec3& pB) {
+    const Vec3 d = normalized(dA);
+    const Vec3 w = pB - pA;
+    return norm(w - d * dot(w, d));
+}
+
+// Coaxial within tau: directions within atan(tau/R) and axis lines within tau.
+// A sphere is coaxial when its centre lies on the other axis.
+bool coaxialPair(const Oracle& A, const Oracle& B, const Mesh& m) {
+    if (!revolution(A.cls) || !revolution(B.cls)) return false;
+    Vec3 pA, dA, pB, dB;
+    if (!axisGeom(A, pA, dA) || !axisGeom(B, pB, dB)) return false;
+    if (A.cls == SurfClass::Sphere && B.cls == SurfClass::Sphere)
+        return dist(pA, pB) <= m.tau;
+    if (A.cls == SurfClass::Sphere) return parallelSep(pB, dB, pA) <= m.tau;
+    if (B.cls == SurfClass::Sphere) return parallelSep(pA, dA, pB) <= m.tau;
+    const double R = std::min(repRadius(m, A, pA, dA), repRadius(m, B, pB, dB));
+    const double ang = std::atan(m.tau / std::max(R, m.tau));
+    if (!dirsAgree(dA, dB, ang)) return false;
+    return parallelSep(pA, dA, pB) <= m.tau;
+}
+
+bool tangentParallelCyl(const Oracle& A, const Oracle& B, const Mesh& m) {
+    if (A.cls != SurfClass::Cylinder || B.cls != SurfClass::Cylinder) return false;
+    if (!(A.S.R > 0.0) || !(B.S.R > 0.0)) return false;
+    const double R = std::min(A.S.R, B.S.R);
+    const double ang = std::atan(m.tau / std::max(R, m.tau));
+    if (!dirsAgree(A.S.n, B.S.n, ang)) return false;
+    const double sep = parallelSep(A.S.p0, A.S.n, B.S.p0);
+    if (sep <= m.tau) return false;  // coaxial, not a tangent
+    const double sum = A.S.R + B.S.R;
+    const double diff = std::fabs(A.S.R - B.S.R);
+    return std::fabs(sep - sum) <= m.tau || std::fabs(sep - diff) <= m.tau;
+}
+
+// -1: same surface or empty intersection, emit no row.
+int expectedTier(const Oracle& A, const Oracle& B, const Mesh& m) {
+    if (A.cls == SurfClass::Cylinder && B.cls == SurfClass::Cylinder && coaxialPair(A, B, m))
+        return -1;
+    if (revolution(A.cls) && revolution(B.cls) && coaxialPair(A, B, m)) return 1;
+    if (tangentParallelCyl(A, B, m)) return 1;
+    if (A.cls == SurfClass::Cone && B.cls == SurfClass::Cone) return 2;
+    if ((A.cls == SurfClass::Cylinder && B.cls == SurfClass::Cone) ||
+        (A.cls == SurfClass::Cone && B.cls == SurfClass::Cylinder))
+        return 2;
+    if (A.cls == SurfClass::Cylinder && B.cls == SurfClass::Cylinder) return 2;
+    const double tau = m.tau;
     try {
         IntAna_QuadQuadGeo q;
         auto run = [&]() -> int {
             if (!q.IsDone()) return 2;
             const IntAna_ResultType ty = q.TypeInter();
-            if (ty == IntAna_Line || ty == IntAna_Circle || ty == IntAna_Ellipse) return 1;
+            if (ty == IntAna_Line || ty == IntAna_Circle || ty == IntAna_Ellipse ||
+                ty == IntAna_Hyperbola || ty == IntAna_Parabola)
+                return 1;
             return 2;
         };
         if (A.cls == SurfClass::Plane && B.cls == SurfClass::Plane) {
@@ -661,7 +743,8 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
             ix.a = A.featureId;
             ix.b = B.featureId;
             if (ix.a > ix.b) std::swap(ix.a, ix.b);
-            ix.expectedTier = expectedTier(A, B, doc.mesh.tau);
+            ix.expectedTier = expectedTier(A, B, doc.mesh);
+            if (ix.expectedTier < 0) continue;
             // shared EDGE of assigned faces
             const Feature& fa = doc.features[static_cast<size_t>(i)];
             const Feature& fb = doc.features[static_cast<size_t>(j)];
