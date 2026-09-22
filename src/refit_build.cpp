@@ -1598,6 +1598,79 @@ int rimSplitVertex(const RegionSet& rs, const MeshView& mv, const BoundaryChain&
     // carries, and every other vertex is a candidate.
     if (ch.meshVerts.size() < 3) return -1;
     if (curve.kind != AnalyticCurve::Circ) return -1;
+
+    // D-train-cone-3 ruling 3. A cap-rim chain of a region that will carry a
+    // seam (a closed360 cylinder, or a ChamferCone) must not swallow that
+    // region's u = 0 column. The column is the chain's own mesh vertex nearest
+    // azimuth 0; it is a split only when it lies strictly inside the chain and
+    // snapVertexToCurve would admit it (curve residual within the chain's own
+    // snap cap). A chain whose terminal already is that column does not split:
+    // the full-circle rims whose collapse terminal is u = 0 stay one arc.
+    auto onCapOf = [&](const Region* R) -> bool {
+        if (!R) return false;
+        for (const Loop& lp : R->loops) {
+            if (lp.role != LoopRole::CapLow && lp.role != LoopRole::CapHigh) continue;
+            for (int k : lp.chainIdx)
+                if (k == ci) return true;
+        }
+        return false;
+    };
+    auto distToZero = [&](const Region& R, int lv) {
+        const double u = azimuthOf(R, pntOf(mv, lv));
+        return std::min(u, 2.0 * kPi - u);
+    };
+    // A closed rim publishes one circle whose terminal is already the u = 0
+    // column (seamVertexOf). Splitting it would turn that circle into two arcs
+    // and move every full-rim fixture. The new clause is only for an open cap
+    // chain that swallows the column in its interior.
+    if (!ch.closedLoop) {
+    for (const Region* R : {A, B}) {
+        if (!R || !onCapOf(R)) continue;
+        const bool seamBearer =
+            (R->type == SurfType::Cylinder && R->closed360) || isChamferConeR(*R);
+        if (!seamBearer) continue;
+        const int term0 = ch.meshVerts.front();
+        const int term1 = ch.closedLoop ? term0 : ch.meshVerts.back();
+        std::vector<double> uu;
+        uu.reserve(ch.meshVerts.size());
+        for (int lv : ch.meshVerts) uu.push_back(azimuthOf(*R, pntOf(mv, lv)));
+        for (size_t i = 1; i < uu.size(); ++i) {
+            while (uu[i] - uu[i - 1] > kPi) uu[i] -= 2.0 * kPi;
+            while (uu[i] - uu[i - 1] < -kPi) uu[i] += 2.0 * kPi;
+        }
+        const double spanLo = std::min(uu.front(), uu.back());
+        const double spanHi = std::max(uu.front(), uu.back());
+        bool zeroInside = false;
+        for (int k = -1; k <= 2 && !zeroInside; ++k) {
+            const double z = static_cast<double>(k) * 2.0 * kPi;
+            if (z > spanLo && z < spanHi) zeroInside = true;
+        }
+        if (!zeroInside) continue;
+        const double dTerm = std::min(distToZero(*R, term0), distToZero(*R, term1));
+        int best = -1;
+        double bestD = 1e300;
+        const size_t iEnd = ch.closedLoop ? ch.meshVerts.size() : ch.meshVerts.size() - 1;
+        for (size_t i = 1; i < iEnd; ++i) {
+            const int lv = ch.meshVerts[i];
+            if (lv == term0 || lv == term1) continue;
+            if (curveResidual(curve, pntOf(mv, lv)) > snapCap) continue;
+            const double d = distToZero(*R, lv);
+            if (d < bestD || (d == bestD && (best < 0 || lv < best))) {
+                bestD = d;
+                best = lv;
+            }
+        }
+        // The terminal is the u = 0 column when it is at least as close.
+        if (best < 0 || !(bestD < dTerm)) continue;
+        if (diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_RIMSPLIT ci=%d rid=%d nV=%zu target=0 splitLv=%d u=%.5f\n",
+                         ci, R->id, ch.meshVerts.size(), best,
+                         azimuthOf(*R, pntOf(mv, best)));
+        return best;
+    }
+    }
+
     for (const Region* R : {A, B}) {
         if (!R || R->type != SurfType::Cylinder || !R->closed360) continue;
         // ... carrying an inner wire, and this chain on one of its rims.
