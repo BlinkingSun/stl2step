@@ -1531,14 +1531,18 @@ bool growOnce(const Mesh& m, std::vector<char>& claimed, SurfClass c, std::vecto
             changed = true;
             continue;
         }
-        // Once a cylinder is over-determined, keep that surface and take any
-        // triangle that still lies on it. A shorter seed must re-solve, so a
-        // bend (a torus) does not walk off on an under-determined fit.
-        if (c == SurfClass::Cylinder &&
-            static_cast<int>(R.size()) >= paramCount(SurfClass::Cylinder) + 1 &&
-            admits(m, R2, c, S)) {
-            R.swap(R2);
-            changed = true;
+        // Once a cylinder is over-determined in vertices, keep that surface and
+        // take any triangle that still lies on it (D-train-grader-2 (1)(b)).
+        // certifies() counts vertices; on a strip |V| = |R| + 2.
+        if (c == SurfClass::Cylinder) {
+            thread_local Scratch hsc;
+            hsc.ensure(m.verts.size());
+            uniqueVerts(m, R, hsc.verts, hsc.st);
+            if (static_cast<int>(hsc.verts.size()) >= paramCount(SurfClass::Cylinder) + 1 &&
+                admits(m, R2, c, S)) {
+                R.swap(R2);
+                changed = true;
+            }
         }
     }
     return changed;
@@ -1963,10 +1967,50 @@ double sigmaOf(const Mesh& m, const Oracle& o) {
     return any ? sigma : 0.0;
 }
 
+// D-train-grader-2 (1b): a component that fails certifies under its parent's
+// surface is not published. A swallowed held plane inside that component is
+// restored when the parent's remainder does not itself certify.
+bool keepCurvedComponent(const Mesh& m, SurfClass cls, const SurfParams& S, std::vector<int>& tris,
+                         const std::vector<Oracle>& swallowed, std::vector<Oracle>& restored) {
+    auto peel = [&]() {
+        for (const Oracle& sp : swallowed) {
+            if (sp.tris.empty()) continue;
+            std::unordered_set<int> have(tris.begin(), tris.end());
+            bool all = true;
+            for (int t : sp.tris)
+                if (!have.count(t)) {
+                    all = false;
+                    break;
+                }
+            if (!all) continue;
+            std::unordered_set<int> mine(sp.tris.begin(), sp.tris.end());
+            std::vector<int> rest;
+            for (int t : tris)
+                if (!mine.count(t)) rest.push_back(t);
+            if (!rest.empty() && certifies(m, rest, cls, S)) continue;
+            SurfParams P = sp.S;
+            if (!certifies(m, sp.tris, SurfClass::Plane, P)) {
+                if (!fitClass(m, sp.tris, SurfClass::Plane, P) ||
+                    !certifies(m, sp.tris, SurfClass::Plane, P))
+                    continue;
+            }
+            Oracle pl = sp;
+            pl.cls = SurfClass::Plane;
+            pl.S = P;
+            pl.tris = sp.tris;
+            restored.push_back(std::move(pl));
+            tris.swap(rest);
+        }
+    };
+    if (!certifies(m, tris, cls, S)) peel();
+    else peel();
+    return !tris.empty() && certifies(m, tris, cls, S);
+}
+
 // One oracle per connected component of the domain graph (D-train-grader (2)).
 // sigma decides connectivity only. Off-surface triangles that close a puncture
 // are not added to the oracle.
-void domainSplit(const Mesh& m, OracleSet& set) {
+void domainSplit(const Mesh& m, OracleSet& set, const std::vector<Oracle>& swallowed) {
     std::vector<Oracle> out;
     out.reserve(set.oracles.size());
     for (Oracle& src : set.oracles) {
@@ -2057,7 +2101,11 @@ void domainSplit(const Mesh& m, OracleSet& set) {
         if (groups.size() <= 1) {
             src.sigmaMM = sigma;
             src.punctures = static_cast<int>(punct.size());
-            out.push_back(std::move(src));
+            std::vector<Oracle> restored;
+            if (src.cls == SurfClass::Plane ||
+                keepCurvedComponent(m, src.cls, src.S, src.tris, swallowed, restored))
+                out.push_back(std::move(src));
+            for (Oracle& pl : restored) out.push_back(std::move(pl));
             continue;
         }
         for (const std::vector<int>& g : groups) {
@@ -2095,7 +2143,10 @@ void domainSplit(const Mesh& m, OracleSet& set) {
                     }
                 }
             }
-            out.push_back(std::move(c));
+            std::vector<Oracle> restored;
+            if (keepCurvedComponent(m, c.cls, c.S, c.tris, swallowed, restored))
+                out.push_back(std::move(c));
+            for (Oracle& pl : restored) out.push_back(std::move(pl));
         }
     }
     set.oracles.swap(out);
@@ -2123,7 +2174,8 @@ void addMissingTris(std::vector<int>& tris, const std::vector<int>& more) {
 // Otherwise they stay in `held` with their triangles removed from curved
 // oracles, so a later class can still grow on them.
 void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
-                       std::vector<char>* claimed, bool commitFailures) {
+                       std::vector<char>* claimed, bool commitFailures,
+                       std::vector<Oracle>* swallowed) {
     const int axisDof = paramCount(SurfClass::Cylinder) - 1;
     const int patch = axisDof - paramCount(SurfClass::Plane) + 1;
     std::vector<Oracle> commit;
@@ -2169,6 +2221,7 @@ void releaseHeldPlanes(const Mesh& m, std::vector<Oracle>& held, OracleSet& set,
             }
         }
         if (best >= 0) {
+            if (swallowed) swallowed->push_back(hp);
             for (int oi = 0; oi < n; ++oi) {
                 if (oi == best) continue;
                 eraseTris(set.oracles[static_cast<size_t>(oi)].tris, mine);
@@ -2234,6 +2287,7 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
     const SurfClass order[5] = {SurfClass::Plane, SurfClass::Cylinder, SurfClass::Cone,
                                 SurfClass::Sphere, SurfClass::Torus};
     std::vector<Oracle> heldPlanes;
+    std::vector<Oracle> swallowedPlanes;
 
     auto seedList = [&]() {
         std::vector<int> s;
@@ -2598,11 +2652,11 @@ void buildOracle(const Mesh& m, OracleSet& out, bool reverseSeeds, int seedOrder
         // Give the bore its on-surface quads, and hand back patches that are
         // not a 2-D piece of a cylinder so cone / sphere / torus can grow.
         if (c == SurfClass::Cylinder)
-            releaseHeldPlanes(m, heldPlanes, out, &claimed, false);
+            releaseHeldPlanes(m, heldPlanes, out, &claimed, false, &swallowedPlanes);
     }
 
-    releaseHeldPlanes(m, heldPlanes, out, &claimed, true);
-    domainSplit(m, out);
+    releaseHeldPlanes(m, heldPlanes, out, &claimed, true, &swallowedPlanes);
+    domainSplit(m, out, swallowedPlanes);
 
     partitionPlanes(m, out.oracles);
     // Re-number owners after partition

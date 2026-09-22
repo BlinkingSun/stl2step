@@ -650,18 +650,21 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
                 f.status = Status::Recovered;
                 f.credit = 1.0;
             } else {
-                // Hole tessellation: a correct plane face with circular holes
-                // has GProp area below the polygonal mesh. If every wire
-                // vertex of the face is a vertex of this oracle, the face
-                // is the whole design surface, not a sliver (case 6 uses
-                // new vertices and stays sliver).
-                const StepFace& F0 = doc.step.faces[static_cast<size_t>(members[0])];
-                std::unordered_set<int> ov(f.oracle.verts.begin(), f.oracle.verts.end());
-                bool covers = !F0.meshVerts.empty();
-                for (int mid : F0.meshVerts) {
-                    if (mid < 0 || !ov.count(mid)) {
-                        covers = false;
-                        break;
+                // Hole tessellation (D-train-grader-2 (1c)): a correct PLANE
+                // face with circular holes has GProp area below the polygonal
+                // mesh. The escape is confined to planes. Every other class
+                // is a sliver at credit = coverage — an over-short cylinder
+                // is never recovered (D-140-1 item 8(e)).
+                bool covers = false;
+                if (f.oracle.cls == SurfClass::Plane) {
+                    const StepFace& F0 = doc.step.faces[static_cast<size_t>(members[0])];
+                    std::unordered_set<int> ov(f.oracle.verts.begin(), f.oracle.verts.end());
+                    covers = !F0.meshVerts.empty();
+                    for (int mid : F0.meshVerts) {
+                        if (mid < 0 || !ov.count(mid)) {
+                            covers = false;
+                            break;
+                        }
                     }
                 }
                 if (covers) {
