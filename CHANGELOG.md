@@ -29,7 +29,7 @@ conical face. Every other corpus fixture and training file is byte-identical to
 - Windows (and any multi-config generator): the nested `gates_full` run inside `p1_ac2_gates_baseline` gets the active configuration, and the guard fails when that nested ctest ran no tests instead of printing PASS.
 
 ### Added
-- Corpus fixture `S22_frustum_fragmented_rim` (a 45° frustum between R10 and R12 on a tube) and a `cone_math_unit` case for the seam chart arithmetic.
+- A `cone_math_unit` case for the seam chart arithmetic (Δu = 0 on a generator).
 - `scripts/ci-hosted-marker.sh` writes `.ci-local/<sha>.linux.green` / `.windows.green` from a green hosted run of that exact sha.
 - Expected-red rows: `cone.open-seed-no-synthetic`, `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
 
