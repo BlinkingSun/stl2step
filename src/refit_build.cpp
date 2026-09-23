@@ -15764,7 +15764,54 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // that ShapeFix_Wire displaces the shared verts[] and opens
                     // the shell it was called to close (12.4 mm on this part).
                     addPcurvesOnFace(f, sewTol, true);
-                    if (!faceIsValid(f)) {
+if (!simple && !f.IsNull()) {
+                        if (diag130Enabled()) {
+                            int wi = 0;
+                            for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                                const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                                int ei = 0;
+                                gp_Pnt2d prev(0, 0);
+                                bool have = false;
+                                for (BRepTools_WireExplorer ex(w, f); ex.More(); ex.Next(), ++ei) {
+                                    const TopoDS_Edge e = ex.Current();
+                                    Standard_Real f2 = 0, l2 = 0;
+                                    Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(
+                                        e, f, f2, l2);
+                                    if (pc.IsNull()) continue;
+                                    gp_Pnt2d a = pc->Value(f2), b = pc->Value(l2);
+                                    if (e.Orientation() == TopAbs_REVERSED) std::swap(a, b);
+                                    const double gap = have ? a.Distance(prev) : 0.0;
+                                    std::fprintf(stderr,
+                                                 "DIAG_CONEWIRE rid=%d wi=%d ei=%d ori=%s "
+                                                 "a=(%.5f,%.5f) b=(%.5f,%.5f) gap=%.4g\n",
+                                                 r.id, wi, ei,
+                                                 e.Orientation() == TopAbs_REVERSED ? "R" : "F",
+                                                 a.X(), a.Y(), b.X(), b.Y(), gap);
+                                    prev = b;
+                                    have = true;
+                                }
+                            }
+                        }
+                        const double capCone = partialFaceTolCap(mv, r);
+                        BRep_Builder Bt;
+                        int ei = 0;
+                        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+                            const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                            const double dev = maxExactAllPcurves(e, -1.0);
+                            double tol = 0.0, maxAll = 0.0;
+                            bool over = false;
+                            if (applyBindTolAllPcurves(e, -1.0, dev, capCone, &tol, &over,
+                                                       &maxAll))
+                                fireTolRewriteEdge(Bt, e, tol, "chamfer-cone-own-cap", capCone);
+                            if (diag130Enabled() || diagP2Enabled())
+                                std::fprintf(stderr,
+                                             "DIAG_CONETOL rid=%d ei=%d tol=%.9g dev=%.9g "
+                                             "cap=%.9g maxAll=%.9g writer=%s over=%d\n",
+                                             r.id, ei, BRep_Tool::Tolerance(e), dev, capCone,
+                                             maxAll, lastTolWriterOf(e), over ? 1 : 0);
+                        }
+                    }
+                                        if (!faceIsValid(f)) {
                         try {
                             ShapeFix_Face sff(f);
                             sff.FixMissingSeamMode() = 1;
