@@ -25,7 +25,8 @@
     "union.canal-cylcyl-pieces": "D-140-8 U6/U7/U-R17: Handle pickup's R 100 / 92.5 / 72.5 walls, 2077.806 + 568.193 + 322.106 = 2968.105 mm^2, stay at 3 / 3 / 2 edge-pieces at 20000 q = 0.5286 mm = 17 sigma (sigma = 0.030815552 on R 100). Those separators are real bands, not punctures: the blend between them is blend.canal-cylcyl (D-140-6 sec 2), deferred to 1.5. The union must NOT merge them -- doing so is a FAILURE, not an XPASS."
   },
   "gates_full": {
-    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)"
+    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)",
+    "linkage_bores_chamfer": "D-130-23 / D-train-cone 6 (fixture-first): 637aa6c raised this fixture's recoverable cone ground truth to 3 — the cross-bore mouth frustum (45.0 deg, Rlo/Rhi 10/12, axis (0,-20,-25) dir +X, 200 tris, 195.406476 mm^2, D-140-6 SS1/SS2) is measured from the MESH and is correct. The engine ships 2 cones: Origin::ChamferCone does not seed from the open cross-bore cylinder, so B1 reads cones 2/3. The sidecar is NOT lowered. Retired in the same commit that ships the frustum (cone-claim lane, SPEC-cone-claim REV 5 R5-7 §5) alongside the gate_130 row."
   },
   "edge_class_gate": {
     "Body11": "D-130-23 / 082194b red lines not relaxed",
