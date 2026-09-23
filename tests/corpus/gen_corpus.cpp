@@ -1848,6 +1848,63 @@ FixtureResult buildS20CrossBoreUnion() {
 
 }  // namespace
 
+// S22: tube R20/R10 with a 45° frustum (R 10→12 over h=2) whose small rim is
+// cut by two generator-aligned planar slivers. Each sliver is a radial
+// triangle (both walls contain the axis, so each wall contains a cone
+// generator). The cuts sit at 80° and 200°, so the cone's u=0 column (+X)
+// lies strictly inside the remaining arc.
+TopoDS_Shape radialSliver(double a0, double a1, double rOuter, double z0, double z1) {
+    BRepBuilderAPI_MakePolygon poly;
+    poly.Add(gp_Pnt(0.0, 0.0, z0));
+    poly.Add(gp_Pnt(rOuter * std::cos(a0), rOuter * std::sin(a0), z0));
+    poly.Add(gp_Pnt(rOuter * std::cos(a1), rOuter * std::sin(a1), z0));
+    poly.Close();
+    if (!poly.IsDone()) throw std::runtime_error("S22: sliver polygon failed");
+    TopoDS_Face face = BRepBuilderAPI_MakeFace(poly.Wire());
+    if (face.IsNull()) throw std::runtime_error("S22: sliver face failed");
+    return BRepPrimAPI_MakePrism(face, gp_Vec(0.0, 0.0, z1 - z0)).Shape();
+}
+
+double exactVolumeS22() {
+    const double tube = M_PI * (20.0 * 20.0 - 10.0 * 10.0) * 10.0;
+    const double chamferExtra = frustumVolume(10.0, 12.0, 2.0) - M_PI * 100.0 * 2.0;
+    const double alpha = 4.0 * M_PI / 180.0;
+    const double tri = 0.5 * 20.0 * 20.0 * std::sin(alpha);
+    // Split at the chamfer start so each piece is a polynomial.
+    // z in [7.5, 8): R=10. z in [8, 8.5]: R=10+(z-8).
+    const double lower = 0.5 * (tri - 50.0 * alpha);
+    const double upper = 0.5 * tri - alpha * (1261.0 / 48.0);
+    const double one = lower + upper;
+    return tube - chamferExtra - 2.0 * one;
+}
+
+FixtureResult buildS22FrustumFragmentedRim() {
+    TopoDS_Shape tube = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 20.0, 10.0);
+    TopoDS_Shape bore = BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0, 0, -0.1), gp_Dir(0, 0, 1)), 10.0, 10.2);
+    tube = BRepAlgoAPI_Cut(tube, bore);
+    gp_Ax2 coneAx(gp_Pnt(0, 0, 8.0), gp_Dir(0, 0, 1));
+    TopoDS_Shape frustum = BRepPrimAPI_MakeCone(coneAx, 10.0, 12.0, 2.0);
+    tube = BRepAlgoAPI_Cut(tube, frustum);
+    const double d2r = M_PI / 180.0;
+    tube = BRepAlgoAPI_Cut(tube, radialSliver(80.0 * d2r, 84.0 * d2r, 20.0, 7.5, 8.5));
+    tube = BRepAlgoAPI_Cut(tube, radialSliver(200.0 * d2r, 204.0 * d2r, 20.0, 7.5, 8.5));
+    Sidecar sc;
+    tagBattery130(sc);
+    sc.recoverable = {planeRec({0, 0, 1}, 1), planeRec({0, 0, -1}, 1),
+                      cylRec(20.0, {0, 0, 0}, {0, 0, 1}, 1, 0, true),
+                      cylRec(10.0, {0, 0, 0}, {0, 0, 1}, 1, 0, true),
+                      coneRec(10.0, 12.0, 45.0, {0, 0, 8}, {0, 0, 1}, 1, 0)};
+    // The two slivers are the radial walls. Each wall's plane contains the axis.
+    sc.recoverable.push_back(planeRec(normalize(Vec3(std::sin(82.0 * d2r), -std::cos(82.0 * d2r), 0)), 1));
+    sc.recoverable.push_back(planeRec(normalize(Vec3(std::sin(202.0 * d2r), -std::cos(202.0 * d2r), 0)), 1));
+    sc.exactVolume = exactVolumeS22();
+    certifyExactVolume(tube, sc.exactVolume, "S22_frustum_fragmented_rim");
+    return emitShape(
+        "S22_frustum_fragmented_rim",
+        "R20/R10 tube, 45deg frustum R10->R12 h=2, small rim cut by two generator-aligned planar slivers. Expected when the face ships: outer wire 1 CIRCLE + 3 arcs + n LINE, unhandled 0.",
+        tube, 0.2, 0.5, sc);
+}
+
 int main(int argc, char** argv) {
     fs::path outDir = fs::current_path();
     if (argc >= 2) outDir = argv[1];
@@ -1896,6 +1953,7 @@ int main(int argc, char** argv) {
     run("counterbore_chamfer", [] { return buildCounterboreChamfer(); });
     run("cyl_meets_chamfer", [] { return buildCylMeetsChamfer(); });
     run("S20_cross_bore_union", [] { return buildS20CrossBoreUnion(); });
+    run("S22_frustum_fragmented_rim", [] { return buildS22FrustumFragmentedRim(); });
 
     for (const auto& fx : fixtures) {
         if (isPinnedCorpusFixture(fx.sidecar.id)

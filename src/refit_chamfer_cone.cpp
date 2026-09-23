@@ -5,7 +5,8 @@
 // Predicates (all required):
 //   1. Unclaimed provisional ring (flood of constant-slope provisionals).
 //   2. N ≥ 6 (shared-edge verts with the cylinder, else azimuth clusters).
-//   3. Adjacent to one accepted closed360 Cylinder (NgonWall or CylGrow).
+//   3. Adjacent to one accepted Cylinder — closed-360 for NgonWall, any span
+//      for CylGrow (the ring's own closure is predicate 6). D-train-cone.
 //   4. Adjacent to one Unclaimed or already-accepted Plane cap (|n·axis|≈1).
 //   5. Shared axis with that cylinder (inherited; gaussMapAxis rejects cones).
 //   6. R(v) linear (least-squares ρ = r0 + k v, residual ≤ sagTol).
@@ -171,9 +172,9 @@ double vOf(const gp_XYZ& p, const gp_XYZ& loc, const gp_XYZ& axis) {
     return (p - loc).Dot(axis);
 }
 
-bool isClosedCyl(const Region& r) {
-    if (r.type != SurfType::Cylinder || !r.closed360) return false;
-    return r.origin == Origin::NgonWall || r.origin == Origin::CylGrow;
+bool isSeedCyl(const Region& r) {
+    return r.type == SurfType::Cylinder &&
+           (r.origin == Origin::CylGrow || (r.origin == Origin::NgonWall && r.closed360));
 }
 
 double sagTolOf(const Region& cyl, int nRing, const DerivedTols& tol, const MeshView& mv) {
@@ -256,7 +257,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
 
         std::vector<int> cylIds;
         for (int i = 0; i < (int)work.accepted.size(); ++i) {
-            if (isClosedCyl(work.accepted[(std::size_t)i])) cylIds.push_back(i);
+            if (isSeedCyl(work.accepted[(std::size_t)i])) cylIds.push_back(i);
         }
         // Diag only (STL2STEP_DIAG_130): NAME the predicate that refuses each
         // candidate ring. Prints nothing and decides nothing when off; no
@@ -264,17 +265,20 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
         const char* d130 = std::getenv("STL2STEP_DIAG_130");
         const bool cDiag = d130 && d130[0] && d130[0] != '0';
         if (cDiag) {
-            int nClosed = 0;
-            for (const Region& a : work.accepted)
-                if (isClosedCyl(a)) nClosed++;
+            int nSeed = 0, nClosed = 0;
+            for (const Region& a : work.accepted) {
+                if (!isSeedCyl(a)) continue;
+                nSeed++;
+                if (a.closed360) nClosed++;
+            }
             std::fprintf(stderr,
-                         "DIAG_C_ENTRY pass=%d nProv=%d nAcc=%d closed360Cyls=%d\n",
+                         "DIAG_C_ENTRY pass=%d nProv=%d nAcc=%d seedCyls=%d closed360=%d\n",
                          pass, (int)work.provisionals.size(),
-                         (int)work.accepted.size(), nClosed);
+                         (int)work.accepted.size(), nSeed, nClosed);
         }
         if (cylIds.empty()) {
             if (cDiag)
-                std::fprintf(stderr, "DIAG_C_NONE why=no-closed360-cylinder-neighbour\n");
+                std::fprintf(stderr, "DIAG_C_NONE why=no-seed-cylinder-neighbour\n");
             return true;
         }
         std::sort(cylIds.begin(), cylIds.end(), [&](int a, int b) {
@@ -600,8 +604,8 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                     }
                 }
                 const int nAz = nBandsAzimuth(chi, tol.thetaBin);
-                int nSides = (int)juncVerts.size();
-                if (nSides < DerivedTols::kG5NSidesMin) nSides = nAz;
+                int nSides = nAz;
+                if (nSides < DerivedTols::kG5NSidesMin) nSides = (int)juncVerts.size();
                 if (nSides < DerivedTols::kG5NSidesMin) nSides = (int)mem.size();
                 if (nSides < DerivedTols::kG5NSidesMin) { crej(seed, "nSides-under-floor", (double)nSides, (double)DerivedTols::kG5NSidesMin); continue; }
 
@@ -666,6 +670,9 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 }
 
                 // Turning-axis round: in-ring n_i×n_j must be ∥ cylinder axis.
+                // `al` is hoisted so the accept diag can print it. Empty fold
+                // set leaves it 0 and does not run the test (same decision).
+                double al = 0.0;
                 {
                     // Each in-ring pair contributes its alignment WEIGHTED by
                     // |n_i x n_j|, the sine of the fold it realises. Half the
@@ -700,7 +707,7 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                         }
                     }
                     if (!align.empty()) {
-                        const double al = weightedMedianInPlace(align);
+                        al = weightedMedianInPlace(align);
                         if (al < kTurnDot) { crej(seed, "turning-axis-round", al, kTurnDot); continue; }
                     }
                 }
@@ -892,12 +899,24 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& /*p*/,
                 for (int m : mem)
                     work.provisionals[(std::size_t)m].claim = ProvClaim::ConsumedCylinder;
 
-                if (cDiag)
+                if (cDiag) {
+                    const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0)
+                                         ? mv.quantFloor
+                                         : 0.0;
+                    const double lineDev =
+                        maxLin / std::sqrt(1.0 + kSlope * kSlope);
                     std::fprintf(stderr,
-                                 "DIAG_C_ACCEPT cyl=%d cylR=%.4f seed=%d R1=%.6f R2=%.6f "
-                                 "nSides=%d nTri=%d maxLin=%.3g height=%.6f\n",
-                                 cylI, cyl.radius, seed, R1, R2, nSides, (int)sTris.size(),
-                                 maxLin, height);
+                                 "DIAG_C_ACCEPT cyl=%d cylR=%.9f seed=%d closed360=%d "
+                                 "cylMinTri=%d R1=%.6f R2=%.6f nTri=%d nSides=%d nAz=%d "
+                                 "juncVerts=%d mem=%d slopeMed=%.9f slopeSpread=%.3g "
+                                 "sagTol=%.6g align=%.9f lineDev=%.6g maxLin=%.6g "
+                                 "maxLinQ=%.4f height=%.6f\n",
+                                 cylI, cyl.radius, seed, cyl.closed360 ? 1 : 0,
+                                 minTriOf(cyl.tris), R1, R2, (int)sTris.size(), nSides, nAz,
+                                 (int)juncVerts.size(), (int)mem.size(), slopeMed,
+                                 slopeMax - slopeMin, sagTol, al, lineDev, maxLin,
+                                 (q > 0.0) ? maxLin / q : 0.0, height);
+                }
                 work.accepted.push_back(std::move(r));
                 anyCommit = true;
             }
