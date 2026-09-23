@@ -4,6 +4,7 @@
 #include "grade_mesh.hpp"
 #include "grade_oracle.hpp"
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,21 @@ struct StepModel {
 
 bool loadStep(const std::string& path, const Mesh& mesh, StepModel& out, std::string& err,
               bool computeVolume);
+
+// Serializes OCCT that is not thread-safe or must not overlap a STEP
+// reader: loadStep, BRep_Tool / BRepTopAdaptor_FClass2d /
+// GeomAPI_ProjectPointOnSurf / BRepAdaptor_Curve / TopExp::MapShapes on
+// STEP faces. gp_* and IntAna_QuadQuadGeo stay outside (stack math).
+// STEPControl_*, Interface_Static, Message::DefaultMessenger, and
+// OSD::SetSignal are process-global; a reader overlapping BRep/Geom on
+// another thread deadlocks on OCCT 8 / MSVC. One mutex, one lock order.
+std::mutex& occtMutex();
+
+// Drops the cout printer and calls OSD::SetSignal once on the first
+// thread, then OSD::SetThreadLocalSignal on this thread (does not replace
+// the process filter). Call from the main thread before a worker pool,
+// and from each worker before its first OCCT call.
+void prepareOcctThread();
 
 }  // namespace grade
 

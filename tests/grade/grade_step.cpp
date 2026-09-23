@@ -28,16 +28,39 @@
 #include <TopTools_IndexedMapOfShape.hxx>
 
 namespace grade {
+
+std::mutex& occtMutex() {
+    static std::mutex mu;
+    return mu;
+}
+
 namespace {
 
-// loadStep is the only OCCT entry in a grade. Interface_Static is process-global
-// (D-train-grader-5 (2) S3).
-std::mutex gLoadStepMu;
-
-void silenceOcct() {
-    Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
-    OSD::SetSignal(Standard_False);
+// Caller holds occtMutex(). SetSignal installs the process filter
+// (OSD.hxx: SetUnhandledExceptionFilter on Windows) and must run once,
+// before workers. SetThreadLocalSignal is the per-thread half and does
+// not replace that filter.
+void prepareOcctThreadHeld() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+        OSD::SetSignal(Standard_False);
+    });
+    thread_local bool local = false;
+    if (!local) {
+        OSD::SetThreadLocalSignal(OSD_SignalMode_Set, Standard_False);
+        local = true;
+    }
 }
+
+}  // namespace
+
+void prepareOcctThread() {
+    std::lock_guard<std::mutex> lock(occtMutex());
+    prepareOcctThreadHeld();
+}
+
+namespace {
 
 SurfParams fromAdaptor(const BRepAdaptor_Surface& ads, SurfClass& cls) {
     SurfParams S;
@@ -112,8 +135,8 @@ SurfParams fromAdaptor(const BRepAdaptor_Surface& ads, SurfClass& cls) {
 
 bool loadStep(const std::string& path, const Mesh& mesh, StepModel& out, std::string& err,
               bool computeVolume) {
-    std::lock_guard<std::mutex> lock(gLoadStepMu);
-    silenceOcct();
+    std::lock_guard<std::mutex> lock(occtMutex());
+    prepareOcctThreadHeld();
     out = StepModel{};
     out.cover.assign(mesh.tris.size(), -1);
     STEPControl_Reader r;
