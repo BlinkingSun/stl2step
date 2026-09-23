@@ -1002,6 +1002,10 @@ static void testSeamChartArithmetic() {
     const double sag = rho * (1.0 - std::cos(kPi / (double)N)) * std::cos(halfAngle);
     const double want = 12.0 * (1.0 - std::cos(kPi / 100.0)) * std::cos(kPi / 4.0);
     checkNear(sag, want, 1e-12, "ρ(1-cos(π/N))cos(halfAngle) chord sag");
+    // A generator is constant u, so the chart span has Δu = 0.
+    const double uAtLo = 0.25;
+    const double uAtHi = uAtLo;
+    checkNear(uAtHi - uAtLo, 0.0, 1e-12, "seam Δu = 0 on a generator");
 }
 
 int main() {

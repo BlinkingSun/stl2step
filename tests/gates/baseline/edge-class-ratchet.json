@@ -117,6 +117,9 @@
     "nonprismatic-control": 0,
     "shelf_bracket": 52
   },
+  "tier2CeilingNote": {
+    "linkage_bores_chamfer": "D-train-cone-2 and D-train-cone-3: mouth-frustum rim chords ship as tier-2 polylines, ceiling 204 → 210. No other fixture key changes."
+  },
   "expectedRed": {
     "Body11": [
       "overCap"
