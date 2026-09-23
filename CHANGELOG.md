@@ -6,9 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Converter output is unchanged: canonical STEP DATA is byte-identical to 1.4.3 on
-the 36 corpus fixtures and the 8 training files. This block covers the grader,
-the test gates and CI.
+Engine version 1.4.4 (untagged; no release yet). One converter change: the
+cross-bore mouth chamfer on `test.stl` / `linkage_bores_chamfer` now ships as one
+conical face. Every other corpus fixture and training file is byte-identical to
+1.4.3 in canonical STEP DATA.
+
+### Fixed
+- The 45° mouth frustum where a cross bore meets a face (200 triangles on the training plate) is built as one analytic cone instead of 100 planar quads. The ring is seeded from the open cross-bore cylinder; its seam is the cone's own generator at the shared azimuth column (`Δu = 0`), and the outer wire is assembled by a new surface-generic `buildSeamedOuterWire`. Plate: cones 2 → 3, STEP faces 413 → 314, analytic edges 210 → 213, grader cone class 0.450 → 1.0. The cone face's own rim-chord tolerance is raised on the cone side only (13 edges, bounded by the part's cap).
+- Two expected-red rows record what is still open on that face: the R = 10 rim is fitted twice (7.6e-7 mm apart), leaving one registered unhandled circle edge (`plate.mouth-cone-rim-twin-circle`), and six sliver seams stay tier-2 (`plate.mouth-cone-rim-sliver-seams`).
 
 ### Changed
 - `stl2step_grade` cylinder admission uses the curved-normal test already used for cones and tori; coaxial walls that share a radius stay two oracles when their domains are disjoint; intersection tiers for coaxial and tangent pairs are decided from `tau` first.
@@ -24,8 +29,9 @@ the test gates and CI.
 - Windows (and any multi-config generator): the nested `gates_full` run inside `p1_ac2_gates_baseline` gets the active configuration, and the guard fails when that nested ctest ran no tests instead of printing PASS.
 
 ### Added
+- Corpus fixture `S22_frustum_fragmented_rim` (a 45° frustum between R10 and R12 on a tube) and a `cone_math_unit` case for the seam chart arithmetic.
 - `scripts/ci-hosted-marker.sh` writes `.ci-local/<sha>.linux.green` / `.windows.green` from a green hosted run of that exact sha.
-- Expected-red rows: `plate.mouth-cone-unclaimed` sidecar entry, `cone.open-seed-no-synthetic`, `linkage_bores_chamfer` (cones 2/3) under both `gate_130` and `gates_full`, `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
+- Expected-red rows: `cone.open-seed-no-synthetic`, `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
 
 ## [1.4.3] - 2026-09-09
 
