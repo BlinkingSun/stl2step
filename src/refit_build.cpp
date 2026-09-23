@@ -32,6 +32,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -1446,6 +1447,137 @@ AnalyticCurve constructedCylConeRim(const Region& cylR, const Region& coneR) {
     else
         out.circ = coneIsoCircle(coneR, chamferHeightOf(coneR));
     return out;
+}
+
+bool rotateEdgesToVertex(std::vector<TopoDS_Edge>& edges, const TopoDS_Vertex& V);
+bool diag130Enabled();
+bool diagP2Enabled();
+
+// D-train-cone-4 1-c: surface-generic seamed outer wire (cone birth site).
+bool buildSeamedOuterWire(const Handle(Geom_ConicalSurface)& csurf,
+                          std::vector<TopoDS_Edge>& pathLo,
+                          std::vector<TopoDS_Edge>& pathHi,
+                          TopoDS_Edge& eSeam,
+                          const TopoDS_Vertex& rotateLo,
+                          const TopoDS_Vertex& rotateHi,
+                          const std::function<double(const gp_Pnt&)>& uAtPnt,
+                          const gp_Lin& seamGenerator,
+                          double seamSweepTol,
+                          double Rhi,
+                          double sewTol,
+                          int diagRid,
+                          double meshQ,
+                          TopoDS_Wire& ow) {
+    auto orientContinuous = [](std::vector<TopoDS_Edge>& path) {
+        for (size_t i = 1; i < path.size(); ++i) {
+            const TopoDS_Vertex prev = TopExp::LastVertex(path[i - 1], Standard_True);
+            const TopoDS_Vertex a = TopExp::FirstVertex(path[i], Standard_True);
+            const TopoDS_Vertex b = TopExp::LastVertex(path[i], Standard_True);
+            if (!a.IsNull() && a.IsSame(prev)) continue;
+            if (!b.IsNull() && b.IsSame(prev)) path[i] = TopoDS::Edge(path[i].Reversed());
+        }
+    };
+    auto sweepU = [&](const std::vector<TopoDS_Edge>& path) -> double {
+        double sweep = 0.0;
+        for (const TopoDS_Edge& e : path) {
+            Standard_Real f3 = 0, l3 = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+            if (c3.IsNull() || !(l3 > f3)) continue;
+            const int nS = 9;
+            double prevU = 0.0;
+            for (int i = 0; i < nS; i++) {
+                const int k = e.Orientation() == TopAbs_REVERSED ? nS - 1 - i : i;
+                const double tk = f3 + (l3 - f3) * (double)k / (double)(nS - 1);
+                const double u = uAtPnt(c3->Value(tk));
+                if (i > 0) {
+                    double du = u - prevU;
+                    while (du > kPi) du -= 2.0 * kPi;
+                    while (du < -kPi) du += 2.0 * kPi;
+                    sweep += du;
+                }
+                prevU = u;
+            }
+        }
+        return sweep;
+    };
+    auto nearestU = [&](const std::vector<TopoDS_Edge>& path, double target) -> TopoDS_Vertex {
+        TopoDS_Vertex best;
+        double bestD = 1e300;
+        for (const TopoDS_Edge& e : path) {
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(e, v1, v2, Standard_False);
+            for (const TopoDS_Vertex* V : {&v1, &v2}) {
+                if (V->IsNull()) continue;
+                const double d = angularDistance(uAtPnt(BRep_Tool::Pnt(*V)), target);
+                if (d < bestD) {
+                    bestD = d;
+                    best = *V;
+                }
+            }
+        }
+        return best;
+    };
+    if (!rotateEdgesToVertex(pathLo, rotateLo)) {
+        const TopoDS_Vertex alt = nearestU(pathLo, 0.0);
+        if (alt.IsNull() || !rotateEdgesToVertex(pathLo, alt)) return false;
+    }
+    if (!rotateEdgesToVertex(pathHi, rotateHi)) {
+        const TopoDS_Vertex alt = nearestU(pathHi, 0.0);
+        if (alt.IsNull() || !rotateEdgesToVertex(pathHi, alt)) return false;
+    }
+    orientContinuous(pathLo);
+    orientContinuous(pathHi);
+    const double sweepHi = sweepU(pathHi);
+    const double sweepLo = sweepU(pathLo);
+    if (sweepHi * sweepLo >= 0.0) return false;
+    if (angularDistance(std::fabs(sweepHi), 2.0 * kPi) > seamSweepTol) return false;
+    if (angularDistance(std::fabs(sweepLo), 2.0 * kPi) > seamSweepTol) return false;
+    if (pathLo.empty() || pathHi.empty()) return false;
+    const TopoDS_Vertex sL = TopExp::FirstVertex(pathLo.front(), Standard_True);
+    const TopoDS_Vertex sH = TopExp::FirstVertex(pathHi.front(), Standard_True);
+    if (diag130Enabled() || diagP2Enabled()) {
+        const gp_Pnt pL = sL.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(sL);
+        const gp_Pnt pH = sH.IsNull() ? gp_Pnt() : BRep_Tool::Pnt(sH);
+        const double dGenLo = sL.IsNull() ? -1.0 : seamGenerator.Distance(pL);
+        const double dGenHi = sH.IsNull() ? -1.0 : seamGenerator.Distance(pH);
+        const double uL = sL.IsNull() ? 0.0 : uAtPnt(pL);
+        const double uH = sH.IsNull() ? 0.0 : uAtPnt(pH);
+        TopoDS_Vertex seamA, seamB;
+        TopExp::Vertices(eSeam, seamA, seamB, Standard_True);
+        std::fprintf(stderr,
+                     "DIAG_CONESEAM rid=%d dGenLo=%.6g dGenHi=%.6g dGenLoQ=%.4f dGenHiQ=%.4f "
+                     "done=1 sweepHi=%.6f sweepLo=%.6f nLo=%zu nHi=%zu sameL=%d sameH=%d\n",
+                     diagRid, dGenLo, dGenHi, meshQ > 0.0 ? dGenLo / meshQ : 0.0,
+                     meshQ > 0.0 ? dGenHi / meshQ : 0.0, sweepHi, sweepLo, pathLo.size(),
+                     pathHi.size(), (!sL.IsNull() && sL.IsSame(seamA)) ? 1 : 0,
+                     (!sH.IsNull() && sH.IsSame(seamB)) ? 1 : 0);
+        std::fprintf(stderr, "DIAG_CONESEAMUV rid=%d us=%.9f ue=%.9f dU=%.6g\n", diagRid, uL, uH,
+                     angularDistance(uL, uH));
+    }
+    {
+        BRep_Builder Bs;
+        Standard_Real fs = 0, ls = 0;
+        Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
+        const double u0 =
+            uAtPnt(BRep_Tool::Pnt(TopExp::FirstVertex(eSeam, Standard_True)));
+        const double vHiParam = coneVAtRadius(csurf->Cone(), Rhi);
+        const double vSgn = (vHiParam >= 0.0) ? 1.0 : -1.0;
+        Handle(Geom2d_Line) pcS0 = new Geom2d_Line(gp_Pnt2d(u0, 0.0), gp_Dir2d(0.0, vSgn));
+        Handle(Geom2d_Line) pcS1 =
+            new Geom2d_Line(gp_Pnt2d(u0 + 2.0 * kPi, 0.0), gp_Dir2d(0.0, vSgn));
+        Bs.UpdateEdge(eSeam, pcS0, pcS1, csurf, TopLoc_Location(), sewTol);
+        if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
+        eSeam.Closed(Standard_False);
+    }
+    BRep_Builder Bw;
+    Bw.MakeWire(ow);
+    Bw.Add(ow, eSeam);
+    for (const TopoDS_Edge& e : pathHi) Bw.Add(ow, TopoDS::Edge(e.Reversed()));
+    Bw.Add(ow, TopoDS::Edge(eSeam.Reversed()));
+    for (int i = (int)pathLo.size() - 1; i >= 0; --i)
+        Bw.Add(ow, TopoDS::Edge(pathLo[(size_t)i].Reversed()));
+    ow.Closed(Standard_True);
+    return true;
 }
 
 // Ordered edges of a closed wire, rotated so the first edge starts at V.
@@ -3440,6 +3572,7 @@ bool walkOrderMatchesAppend(const LoopConnWalk& walk) {
 }
 
 bool collectWireEdges(const TopoDS_Wire& w, std::vector<TopoDS_Edge>& edges);
+bool rotateEdgesToVertex(std::vector<TopoDS_Edge>& edges, const TopoDS_Vertex& V);
 
 void registerShippedLoopOrder(int rid, const char* loopLabel, const TopoDS_Wire& w,
                               const LoopConnWalk& walk, const std::vector<LoopWireSlot>& slots) {
@@ -15633,22 +15766,38 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // snapVertexToCurve the cylinder seam uses.
                     TopoDS_Edge eSeam;
                     try {
-                        const gp_Pnt pSeamLo =
-                            circLo.Location().Translated(gp_Vec(circLo.XAxis().Direction()) * Rlo);
-                        // From the R_lo rim TOWARD the R_hi rim, built from the
-                        // frustum's own two numbers so it is right for either
-                        // taper sign. Writing it as sin(Ang)*X + cos(Ang)*Z is
-                        // the surface's +v direction, which points AWAY from the
-                        // R_hi rim when Ang < 0 (h < 0) and gives a seam whose
-                        // parameter range runs backwards.
-                        const gp_Dir genDir(gp_Vec(circLo.XAxis().Direction()) * dR +
-                                            gp_Vec(r.ax.Direction()) * h);
-                        const gp_Lin gen(pSeamLo, genDir);
-                        AnalyticCurve acs;
-                        acs.kind = AnalyticCurve::Lin;
-                        acs.lin = gen;
-                        snapVertexToCurve(verts[(size_t)vL], acs, snapCap);
-                        snapVertexToCurve(verts[(size_t)vH], acs, snapCap);
+                        // A single-chain frustum (hole B) is seamed on the cone's
+                        // X-axis ruling: its two circles were built on that axis,
+                        // and moving the ruling onto the raw vertices invalidates
+                        // the positive-h cone. A composite rim (the mouth) is the
+                        // opposite. Its vertices sit 0.00947 rad off that X axis,
+                        // and a generator placed there misses them by R*δ
+                        // (0.114 mm at R = 12) — InvalidCurveOnClosedSurface.
+                        // Both vertices already lie on the iso circles at one
+                        // azimuth, so the segment between them is the ruling.
+                        const bool singleChain = loopLo->chainIdx.size() == 1 &&
+                                                  loopHi->chainIdx.size() == 1;
+                        gp_Lin gen;
+                        if (singleChain) {
+                            const gp_Pnt pAxis =
+                                circLo.Location().Translated(
+                                    gp_Vec(circLo.XAxis().Direction()) * Rlo);
+                            const gp_Dir genDir(gp_Vec(circLo.XAxis().Direction()) * dR +
+                                                gp_Vec(r.ax.Direction()) * h);
+                            gen = gp_Lin(pAxis, genDir);
+                            AnalyticCurve acs;
+                            acs.kind = AnalyticCurve::Lin;
+                            acs.lin = gen;
+                            snapVertexToCurve(verts[(size_t)vL], acs, snapCap);
+                            snapVertexToCurve(verts[(size_t)vH], acs, snapCap);
+                        } else {
+                            const gp_Pnt pSeamLo = BRep_Tool::Pnt(verts[(size_t)vL]);
+                            const gp_Pnt pSeamHi = BRep_Tool::Pnt(verts[(size_t)vH]);
+                            const gp_Vec along(pSeamLo, pSeamHi);
+                            if (along.SquareMagnitude() <= Precision::SquareConfusion())
+                                return coneFail("seam-degenerate", 0, 0);
+                            gen = gp_Lin(pSeamLo, gp_Dir(along));
+                        }
                         BRepBuilderAPI_MakeEdge ms(gen, verts[(size_t)vL], verts[(size_t)vH]);
                         if (!ms.IsDone()) return coneFail("seam-MakeEdge-failed", 0, 0);
                         eSeam = ms.Edge();
@@ -15733,26 +15882,41 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         }
                     }
                     if (!got) {
-                        TopoDS_Wire wL, wH;
-                        if (buildLoopWire(wL, *capL, rs, mv, geom, collapsed, meshE, edgeOk,
+                        // Composite cap: read the MEASURED loopLo/loopHi, never
+                        // the LoopRole names. Each rim is rotated onto its seam
+                        // vertex and the two rims run opposite u so the outer
+                        // wire is one chart, not a doubled-back loop. The seam
+                        // pair is bound here the way the simple path binds it.
+                        TopoDS_Wire wLoW, wHiW;
+                        if (buildLoopWire(wLoW, *loopLo, rs, mv, geom, collapsed, meshE, edgeOk,
                                           nullptr) &&
-                            buildLoopWire(wH, *capH, rs, mv, geom, collapsed, meshE, edgeOk,
+                            buildLoopWire(wHiW, *loopHi, rs, mv, geom, collapsed, meshE, edgeOk,
                                           nullptr)) {
-                            BRep_Builder Bw;
-                            TopoDS_Wire ow;
-                            Bw.MakeWire(ow);
-                            Bw.Add(ow, eSeam);
-                            for (BRepTools_WireExplorer ex(wH); ex.More(); ex.Next())
-                                Bw.Add(ow, ex.Current());
-                            Bw.Add(ow, TopoDS::Edge(eSeam.Reversed()));
-                            std::vector<TopoDS_Edge> pathL;
-                            for (BRepTools_WireExplorer ex(wL); ex.More(); ex.Next())
-                                pathL.push_back(TopoDS::Edge(ex.Current()));
-                            for (int i = (int)pathL.size() - 1; i >= 0; --i)
-                                Bw.Add(ow, TopoDS::Edge(pathL[(size_t)i].Reversed()));
-                            ow.Closed(Standard_True);
-                            got = makeFaceCopy(csurf, ow, inners, r.outwardNormal, f) ||
-                                  makeFaceKeep(csurf, ow, inners, r.outwardNormal, f);
+                            std::vector<TopoDS_Edge> pathLo, pathHi;
+                            if (collectWireEdges(wLoW, pathLo) && collectWireEdges(wHiW, pathHi)) {
+                                Standard_Real sf = 0, sl = 0;
+                                Handle(Geom_Curve) sc = BRep_Tool::Curve(eSeam, sf, sl);
+                                Handle(Geom_Line) gl = Handle(Geom_Line)::DownCast(sc);
+                                if (gl.IsNull()) {
+                                    /* fall through */
+                                } else {
+                                    const gp_Lin seamGen = gl->Lin();
+                                    const double qMesh =
+                                        (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0)
+                                            ? mv.quantFloor
+                                            : 0.0;
+                                    const double seamSweepTol =
+                                        qMesh > 0.0 ? 2.0 * qMesh : Precision::Angular();
+                                    TopoDS_Wire ow;
+                                    auto uAt = [&](const gp_Pnt& p) { return azimuthOf(r, p); };
+                                    if (buildSeamedOuterWire(csurf, pathLo, pathHi, eSeam,
+                                                             verts[(size_t)vL], verts[(size_t)vH],
+                                                             uAt, seamGen, seamSweepTol, Rhi,
+                                                             sewTol, r.id, qMesh, ow)) {
+                                        got = makeFaceKeep(csurf, ow, inners, r.outwardNormal, f);
+                                    }
+                                }
+                            }
                         }
                     }
                     if (!got || f.IsNull()) return coneFail("makeFace-failed", simple ? 1 : 0, 0);
@@ -15764,7 +15928,12 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // that ShapeFix_Wire displaces the shared verts[] and opens
                     // the shell it was called to close (12.4 mm on this part).
                     addPcurvesOnFace(f, sewTol, true);
-if (!simple && !f.IsNull()) {
+                    // Composite rim chords: raise-only, at this cone's own
+                    // partialFaceTolCap. ensureFaceValid has no Cone case
+                    // (D-S3-123(e)) and the shared bind uses the sliver plane's
+                    // cap, which is below the chord sag. Hole-B's simple faces
+                    // do not enter here.
+                    if (!simple && !f.IsNull()) {
                         if (diag130Enabled()) {
                             int wi = 0;
                             for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
@@ -15811,7 +15980,7 @@ if (!simple && !f.IsNull()) {
                                              maxAll, lastTolWriterOf(e), over ? 1 : 0);
                         }
                     }
-                                        if (!faceIsValid(f)) {
+                    if (!faceIsValid(f)) {
                         try {
                             ShapeFix_Face sff(f);
                             sff.FixMissingSeamMode() = 1;
