@@ -992,6 +992,18 @@ static void testFrustumChordVolume() {
           "density: non-finite rho -> 0");
 }
 
+static void testSeamChartArithmetic() {
+    const double halfAngle = kPi / 4.0;
+    const double h = -2.0;
+    const double dv = std::fabs(h) / std::cos(halfAngle);
+    checkNear(dv, 2.0 * std::sqrt(2.0), 1e-12, "seam |Δv| = |h|/cos(halfAngle)");
+    const double rho = 12.0;
+    const int N = 100;
+    const double sag = rho * (1.0 - std::cos(kPi / (double)N)) * std::cos(halfAngle);
+    const double want = 12.0 * (1.0 - std::cos(kPi / 100.0)) * std::cos(kPi / 4.0);
+    checkNear(sag, want, 1e-12, "ρ(1-cos(π/N))cos(halfAngle) chord sag");
+}
+
 int main() {
     testParametrisation();
     testApexAndVRange();
@@ -1005,6 +1017,7 @@ int main() {
     testIntCylinder();
     testIntCone();
     testFrustumChordVolume();
+    testSeamChartArithmetic();
 
     std::fprintf(stderr, "cone_math_unit: %d/%d PASS\n", gPass, gPass + gFail);
     return gFail ? 1 : 0;
