@@ -4,6 +4,29 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Converter output is unchanged: canonical STEP DATA is byte-identical to 1.4.3 on
+the 36 corpus fixtures and the 8 training files. This block covers the grader,
+the test gates and CI.
+
+### Changed
+- `stl2step_grade` cylinder admission uses the curved-normal test already used for cones and tori; coaxial walls that share a radius stay two oracles when their domains are disjoint; intersection tiers for coaxial and tangent pairs are decided from `tau` first.
+- Grader cylinder certificate: at least four azimuth columns at `dφ_τ = τ/ρmax` and a section that is not a straight line. A pair that does not grow is extended in ascending triangle index until the certificate holds. The emit floor lives in `certifies` (registered as `grade.cyl-emit-triangle-floor`).
+- Grader plane handling: every certified plane is held; only a four-vertex quad enters the curved ambient set; larger faces reach a cylinder through per-triangle release after the other classes have seeded; release and claim/merge run to a joint fixpoint.
+- `grade_selftest` grades the corpus fixtures in parallel (`std::thread::hardware_concurrency()` workers; `STL2STEP_GRADE_SELFTEST_JOBS=1` for serial) and consumes checks in source order: about 159 s, under the unchanged 300 s timeout. Graded numbers are unchanged by the speed-up.
+- `p1_ac2_gates_baseline` waits up to 6000 s, the same budget as `gates_full`.
+- `rimSplitVertex` also splits an open cap chain of a closed-360 cylinder or chamfer cone at the region's u = 0 column when that column is an interior vertex of the chain. Output is unchanged on all 44 artefacts.
+- An invalid cone face is refused where it is built, and its component is exploded rather than published.
+
+### Fixed
+- The grader no longer reports the plate's two R = 5 six-triangle bores as six missing planes, no longer takes 48 triangles off the S04 torus, and no longer publishes one-triangle cylinder rows. The hole-tessellation area escape applies to planes only.
+- Windows (and any multi-config generator): the nested `gates_full` run inside `p1_ac2_gates_baseline` gets the active configuration, and the guard fails when that nested ctest ran no tests instead of printing PASS.
+
+### Added
+- `scripts/ci-hosted-marker.sh` writes `.ci-local/<sha>.linux.green` / `.windows.green` from a green hosted run of that exact sha.
+- Expected-red rows: `plate.mouth-cone-unclaimed` sidecar entry, `cone.open-seed-no-synthetic`, `gate_130` B1 `linkage_bores_chamfer` (cones 2/3), `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
+
 ## [1.4.3] - 2026-09-09
 
 ### Fixed
