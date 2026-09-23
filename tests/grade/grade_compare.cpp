@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -35,6 +36,14 @@
 
 namespace grade {
 namespace {
+
+// Holds occtMutex for one contiguous OCCT section so a STEP reader on
+// another worker cannot overlap it. gp_* and IntAna stay outside: they
+// are stack math with no process statics.
+struct OcctSection {
+    std::lock_guard<std::mutex> guard;
+    OcctSection() : guard(occtMutex()) {}
+};
 
 int statusIndex(Status s) {
     switch (s) {
@@ -495,6 +504,7 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
         if (a > 0.0 || F.face.IsNull()) return a;
         // Analytic circular discs (exact.step) have a CIRCLE edge and one
         // seam vertex — mesh-vert identity is empty. Classify centroids.
+        OcctSection occt;
         Handle(Geom_Surface) surf = BRep_Tool::Surface(F.face);
         if (surf.IsNull()) return 0.0;
         BRepTopAdaptor_FClass2d cls(F.face, Precision::PConfusion());
@@ -570,6 +580,7 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
         // Enlarged face: area(F) exceeds the matched oracle by more than
         // areaQ. Exact recovered faces are within areaQ and must not span.
         if (!(F.area > O0.w + areaQ(doc.mesh, O0.tris))) continue;
+        OcctSection occt;
         Handle(Geom_Surface) surf = BRep_Tool::Surface(F.face);
         if (surf.IsNull()) continue;
         BRepTopAdaptor_FClass2d cls(F.face, Precision::PConfusion());
@@ -763,6 +774,7 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
                             break;
                         }
                     if (!fp) return;
+                    OcctSection occt;
                     TopTools_IndexedMapOfShape emap;
                     TopExp::MapShapes(fp->face, TopAbs_EDGE, emap);
                     for (int e = 1; e <= emap.Extent(); ++e) ++edgeCount[e];  // not unique across faces
@@ -776,6 +788,7 @@ bool gradeFiles(const std::string& stl, const std::string& step, const GradeConf
                     if (F.entity == fb.stepFaces[0].entity) Fb = &F;
                 }
                 if (Fa && Fb) {
+                    OcctSection occt;
                     TopExp::MapShapes(Fa->face, TopAbs_EDGE, ea);
                     TopExp::MapShapes(Fb->face, TopAbs_EDGE, eb);
                     for (int ei = 1; ei <= ea.Extent(); ++ei) {

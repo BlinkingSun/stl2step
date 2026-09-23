@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <functional>
@@ -41,9 +42,6 @@
 #include <BRep_Builder.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
-#include <Message.hxx>
-#include <Message_PrinterOStream.hxx>
-#include <OSD.hxx>
 #include <STEPControl_Reader.hxx>
 #include <STEPControl_Writer.hxx>
 #include <TopExp.hxx>
@@ -193,10 +191,7 @@ void ensureDir(const std::string& p) {
 #endif
 }
 
-void silence() {
-    Message::DefaultMessenger()->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
-    OSD::SetSignal(Standard_False);
-}
+void silence() { grade::prepareOcctThread(); }
 
 bool writeStep(const TopoDS_Shape& s, const std::string& path) {
     Interface_Static::SetCVal("write.step.schema", "AP214IS");
@@ -300,15 +295,33 @@ int coreTests(const std::string& corpus) {
     std::fprintf(stdout, "grade_selftest jobs=%u\n", nJobs);
     std::fflush(stdout);
     {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto elapsed = [&]() {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        };
+        auto fixtureOf = [](const Job& j, size_t i) {
+            std::string s = j.stl;
+            const auto sl = s.find_last_of("/\\");
+            if (sl != std::string::npos) s = s.substr(sl + 1);
+            s += "#";
+            s += std::to_string(i);
+            return s;
+        };
         std::atomic<size_t> cursor{0};
         auto worker = [&]() {
+            grade::prepareOcctThread();
             for (;;) {
                 const size_t i = cursor.fetch_add(1);
                 if (i >= jobs.size()) break;
+                const std::string fx = fixtureOf(jobs[i], i);
+                std::fprintf(stderr, "grade_selftest start %s t=%.3f\n", fx.c_str(), elapsed());
+                std::fflush(stderr);
                 grade::setOracleStderrSink(&jobs[i].cap);
                 jobs[i].ok = grade::gradeFiles(jobs[i].stl, jobs[i].step, jobs[i].cfg, jobs[i].doc,
                                                jobs[i].err);
                 grade::setOracleStderrSink(nullptr);
+                std::fprintf(stderr, "grade_selftest done %s t=%.3f\n", fx.c_str(), elapsed());
+                std::fflush(stderr);
             }
         };
         const unsigned pool =

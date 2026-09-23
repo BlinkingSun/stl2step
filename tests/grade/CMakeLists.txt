@@ -79,7 +79,8 @@ add_test(NAME grade_independence
 set_tests_properties(grade_selftest
     PROPERTIES
         LABELS "grade"
-        TIMEOUT 300
+        # D-train-push-5: local4=185.83s×ratioLinux=2=371.66s; local3=185.95s×ratioMac=4=743.80s; win=max(linux,macos)=4×local4=743.32s (run 35810390568, no windows ctest); max×1.5=1115.70→TIMEOUT 1200.
+        TIMEOUT 1200
         SKIP_RETURN_CODE ${STL2STEP_OCCT_SKIP_EXIT_CODE})
 set_tests_properties(grade_synthetic grade_selftest_ascii grade_independence
     PROPERTIES LABELS "grade" TIMEOUT 300)
