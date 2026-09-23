@@ -25,7 +25,7 @@ the test gates and CI.
 
 ### Added
 - `scripts/ci-hosted-marker.sh` writes `.ci-local/<sha>.linux.green` / `.windows.green` from a green hosted run of that exact sha.
-- Expected-red rows: `plate.mouth-cone-unclaimed` sidecar entry, `cone.open-seed-no-synthetic`, `gate_130` B1 `linkage_bores_chamfer` (cones 2/3), `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
+- Expected-red rows: `plate.mouth-cone-unclaimed` sidecar entry, `cone.open-seed-no-synthetic`, `linkage_bores_chamfer` (cones 2/3) under both `gate_130` and `gates_full`, `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
 
 ## [1.4.3] - 2026-09-09
 
