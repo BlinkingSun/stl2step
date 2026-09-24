@@ -113,12 +113,12 @@
     "cyl_meets_chamfer": 0,
     "handle-lock": 0,
     "handle-pickup": 358,
-    "linkage_bores_chamfer": 210,
+    "linkage_bores_chamfer": 138,
     "nonprismatic-control": 0,
     "shelf_bracket": 52
   },
   "tier2CeilingNote": {
-    "linkage_bores_chamfer": "D-train-cone-2 and D-train-cone-3: mouth-frustum rim chords ship as tier-2 polylines, ceiling 204 → 210. No other fixture key changes."
+    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN)."
   },
   "expectedRed": {
     "Body11": [

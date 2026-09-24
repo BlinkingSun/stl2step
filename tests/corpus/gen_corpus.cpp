@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
@@ -1846,6 +1847,108 @@ FixtureResult buildS20CrossBoreUnion() {
                      solid, defl, angDefl, sc, /*emitExactStep=*/true);
 }
 
+// D-train-seams D-S8. A block with one partial cylindrical outer wall.
+// The top rim's terminal vertex is moved off the cap by the wall's own chord
+// sagitta (asserted > the engine sewTol before any engine run). The bottom rim
+// is the negative control and is not moved. Expected classes: positive rim
+// 1 CIRCLE + 1 LINE, negative rim 1 CIRCLE, unhandled 0.
+double exactVolumeS21(double bx, double by, double bz, double R, double H) {
+    return bx * by * bz + 0.5 * M_PI * R * R * H;
+}
+
+FixtureResult buildS21RimOffplane() {
+    const double bx = 40.0, by = 20.0, bz = 10.0;
+    const double R = 6.0, H = 10.0;
+    const double ax = bx, ay = by * 0.5;
+    TopoDS_Shape box = BRepPrimAPI_MakeBox(bx, by, bz);
+    gp_Ax2 axis(gp_Pnt(ax, ay, 0.0), gp_Dir(0, 0, 1), gp_Dir(0, -1, 0));
+    TopoDS_Shape half = BRepPrimAPI_MakeCylinder(axis, R, H, M_PI);
+    TopoDS_Shape solid = BRepAlgoAPI_Fuse(box, half);
+    const double closed = exactVolumeS21(bx, by, bz, R, H);
+    certifyExactVolume(solid, closed, "S21_rim_offplane_vertex");
+    const double defl = 0.2;
+    const double angDefl = 0.5;
+    tessellate(solid, defl, angDefl);
+    FixtureResult out;
+    out.mesh = weldQuantized(quantizeMesh(extractMesh(solid)));
+    double xmin = 1e300, ymin = 1e300, zmin = 1e300;
+    double xmax = -1e300, ymax = -1e300, zmax = -1e300;
+    double maxAbs = 0.0;
+    for (const auto& v : out.mesh.verts) {
+        xmin = std::min(xmin, v.x);
+        ymin = std::min(ymin, v.y);
+        zmin = std::min(zmin, v.z);
+        xmax = std::max(xmax, v.x);
+        ymax = std::max(ymax, v.y);
+        zmax = std::max(zmax, v.z);
+        maxAbs = std::max(maxAbs, std::max(std::fabs(v.x), std::max(std::fabs(v.y), std::fabs(v.z))));
+    }
+    const double bboxDiag =
+        std::sqrt((xmax - xmin) * (xmax - xmin) + (ymax - ymin) * (ymax - ymin) +
+                  (zmax - zmin) * (zmax - zmin));
+    // stl2step.cpp sewTol = min(max(1e-6, diag * 1e-5), 0.5). Same expression.
+    const double sewTol = std::min(std::max(1e-6, bboxDiag * 1e-5), 0.5);
+    std::vector<int> top;
+    for (int i = 0; i < (int)out.mesh.verts.size(); i++) {
+        const auto& v = out.mesh.verts[(size_t)i];
+        const double dx = v.x - ax;
+        const double dy = v.y - ay;
+        const double rho = std::sqrt(dx * dx + dy * dy);
+        if (std::fabs(v.z - H) <= defl && std::fabs(rho - R) <= defl) top.push_back(i);
+    }
+    if (top.size() < 3)
+        throw std::runtime_error("S21: top rim has fewer than two edges");
+    std::sort(top.begin(), top.end(), [&](int a, int b) {
+        const auto& pa = out.mesh.verts[(size_t)a];
+        const auto& pb = out.mesh.verts[(size_t)b];
+        return std::atan2(pa.x - ax, -(pa.y - ay)) < std::atan2(pb.x - ax, -(pb.y - ay));
+    });
+    double maxStep = 0.0;
+    for (size_t i = 1; i < top.size(); i++) {
+        const auto& pa = out.mesh.verts[(size_t)top[i - 1]];
+        const auto& pb = out.mesh.verts[(size_t)top[i]];
+        double d = std::fabs(std::atan2(pb.x - ax, -(pb.y - ay)) -
+                             std::atan2(pa.x - ax, -(pa.y - ay)));
+        if (d > maxStep) maxStep = d;
+    }
+    const double offset = R * (1.0 - std::cos(0.5 * maxStep));
+    if (!(offset > sewTol)) {
+        std::ostringstream os;
+        os << std::setprecision(17) << "S21 offset " << offset << " mm is not > sewTol " << sewTol;
+        throw std::runtime_error(os.str());
+    }
+    // The diameter-end vertex. Measured: OCCT's tessellation keeps the long cap
+    // arc on its own chain and isolates this corner on a 2-point chain, which
+    // D-S2 certifies as an ellipse. Both cap arcs stay whole circles.
+    int term = top.front();
+    for (int id : top)
+        if (out.mesh.verts[(size_t)id].y < out.mesh.verts[(size_t)term].y) term = id;
+    out.mesh.verts[(size_t)term].z += offset;
+    const float f = static_cast<float>(std::fabs(maxAbs));
+    const float up = std::nextafterf(f, std::numeric_limits<float>::infinity());
+    const double ulp = static_cast<double>(up) - static_cast<double>(f);
+    const double q = ulp * std::sqrt(3.0) / 2.0;
+    const double offQ = (q > 0.0) ? (offset / q) : 0.0;
+    std::cout << std::setprecision(17) << "S21-RIM offset=" << offset << " mm = " << offQ
+              << " q sewTol=" << sewTol << " mm bboxDiag=" << bboxDiag << " maxStep=" << maxStep
+              << " topN=" << top.size() << " term=" << term << "\n";
+    Sidecar sc;
+    sc.recoverable = {planeRec({0, 0, 1}, 1), planeRec({0, 0, -1}, 1), planeRec({1, 0, 0}, 1),
+                      planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1), planeRec({0, -1, 0}, 1),
+                      cylRec(R, {ax, ay, 0.0}, {0, 0, 1}, 1, 0, false)};
+    sc.exactVolume = closed;
+    out.sidecar = sc;
+    out.sidecar.id = "S21_rim_offplane_vertex";
+    out.sidecar.description =
+        "partial cylindrical wall; both cap rims 1 CIRCLE each; the off-plane "
+        "corner chain ships 1 ELLIPSE (D-S2); unhandled 0 (D-S8)";
+    out.sidecar.deflection = defl;
+    fillMeshSidecar(out);
+    if (!out.sidecar.watertight)
+        throw std::runtime_error("S21: displaced rim opened the mesh");
+    return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1896,6 +1999,7 @@ int main(int argc, char** argv) {
     run("counterbore_chamfer", [] { return buildCounterboreChamfer(); });
     run("cyl_meets_chamfer", [] { return buildCylMeetsChamfer(); });
     run("S20_cross_bore_union", [] { return buildS20CrossBoreUnion(); });
+    run("S21_rim_offplane_vertex", [] { return buildS21RimOffplane(); });
 
     for (const auto& fx : fixtures) {
         if (isPinnedCorpusFixture(fx.sidecar.id)
