@@ -252,6 +252,12 @@ jobs:
           $lines += '--- dll set diff (ref vs hosted; informational) ---'
           $lines += "only_in_hosted=$(($onlyH | ForEach-Object InputObject) -join ',')"
           $lines += "only_in_ref=$(($onlyR | ForEach-Object InputObject) -join ',')"
+          foreach ($d in @(@{L='hosted';P=$hostedDir},@{L='ref';P=$refDir})) {
+            foreach ($n in @('TKernel.dll','TKDESTEP.dll','TKBRep.dll','z.dll','zlib1.dll')) {
+              $f = Join-Path $d.P $n
+              if (Test-Path $f) { $vi = (Get-Item $f).VersionInfo; $lines += "dllver $($d.L) $n file=$($vi.FileVersion) product=$($vi.ProductVersion) size=$((Get-Item $f).Length)" }
+            }
+          }
           $hostedExe = Join-Path $hostedDir 'stl2step.exe'
           $refExe = Join-Path $refDir 'stl2step.exe'
           if (-not (Test-Path $hostedExe)) { throw "missing $hostedExe" }
@@ -280,14 +286,20 @@ jobs:
             if ($code -ne 0 -and $code -ne 2) {
               throw "$Label convert failed $($ConvertArgs[0]): ok=true but exit $code (expected 0 or 2)"
             }
+            return $line
           }
           $mismatches = [System.Collections.Generic.List[string]]::new()
           foreach ($fx in $fixtures) {
             if (-not (Test-Path $fx.Stl)) { throw "missing fixture $($fx.Stl)" }
             $hStep = Join-Path $work "hosted_$($fx.Id).step"
             $rStep = Join-Path $work "ref_$($fx.Id).step"
-            Assert-Stl2StepConvertOk -Label 'hosted' -Exe $hostedExe -ConvertArgs @($fx.Stl, '-o', $hStep, '--engine', 'trueform', '--threads', '1', '--no-verify', '--quiet')
-            Assert-Stl2StepConvertOk -Label 'ref' -Exe $refExe -ConvertArgs @($fx.Stl, '-o', $rStep, '--engine', 'trueform', '--threads', '1', '--no-verify', '--quiet')
+            $hLine = Assert-Stl2StepConvertOk -Label 'hosted' -Exe $hostedExe -ConvertArgs @($fx.Stl, '-o', $hStep, '--engine', 'trueform', '--threads', '1', '--no-verify', '--quiet')
+            $rLine = Assert-Stl2StepConvertOk -Label 'ref' -Exe $refExe -ConvertArgs @($fx.Stl, '-o', $rStep, '--engine', 'trueform', '--threads', '1', '--no-verify', '--quiet')
+            $hRes = Join-Path $work "hosted_$($fx.Id).result"; $rRes = Join-Path $work "ref_$($fx.Id).result"
+            Set-Content -LiteralPath $hRes -Value $hLine -Encoding utf8
+            Set-Content -LiteralPath $rRes -Value $rLine -Encoding utf8
+            $rr = & python $canon result $hRes $rRes --report json
+            $lines += "$($fx.Id) result_compare=$(($rr -join ' '))"
             $raw = & python $canon step $hStep $rStep --report json
             $code = $LASTEXITCODE
             if ($code -eq 2 -or $null -eq $raw) { throw "canonicalize failed $($fx.Id) exit $code" }
@@ -312,4 +324,5 @@ jobs:
             ${{ env.ENGINE_OUT }}/engine-manifest.json
             ${{ env.ENGINE_OUT }}/SHA256SUMS-engine.txt
             ${{ env.ENGINE_OUT }}/equivalence.txt
+            ${{ runner.temp }}/eq-convert/*
           if-no-files-found: warn
