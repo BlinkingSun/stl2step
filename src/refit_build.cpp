@@ -4832,6 +4832,252 @@ double chainMaxDistToOwnVerts(const AnalyticCurve& c, const MeshView& mv, const 
     return maxDist;
 }
 
+// D-train-seams D-S1 measurement (diagnostic only). A run is a maximal
+// contiguous span of the chain's own vertices. `runs` uses residual <= sewTol
+// (the gate's own test). `runsCert` also requires both surfaces within
+// tau = 2q (D-130-12): D-S3 refuses an arc through a vertex the mesh puts off
+// a shipped surface. A run is an edge only when it has two endpoints (D-S1).
+// Nothing here writes geometry.
+struct ChainSpanRuns {
+    int runs = 0;
+    int longest = 0;
+    int excluded = 0;
+    int runsCert = 0;
+    int longestCert = 0;
+    int nOnBoth = 0;
+    int nOffSurf = 0;
+    // Inclusive index pairs into the chain. first > second means the run wraps
+    // the closed chain: [first, n) U [0, second].
+    std::vector<std::pair<int, int>> certRuns;
+    // An uncovered vertex still lies within tau of both surfaces (D-S1 guard b).
+    bool refuseOnSurface = false;
+};
+
+ChainSpanRuns chainSpanRuns(const AnalyticCurve& c, const MeshView& mv, const BoundaryChain& ch,
+                            const Region* A, const Region* B, double sewTol) {
+    ChainSpanRuns o;
+    const int n = (int)ch.meshVerts.size();
+    if (n <= 0) return o;
+    // D-S1: an analytic edge has two endpoints. Not a tolerance.
+    const int kMinRun = 2;
+    const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+    const double tau = (q > 0.0) ? (2.0 * q) : 0.0;
+    std::vector<char> onSew(ch.meshVerts.size(), 0);
+    std::vector<char> onCert(ch.meshVerts.size(), 0);
+    std::vector<char> onSurf(ch.meshVerts.size(), 0);
+    for (int i = 0; i < n; i++) {
+        const gp_Pnt p = pntOf(mv, ch.meshVerts[(size_t)i]);
+        const double res = curveResidual(c, p);
+        const double dA = regionPointDev(A, p);
+        const double dB = regionPointDev(B, p);
+        const bool sew = std::isfinite(res) && res <= sewTol;
+        if (sew) onSew[(size_t)i] = 1;
+        const bool offA = !(std::isfinite(dA) && dA <= tau);
+        const bool offB = !(std::isfinite(dB) && dB <= tau);
+        if (!offA && !offB) {
+            o.nOnBoth++;
+            onSurf[(size_t)i] = 1;
+        }
+        if (offA || offB) o.nOffSurf++;
+        if (sew && !offA && !offB) onCert[(size_t)i] = 1;
+    }
+    auto tally = [&](const std::vector<char>& on, int& nRun, int& longest, int* covered) {
+        int i = 0;
+        int cov = 0;
+        while (i < n) {
+            if (!on[(size_t)i]) {
+                i++;
+                continue;
+            }
+            int j = i + 1;
+            while (j < n && on[(size_t)j]) j++;
+            const int len = j - i;
+            if (len >= kMinRun) {
+                nRun++;
+                cov += len;
+                if (len > longest) longest = len;
+            }
+            i = j;
+        }
+        if (ch.closedLoop && n >= kMinRun && on[0] && on[(size_t)(n - 1)]) {
+            int prefix = 0;
+            while (prefix < n && on[(size_t)prefix]) prefix++;
+            if (prefix < n) {
+                int suffix = 0;
+                while (suffix < n && on[(size_t)(n - 1 - suffix)]) suffix++;
+                if (prefix >= kMinRun) {
+                    nRun--;
+                    cov -= prefix;
+                }
+                if (suffix >= kMinRun) {
+                    nRun--;
+                    cov -= suffix;
+                }
+                const int len = prefix + suffix;
+                if (len >= kMinRun) {
+                    nRun++;
+                    cov += len;
+                    if (len > longest) longest = len;
+                }
+            }
+        }
+        if (covered) *covered = cov;
+    };
+    int covered = 0;
+    tally(onSew, o.runs, o.longest, &covered);
+    o.excluded = n - covered;
+    int coveredCert = 0;
+    tally(onCert, o.runsCert, o.longestCert, &coveredCert);
+    {
+        int i = 0;
+        while (i < n) {
+            if (!onCert[(size_t)i]) {
+                i++;
+                continue;
+            }
+            int j = i + 1;
+            while (j < n && onCert[(size_t)j]) j++;
+            if (j - i >= kMinRun) o.certRuns.emplace_back(i, j - 1);
+            i = j;
+        }
+        if (ch.closedLoop && n >= kMinRun && onCert[0] && onCert[(size_t)(n - 1)]) {
+            int prefix = 0;
+            while (prefix < n && onCert[(size_t)prefix]) prefix++;
+            if (prefix < n) {
+                int suffix = 0;
+                while (suffix < n && onCert[(size_t)(n - 1 - suffix)]) suffix++;
+                o.certRuns.erase(std::remove_if(o.certRuns.begin(), o.certRuns.end(),
+                                                [&](const std::pair<int, int>& r) {
+                                                    const bool pref =
+                                                        prefix >= kMinRun && r.first == 0 &&
+                                                        r.second == prefix - 1;
+                                                    const bool suff =
+                                                        suffix >= kMinRun &&
+                                                        r.first == n - suffix && r.second == n - 1;
+                                                    return pref || suff;
+                                                }),
+                                 o.certRuns.end());
+                if (prefix + suffix >= kMinRun)
+                    o.certRuns.emplace_back(n - suffix, prefix - 1);
+            }
+        }
+        std::vector<char> covered(ch.meshVerts.size(), 0);
+        for (const auto& r : o.certRuns) {
+            if (r.first <= r.second) {
+                for (int k = r.first; k <= r.second; k++) covered[(size_t)k] = 1;
+            } else {
+                for (int k = r.first; k < n; k++) covered[(size_t)k] = 1;
+                for (int k = 0; k <= r.second; k++) covered[(size_t)k] = 1;
+            }
+        }
+        for (int k = 0; k < n; k++) {
+            if (!covered[(size_t)k] && onSurf[(size_t)k]) o.refuseOnSurface = true;
+        }
+    }
+    return o;
+}
+
+// D-S2: on the discard path only, re-take Plane|Cylinder at tol = tau and pick
+// the solution whose MAXIMUM residual over the chain's own vertices is least.
+// Accept only when that maximum is <= tau. Does not call constructedGenerator
+// and does not touch pickIntAna.
+AnalyticCurve repickPlaneCylByMax(const Region& plane, const Region& cyl, const MeshView& mv,
+                                  const BoundaryChain& ch, double tau, double* maxOut) {
+    AnalyticCurve none;
+    if (maxOut) *maxOut = -1.0;
+    if (!(tau > 0.0) || ch.meshVerts.empty()) return none;
+    try {
+        const double H = std::fabs(cyl.vMax - cyl.vMin);
+        IntAna_QuadQuadGeo iq(asPlane(plane), cylForIntersect(cyl), Precision::Angular(), tau, H);
+        if (!iq.IsDone()) return none;
+        const IntAna_ResultType ty = iq.TypeInter();
+        if (ty == IntAna_Empty || ty == IntAna_Same || ty == IntAna_NoGeometricSolution) return none;
+        double bestMax = 1e300;
+        AnalyticCurve best;
+        auto consider = [&](const AnalyticCurve& cand) {
+            double m = 0.0;
+            for (int lv : ch.meshVerts) {
+                const double r = curveResidual(cand, pntOf(mv, lv));
+                if (!std::isfinite(r)) return;
+                if (r > m) m = r;
+            }
+            if (m < bestMax) {
+                bestMax = m;
+                best = cand;
+            }
+        };
+        const int nSol = iq.NbSolutions();
+        if (ty == IntAna_Line || ty == IntAna_PointAndCircle) {
+            for (int s = 1; s <= nSol; s++) {
+                try {
+                    AnalyticCurve c;
+                    c.kind = AnalyticCurve::Lin;
+                    c.lin = iq.Line(s);
+                    consider(c);
+                } catch (const Standard_Failure&) {
+                }
+            }
+        }
+        if (ty == IntAna_Circle || ty == IntAna_PointAndCircle) {
+            for (int s = 1; s <= nSol; s++) {
+                try {
+                    AnalyticCurve c;
+                    c.kind = AnalyticCurve::Circ;
+                    c.circ = iq.Circle(s);
+                    consider(c);
+                } catch (const Standard_Failure&) {
+                }
+            }
+        }
+        if (ty == IntAna_Ellipse) {
+            for (int s = 1; s <= nSol; s++) {
+                try {
+                    AnalyticCurve c;
+                    c.kind = AnalyticCurve::Elips;
+                    c.elips = iq.Ellipse(s);
+                    consider(c);
+                } catch (const Standard_Failure&) {
+                }
+            }
+        }
+        if (maxOut) *maxOut = (best.kind == AnalyticCurve::None) ? -1.0 : bestMax;
+        if (best.kind != AnalyticCurve::None && bestMax <= tau) return best;
+    } catch (const Standard_Failure&) {
+    }
+    return none;
+}
+
+void emitDiagChainSpan(int ci, const char* kind, const AnalyticCurve& curve, const MeshView& mv,
+                       const BoundaryChain& ch, const Region* A, const Region* B, double sewTol) {
+    if (!diagP2Enabled()) return;
+    const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+    const double tau = (q > 0.0) ? (q + q) : 0.0;
+    const ChainSpanRuns sp = chainSpanRuns(curve, mv, ch, A, B, sewTol);
+    std::fprintf(stderr,
+                 "DIAG_CHAINSPAN ci=%d regA=%d regB=%d kind=%s nV=%zu runs=%d longest=%d "
+                 "excluded=%d runsCert=%d longestCert=%d nOnBoth=%d nOffSurf=%d "
+                 "closed=%d\n",
+                 ci, ch.regA, ch.regB, kind ? kind : "?", ch.meshVerts.size(), sp.runs, sp.longest,
+                 sp.excluded, sp.runsCert, sp.longestCert, sp.nOnBoth, sp.nOffSurf,
+                 ch.closedLoop ? 1 : 0);
+    const int n = (int)ch.meshVerts.size();
+    for (int i = 0; i < n; i++) {
+        const gp_Pnt p = pntOf(mv, ch.meshVerts[(size_t)i]);
+        const double res = curveResidual(curve, p);
+        const double dA = regionPointDev(A, p);
+        const double dB = regionPointDev(B, p);
+        const double resQ = (q > 0.0 && std::isfinite(res)) ? (res / q) : -1.0;
+        const double dAq = (q > 0.0 && std::isfinite(dA)) ? (dA / q) : -1.0;
+        const double dBq = (q > 0.0 && std::isfinite(dB)) ? (dB / q) : -1.0;
+        const bool offA = !(std::isfinite(dA) && dA <= tau);
+        const bool offB = !(std::isfinite(dB) && dB <= tau);
+        const char* off = (offA && offB) ? "AB" : offA ? "A" : offB ? "B" : "neither";
+        std::fprintf(stderr,
+                     "DIAG_CHAINSPAN_V ci=%d i=%d vid=%d resQ=%.4f dAq=%.4f dBq=%.4f off=%s\n",
+                     ci, i, ch.meshVerts[(size_t)i], resQ, dAq, dBq, off);
+    }
+}
+
 bool fittedPlaneIntersection(const Region* A, const Region* B, gp_Lin& out) {
     if (!A || !B || A->type != SurfType::Plane || B->type != SurfType::Plane) return false;
     try {
@@ -14254,14 +14500,17 @@ void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape
         // so both are counted and both are reported.
         if (row.dev >= 0.0 && row.cap >= 0.0 && row.dev > row.cap + Precision::PConfusion())
             nDevOverCap++;
-        if (diagP2Enabled())
+        if (diagP2Enabled()) {
+            const char* writer = lastTolWriterOf(e);
             std::fprintf(stderr,
                          "DIAG_EDGECLASS ridA=%d ridB=%d tier=%s curve=%s clsA=%s clsB=%s "
                          "tol=%.9f dev=%.9f devEnds=%.9f devExact=%d cap=%.9f overTol=%d "
-                         "overCap=%d noStored=%d\n",
+                         "overCap=%d noStored=%d writer=%s\n",
                          row.ridA, row.ridB, row.tier, row.curve, row.clsA, row.clsB, row.tol,
                          row.dev, row.devEnds, row.devExact ? 1 : 0, row.cap,
-                         row.overTol ? 1 : 0, row.overCap ? 1 : 0, nNoStored);
+                         row.overTol ? 1 : 0, row.overCap ? 1 : 0, nNoStored,
+                         writer ? writer : "unknown");
+        }
     }
     stats.edgeAnalytic += nAnalytic;
     stats.edgePolylineTier2 += nPoly;
@@ -14865,10 +15114,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG"); v && v[0] && v[0] != '0')
                 diagCollapse = 1;
             int nMix = 0, nNone = 0, nFail = 0, nOk = 0, nChainSewFb = 0;
+            struct SpanPlan {
+                bool active = false;
+                std::vector<std::pair<int, int>> runs;
+            };
+            std::vector<SpanPlan> spanPlan(rs.chains.size());
+            int nGuardA = 0, nGuardB = 0, nC2ok = 0, nC2no = 0;
             (void)tryPlaneLoopCircles(rs, mv, sewTol);
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 collapsed[ci] = 0;
                 geom[ci] = ChainGeom{};
+                spanPlan[ci] = SpanPlan{};
                 const BoundaryChain& ch = rs.chains[ci];
                 const Region* A = regionById(rs, ch.regA);
                 const Region* B = regionById(rs, ch.regB);
@@ -15234,16 +15490,95 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                      "DIAG_CHAINSEW ci=%d kind=%s regA=%d regB=%d ratioSew=%.3f "
                                      "fallback=%d\n",
                                      (int)ci, kind, geom[ci].regA, geom[ci].regB, ratioSew, fb);
+                        if (fb)
+                            emitDiagChainSpan((int)ci, kind, curve, mv, ch, A, B, sewTol);
                     }
                     // Tagged plane-loop Circs are not exempt: Pratt circles that
                     // miss mesh verts by >> sewTol must demote to polyline like
                     // every other curve. IntAna plane|cyl circs on vertices have
                     // fb=0 (ratioSew≈0) and keep geom.
+                    // D-S1 / D-S2, discard path only (guard a). A chain that is
+                    // inside sewTol today is untouched above.
                     if (fb) {
-                        geom[ci] = ChainGeom{};
-                        nNone++;
-                        nChainSewFb++;
-                        continue;
+                        const bool pass0 = recoverPass == 0 && rounds == 0 &&
+                                           fallbackGuardPass == 0 && j6UncollapsePass == 0;
+                        const ChainSpanRuns sp = chainSpanRuns(curve, mv, ch, A, B, sewTol);
+                        const bool allOnBoth =
+                            !ch.meshVerts.empty() && sp.nOnBoth == (int)ch.meshVerts.size();
+                        bool kept = false;
+                        if (allOnBoth) {
+                            if (pass0) nGuardB++;
+                            const Region* pln = nullptr;
+                            const Region* cyl = nullptr;
+                            if (A && B && A->type == SurfType::Plane &&
+                                B->type == SurfType::Cylinder) {
+                                pln = A;
+                                cyl = B;
+                            } else if (A && B && B->type == SurfType::Plane &&
+                                       A->type == SurfType::Cylinder) {
+                                pln = B;
+                                cyl = A;
+                            }
+                            if (pln && cyl) {
+                                const double qMesh =
+                                    (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0)
+                                        ? mv.quantFloor
+                                        : 0.0;
+                                const double tau = (qMesh > 0.0) ? (2.0 * qMesh) : 0.0;
+                                double maxRes = -1.0;
+                                const AnalyticCurve neu =
+                                    repickPlaneCylByMax(*pln, *cyl, mv, ch, tau, &maxRes);
+                                const double maxQ =
+                                    (qMesh > 0.0 && maxRes >= 0.0) ? (maxRes / qMesh) : -1.0;
+                                if (neu.kind != AnalyticCurve::None) {
+                                    curve = neu;
+                                    geom[ci].curve = curve;
+                                    kept = true;
+                                    if (pass0) nC2ok++;
+                                    if (pass0)
+                                        std::fprintf(stderr,
+                                                     "DIAG_SPAN_C2 ci=%d accept=1 kind=%s "
+                                                     "maxResQ=%.4f\n",
+                                                     (int)ci,
+                                                     neu.kind == AnalyticCurve::Lin    ? "lin"
+                                                     : neu.kind == AnalyticCurve::Circ ? "circ"
+                                                                                       : "elips",
+                                                     maxQ);
+                                } else {
+                                    if (pass0) nC2no++;
+                                    if (pass0)
+                                        std::fprintf(stderr,
+                                                     "DIAG_SPAN_C2 ci=%d accept=0 maxResQ=%.4f "
+                                                     "reason=max-residual-above-tau\n",
+                                                     (int)ci, maxQ);
+                                }
+                            }
+                        } else if (!sp.certRuns.empty() && !sp.refuseOnSurface) {
+                            if (pass0) nGuardA++;
+                            spanPlan[ci].active = true;
+                            spanPlan[ci].runs = sp.certRuns;
+                            const auto& r0 = sp.certRuns.front();
+                            geom[ci].ia = ch.meshVerts[(size_t)r0.first];
+                            geom[ci].ib = ch.meshVerts[(size_t)r0.second];
+                            kept = true;
+                            if (pass0)
+                                std::fprintf(stderr,
+                                             "DIAG_SPAN_KEEP ci=%d runs=%zu longest=%d "
+                                             "guardA=1\n",
+                                             (int)ci, sp.certRuns.size(), sp.longestCert);
+                        } else if (sp.refuseOnSurface) {
+                            if (pass0) nGuardB++;
+                            if (pass0)
+                                std::fprintf(stderr,
+                                             "DIAG_SPAN_GUARD ci=%d guardB=1 runsCert=%d\n",
+                                             (int)ci, sp.runsCert);
+                        }
+                        if (!kept) {
+                            geom[ci] = ChainGeom{};
+                            nNone++;
+                            nChainSewFb++;
+                            continue;
+                        }
                     }
                 }
                 continue;
@@ -15287,6 +15622,143 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                              "worstVid=%d maxVtxTol=%.6f sewTol=%.6f\n",
                              recoverPass, verts.size(), nOff, maxOff, worst, maxTol, sewTol);
             }
+            // D-S1: one analytic edge per certified run, mesh edges for the rest.
+            // Runs were admitted only on today's discard path (guard a).
+            auto publishSpan = [&](int ci, const AnalyticCurve& curve, const BoundaryChain& ch,
+                                   const Region* A, const Region* B) -> bool {
+                const SpanPlan& sp = spanPlan[(size_t)ci];
+                const int n = (int)ch.meshVerts.size();
+                if (n < 2 || sp.runs.empty() || !A || !B) return false;
+                std::vector<int> runAt((size_t)n, -1);
+                for (size_t r = 0; r < sp.runs.size(); r++) {
+                    const int a = sp.runs[r].first;
+                    const int b = sp.runs[r].second;
+                    if (a <= b) {
+                        for (int k = a; k <= b && k < n; k++) runAt[(size_t)k] = (int)r;
+                    } else {
+                        for (int k = a; k < n; k++) runAt[(size_t)k] = (int)r;
+                        for (int k = 0; k <= b && k < n; k++) runAt[(size_t)k] = (int)r;
+                    }
+                }
+                int start = 0;
+                if (ch.closedLoop) {
+                    for (int k = 0; k < n; k++) {
+                        const int prev = (k + n - 1) % n;
+                        if (runAt[(size_t)k] != runAt[(size_t)prev]) {
+                            start = k;
+                            break;
+                        }
+                    }
+                }
+                const int nSeg = ch.closedLoop ? n : (n - 1);
+                int pos = start;
+                int left = nSeg;
+                std::vector<TopoDS_Edge> edges;
+                std::vector<char> isArc;
+                int guard = 0;
+                while (left > 0 && guard++ < n + 2) {
+                    const int nxt = ch.closedLoop ? (pos + 1) % n : (pos + 1);
+                    if (!ch.closedLoop && nxt >= n) return false;
+                    if (runAt[(size_t)pos] >= 0 && runAt[(size_t)nxt] == runAt[(size_t)pos]) {
+                        const int rid = runAt[(size_t)pos];
+                        int end = nxt;
+                        int steps = 1;
+                        while (steps < left) {
+                            const int nx = ch.closedLoop ? (end + 1) % n : (end + 1);
+                            if (!ch.closedLoop && nx >= n) break;
+                            if (runAt[(size_t)nx] != rid) break;
+                            end = nx;
+                            steps++;
+                        }
+                        const int va = ch.meshVerts[(size_t)pos];
+                        const int vb = ch.meshVerts[(size_t)end];
+                        if (va < 0 || vb < 0 || (size_t)va >= verts.size() ||
+                            (size_t)vb >= verts.size() || verts[(size_t)va].IsNull() ||
+                            verts[(size_t)vb].IsNull())
+                            return false;
+                        snapVertexToCurve(verts[(size_t)va], curve, sewTol);
+                        snapVertexToCurve(verts[(size_t)vb], curve, sewTol);
+                        gp_Pnt midP;
+                        if (steps > 1) {
+                            int midI = pos;
+                            for (int s = 0; s < steps / 2; s++)
+                                midI = ch.closedLoop ? (midI + 1) % n : (midI + 1);
+                            midP = pntOf(mv, ch.meshVerts[(size_t)midI]);
+                        } else if (curve.kind == AnalyticCurve::Circ) {
+                            const gp_Pnt pa = BRep_Tool::Pnt(verts[(size_t)va]);
+                            const gp_Pnt pb = BRep_Tool::Pnt(verts[(size_t)vb]);
+                            double p1 = ElCLib::Parameter(curve.circ, pa);
+                            double p2 = ElCLib::Parameter(curve.circ, pb);
+                            double df = p2 - p1;
+                            while (df <= 0.0) df += 2.0 * kPi;
+                            if (df > kPi) df -= 2.0 * kPi;
+                            midP = ElCLib::Value(p1 + 0.5 * df, curve.circ);
+                        } else {
+                            const gp_Pnt pa = BRep_Tool::Pnt(verts[(size_t)va]);
+                            const gp_Pnt pb = BRep_Tool::Pnt(verts[(size_t)vb]);
+                            midP = gp_Pnt(0.5 * (pa.X() + pb.X()), 0.5 * (pa.Y() + pb.Y()),
+                                          0.5 * (pa.Z() + pb.Z()));
+                        }
+                        TopoDS_Edge e;
+                        if (curve.kind == AnalyticCurve::Circ)
+                            e = makeArc(curve.circ, verts[(size_t)va], verts[(size_t)vb], midP);
+                        else if (curve.kind == AnalyticCurve::Elips)
+                            e = makeEllipseArc(curve.elips, verts[(size_t)va], verts[(size_t)vb],
+                                               midP);
+                        if (e.IsNull())
+                            e = makeEdgeFromCurve(curve, verts[(size_t)va], verts[(size_t)vb],
+                                                  false);
+                        if (e.IsNull()) return false;
+                        edges.push_back(e);
+                        isArc.push_back(1);
+                        left -= steps;
+                        pos = end;
+                    } else {
+                        const int va = ch.meshVerts[(size_t)pos];
+                        const int vb = ch.meshVerts[(size_t)nxt];
+                        const int eid = edgeConnecting(mv, ch, va, vb);
+                        if (eid < 0 || (size_t)eid >= meshE.size() || !edgeOk[(size_t)eid] ||
+                            meshE[(size_t)eid].IsNull())
+                            return false;
+                        edges.push_back(meshE[(size_t)eid]);
+                        isArc.push_back(0);
+                        left -= 1;
+                        pos = nxt;
+                    }
+                }
+                if (left != 0 || edges.empty()) return false;
+                const Region* ownerR = nullptr;
+                const Region* consumerR = nullptr;
+                if (A->type == SurfType::Plane && B->type == SurfType::Cylinder) {
+                    ownerR = A;
+                    consumerR = B;
+                } else if (B->type == SurfType::Plane && A->type == SurfType::Cylinder) {
+                    ownerR = B;
+                    consumerR = A;
+                } else if (A->id <= B->id) {
+                    ownerR = A;
+                    consumerR = B;
+                } else {
+                    ownerR = B;
+                    consumerR = A;
+                }
+                const char* kindStr = "poly";
+                if (curve.kind == AnalyticCurve::Circ) kindStr = "circ";
+                else if (curve.kind == AnalyticCurve::Lin) kindStr = "lin";
+                else if (curve.kind == AnalyticCurve::Elips) kindStr = "elips";
+                SeamBindCounts acc;
+                for (size_t i = 0; i < edges.size(); i++) {
+                    if (!isArc[i]) continue;
+                    bindAllVariants(edges[i], *ownerR, kindStr, mv, ci, acc);
+                    bindAllVariants(edges[i], *consumerR, kindStr, mv, ci, acc);
+                    bindAllVariants(edges[i], *ownerR, kindStr, mv, ci, acc);
+                }
+                geom[(size_t)ci].collapsed = true;
+                geom[(size_t)ci].edges = edges;
+                for (const TopoDS_Edge& ce : edges) noteWirePop(ce, "rebuildCollapsed", ci);
+                collapsed[(size_t)ci] = 1;
+                return true;
+            };
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 if (geom[ci].curve.kind == AnalyticCurve::None) continue;
                 const AnalyticCurve curve = geom[ci].curve;
@@ -15310,6 +15782,19 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (!A) A = B;
                 if (!B) B = A;
                 if (!A || !B) continue;
+                if (spanPlan[ci].active) {
+                    const bool pass0 = recoverPass == 0 && rounds == 0 && fallbackGuardPass == 0 &&
+                                       j6UncollapsePass == 0;
+                    if (publishSpan((int)ci, curve, ch, A, B)) {
+                        nOk++;
+                        continue;
+                    }
+                    geom[ci].collapsed = false;
+                    geom[ci].edges.clear();
+                    collapsed[ci] = 0;
+                    if (pass0) std::fprintf(stderr, "DIAG_SPAN_FAIL ci=%d\n", (int)ci);
+                    continue;
+                }
                 const bool full = ch.closedLoop;
                 WarnFn chainWarn =
                     (recoverPass == 0 && rounds == 0 && fallbackGuardPass == 0 &&
@@ -15610,6 +16095,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                              "sewTol=%.6f\n",
                              sliverCensusPartName((int)mv.nTri), nChainSewFb, nOk, nNone,
                              rs.chains.size(), sewTol);
+                std::fprintf(stderr,
+                             "DIAG_SPAN_GUARD guardA=%d guardB=%d c2accept=%d c2refuse=%d\n",
+                             nGuardA, nGuardB, nC2ok, nC2no);
             }
             if (diagCollapse) {
                 std::fprintf(stderr,

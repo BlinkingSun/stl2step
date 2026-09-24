@@ -312,6 +312,25 @@ set_tests_properties(quant_floor_unit PROPERTIES
     LABELS "unit;quant"
     TIMEOUT 60)
 
+# D-train-seams D-S8: the certified-span partition. Pure — a residual list in,
+# maximal runs out. No engine, no OCCT.
+add_executable(seam_span_unit seam_span_unit.cpp)
+target_compile_features(seam_span_unit PRIVATE cxx_std_17)
+set_target_properties(seam_span_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(MSVC)
+    target_compile_definitions(seam_span_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(seam_span_unit)
+endif()
+add_test(NAME seam_span_unit COMMAND seam_span_unit)
+set_tests_properties(seam_span_unit PROPERTIES
+    LABELS "unit;seam-span"
+    TIMEOUT 60)
+
 # SPEC-volid §4.3 / D-140-10 — S01/S02/S03 volume-attribution identity.
 # Spawns the CLI with STL2STEP_VOLID=1; asserts the §2.5 closesA/closesB
 # bracket on the three synthetic fixtures only.

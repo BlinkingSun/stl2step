@@ -95,6 +95,7 @@
     "S16-R2-ChainUnstable": 0,
     "S19_mouth_round": 492,
     "S20_cross_bore_union": 0,
+    "S21_rim_offplane_vertex": 0,
     "boss_cone_chamfer": 0,
     "build_fixtures/counterbore": 0,
     "build_fixtures/fillet_strip_2tri": 0,
@@ -113,12 +114,13 @@
     "cyl_meets_chamfer": 0,
     "handle-lock": 0,
     "handle-pickup": 358,
-    "linkage_bores_chamfer": 210,
+    "linkage_bores_chamfer": 138,
     "nonprismatic-control": 0,
     "shelf_bracket": 52
   },
   "tier2CeilingNote": {
-    "linkage_bores_chamfer": "D-train-cone-2 and D-train-cone-3: mouth-frustum rim chords ship as tier-2 polylines, ceiling 204 → 210. No other fixture key changes."
+    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN).",
+    "S21_rim_offplane_vertex": "D-S8 fixture added by this lane. edge_class_gate on be13e23: red lines clear, polylineTier2=0, and the gate's own line was 'no tier2Ceiling (a fixture the ratchet never saw is not measured); seed it'. Seeded at the measured 0. No expectedRed entry."
   },
   "expectedRed": {
     "Body11": [
