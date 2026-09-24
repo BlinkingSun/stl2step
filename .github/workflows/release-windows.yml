@@ -24,7 +24,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   build-package:
@@ -262,15 +261,30 @@ jobs:
           $work = Join-Path $env:RUNNER_TEMP 'eq-convert'
           Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $work -Force | Out-Null
+          function Assert-Stl2StepConvertOk {
+            param([string]$Label, [string]$Exe, [string[]]$Args)
+            $out = & $Exe @Args 2>&1
+            $code = $LASTEXITCODE
+            $text = if ($out -is [array]) { ($out | ForEach-Object { "$_" }) } else { @("$out") }
+            $line = $text | Where-Object { $_ } | Select-Object -Last 1
+            if (-not $line -or -not $line.StartsWith('RESULT ')) {
+              throw "$Label convert failed $($Args[0]): no RESULT line (exit $code)"
+            }
+            $json = $line.Substring(7) | ConvertFrom-Json
+            if (-not $json.ok) {
+              throw "$Label convert failed $($Args[0]): ok=false exit $code error=$($json.error)"
+            }
+            if ($code -ne 0 -and $code -ne 2) {
+              throw "$Label convert failed $($Args[0]): ok=true but exit $code (expected 0 or 2)"
+            }
+          }
           $mismatches = [System.Collections.Generic.List[string]]::new()
           foreach ($fx in $fixtures) {
             if (-not (Test-Path $fx.Stl)) { throw "missing fixture $($fx.Stl)" }
             $hStep = Join-Path $work "hosted_$($fx.Id).step"
             $rStep = Join-Path $work "ref_$($fx.Id).step"
-            & $hostedExe $fx.Stl -o $hStep --engine trueform --threads 1 --no-verify --quiet
-            if ($LASTEXITCODE -ne 0) { throw "hosted convert failed $($fx.Id) exit $LASTEXITCODE" }
-            & $refExe $fx.Stl -o $rStep --engine trueform --threads 1 --no-verify --quiet
-            if ($LASTEXITCODE -ne 0) { throw "ref convert failed $($fx.Id) exit $LASTEXITCODE" }
+            Assert-Stl2StepConvertOk -Label 'hosted' -Exe $hostedExe -Args @($fx.Stl, '-o', $hStep, '--engine', 'trueform', '--threads', '1', '--no-verify', '--quiet')
+            Assert-Stl2StepConvertOk -Label 'ref' -Exe $refExe -Args @($fx.Stl, '-o', $rStep, '--engine', 'trueform', '--threads', '1', '--no-verify', '--quiet')
             $raw = & python $canon step $hStep $rStep --report json
             $code = $LASTEXITCODE
             if ($code -eq 2 -or $null -eq $raw) { throw "canonicalize failed $($fx.Id) exit $code" }
