@@ -1850,8 +1850,9 @@ FixtureResult buildS20CrossBoreUnion() {
 // D-train-seams D-S8. A block with one partial cylindrical outer wall.
 // The top rim's terminal vertex is moved off the cap by the wall's own chord
 // sagitta (asserted > the engine sewTol before any engine run). The bottom rim
-// is the negative control and is not moved. Expected classes: positive rim
-// 1 CIRCLE + 1 LINE, negative rim 1 CIRCLE, unhandled 0.
+// is the negative control and is not moved. Shipped classes (D-train-seams-9,
+// amending D-S8): both cap rims 1 CIRCLE each; the off-plane corner chain
+// (oblique facet x cylinder) ships 1 ELLIPSE; unhandled 0, tier2 0.
 double exactVolumeS21(double bx, double by, double bz, double R, double H) {
     return bx * by * bz + 0.5 * M_PI * R * R * H;
 }

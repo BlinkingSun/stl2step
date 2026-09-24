@@ -6,14 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-Engine version 1.4.4 (untagged; no release yet). One converter change: the
-cross-bore mouth chamfer on `test.stl` / `linkage_bores_chamfer` now ships as one
-conical face. Every other corpus fixture and training file is byte-identical to
-1.4.3 in canonical STEP DATA.
+Engine version 1.4.4 (untagged; no release yet). Two converter changes on
+the training plate (`test.stl` / `linkage_bores_chamfer`): the cross-bore mouth chamfer
+ships as one conical face, and the R30 plane/cylinder rims ship as analytic circle arcs.
+Elsewhere only Body28 moves (one seam edge heals to analytic); every other corpus fixture
+and training file is byte-identical to 1.4.3 in canonical STEP DATA.
 
 ### Fixed
 - The 45° mouth frustum where a cross bore meets a face (200 triangles on the training plate) is built as one analytic cone instead of 100 planar quads. The ring is seeded from the open cross-bore cylinder; its seam is the cone's own generator at the shared azimuth column (`Δu = 0`), and the outer wire is assembled by a new surface-generic `buildSeamedOuterWire`. Plate: cones 2 → 3, STEP faces 413 → 314, analytic edges 210 → 213, grader cone class 0.450 → 1.0. The cone face's own rim-chord tolerance is raised on the cone side only (13 edges, bounded by the part's cap).
 - Two expected-red rows record what is still open on that face: the R = 10 rim is fitted twice (7.6e-7 mm apart), leaving one registered unhandled circle edge (`plate.mouth-cone-rim-twin-circle`), and six sliver seams stay tier-2 (`plate.mouth-cone-rim-sliver-seams`).
+- A plane/cylinder seam that the chain-form gate used to discard now ships one analytic edge per maximal run of its own vertices lying within sewTol of the curve and within τ of both surfaces; mesh edges are kept only where the mesh puts a vertex off a surface. On the training plate the two R30 rims each become one circle arc plus one off-plane tail chord: tier-2 edges 210 → 138, analytic 213 → 215, over-cap edges 128 → 56. A discarded chain whose vertices all lie within τ is re-intersected at τ and kept only when its residual is within τ (the plate's two foot-lines are refused and stay mesh lines).
+- Expected-red rows for the plate's three unbuilt edge rounds (R5 ×2 along +Y at x = 53, R3 along +Z at (51, −7)) and two permanent residue components. The rounds are real cylinders, but their chord folds (2.9–4.5°) sit below the 5° cylinder-growth floor, so they stay faceted.
 
 ### Changed
 - `stl2step_grade` cylinder admission uses the curved-normal test already used for cones and tori; coaxial walls that share a radius stay two oracles when their domains are disjoint; intersection tiers for coaxial and tangent pairs are decided from `tau` first.
@@ -30,6 +33,7 @@ conical face. Every other corpus fixture and training file is byte-identical to
 
 ### Added
 - A `cone_math_unit` case for the seam chart arithmetic (Δu = 0 on a generator).
+- Corpus fixture `S21_rim_offplane_vertex` (a block with a partial cylinder wall and one rim vertex lifted off its cap) and a `seam_span_unit` test for the run partition.
 - `scripts/ci-hosted-marker.sh` writes `.ci-local/<sha>.linux.green` / `.windows.green` from a green hosted run of that exact sha.
 - Expected-red rows: `cone.open-seed-no-synthetic`, `grade.synthetic-oblique-cone-unseeded`, and the grader rows named above. Each row records why the fixture is red and what retires it.
 
