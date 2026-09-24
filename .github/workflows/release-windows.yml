@@ -1,15 +1,20 @@
 name: Release Windows Engine
 
+# Workflow files stay on the triggering sha (.github/scripts, .github/winrel).
+# The build ref is checked out under src/ so a v1.4.3 proof does not replace them.
+# .github/winrel/vcpkg.json documents the OCCT 7.9.3 pin only — install is classic
+# mode from a vcpkg clone at that commit (manifest mode rejects package arguments).
+
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: Git ref to build (empty = triggering commit)
+        description: Git ref to build (empty = triggering sha). Push to winrel/** ignores this and proofs v1.4.3.
         required: false
         default: ''
         type: string
       version_tag:
-        description: Zip tag label (e.g. v1.4.4)
+        description: Zip tag label (e.g. v1.4.4). Push to winrel/** forces v1.4.3.
         required: true
         default: v1.4.4
         type: string
@@ -17,49 +22,164 @@ on:
     branches:
       - 'winrel/**'
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   build-package:
     runs-on: windows-latest
+    timeout-minutes: 360
     env:
       PYTHONUTF8: '1'
-      VERSION_TAG: ${{ github.event.inputs.version_tag || 'v1.4.4' }}
-      VCPKG_WINREL_ROOT: ${{ runner.temp }}\vcpkg-occt793
-      MANIFEST_ROOT: ${{ github.workspace }}\.github\winrel
       ENGINE_OUT: ${{ runner.temp }}\engine-dist
+      # vcpkg commit whose opencascade port is 7.9.3 (baseline f5ced781).
+      VCPKG_PIN: f5ced781079acf17f51b675875f29e37340283ae
     steps:
-      - uses: actions/checkout@v5
+      - name: Checkout workflow files (triggering sha)
+        uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.inputs.ref || github.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
+          sparse-checkout: .github
+          sparse-checkout-cone-mode: true
 
-      - name: Restore vcpkg binary archives (OCCT 7.9.3)
+      - name: Record runner image
+        id: image
+        shell: pwsh
+        run: |
+          $img = $env:ImageVersion
+          if (-not $img) { $img = 'unknown' }
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value "IMAGE_VERSION=$img"
+          Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8NoBOM -Value "version=$img"
+
+      - name: Resolve proof build ref
+        id: proof
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value @(
+            'BUILD_REF=v1.4.3',
+            'VERSION_TAG=v1.4.3',
+            'EQUIV_PROOF=true'
+          )
+          Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8NoBOM -Value @(
+            'ref=v1.4.3',
+            'tag=v1.4.3'
+          )
+
+      - name: Resolve dispatch build ref
+        id: dispatch
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $ref = '${{ github.event.inputs.ref }}'.Trim()
+          if (-not $ref) { $ref = $env:GITHUB_SHA }
+          if ($ref -match '[\r\n]' -or $ref -match '\s') { throw "ref is not a single git revision: $ref" }
+          $tag = '${{ github.event.inputs.version_tag }}'.Trim()
+          if (-not $tag) { $tag = 'v1.4.4' }
+          if ($tag -match '[\r\n]' -or $tag -match '\s') { throw "version_tag is not a single token: $tag" }
+          $proof = ($ref -eq 'v1.4.3' -or $ref -eq 'refs/tags/v1.4.3')
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value @(
+            "BUILD_REF=$ref",
+            "VERSION_TAG=$tag",
+            "EQUIV_PROOF=$($proof.ToString().ToLower())"
+          )
+          Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8NoBOM -Value @(
+            "ref=$ref",
+            "tag=$tag"
+          )
+
+      - name: Checkout build ref into src
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.proof.outputs.ref || steps.dispatch.outputs.ref }}
+          path: src
+          fetch-depth: 1
+          clean: true
+
+      - name: Restore vcpkg binary cache (OCCT 7.9.3 pin)
         id: vcpkg-cache
         uses: actions/cache/restore@v4
         with:
-          path: ~\AppData\Local\vcpkg\archives
-          key: vcpkg-occt793-${{ runner.os }}-${{ env.ImageVersion }}
+          path: |
+            ${{ runner.temp }}/vcpkg793
+            ${{ runner.temp }}/vcpkg-archives
+          key: vcpkg-occt793-${{ env.VCPKG_PIN }}-${{ runner.os }}-${{ steps.image.outputs.version }}
 
-      - name: Install OpenCASCADE 7.9.3 (dedicated vcpkg root)
+      - name: Install OpenCASCADE 7.9.3 (classic vcpkg, pinned commit)
         shell: pwsh
         run: |
-          vcpkg install opencascade:x64-windows `
-            --x-manifest-root="$env:MANIFEST_ROOT" `
-            --x-install-root="$env:VCPKG_WINREL_ROOT"
-          vcpkg list --x-install-root="$env:VCPKG_WINREL_ROOT" | Select-String opencascade
+          $pin = $env:VCPKG_PIN
+          $dest = Join-Path $env:RUNNER_TEMP 'vcpkg793'
+          $archive = Join-Path $env:RUNNER_TEMP 'vcpkg-archives'
+          New-Item -ItemType Directory -Path $archive -Force | Out-Null
+          $gitOk = $false
+          if (Test-Path (Join-Path $dest '.git')) {
+            $got = (git -C $dest rev-parse HEAD).Trim()
+            if ($got -eq $pin) { $gitOk = $true } else { Write-Host "cache HEAD $got != $pin; recloning" }
+          }
+          if (-not $gitOk) {
+            if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+            # Preferred pin is clone + checkout of f5ced781. A default-branch
+            # clone does not contain that historical commit, and a full vcpkg
+            # history is huge. Fetch the commit by SHA (depth 1) and detach.
+            New-Item -ItemType Directory -Path $dest -Force | Out-Null
+            git -C $dest init
+            if ($LASTEXITCODE -ne 0) { throw "git init vcpkg failed: $LASTEXITCODE" }
+            git -C $dest remote add origin https://github.com/microsoft/vcpkg.git
+            if ($LASTEXITCODE -ne 0) { throw "git remote add vcpkg failed: $LASTEXITCODE" }
+            git -C $dest fetch --depth 1 origin $pin
+            if ($LASTEXITCODE -ne 0) { throw "git fetch $pin failed: $LASTEXITCODE" }
+            git -C $dest checkout --detach FETCH_HEAD
+            if ($LASTEXITCODE -ne 0) { throw "git checkout $pin failed: $LASTEXITCODE" }
+          }
+          $got = (git -C $dest rev-parse HEAD).Trim()
+          if ($got -ne $pin) { throw "vcpkg HEAD $got != $pin" }
+          Write-Host "vcpkg pin $got"
+          if (-not (Test-Path (Join-Path $dest 'vcpkg.exe'))) {
+            Push-Location $dest
+            try {
+              cmd /c 'bootstrap-vcpkg.bat -disableMetrics'
+              if ($LASTEXITCODE -ne 0) { throw "bootstrap-vcpkg.bat failed: $LASTEXITCODE" }
+            } finally { Pop-Location }
+          }
+          $env:VCPKG_ROOT = $dest
+          $env:VCPKG_DISABLE_METRICS = '1'
+          $env:VCPKG_DEFAULT_BINARY_CACHE = $archive
+          # Classic mode: package argument, no --x-manifest-root. Run inside the
+          # clone so a vcpkg.json elsewhere (engine tree or .github/winrel) is
+          # not discovered. Layout is <clone>/installed/x64-windows.
+          Push-Location $dest
+          try {
+            & "$dest\vcpkg.exe" install 'opencascade:x64-windows'
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
+            $listed = & "$dest\vcpkg.exe" list
+          } finally { Pop-Location }
+          $hit = $listed | Select-String 'opencascade:x64-windows\s+7\.9\.3'
+          if (-not $hit) { throw "expected opencascade 7.9.3; list:`n$($listed | Select-String opencascade)" }
+          Write-Host $hit
+          Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value @(
+            "VCPKG793=$dest",
+            "VCPKG_ROOT=$dest"
+          )
 
-      - name: Save vcpkg binary archives
+      - name: Save vcpkg binary cache
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: ~\AppData\Local\vcpkg\archives
-          key: vcpkg-occt793-${{ runner.os }}-${{ env.ImageVersion }}
+          path: |
+            ${{ runner.temp }}/vcpkg793
+            ${{ runner.temp }}/vcpkg-archives
+          key: vcpkg-occt793-${{ env.VCPKG_PIN }}-${{ runner.os }}-${{ steps.image.outputs.version }}
 
-      - name: Configure (no repo-root manifest)
+      - name: Configure (classic toolchain, manifest mode off)
         shell: pwsh
         run: |
-          cmake -S . -B build `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-            -DVCPKG_INSTALLED_DIR="$env:VCPKG_WINREL_ROOT/installed" `
+          Write-Host "BUILD_REF=$env:BUILD_REF VERSION_TAG=$env:VERSION_TAG EQUIV_PROOF=$env:EQUIV_PROOF"
+          cmake -S src -B build `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG793/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DVCPKG_MANIFEST_MODE=OFF `
             -DSTL2STEP_BUILD_TESTS=ON `
             -DSTL2STEP_BUILD_EXAMPLES=OFF
 
@@ -75,18 +195,38 @@ jobs:
       - name: Package engine bundle
         shell: pwsh
         run: |
+          # Select-VcpkgRoot keeps the highest OCCT it can see. Hide the
+          # runner's preinstalled root so the pinned clone (7.9.3) wins.
+          Remove-Item Env:VCPKG_INSTALLATION_ROOT -ErrorAction SilentlyContinue
           & .\.github\scripts\package-engine.ps1 $env:VERSION_TAG `
-            -BuildDir build `
+            -BuildDir (Join-Path $env:GITHUB_WORKSPACE 'build') `
             -Out $env:ENGINE_OUT `
-            -Vcpkg $env:VCPKG_WINREL_ROOT
+            -Vcpkg $env:VCPKG793
 
       - name: Equivalence vs published v1.4.3 engine
         shell: pwsh
         env:
           REF_URL: https://github.com/BlinkingSun/stl2step/releases/download/v1.4.3/stl2step-engine-v1.4.3-windows-x64.zip
         run: |
+          $PSNativeCommandUseErrorActionPreference = $false
           $eq = Join-Path $env:ENGINE_OUT 'equivalence.txt'
           $lines = @()
+          $proof = $env:EQUIV_PROOF -eq 'true'
+          $lines += "mode=$(if ($proof) { 'proof' } else { 'informational' })"
+          $lines += "build_ref=$env:BUILD_REF"
+          $lines += "version_tag=$env:VERSION_TAG"
+          $lines += 'reference_tag=v1.4.3'
+          # corpus_generate writes into the source tree (tests/corpus/CMakeLists.txt
+          # _corpus_out_dir = CMAKE_CURRENT_SOURCE_DIR). Names from gen_corpus.cpp
+          # emitShape ids: S01.stl, cross_bores.stl. linkage_bores_chamfer.stl is tracked.
+          $corpus = Join-Path $env:GITHUB_WORKSPACE 'src\tests\corpus'
+          $fixtures = @(
+            @{ Id = 'linkage_bores_chamfer'; Stl = Join-Path $corpus 'linkage_bores_chamfer.stl' },
+            @{ Id = 'cross_bores'; Stl = Join-Path $corpus 'cross_bores.stl' },
+            @{ Id = 'S01'; Stl = Join-Path $corpus 'S01.stl' }
+          )
+          $lines += "fixtures=$($fixtures.Id -join ',')"
+          $lines += 'canonicalize=compare_step --report json keys identical (canonicalize.py:228) a.sha256 (canonicalize.py:229)'
           $hostedZip = Join-Path $env:ENGINE_OUT "stl2step-engine-$env:VERSION_TAG-windows-x64.zip"
           $refZip = Join-Path $env:RUNNER_TEMP 'stl2step-engine-v1.4.3-windows-x64.zip'
           Invoke-WebRequest -Uri $env:REF_URL -OutFile $refZip
@@ -103,47 +243,56 @@ jobs:
           $hostedFiles | ForEach-Object { $lines += "$($_.Name) $($_.Length)" }
           $lines += '--- ref v1.4.3 zip contents ---'
           $refFiles | ForEach-Object { $lines += "$($_.Name) $($_.Length)" }
-          $hd = ($hostedFiles | Where-Object { $_.Extension -eq '.dll' } | ForEach-Object Name) | Sort-Object
-          $rd = ($refFiles | Where-Object { $_.Extension -eq '.dll' } | ForEach-Object Name) | Sort-Object
-          $onlyH = Compare-Object $rd $hd | Where-Object SideIndicator -eq '=>'
-          $onlyR = Compare-Object $rd $hd | Where-Object SideIndicator -eq '<='
-          $lines += '--- dll set diff (ref vs hosted) ---'
-          $lines += "only_in_hosted=$($onlyH.InputObject -join ',')"
-          $lines += "only_in_ref=$($onlyR.InputObject -join ',')"
+          $hd = @(($hostedFiles | Where-Object { $_.Extension -eq '.dll' } | ForEach-Object Name) | Sort-Object)
+          $rd = @(($refFiles | Where-Object { $_.Extension -eq '.dll' } | ForEach-Object Name) | Sort-Object)
+          $onlyH = @(Compare-Object $rd $hd | Where-Object SideIndicator -eq '=>')
+          $onlyR = @(Compare-Object $rd $hd | Where-Object SideIndicator -eq '<=')
+          $lines += '--- dll set diff (ref vs hosted; informational) ---'
+          $lines += "only_in_hosted=$(($onlyH | ForEach-Object InputObject) -join ',')"
+          $lines += "only_in_ref=$(($onlyR | ForEach-Object InputObject) -join ',')"
           $hostedExe = Join-Path $hostedDir 'stl2step.exe'
           $refExe = Join-Path $refDir 'stl2step.exe'
-          $lines += "--- version ---"
+          if (-not (Test-Path $hostedExe)) { throw "missing $hostedExe" }
+          if (-not (Test-Path $refExe)) { throw "missing $refExe" }
+          $lines += '--- version ---'
           $lines += "hosted: $(& $hostedExe --version)"
           $lines += "ref:    $(& $refExe --version)"
-          $fixtures = @(
-            'linkage_bores_chamfer',
-            'cross_bores',
-            'S01'
-          )
-          $canon = Join-Path $env:GITHUB_WORKSPACE 'tests\gates\baseline\canonicalize.py'
+          $canon = Join-Path $env:GITHUB_WORKSPACE 'src\tests\gates\baseline\canonicalize.py'
+          if (-not (Test-Path $canon)) { throw "missing $canon" }
           $work = Join-Path $env:RUNNER_TEMP 'eq-convert'
           Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $work -Force | Out-Null
-          foreach ($id in $fixtures) {
-            $stl = Join-Path $env:GITHUB_WORKSPACE "tests\corpus\$id.stl"
-            if (-not (Test-Path $stl)) { throw "missing fixture $stl" }
-            $hStep = Join-Path $work "hosted_$id.step"
-            $rStep = Join-Path $work "ref_$id.step"
-            & $hostedExe $stl -o $hStep --engine trueform --threads 1 --no-verify --quiet
-            & $refExe $stl -o $rStep --engine trueform --threads 1 --no-verify --quiet
-            $json = python $canon step $hStep $rStep --report json | ConvertFrom-Json
-            $lines += "$id hosted_sha256=$($json.a.sha256) ref_sha256=$($json.b.sha256) identical=$($json.identical)"
+          $mismatches = [System.Collections.Generic.List[string]]::new()
+          foreach ($fx in $fixtures) {
+            if (-not (Test-Path $fx.Stl)) { throw "missing fixture $($fx.Stl)" }
+            $hStep = Join-Path $work "hosted_$($fx.Id).step"
+            $rStep = Join-Path $work "ref_$($fx.Id).step"
+            & $hostedExe $fx.Stl -o $hStep --engine trueform --threads 1 --no-verify --quiet
+            if ($LASTEXITCODE -ne 0) { throw "hosted convert failed $($fx.Id) exit $LASTEXITCODE" }
+            & $refExe $fx.Stl -o $rStep --engine trueform --threads 1 --no-verify --quiet
+            if ($LASTEXITCODE -ne 0) { throw "ref convert failed $($fx.Id) exit $LASTEXITCODE" }
+            $raw = & python $canon step $hStep $rStep --report json
+            $code = $LASTEXITCODE
+            if ($code -eq 2 -or $null -eq $raw) { throw "canonicalize failed $($fx.Id) exit $code" }
+            $text = if ($raw -is [array]) { $raw -join "`n" } else { "$raw" }
+            $json = $text | ConvertFrom-Json
+            $lines += "$($fx.Id) hosted_sha256=$($json.a.sha256) ref_sha256=$($json.b.sha256) identical=$($json.identical)"
+            if ($proof -and $json.identical -ne $true) { $mismatches.Add($fx.Id) }
           }
           $lines | Set-Content -LiteralPath $eq -Encoding utf8
           Get-Content $eq
+          if ($mismatches.Count -gt 0) {
+            throw "equivalence proof failed (ref v1.4.3): $($mismatches -join ',')"
+          }
 
       - name: Upload engine artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: stl2step-engine-windows-x64-${{ env.VERSION_TAG }}
+          name: stl2step-engine-windows-x64-${{ steps.proof.outputs.tag || steps.dispatch.outputs.tag }}
           path: |
-            ${{ env.ENGINE_OUT }}/stl2step-engine-${{ env.VERSION_TAG }}-windows-x64.zip
+            ${{ env.ENGINE_OUT }}/stl2step-engine-${{ steps.proof.outputs.tag || steps.dispatch.outputs.tag }}-windows-x64.zip
             ${{ env.ENGINE_OUT }}/engine-manifest.json
             ${{ env.ENGINE_OUT }}/SHA256SUMS-engine.txt
             ${{ env.ENGINE_OUT }}/equivalence.txt
-          if-no-files-found: error
+          if-no-files-found: warn
