@@ -86,7 +86,7 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut 0.2.2 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.4.2 + SolidOut 0.2.2 for macOS and Windows). SolidOut 0.2.2 ships with engine 1.4.2 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
+Download: [SolidOut 0.2.3 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.4.4 + SolidOut 0.2.3 for macOS and Windows). SolidOut 0.2.3 ships with engine 1.4.4 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
 
 Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same current release with engine 1.4.2 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
 
@@ -114,28 +114,30 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 | `engine-manifest.json` | Schema 1 index of engine bundles | the updater |
 | `SHA256SUMS-engine.txt` | SHA-256 checksums of the engine files | the updater |
 
+**What changed in 1.4.4.** A 45° chamfer where a cross bore meets a face is built as one analytic cone, and plane/cylinder rims ship as analytic circle arcs where the mesh supports them (training plate: STEP faces 413 → 314, polyline edges 204 → 138); every other fixture converts byte-identically except one seam edge that heals to analytic. The Windows engine and SolidOut installers are now built by GitHub Actions (OpenCASCADE 8.0.1 as before; the CI build of 1.4.3 was verified byte-identical to the previous build).
+
 **What changed in 1.4.3.** Windows: the bundled engine no longer aborts at the end of a conversion (a small-string overrun in the RESULT JSON builder, MSVC only); RESULT/MESH_RESULT are flushed explicitly; calibrated tests skip with a reason on OpenCASCADE below 7.9. SolidOut 0.2.2: native menu, 60-minute visible limit with Cancel, diagnosable engine errors. 1.4.2: `--threads 1` constructs zero worker threads (Safari wasm). See [CHANGELOG.md](CHANGELOG.md).
 
 ```json
 {
   "schema": 1,
-  "engineVersion": "1.4.3",
+  "engineVersion": "1.4.4",
   "assets": {
     "macos-arm64": {
-      "name": "stl2step-engine-v1.4.3-macos-arm64.tar.gz",
-      "sha256": "201d8514bf7885291e9c6247fcb2ea234d8b3559d3b7700aace311e87d5aa49d",
-      "size": 13242159,
+      "name": "stl2step-engine-v1.4.4-macos-arm64.tar.gz",
+      "sha256": "42580bc75e65e9da3fae42880dd93f09026e638d07c16c1d4f77a77164eeb5c2",
+      "size": 13261421,
       "minOS": "26.0",
       "teamId": "L3LP86Z6L4"
     },
     "windows-x64": {
-      "name": "stl2step-engine-v1.4.3-windows-x64.zip",
-      "sha256": "e7762ae52237cc48ebf427a662fbecb6ef43fa8d67d9fb8d4b6dd500c286e98b",
-      "size": 16014624,
+      "name": "stl2step-engine-v1.4.4-windows-x64.zip",
+      "sha256": "55f648476323b518561dde6f6020b981c1f3cb8b575118fe23e3ca5730d7bb96",
+      "size": 16296214,
       "minWindows": "10"
     },
     "web-wasm": {
-      "name": "stl2step-engine-v1.4.3-web-wasm.tar.gz",
+      "name": "stl2step-engine-v1.4.4-web-wasm.tar.gz",
       "emscripten": "6.0.5",
       "occt": "7.9.3",
       "threads": "1"
