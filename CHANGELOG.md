@@ -4,9 +4,9 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.4.4] - 2026-09-24
 
-Engine version 1.4.4 (untagged; no release yet). Two converter changes on
+Two converter changes on
 the training plate (`test.stl` / `linkage_bores_chamfer`): the cross-bore mouth chamfer
 ships as one conical face, and the R30 plane/cylinder rims ship as analytic circle arcs.
 Elsewhere only Body28 moves (one seam edge heals to analytic); every other corpus fixture
