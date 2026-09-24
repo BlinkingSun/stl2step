@@ -1,0 +1,7 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "stl2step-winrel",
+  "version-string": "0",
+  "dependencies": ["opencascade"],
+  "builtin-baseline": "f89a4a1da4e3176a8d1a14c1825b9b2f98e48843"
+}
