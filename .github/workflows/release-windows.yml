@@ -182,8 +182,11 @@ jobs:
             -DSTL2STEP_BUILD_TESTS=ON `
             -DSTL2STEP_BUILD_EXAMPLES=OFF
 
-      - name: Build Release
-        run: cmake --build build --config Release -j
+      - name: Build Release (engine + corpus generator only)
+        # Release needs only the engine; tests stay configured for corpus_generate.
+        # Test TUs are not built: with OCCT 7.9.3 windows.h leaks the legacy `near`
+        # macro into test helpers named near() (grade_selftest.cpp, prism_build_test.cpp).
+        run: cmake --build build --config Release -j --target stl2step stl2step_corpus_gen
 
       - name: Smoke tests (version + corpus generator)
         shell: pwsh
