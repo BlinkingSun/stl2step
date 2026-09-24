@@ -1,0 +1,149 @@
+name: Release Windows Engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build (empty = triggering commit)
+        required: false
+        default: ''
+        type: string
+      version_tag:
+        description: Zip tag label (e.g. v1.4.4)
+        required: true
+        default: v1.4.4
+        type: string
+  push:
+    branches:
+      - 'winrel/**'
+
+jobs:
+  build-package:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+      VERSION_TAG: ${{ github.event.inputs.version_tag || 'v1.4.4' }}
+      VCPKG_WINREL_ROOT: ${{ runner.temp }}\vcpkg-occt793
+      MANIFEST_ROOT: ${{ github.workspace }}\.github\winrel
+      ENGINE_OUT: ${{ runner.temp }}\engine-dist
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Restore vcpkg binary archives (OCCT 7.9.3)
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-occt793-${{ runner.os }}-${{ env.ImageVersion }}
+
+      - name: Install OpenCASCADE 7.9.3 (dedicated vcpkg root)
+        shell: pwsh
+        run: |
+          vcpkg install opencascade:x64-windows `
+            --x-manifest-root="$env:MANIFEST_ROOT" `
+            --x-install-root="$env:VCPKG_WINREL_ROOT"
+          vcpkg list --x-install-root="$env:VCPKG_WINREL_ROOT" | Select-String opencascade
+
+      - name: Save vcpkg binary archives
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-occt793-${{ runner.os }}-${{ env.ImageVersion }}
+
+      - name: Configure (no repo-root manifest)
+        shell: pwsh
+        run: |
+          cmake -S . -B build `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_INSTALLED_DIR="$env:VCPKG_WINREL_ROOT/installed" `
+            -DSTL2STEP_BUILD_TESTS=ON `
+            -DSTL2STEP_BUILD_EXAMPLES=OFF
+
+      - name: Build Release
+        run: cmake --build build --config Release -j
+
+      - name: Smoke tests (version + corpus generator)
+        shell: pwsh
+        run: |
+          & .\build\Release\stl2step.exe --version
+          ctest --test-dir build -C Release -R '^(version_matches_project|corpus_generate)$' --output-on-failure
+
+      - name: Package engine bundle
+        shell: pwsh
+        run: |
+          & .\.github\scripts\package-engine.ps1 $env:VERSION_TAG `
+            -BuildDir build `
+            -Out $env:ENGINE_OUT `
+            -Vcpkg $env:VCPKG_WINREL_ROOT
+
+      - name: Equivalence vs published v1.4.3 engine
+        shell: pwsh
+        env:
+          REF_URL: https://github.com/BlinkingSun/stl2step/releases/download/v1.4.3/stl2step-engine-v1.4.3-windows-x64.zip
+        run: |
+          $eq = Join-Path $env:ENGINE_OUT 'equivalence.txt'
+          $lines = @()
+          $hostedZip = Join-Path $env:ENGINE_OUT "stl2step-engine-$env:VERSION_TAG-windows-x64.zip"
+          $refZip = Join-Path $env:RUNNER_TEMP 'stl2step-engine-v1.4.3-windows-x64.zip'
+          Invoke-WebRequest -Uri $env:REF_URL -OutFile $refZip
+          $lines += "hosted_zip=$hostedZip size=$((Get-Item $hostedZip).Length)"
+          $lines += "ref_zip=$refZip size=$((Get-Item $refZip).Length)"
+          $hostedDir = Join-Path $env:RUNNER_TEMP 'eq-hosted'
+          $refDir = Join-Path $env:RUNNER_TEMP 'eq-ref'
+          Remove-Item -Recurse -Force $hostedDir,$refDir -ErrorAction SilentlyContinue
+          Expand-Archive -Path $hostedZip -DestinationPath $hostedDir -Force
+          Expand-Archive -Path $refZip -DestinationPath $refDir -Force
+          $hostedFiles = Get-ChildItem $hostedDir -File | Sort-Object Name
+          $refFiles = Get-ChildItem $refDir -File | Sort-Object Name
+          $lines += '--- hosted zip contents ---'
+          $hostedFiles | ForEach-Object { $lines += "$($_.Name) $($_.Length)" }
+          $lines += '--- ref v1.4.3 zip contents ---'
+          $refFiles | ForEach-Object { $lines += "$($_.Name) $($_.Length)" }
+          $hd = ($hostedFiles | Where-Object { $_.Extension -eq '.dll' } | ForEach-Object Name) | Sort-Object
+          $rd = ($refFiles | Where-Object { $_.Extension -eq '.dll' } | ForEach-Object Name) | Sort-Object
+          $onlyH = Compare-Object $rd $hd | Where-Object SideIndicator -eq '=>'
+          $onlyR = Compare-Object $rd $hd | Where-Object SideIndicator -eq '<='
+          $lines += '--- dll set diff (ref vs hosted) ---'
+          $lines += "only_in_hosted=$($onlyH.InputObject -join ',')"
+          $lines += "only_in_ref=$($onlyR.InputObject -join ',')"
+          $hostedExe = Join-Path $hostedDir 'stl2step.exe'
+          $refExe = Join-Path $refDir 'stl2step.exe'
+          $lines += "--- version ---"
+          $lines += "hosted: $(& $hostedExe --version)"
+          $lines += "ref:    $(& $refExe --version)"
+          $fixtures = @(
+            'linkage_bores_chamfer',
+            'cross_bores',
+            'S01'
+          )
+          $canon = Join-Path $env:GITHUB_WORKSPACE 'tests\gates\baseline\canonicalize.py'
+          $work = Join-Path $env:RUNNER_TEMP 'eq-convert'
+          Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $work -Force | Out-Null
+          foreach ($id in $fixtures) {
+            $stl = Join-Path $env:GITHUB_WORKSPACE "tests\corpus\$id.stl"
+            if (-not (Test-Path $stl)) { throw "missing fixture $stl" }
+            $hStep = Join-Path $work "hosted_$id.step"
+            $rStep = Join-Path $work "ref_$id.step"
+            & $hostedExe $stl -o $hStep --engine trueform --threads 1 --no-verify --quiet
+            & $refExe $stl -o $rStep --engine trueform --threads 1 --no-verify --quiet
+            $json = python $canon step $hStep $rStep --report json | ConvertFrom-Json
+            $lines += "$id hosted_sha256=$($json.a.sha256) ref_sha256=$($json.b.sha256) identical=$($json.identical)"
+          }
+          $lines | Set-Content -LiteralPath $eq -Encoding utf8
+          Get-Content $eq
+
+      - name: Upload engine artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stl2step-engine-windows-x64-${{ env.VERSION_TAG }}
+          path: |
+            ${{ env.ENGINE_OUT }}/stl2step-engine-${{ env.VERSION_TAG }}-windows-x64.zip
+            ${{ env.ENGINE_OUT }}/engine-manifest.json
+            ${{ env.ENGINE_OUT }}/SHA256SUMS-engine.txt
+            ${{ env.ENGINE_OUT }}/equivalence.txt
+          if-no-files-found: error
