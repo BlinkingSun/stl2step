@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 360
     env:
       PYTHONUTF8: '1'
-      ENGINE_OUT: ${{ runner.temp }}\engine-dist
+      ENGINE_OUT: ${{ github.workspace }}\engine-dist
       # vcpkg commit whose opencascade port is 7.9.3 (baseline f5ced781).
       VCPKG_PIN: f5ced781079acf17f51b675875f29e37340283ae
     steps:
