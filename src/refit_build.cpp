@@ -4832,6 +4832,127 @@ double chainMaxDistToOwnVerts(const AnalyticCurve& c, const MeshView& mv, const 
     return maxDist;
 }
 
+// D-train-seams D-S1 measurement (diagnostic only). A run is a maximal
+// contiguous span of the chain's own vertices. `runs` uses residual <= sewTol
+// (the gate's own test). `runsCert` also requires both surfaces within
+// tau = 2q (D-130-12): D-S3 refuses an arc through a vertex the mesh puts off
+// a shipped surface. A run is an edge only when it has two endpoints (D-S1).
+// Nothing here writes geometry.
+struct ChainSpanRuns {
+    int runs = 0;
+    int longest = 0;
+    int excluded = 0;
+    int runsCert = 0;
+    int longestCert = 0;
+    int nOnBoth = 0;
+    int nOffSurf = 0;
+};
+
+ChainSpanRuns chainSpanRuns(const AnalyticCurve& c, const MeshView& mv, const BoundaryChain& ch,
+                            const Region* A, const Region* B, double sewTol) {
+    ChainSpanRuns o;
+    const int n = (int)ch.meshVerts.size();
+    if (n <= 0) return o;
+    // D-S1: an analytic edge has two endpoints. Not a tolerance.
+    const int kMinRun = 2;
+    const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+    const double tau = (q > 0.0) ? (2.0 * q) : 0.0;
+    std::vector<char> onSew(ch.meshVerts.size(), 0);
+    std::vector<char> onCert(ch.meshVerts.size(), 0);
+    for (int i = 0; i < n; i++) {
+        const gp_Pnt p = pntOf(mv, ch.meshVerts[(size_t)i]);
+        const double res = curveResidual(c, p);
+        const double dA = regionPointDev(A, p);
+        const double dB = regionPointDev(B, p);
+        const bool sew = std::isfinite(res) && res <= sewTol;
+        if (sew) onSew[(size_t)i] = 1;
+        const bool offA = !(std::isfinite(dA) && dA <= tau);
+        const bool offB = !(std::isfinite(dB) && dB <= tau);
+        if (!offA && !offB) o.nOnBoth++;
+        if (offA || offB) o.nOffSurf++;
+        if (sew && !offA && !offB) onCert[(size_t)i] = 1;
+    }
+    auto tally = [&](const std::vector<char>& on, int& nRun, int& longest, int* covered) {
+        int i = 0;
+        int cov = 0;
+        while (i < n) {
+            if (!on[(size_t)i]) {
+                i++;
+                continue;
+            }
+            int j = i + 1;
+            while (j < n && on[(size_t)j]) j++;
+            const int len = j - i;
+            if (len >= kMinRun) {
+                nRun++;
+                cov += len;
+                if (len > longest) longest = len;
+            }
+            i = j;
+        }
+        if (ch.closedLoop && n >= kMinRun && on[0] && on[(size_t)(n - 1)]) {
+            int prefix = 0;
+            while (prefix < n && on[(size_t)prefix]) prefix++;
+            if (prefix < n) {
+                int suffix = 0;
+                while (suffix < n && on[(size_t)(n - 1 - suffix)]) suffix++;
+                if (prefix >= kMinRun) {
+                    nRun--;
+                    cov -= prefix;
+                }
+                if (suffix >= kMinRun) {
+                    nRun--;
+                    cov -= suffix;
+                }
+                const int len = prefix + suffix;
+                if (len >= kMinRun) {
+                    nRun++;
+                    cov += len;
+                    if (len > longest) longest = len;
+                }
+            }
+        }
+        if (covered) *covered = cov;
+    };
+    int covered = 0;
+    tally(onSew, o.runs, o.longest, &covered);
+    o.excluded = n - covered;
+    int coveredCert = 0;
+    tally(onCert, o.runsCert, o.longestCert, &coveredCert);
+    return o;
+}
+
+void emitDiagChainSpan(int ci, const char* kind, const AnalyticCurve& curve, const MeshView& mv,
+                       const BoundaryChain& ch, const Region* A, const Region* B, double sewTol) {
+    if (!diagP2Enabled()) return;
+    const double q = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+    const double tau = (q > 0.0) ? (q + q) : 0.0;
+    const ChainSpanRuns sp = chainSpanRuns(curve, mv, ch, A, B, sewTol);
+    std::fprintf(stderr,
+                 "DIAG_CHAINSPAN ci=%d regA=%d regB=%d kind=%s nV=%zu runs=%d longest=%d "
+                 "excluded=%d runsCert=%d longestCert=%d nOnBoth=%d nOffSurf=%d "
+                 "closed=%d\n",
+                 ci, ch.regA, ch.regB, kind ? kind : "?", ch.meshVerts.size(), sp.runs, sp.longest,
+                 sp.excluded, sp.runsCert, sp.longestCert, sp.nOnBoth, sp.nOffSurf,
+                 ch.closedLoop ? 1 : 0);
+    const int n = (int)ch.meshVerts.size();
+    for (int i = 0; i < n; i++) {
+        const gp_Pnt p = pntOf(mv, ch.meshVerts[(size_t)i]);
+        const double res = curveResidual(curve, p);
+        const double dA = regionPointDev(A, p);
+        const double dB = regionPointDev(B, p);
+        const double resQ = (q > 0.0 && std::isfinite(res)) ? (res / q) : -1.0;
+        const double dAq = (q > 0.0 && std::isfinite(dA)) ? (dA / q) : -1.0;
+        const double dBq = (q > 0.0 && std::isfinite(dB)) ? (dB / q) : -1.0;
+        const bool offA = !(std::isfinite(dA) && dA <= tau);
+        const bool offB = !(std::isfinite(dB) && dB <= tau);
+        const char* off = (offA && offB) ? "AB" : offA ? "A" : offB ? "B" : "neither";
+        std::fprintf(stderr,
+                     "DIAG_CHAINSPAN_V ci=%d i=%d vid=%d resQ=%.4f dAq=%.4f dBq=%.4f off=%s\n",
+                     ci, i, ch.meshVerts[(size_t)i], resQ, dAq, dBq, off);
+    }
+}
+
 bool fittedPlaneIntersection(const Region* A, const Region* B, gp_Lin& out) {
     if (!A || !B || A->type != SurfType::Plane || B->type != SurfType::Plane) return false;
     try {
@@ -14254,14 +14375,17 @@ void edgeClassCensus(const MeshView& mv, const RegionSet& rs, const TopoDS_Shape
         // so both are counted and both are reported.
         if (row.dev >= 0.0 && row.cap >= 0.0 && row.dev > row.cap + Precision::PConfusion())
             nDevOverCap++;
-        if (diagP2Enabled())
+        if (diagP2Enabled()) {
+            const char* writer = lastTolWriterOf(e);
             std::fprintf(stderr,
                          "DIAG_EDGECLASS ridA=%d ridB=%d tier=%s curve=%s clsA=%s clsB=%s "
                          "tol=%.9f dev=%.9f devEnds=%.9f devExact=%d cap=%.9f overTol=%d "
-                         "overCap=%d noStored=%d\n",
+                         "overCap=%d noStored=%d writer=%s\n",
                          row.ridA, row.ridB, row.tier, row.curve, row.clsA, row.clsB, row.tol,
                          row.dev, row.devEnds, row.devExact ? 1 : 0, row.cap,
-                         row.overTol ? 1 : 0, row.overCap ? 1 : 0, nNoStored);
+                         row.overTol ? 1 : 0, row.overCap ? 1 : 0, nNoStored,
+                         writer ? writer : "unknown");
+        }
     }
     stats.edgeAnalytic += nAnalytic;
     stats.edgePolylineTier2 += nPoly;
@@ -15234,6 +15358,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                      "DIAG_CHAINSEW ci=%d kind=%s regA=%d regB=%d ratioSew=%.3f "
                                      "fallback=%d\n",
                                      (int)ci, kind, geom[ci].regA, geom[ci].regB, ratioSew, fb);
+                        if (fb)
+                            emitDiagChainSpan((int)ci, kind, curve, mv, ch, A, B, sewTol);
                     }
                     // Tagged plane-loop Circs are not exempt: Pratt circles that
                     // miss mesh verts by >> sewTol must demote to polyline like
