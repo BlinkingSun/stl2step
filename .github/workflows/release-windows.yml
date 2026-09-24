@@ -2,7 +2,7 @@ name: Release Windows Engine
 
 # Workflow files stay on the triggering sha (.github/scripts, .github/winrel).
 # The build ref is checked out under src/ so a v1.4.3 proof does not replace them.
-# .github/winrel/vcpkg.json documents the OCCT 7.9.3 pin only — install is classic
+# .github/winrel/vcpkg.json documents the OCCT 8.0.1 pin only — install is classic
 # mode from a vcpkg clone at that commit (manifest mode rejects package arguments).
 
 on:
@@ -32,8 +32,8 @@ jobs:
     env:
       PYTHONUTF8: '1'
       ENGINE_OUT: ${{ github.workspace }}\engine-dist
-      # vcpkg commit whose opencascade port is 7.9.3 (baseline f5ced781).
-      VCPKG_PIN: f5ced781079acf17f51b675875f29e37340283ae
+      # vcpkg commit whose opencascade port is 8.0.1 — the OCCT the shop-PC v1.4.3 Windows engine shipped with (TKernel.dll 8.0.1, measured by the proof run 2026-09-24).
+      VCPKG_PIN: f89a4a1da4e3176a8d1a14c1825b9b2f98e48843
     steps:
       - name: Checkout workflow files (triggering sha)
         uses: actions/checkout@v5
@@ -96,20 +96,20 @@ jobs:
           fetch-depth: 1
           clean: true
 
-      - name: Restore vcpkg binary cache (OCCT 7.9.3 pin)
+      - name: Restore vcpkg binary cache (OCCT 8.0.1 pin)
         id: vcpkg-cache
         uses: actions/cache/restore@v4
         with:
           path: |
-            ${{ runner.temp }}/vcpkg793
+            ${{ runner.temp }}/vcpkg-occt801
             ${{ runner.temp }}/vcpkg-archives
-          key: vcpkg-occt793-${{ env.VCPKG_PIN }}-${{ runner.os }}-${{ steps.image.outputs.version }}
+          key: vcpkg-occt801-${{ env.VCPKG_PIN }}-${{ runner.os }}-${{ steps.image.outputs.version }}
 
-      - name: Install OpenCASCADE 7.9.3 (classic vcpkg, pinned commit)
+      - name: Install OpenCASCADE 8.0.1 (classic vcpkg, pinned commit)
         shell: pwsh
         run: |
           $pin = $env:VCPKG_PIN
-          $dest = Join-Path $env:RUNNER_TEMP 'vcpkg793'
+          $dest = Join-Path $env:RUNNER_TEMP 'vcpkg-occt801'
           $archive = Join-Path $env:RUNNER_TEMP 'vcpkg-archives'
           New-Item -ItemType Directory -Path $archive -Force | Out-Null
           $gitOk = $false
@@ -119,7 +119,7 @@ jobs:
           }
           if (-not $gitOk) {
             if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
-            # Preferred pin is clone + checkout of f5ced781. A default-branch
+            # Preferred pin is clone + checkout of the pinned commit. A default-branch
             # clone does not contain that historical commit, and a full vcpkg
             # history is huge. Fetch the commit by SHA (depth 1) and detach.
             New-Item -ItemType Directory -Path $dest -Force | Out-Null
@@ -154,11 +154,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed: $LASTEXITCODE" }
             $listed = & "$dest\vcpkg.exe" list
           } finally { Pop-Location }
-          $hit = $listed | Select-String 'opencascade:x64-windows\s+7\.9\.3'
-          if (-not $hit) { throw "expected opencascade 7.9.3; list:`n$($listed | Select-String opencascade)" }
+          $hit = $listed | Select-String 'opencascade:x64-windows\s+8\.0\.1'
+          if (-not $hit) { throw "expected opencascade 8.0.1; list:`n$($listed | Select-String opencascade)" }
           Write-Host $hit
           Add-Content -Path $env:GITHUB_ENV -Encoding utf8NoBOM -Value @(
-            "VCPKG793=$dest",
+            "VCPKGOCCT=$dest",
             "VCPKG_ROOT=$dest"
           )
 
@@ -167,16 +167,16 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: |
-            ${{ runner.temp }}/vcpkg793
+            ${{ runner.temp }}/vcpkg-occt801
             ${{ runner.temp }}/vcpkg-archives
-          key: vcpkg-occt793-${{ env.VCPKG_PIN }}-${{ runner.os }}-${{ steps.image.outputs.version }}
+          key: vcpkg-occt801-${{ env.VCPKG_PIN }}-${{ runner.os }}-${{ steps.image.outputs.version }}
 
       - name: Configure (classic toolchain, manifest mode off)
         shell: pwsh
         run: |
           Write-Host "BUILD_REF=$env:BUILD_REF VERSION_TAG=$env:VERSION_TAG EQUIV_PROOF=$env:EQUIV_PROOF"
           cmake -S src -B build `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG793/scripts/buildsystems/vcpkg.cmake" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKGOCCT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DVCPKG_MANIFEST_MODE=OFF `
             -DSTL2STEP_BUILD_TESTS=ON `
@@ -184,7 +184,7 @@ jobs:
 
       - name: Build Release (engine + corpus generator only)
         # Release needs only the engine; tests stay configured for corpus_generate.
-        # Test TUs are not built: with OCCT 7.9.3 windows.h leaks the legacy `near`
+        # Test TUs are not built: with OCCT 7.9.3 (first proof run) windows.h leaks the legacy `near`
         # macro into test helpers named near() (grade_selftest.cpp, prism_build_test.cpp).
         run: cmake --build build --config Release -j --target stl2step stl2step_corpus_gen
 
@@ -198,12 +198,12 @@ jobs:
         shell: pwsh
         run: |
           # Select-VcpkgRoot keeps the highest OCCT it can see. Hide the
-          # runner's preinstalled root so the pinned clone (7.9.3) wins.
+          # runner's preinstalled root so the pinned clone (8.0.1) wins.
           Remove-Item Env:VCPKG_INSTALLATION_ROOT -ErrorAction SilentlyContinue
           & .\.github\scripts\package-engine.ps1 $env:VERSION_TAG `
             -BuildDir (Join-Path $env:GITHUB_WORKSPACE 'build') `
             -Out $env:ENGINE_OUT `
-            -Vcpkg $env:VCPKG793
+            -Vcpkg $env:VCPKGOCCT
 
       - name: Equivalence vs published v1.4.3 engine
         shell: pwsh

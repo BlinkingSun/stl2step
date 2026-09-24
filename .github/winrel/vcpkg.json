@@ -3,5 +3,5 @@
   "name": "stl2step-winrel",
   "version-string": "0",
   "dependencies": ["opencascade"],
-  "builtin-baseline": "f5ced781079acf17f51b675875f29e37340283ae"
+  "builtin-baseline": "f89a4a1da4e3176a8d1a14c1825b9b2f98e48843"
 }
