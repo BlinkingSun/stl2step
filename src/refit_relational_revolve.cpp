@@ -22,6 +22,7 @@
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_XYZ.hxx>
+#include <Standard_Failure.hxx>
 
 namespace stl2step {
 namespace refit {
@@ -640,17 +641,17 @@ std::vector<int> frontierOf(const WorkMesh& wm, const Band& b) {
     return out;
 }
 
-// The maximal same-sheet free component. A line band that is only a subset of
-// that component is refused when the component itself is a circle at τ
-// (D-fc-1.6.9). A component that is still a line is a cone, not a subset.
-bool lineIsCircleSubset(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
+// Maximal same-sheet free component. Returns false when it is the band itself.
+bool largerSheet(const WorkMesh& wm, const Frame& fr, const Band& band, Band& ext) {
     const int nTri = (int)wm.mv->nTri;
     std::vector<char> seen((std::size_t)std::max(nTri, 0), 0);
     std::vector<int> stack;
+    int nBand = 0;
     for (int t : band.tris) {
         if (t < 0 || t >= nTri || seen[(std::size_t)t]) continue;
         seen[(std::size_t)t] = 1;
         stack.push_back(t);
+        ++nBand;
     }
     std::vector<int> comp;
     while (!stack.empty()) {
@@ -665,22 +666,112 @@ bool lineIsCircleSubset(const WorkMesh& wm, const Frame& fr, const Band& band, d
             stack.push_back(n);
         }
     }
-    if (comp.size() <= band.tris.size()) return false;
-    Band ext;
+    if ((int)comp.size() <= nBand) return false;
+    ext = Band();
     ext.in.assign((std::size_t)std::max(nTri, 0), 0);
-    ext.tris = comp;
-    for (int t : comp)
+    ext.tris = std::move(comp);
+    for (int t : ext.tris)
         if (t >= 0 && t < nTri) ext.in[(std::size_t)t] = 1;
     collectBand(*wm.mv, fr, wm.g2l, ext);
+    return true;
+}
+
+// A line band that is only a subset of a certifyTorus sheet is a fillet
+// chord, not a cone (D-fc-1.6.9). A sheet that is still a line is a cone.
+bool lineIsCircleSubset(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
+    Band ext;
+    if (!largerSheet(wm, fr, band, ext)) return false;
     if ((int)ext.pts.size() < minStations(kParamsCircle)) return false;
-    const double lr = profileLineMaxResid(ext.pts);
-    if (lr <= tau) return false;
-    double Rmaj = 0, z0 = 0, Rmin = 0;
-    if (!fitProfileCircle(ext.pts, tau, Rmaj, z0, Rmin)) return false;
-    double mx = 0;
-    for (const ProfPt& p : ext.pts)
-        mx = std::max(mx, std::fabs(hypot2(p.rho - Rmaj, p.z - z0) - Rmin));
-    return mx <= tau;
+    if (profileLineMaxResid(ext.pts) <= tau) return false;
+    return certifyTorus(ext.pts, tau).ok;
+}
+
+struct ConeCand {
+    Band band;
+    SurfaceFit fit;
+    ClosedM cl;
+    double maxP = 0;
+};
+
+bool ptsOnCircle(const std::vector<ProfPt>& pts, double Rmaj, double z0, double Rmin, double tau) {
+    if (pts.empty()) return false;
+    for (const ProfPt& p : pts)
+        if (std::fabs(std::hypot(p.rho - Rmaj, p.z - z0) - Rmin) > tau) return false;
+    return true;
+}
+
+// A 2-station line band that grows, through free neighbours, into a
+// certifyTorus profile is one row of that blend (D-fc-1.6.9). A cone that
+// only meets the blend does not lie on the circle, so the grow stops.
+bool rowOfTorus(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
+    const int nTri = (int)wm.mv->nTri;
+    std::vector<char> in((std::size_t)std::max(nTri, 0), 0);
+    for (int t : band.tris)
+        if (t >= 0 && t < nTri) in[(std::size_t)t] = 1;
+    std::vector<ProfPt> pts = band.pts;
+    bool grew = false;
+    for (int guard = 0; guard < nTri; ++guard) {
+        std::vector<int> frnt;
+        for (int t = 0; t < nTri; ++t) {
+            if (!in[(std::size_t)t]) continue;
+            for (int n : wm.adj.nbr[(std::size_t)t]) {
+                if (n < 0 || n >= nTri || in[(std::size_t)n] || !wm.freeTri[(std::size_t)n]) continue;
+                if (sheetOf(*wm.mv, n, fr) != band.sheet) continue;
+                frnt.push_back(n);
+            }
+        }
+        std::sort(frnt.begin(), frnt.end());
+        frnt.erase(std::unique(frnt.begin(), frnt.end()), frnt.end());
+        if (frnt.empty()) break;
+        std::vector<char> infr((std::size_t)nTri, 0);
+        for (int t : frnt) infr[(std::size_t)t] = 1;
+        bool any = false;
+        std::vector<char> seen((std::size_t)nTri, 0);
+        for (int seed : frnt) {
+            if (seen[(std::size_t)seed]) continue;
+            std::vector<int> comp;
+            std::vector<int> stack{seed};
+            seen[(std::size_t)seed] = 1;
+            while (!stack.empty()) {
+                const int t = stack.back();
+                stack.pop_back();
+                comp.push_back(t);
+                for (int n : wm.adj.nbr[(std::size_t)t]) {
+                    if (n < 0 || n >= nTri || !infr[(std::size_t)n] || seen[(std::size_t)n]) continue;
+                    seen[(std::size_t)n] = 1;
+                    stack.push_back(n);
+                }
+            }
+            std::vector<ProfPt> trial = pts;
+            for (int t : comp)
+                for (int k = 0; k < 3; ++k)
+                    trial.push_back(profOfPoint(triVert(*wm.mv, t, k), fr, 0));
+            double Rmaj = 0, z0 = 0, Rmin = 0;
+            if (!fitProfileCircle(trial, tau, Rmaj, z0, Rmin)) continue;
+            if (!ptsOnCircle(trial, Rmaj, z0, Rmin, tau)) continue;
+            pts.swap(trial);
+            for (int t : comp) in[(std::size_t)t] = 1;
+            any = true;
+            grew = true;
+        }
+        if (!any) break;
+    }
+    return grew && certifyTorus(pts, tau).ok;
+}
+
+void markTorusChords(const WorkMesh& wm, const Frame& fr, const std::vector<ConeCand>& cs, double tau,
+                     std::vector<char>& drop) {
+    drop.assign(cs.size(), 0);
+    for (int i = 0; i < (int)cs.size(); ++i)
+        if (rowOfTorus(wm, fr, cs[(std::size_t)i].band, tau)) drop[(std::size_t)i] = 1;
+}
+
+// A torus band that is a strict subset of a sheet certifyTorus refuses is
+// the plate-mouth window (D-fc-1.6.9). The sheet that is the band is kept.
+bool torusIsFailingSubset(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
+    Band ext;
+    if (!largerSheet(wm, fr, band, ext)) return false;
+    return !certifyTorus(ext.pts, tau).ok;
 }
 
 void growLineDrain(WorkMesh& wm, const Frame& fr, Band& band, const std::vector<int>& stamp) {
@@ -1148,16 +1239,45 @@ bool emitTorus(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const 
 void updateDonor(SegmentWork& work, Donor& donor) {
     if (donor.updated || donor.idx < 0 || donor.idx >= (int)work.accepted.size()) return;
     Region& r = work.accepted[(std::size_t)donor.idx];
-    gp_XYZ x = r.ax.XDirection().XYZ();
-    Frame fr = makeFrame(donor.fr.origin, donor.fr.axis, x);
-    r.ax = gp_Ax3(gp_Pnt(fr.origin.X(), fr.origin.Y(), fr.origin.Z()),
-                  gp_Dir(fr.axis.X(), fr.axis.Y(), fr.axis.Z()),
-                  gp_Dir(fr.e1.X(), fr.e1.Y(), fr.e1.Z()));
+    r.ax = gp_Ax3(gp_Pnt(donor.fr.origin.X(), donor.fr.origin.Y(), donor.fr.origin.Z()),
+                  gp_Dir(donor.fr.axis.X(), donor.fr.axis.Y(), donor.fr.axis.Z()),
+                  gp_Dir(donor.fr.e1.X(), donor.fr.e1.Y(), donor.fr.e1.Z()));
     if (r.type == SurfType::Cylinder) r.radius = donor.radius;
     r.maxVertexDev = donor.maxDev;
     r.rmsVertexDev = donor.rms;
-    donor.fr = fr;
     donor.updated = true;
+}
+
+// The cone face reuses a neighbour cylinder's rim circle. That circle's
+// parameter is the cylinder's XDirection, and the cone pcurve assumes the
+// two frames share it. Rotate every coaxial cylinder that touches the band
+// onto the donor frame's XDirection. Location, radius, and axis stay.
+void shareSeamFrame(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const Band& band) {
+    const int nTri = (int)wm.mv->nTri;
+    std::vector<char> touch((std::size_t)std::max(nTri, 0), 0);
+    for (int t : band.tris) {
+        if (t < 0 || t >= nTri) continue;
+        for (int n : wm.adj.nbr[(std::size_t)t])
+            if (n >= 0 && n < nTri) touch[(std::size_t)n] = 1;
+    }
+    const gp_Dir xdir(donor.fr.e1.X(), donor.fr.e1.Y(), donor.fr.e1.Z());
+    for (Region& r : work.accepted) {
+        if (r.type != SurfType::Cylinder) continue;
+        bool hit = false;
+        for (int t : r.tris) {
+            if (t >= 0 && t < nTri && touch[(std::size_t)t]) {
+                hit = true;
+                break;
+            }
+        }
+        if (!hit) continue;
+        Frame rf = makeFrame(r.ax.Location().XYZ(), r.ax.Direction().XYZ(), r.ax.XDirection().XYZ());
+        if (!sameAxis(donor.fr, rf, wm.tau, std::max(donor.length, wm.tau))) continue;
+        try {
+            r.ax = gp_Ax3(r.ax.Location(), r.ax.Direction(), xdir);
+        } catch (const Standard_Failure&) {
+        }
+    }
 }
 
 bool adjacentSameSurface(const WorkMesh& wm, SegmentWork& work, const Band& band,
@@ -1400,12 +1520,20 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
 
         int claimed = 0, refused = 0;
         std::vector<int> stamp(nTri, 0);
+        std::vector<char> hold((std::size_t)std::max(nTri, 0), 0);
         int stampGen = 0;
 
         for (Donor& donor : donors) {
-            // Pool: unclaimed triangles reachable from the donor, or from a
-            // relational surface already claimed about this axis, without
-            // crossing an accepted triangle.
+            // A failed band on one donor is not a refusal on another axis.
+            // Held triangles are rows of a blend already refused as cones.
+            for (int t = 0; t < nTri; ++t)
+                stamp[(std::size_t)t] = hold[(std::size_t)t] ? 1 : 0;
+            stampGen = 1;
+            std::vector<ConeCand> cands;
+            // The candidate set is every free triangle reachable from the
+            // donor without crossing an accepted triangle. A cone that meets
+            // the donor only through an unclaimed blend is in this set; growth
+            // at growTol then keeps the blend and the cone as separate bands.
             std::vector<char> pool((std::size_t)nTri, 0);
             std::vector<int> stack;
             auto seedBoundary = [&](const std::vector<int>& tris) {
@@ -1438,14 +1566,18 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     stack.push_back(n);
                 }
             }
-
-            std::vector<int> seeds;
-            for (int t = 0; t < nTri; ++t)
-                if (pool[(std::size_t)t] && stamp[(std::size_t)t] == 0) seeds.push_back(t);
-
-            for (int seed : seeds) {
-                if (!wm.freeTri[(std::size_t)seed] || stamp[(std::size_t)seed] != 0) continue;
-                if (!pool[(std::size_t)seed]) continue;
+            int scan = 0;
+            while (true) {
+                int seed = -1;
+                for (int t = scan; t < nTri; ++t) {
+                    if (!pool[(std::size_t)t] || !wm.freeTri[(std::size_t)t] || stamp[(std::size_t)t] != 0)
+                        continue;
+                    if (sheetOf(mv, t, donor.fr) == 0) continue;
+                    seed = t;
+                    scan = t + 1;
+                    break;
+                }
+                if (seed < 0) break;
                 const int sh = sheetOf(mv, seed, donor.fr);
                 if (sh == 0) continue;
 
@@ -1572,37 +1704,18 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         stampFail("partial-cone");
                         continue;
                     }
-                    double ang0 = 0, ang1 = 0;
-                    int straddle = 0;
-                    if (!emitCone(wm, work, donor, band, fit, cl, ang0, ang1, straddle)) {
-                        stampFail("degenerate");
-                        continue;
-                    }
-                    updateDonor(work, donor);
+                    ConeCand cand;
+                    cand.band = band;
+                    cand.fit = fit;
+                    cand.cl = cl;
+                    cand.maxP = maxP;
+                    cands.push_back(std::move(cand));
+                    const int g = ++stampGen;
                     for (int t : band.tris)
                         if (t >= 0 && t < nTri) {
-                            wm.freeTri[(std::size_t)t] = 0;
-                            pool[(std::size_t)t] = 0;
+                            stamp[(std::size_t)t] = g;
+                            hold[(std::size_t)t] = 1;
                         }
-                    ++claimed;
-                    DiagRec d = baseDiag(modeName, donor, band, tau);
-                    d.stations = stations;
-                    d.levels = levels;
-                    d.params = kParamsLine;
-                    d.maxDev = maxP;
-                    d.maxDevTau = maxP / tau;
-                    d.lineResTau = fit.orthMax / tau;
-                    d.span = cl.span;
-                    d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
-                    d.halfAng = std::atan(std::abs(fit.b)) * 180.0 / kPi;
-                    d.dihedral = d.halfAng;
-                    d.r0 = work.accepted.back().radius;
-                    d.r1 = work.accepted.back().vMax;
-                    d.tan0 = ang0;
-                    d.tan1 = ang1;
-                    d.straddle = straddle;
-                    d.why = "accept";
-                    printBand(d);
                     continue;
                 }
 
@@ -1614,6 +1727,10 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 const TorusCert cert = certifyTorus(band.pts, tau);
                 if (!cert.ok) {
                     stampFail(torusWhy(cert));
+                    continue;
+                }
+                if (torusIsFailingSubset(wm, donor.fr, band, tau)) {
+                    stampFail("vertex-off");
                     continue;
                 }
                 if (sameSurfaceFr(wm, work, donor.fr, band, fit, true)) {
@@ -1629,10 +1746,7 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 // pre-trim count captured above.
                 updateDonor(work, donor);
                 for (int t : band.tris)
-                    if (t >= 0 && t < nTri) {
-                        wm.freeTri[(std::size_t)t] = 0;
-                        pool[(std::size_t)t] = 0;
-                    }
+                    if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
                 ++claimed;
                 DiagRec d = baseDiag(modeName, donor, band, tau);
                 d.stations = cert.profPts;
@@ -1654,6 +1768,81 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 d.why = "accept";
                 d.nV = (int)band.pts.size();
                 printBand(d);
+            }
+            if (!cands.empty()) {
+                std::vector<char> drop;
+                markTorusChords(wm, donor.fr, cands, tau, drop);
+                for (int i = 0; i < (int)cands.size(); ++i) {
+                    ConeCand& cand = cands[(std::size_t)i];
+                    if (!drop.empty() && drop[(std::size_t)i]) {
+                        ++refused;
+                        DiagRec d = baseDiag(modeName, donor, cand.band, tau);
+                        d.stations = countProfPts(cand.band.pts, tau);
+                        d.levels = d.stations;
+                        d.params = kParamsLine;
+                        d.maxDev = cand.maxP;
+                        d.maxDevTau = tau > 0 ? cand.maxP / tau : 0;
+                        d.lineResTau = tau > 0 ? cand.fit.orthMax / tau : 0;
+                        d.span = cand.cl.span;
+                        d.halfAng = std::atan(std::abs(cand.fit.b)) * 180.0 / kPi;
+                        d.why = "line";
+                        printBand(d);
+                        continue;
+                    }
+                    // The cone pcurve treats the rim circle's first parameter as
+                    // cone-u. A vertex a hair on the negative side of X is stored
+                    // as 2π − ε and the pcurve doubles it. Put X through a band
+                    // vertex so that parameter is 0.
+                    {
+                        double best = 1e300;
+                        gp_XYZ bestR(0, 0, 0);
+                        bool have = false;
+                        for (const Vtx& v : cand.band.verts) {
+                            gp_XYZ rad = v.p - donor.fr.origin;
+                            rad -= donor.fr.axis * rad.Dot(donor.fr.axis);
+                            const double m = rad.Modulus();
+                            if (!(m > gp::Resolution())) continue;
+                            rad /= m;
+                            const double miss = 1.0 - rad.Dot(donor.fr.e1);
+                            if (!have || miss < best) {
+                                best = miss;
+                                bestR = rad;
+                                have = true;
+                            }
+                        }
+                        if (have) donor.fr.e1 = bestR;
+                    }
+                    double ang0 = 0, ang1 = 0;
+                    int straddle = 0;
+                    if (!emitCone(wm, work, donor, cand.band, cand.fit, cand.cl, ang0, ang1,
+                                  straddle)) {
+                        ++refused;
+                        continue;
+                    }
+                    shareSeamFrame(wm, work, donor, cand.band);
+                    updateDonor(work, donor);
+                    for (int t : cand.band.tris)
+                        if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+                    ++claimed;
+                    DiagRec d = baseDiag(modeName, donor, cand.band, tau);
+                    d.stations = countProfPts(cand.band.pts, tau);
+                    d.levels = d.stations;
+                    d.params = kParamsLine;
+                    d.maxDev = cand.maxP;
+                    d.maxDevTau = tau > 0 ? cand.maxP / tau : 0;
+                    d.lineResTau = tau > 0 ? cand.fit.orthMax / tau : 0;
+                    d.span = cand.cl.span;
+                    d.spanTol = (cand.cl.nBands > 0) ? 1.5 * kTwoPi / cand.cl.nBands : 0;
+                    d.halfAng = std::atan(std::abs(cand.fit.b)) * 180.0 / kPi;
+                    d.dihedral = d.halfAng;
+                    d.r0 = work.accepted.back().radius;
+                    d.r1 = work.accepted.back().vMax;
+                    d.tan0 = ang0;
+                    d.tan1 = ang1;
+                    d.straddle = straddle;
+                    d.why = "accept";
+                    printBand(d);
+                }
             }
         }
         printSum(modeName, (int)donors.size(), claimed, refused + refusedDonors);
