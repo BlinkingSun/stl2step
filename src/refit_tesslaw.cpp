@@ -1,7 +1,9 @@
-// Tessellation-law refutation of NgonWall cylinders (D-fc-1.9).
+// Tessellation-law refutation of NgonWall cylinders (D-fc-1.9, amended D-fc-2.1).
 // A monotone chord/angle law never gives a larger circle a coarser step than
-// a smaller one. An NgonWall whose step violates that bound is removed and
-// its walls return to Unclaimed so A3 commits them as planes.
+// a smaller one. The step is taken from an equal-step boundary rail, and a
+// sample counts only when no non-N-gon witness rail already exceeds its bound.
+// An NgonWall that violates an admissible sample is removed and its walls
+// return to Unclaimed so A3 commits them as planes.
 // SPDX-License-Identifier: MIT
 
 #include "refit_internal.hpp"
@@ -11,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -175,30 +178,207 @@ bool azimuthStations(const MeshView& mv, const std::vector<int>& tris, const gp_
     return true;
 }
 
-// k steps on the occupied arc, θ_obs = largest of those steps.
-// A closed cylinder counts every gap, including the seam. An open arc drops
-// the single exterior gap (the walk was started across it).
-bool arcStep(const std::vector<double>& st, bool closed360, int& k, double& thetaObs) {
-    const int m = static_cast<int>(st.size());
-    if (m < 2) return false;
-    std::vector<double> gaps(static_cast<size_t>(m), 0.0);
-    for (int i = 0; i < m; ++i) {
-        const int j = (i + 1) % m;
-        double g = st[static_cast<size_t>(j)] - st[static_cast<size_t>(i)];
-        if (g <= 0.0) g += kTwoPi;
-        gaps[static_cast<size_t>(i)] = g;
+// One monotone boundary rail. Steps are absolute azimuth steps (radians).
+struct Rail {
+    int id = -1;
+    int accIdx = -1;
+    int minTri = -1;
+    bool isNgon = false;
+    double r = 0.0;
+    int k = 0;
+    double minStep = 0.0;
+    double maxStep = 0.0;
+    double U = 0.0;
+    bool equal = false;
+    bool admissible = false;
+    int witnessMinTri = -1;
+    double witnessR = 0.0;
+    double witnessStep = 0.0;
+};
+
+// Boundary rails (D-fc-2.1). An edge used by exactly one region triangle joins
+// the rail graph when its endpoint azimuths differ by more than τ/r. Chains
+// through shared vertices become maximal paths or cycles, then split where the
+// signed step changes sign. A cycle with no sign change is one closed rail.
+// Rails with k < 2 are dropped.
+void collectRails(const MeshView& mv, const std::vector<int>& tris, const gp_Dir& axis,
+                  const gp_Pnt& center, double radius, double tau, bool isNgon, int accIdx,
+                  int minTri, int& nextRailId, std::vector<Rail>& out) {
+    if (!(radius > 0.0) || !(tau > 0.0) || !mv.pts || !mv.tris || !mv.compTris) return;
+    const gp_XYZ W(axis.X(), axis.Y(), axis.Z());
+    const gp_XYZ C = center.XYZ();
+    const gp_XYZ tmp = (std::abs(W.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+    gp_XYZ U = W.Crossed(tmp);
+    const double um = U.Modulus();
+    if (!(um > 0.0)) return;
+    U.Divide(um);
+    gp_XYZ V = W.Crossed(U);
+    const double vm = V.Modulus();
+    if (!(vm > 0.0)) return;
+    V.Divide(vm);
+
+    auto az = [&](int g, bool& ok) -> double {
+        ok = false;
+        if (g < 0 || static_cast<size_t>(g) >= mv.nVtx) return 0.0;
+        const gp_XYZ rad = mv.pts[g] - C;
+        const gp_XYZ perp = rad - W * rad.Dot(W);
+        ok = perp.Modulus() > tau;
+        return std::atan2(perp.Dot(V), perp.Dot(U));
+    };
+
+    std::map<std::pair<int, int>, int> cnt;
+    for (int t : tris) {
+        if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
+        const int gt = mv.compTris[t];
+        if (gt < 0) continue;
+        for (int k = 0; k < 3; ++k) {
+            const int a = mv.tris[gt][k];
+            const int b = mv.tris[gt][(k + 1) % 3];
+            cnt[{std::min(a, b), std::max(a, b)}]++;
+        }
     }
-    if (closed360) {
-        k = m;
-        thetaObs = *std::max_element(gaps.begin(), gaps.end());
-        return k >= 2 && thetaObs > 0.0 && std::isfinite(thetaObs);
+
+    const double delta = tau / radius;
+    std::map<int, std::vector<int>> adj;
+    std::vector<std::pair<int, int>> E;
+    for (const auto& kv : cnt) {
+        if (kv.second != 1) continue;
+        bool oa = false, ob = false;
+        const double aa = az(kv.first.first, oa);
+        const double ab = az(kv.first.second, ob);
+        if (!oa || !ob) continue;
+        double d = std::abs(aa - ab);
+        if (d > kPi) d = kTwoPi - d;
+        if (!(d > delta)) continue;
+        const int id = static_cast<int>(E.size());
+        E.push_back(kv.first);
+        adj[kv.first.first].push_back(id);
+        adj[kv.first.second].push_back(id);
     }
-    if (m < 3) return false;
-    thetaObs = 0.0;
-    for (int i = 0; i < m - 1; ++i)
-        thetaObs = std::max(thetaObs, gaps[static_cast<size_t>(i)]);
-    k = m - 1;
-    return k >= 2 && thetaObs > 0.0 && std::isfinite(thetaObs);
+
+    std::vector<char> used(E.size(), 0);
+    auto walkFrom = [&](int e0, bool& cyclic) {
+        cyclic = false;
+        std::vector<int> fwd;
+        fwd.push_back(E[static_cast<size_t>(e0)].first);
+        fwd.push_back(E[static_cast<size_t>(e0)].second);
+        used[static_cast<size_t>(e0)] = 1;
+        int v = E[static_cast<size_t>(e0)].second;
+        int e = e0;
+        while (true) {
+            std::vector<int>& L = adj[v];
+            if (L.size() != 2) break;
+            const int nx = (L[0] == e) ? L[1] : L[0];
+            if (used[static_cast<size_t>(nx)]) {
+                if (nx == e0) cyclic = true;
+                break;
+            }
+            used[static_cast<size_t>(nx)] = 1;
+            const std::pair<int, int>& edge = E[static_cast<size_t>(nx)];
+            v = (edge.first == v) ? edge.second : edge.first;
+            fwd.push_back(v);
+            e = nx;
+        }
+        std::vector<int> verts;
+        if (!cyclic) {
+            std::vector<int> back;
+            v = E[static_cast<size_t>(e0)].first;
+            e = e0;
+            while (true) {
+                std::vector<int>& L = adj[v];
+                if (L.size() != 2) break;
+                const int nx = (L[0] == e) ? L[1] : L[0];
+                if (used[static_cast<size_t>(nx)]) break;
+                used[static_cast<size_t>(nx)] = 1;
+                const std::pair<int, int>& edge = E[static_cast<size_t>(nx)];
+                v = (edge.first == v) ? edge.second : edge.first;
+                back.push_back(v);
+                e = nx;
+            }
+            std::reverse(back.begin(), back.end());
+            back.insert(back.end(), fwd.begin(), fwd.end());
+            verts = std::move(back);
+        } else {
+            verts = std::move(fwd);
+            if (verts.size() > 1 && verts.front() == verts.back()) verts.pop_back();
+        }
+        return verts;
+    };
+
+    std::vector<std::pair<std::vector<int>, bool>> chains;
+    for (size_t i = 0; i < E.size(); ++i) {
+        if (used[i]) continue;
+        if (adj[E[i].first].size() == 2 && adj[E[i].second].size() == 2) continue;
+        bool cyclic = false;
+        std::vector<int> vs = walkFrom(static_cast<int>(i), cyclic);
+        chains.emplace_back(std::move(vs), cyclic);
+    }
+    for (size_t i = 0; i < E.size(); ++i) {
+        if (used[i]) continue;
+        bool cyclic = false;
+        std::vector<int> vs = walkFrom(static_cast<int>(i), cyclic);
+        chains.emplace_back(std::move(vs), cyclic);
+    }
+
+    // Each azimuth is known to τ/r, so a step is known to 2τ/r and the
+    // difference of two true-equal steps to 4τ/r (D-fc-2.1). No other band.
+    const double azUnc = tau / radius;
+    const double stepUnc = azUnc + azUnc;
+    const double equalTol = stepUnc + stepUnc;
+
+    for (const auto& ch : chains) {
+        const std::vector<int>& vs = ch.first;
+        const bool cyclic = ch.second;
+        const int n = static_cast<int>(vs.size());
+        if (n < 2) continue;
+        const int ne = cyclic ? n : n - 1;
+        std::vector<double> sd(static_cast<size_t>(ne), 0.0);
+        for (int i = 0; i < ne; ++i) {
+            bool o1 = false, o2 = false;
+            const double a1 = az(vs[static_cast<size_t>(i)], o1);
+            const double a2 = az(vs[static_cast<size_t>((i + 1) % n)], o2);
+            double d = a2 - a1;
+            while (d > kPi) d -= kTwoPi;
+            while (d <= -kPi) d += kTwoPi;
+            sd[static_cast<size_t>(i)] = d;
+        }
+        std::vector<std::vector<double>> runs;
+        std::vector<double> cur;
+        int sgn = 0;
+        for (int i = 0; i < ne; ++i) {
+            const int s = sd[static_cast<size_t>(i)] > 0.0 ? 1 : -1;
+            if (!cur.empty() && s != sgn) {
+                runs.push_back(cur);
+                cur.clear();
+            }
+            cur.push_back(std::abs(sd[static_cast<size_t>(i)]));
+            sgn = s;
+        }
+        if (!cur.empty()) runs.push_back(std::move(cur));
+        for (const std::vector<double>& run : runs) {
+            const int k = static_cast<int>(run.size());
+            if (k < 2) continue;
+            double mn = run[0];
+            double mx = run[0];
+            for (double d : run) {
+                mn = std::min(mn, d);
+                mx = std::max(mx, d);
+            }
+            if (!(mx > 0.0) || !std::isfinite(mx) || !std::isfinite(mn)) continue;
+            Rail rail;
+            rail.id = nextRailId++;
+            rail.accIdx = accIdx;
+            rail.minTri = minTri;
+            rail.isNgon = isNgon;
+            rail.r = radius;
+            rail.k = k;
+            rail.minStep = mn;
+            rail.maxStep = mx;
+            rail.U = mx * static_cast<double>(k) / static_cast<double>(k - 1);
+            rail.equal = std::isfinite(rail.U) && (mx - mn) <= equalTol;
+            out.push_back(rail);
+        }
+    }
 }
 
 struct Meas {
@@ -210,12 +390,11 @@ struct Meas {
     double rStored = 0.0;
     int N = 0;
     int stations = 0;
-    int k = 0;
-    double thetaObs = 0.0;
+    std::vector<Rail> rails;
 };
 
 bool measureRef(const MeshView& mv, const SegmentParams& p, double tau, int accIdx,
-                const Region& reg, Meas& m) {
+                const Region& reg, int& nextRailId, Meas& m) {
     m = Meas{};
     m.accIdx = accIdx;
     m.minTri = minTriOf(reg.tris);
@@ -238,11 +417,8 @@ bool measureRef(const MeshView& mv, const SegmentParams& p, double tau, int accI
     if (!azimuthStations(mv, reg.tris, axis, center, radius, tau, stations)) return true;
     m.stations = static_cast<int>(stations.size());
     if (m.stations < minStations(kParamsCircle)) return true;
-    int k = 0;
-    double theta = 0.0;
-    if (!arcStep(stations, reg.closed360, k, theta)) return true;
-    m.k = k;
-    m.thetaObs = theta;
+    collectRails(mv, reg.tris, axis, center, radius, tau, m.isNgon, accIdx, m.minTri, nextRailId,
+                 m.rails);
     m.certified = true;
     return true;
 }
@@ -259,38 +435,84 @@ struct Witness {
     double bound = 0.0;
 };
 
-bool refutes(const Meas& ref, const Meas& ngon) {
-    if (!ref.certified || ref.k < 2 || ref.accIdx == ngon.accIdx) return false;
-    if (!(ref.rRefit <= ngon.rStored) || !(ngon.rStored > 0.0) || ngon.N < 3) return false;
-    const double bound = ref.thetaObs * static_cast<double>(ref.k) / static_cast<double>(ref.k - 1);
-    const double step = kTwoPi / static_cast<double>(ngon.N);
-    return std::isfinite(bound) && step >= bound;
+// A sample rail is admissible when every non-N-gon witness rail of a circle at
+// least as large (r_b ≥ r_a − τ), including the sample's own other rails, has
+// max step < U. NgonWall rails are never witnesses (D-fc-2.1).
+void markAdmissible(std::vector<Meas>& meas, double tau) {
+    for (Meas& src : meas) {
+        for (Rail& a : src.rails) {
+            a.admissible = false;
+            a.witnessMinTri = -1;
+            a.witnessR = 0.0;
+            a.witnessStep = 0.0;
+            if (!a.equal || a.k < 2 || !std::isfinite(a.U)) continue;
+            bool ok = true;
+            double bestStep = -1.0;
+            int bestTri = -1;
+            double bestR = 0.0;
+            for (const Meas& host : meas) {
+                if (host.isNgon || !host.certified) continue;
+                for (const Rail& b : host.rails) {
+                    if (b.k < 2 || b.id == a.id) continue;
+                    if (!(b.r >= a.r - tau)) continue;
+                    if (b.maxStep < a.U) continue;
+                    ok = false;
+                    const bool better = bestTri < 0 || b.maxStep > bestStep
+                                        || (b.maxStep == bestStep && b.minTri < bestTri);
+                    if (better) {
+                        bestStep = b.maxStep;
+                        bestTri = b.minTri;
+                        bestR = b.r;
+                    }
+                }
+            }
+            a.admissible = ok;
+            if (!ok) {
+                a.witnessMinTri = bestTri;
+                a.witnessR = bestR;
+                a.witnessStep = bestStep;
+            }
+        }
+    }
 }
 
-void consider(const Meas& ref, const Meas& ngon, Witness& w) {
-    if (!ref.certified || ref.k < 2 || ref.accIdx == ngon.accIdx) return;
-    if (!(ref.rRefit <= ngon.rStored) || !(ngon.rStored > 0.0) || ngon.N < 3) return;
-    const double bound = ref.thetaObs * static_cast<double>(ref.k) / static_cast<double>(ref.k - 1);
-    if (!std::isfinite(bound)) return;
+bool refutes(const Meas& ref, const Meas& ngon, double tau) {
+    if (!ref.certified || ref.accIdx == ngon.accIdx) return false;
+    if (!(ngon.rStored > 0.0) || ngon.N < 3) return false;
     const double step = kTwoPi / static_cast<double>(ngon.N);
-    const bool hit = step >= bound;
-    const bool betterHit = hit && (!w.hits || ref.rRefit < w.r
-                                   || (ref.rRefit == w.r && ref.minTri < w.minTri));
-    const bool betterKeep = !hit && !w.hits && (!w.any || bound < w.bound
-                                                || (bound == w.bound && ref.minTri < w.minTri));
-    if (!w.any || betterHit || betterKeep) {
-        w.any = true;
-        w.hits = hit;
-        w.minTri = ref.minTri;
-        w.r = ref.rRefit;
-        w.theta = ref.thetaObs;
-        w.k = ref.k;
-        w.bound = bound;
-    } else if (hit && w.hits && ref.rRefit == w.r && ref.minTri < w.minTri) {
-        w.minTri = ref.minTri;
-        w.theta = ref.thetaObs;
-        w.k = ref.k;
-        w.bound = bound;
+    for (const Rail& a : ref.rails) {
+        if (!a.admissible) continue;
+        if (!(a.r <= ngon.rStored + tau)) continue;
+        if (std::isfinite(a.U) && step >= a.U) return true;
+    }
+    return false;
+}
+
+// Winning rail: a hit beats a miss. Among hits, the smallest U, then the
+// smallest region id, then the smallest k. A miss reports the tightest U.
+void consider(const Meas& ref, const Meas& ngon, double tau, Witness& w) {
+    if (!ref.certified || ref.accIdx == ngon.accIdx) return;
+    if (!(ngon.rStored > 0.0) || ngon.N < 3) return;
+    const double step = kTwoPi / static_cast<double>(ngon.N);
+    for (const Rail& a : ref.rails) {
+        if (!a.admissible) continue;
+        if (!(a.r <= ngon.rStored + tau)) continue;
+        if (!std::isfinite(a.U)) continue;
+        const bool hit = step >= a.U;
+        const bool tighter = a.U < w.bound
+                             || (a.U == w.bound && (ref.minTri < w.minTri
+                                                    || (ref.minTri == w.minTri && a.k < w.k)));
+        const bool betterHit = hit && (!w.hits || tighter);
+        const bool betterKeep = !hit && !w.hits && (!w.any || tighter);
+        if (!w.any || betterHit || betterKeep) {
+            w.any = true;
+            w.hits = hit;
+            w.minTri = ref.minTri;
+            w.r = a.r;
+            w.theta = a.maxStep;
+            w.k = a.k;
+            w.bound = a.U;
+        }
     }
 }
 
@@ -511,8 +733,10 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
     const double tau = tauOf(mv);
     const bool diag = tesslawDiagOn();
     if (!(tau > 0.0) || !meshReadable(mv)) {
-        if (diag)
+        if (diag) {
+            std::fprintf(stderr, "DIAG_TESSLAW_RAILS rails=0 equal=0 admissible=0 rejected=0\n");
             std::fprintf(stderr, "DIAG_TESSLAW summary n=0 refute=0 keep=0 noref=0\n");
+        }
         return true;
     }
 
@@ -524,21 +748,25 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
         }
     }
     if (!anyNgon) {
-        if (diag)
+        if (diag) {
+            std::fprintf(stderr, "DIAG_TESSLAW_RAILS rails=0 equal=0 admissible=0 rejected=0\n");
             std::fprintf(stderr, "DIAG_TESSLAW summary n=0 refute=0 keep=0 noref=0\n");
+        }
         return true;
     }
 
     std::vector<Meas> meas;
     meas.reserve(work.accepted.size());
+    int nextRailId = 0;
     for (int i = 0; i < static_cast<int>(work.accepted.size()); ++i) {
         const Region& r = work.accepted[static_cast<size_t>(i)];
         if (!isLawCylinder(r) && !(r.origin == Origin::NgonWall && r.type == SurfType::Cylinder))
             continue;
         Meas m;
-        measureRef(mv, p, tau, i, r, m);
+        measureRef(mv, p, tau, i, r, nextRailId, m);
         if (m.isNgon || m.certified) meas.push_back(m);
     }
+    markAdmissible(meas, tau);
 
     std::vector<int> nonNgon;
     std::vector<int> ngons;
@@ -557,7 +785,7 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
     std::vector<char> isRef(meas.size(), 0);
     for (int gi : ngons) {
         for (int u : nonNgon) {
-            if (refutes(meas[static_cast<size_t>(u)], meas[static_cast<size_t>(gi)])) {
+            if (refutes(meas[static_cast<size_t>(u)], meas[static_cast<size_t>(gi)], tau)) {
                 isRef[static_cast<size_t>(gi)] = 1;
                 break;
             }
@@ -575,7 +803,7 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
             for (int hj : ngons) {
                 if (hj == gi || isRef[static_cast<size_t>(hj)]) continue;
                 if (!meas[static_cast<size_t>(hj)].certified) continue;
-                if (refutes(meas[static_cast<size_t>(hj)], meas[static_cast<size_t>(gi)])) {
+                if (refutes(meas[static_cast<size_t>(hj)], meas[static_cast<size_t>(gi)], tau)) {
                     attacked = true;
                     break;
                 }
@@ -586,7 +814,7 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
             if (isRef[static_cast<size_t>(gi)]) continue;
             for (int hj : ngons) {
                 if (!grounded[static_cast<size_t>(hj)] || hj == gi) continue;
-                if (refutes(meas[static_cast<size_t>(hj)], meas[static_cast<size_t>(gi)])) {
+                if (refutes(meas[static_cast<size_t>(hj)], meas[static_cast<size_t>(gi)], tau)) {
                     isRef[static_cast<size_t>(gi)] = 1;
                     changed = true;
                     break;
@@ -604,7 +832,7 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
         for (int hj : ngons) {
             if (hj == gi || isRef[static_cast<size_t>(hj)]) continue;
             if (!meas[static_cast<size_t>(hj)].certified) continue;
-            if (refutes(meas[static_cast<size_t>(hj)], meas[static_cast<size_t>(gi)])) {
+            if (refutes(meas[static_cast<size_t>(hj)], meas[static_cast<size_t>(gi)], tau)) {
                 attacked = true;
                 break;
             }
@@ -619,10 +847,10 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
         const Meas& g = meas[static_cast<size_t>(gi)];
         Witness w;
         for (int u : nonNgon)
-            consider(meas[static_cast<size_t>(u)], g, w);
+            consider(meas[static_cast<size_t>(u)], g, tau, w);
         for (int hj : ngons) {
             if (!grounded[static_cast<size_t>(hj)] || hj == gi) continue;
-            consider(meas[static_cast<size_t>(hj)], g, w);
+            consider(meas[static_cast<size_t>(hj)], g, tau, w);
         }
         DiagLine line;
         line.minTri = g.minTri;
@@ -687,6 +915,36 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
     }
 
     if (diag) {
+        int nRails = 0, nEqual = 0, nAdm = 0, nRej = 0;
+        std::vector<const Rail*> rejected;
+        for (const Meas& src : meas) {
+            if (src.isNgon || !src.certified) continue;
+            for (const Rail& a : src.rails) {
+                if (a.k < 2) continue;
+                ++nRails;
+                if (!a.equal) continue;
+                ++nEqual;
+                if (a.admissible) {
+                    ++nAdm;
+                } else {
+                    ++nRej;
+                    rejected.push_back(&a);
+                }
+            }
+        }
+        std::sort(rejected.begin(), rejected.end(), [](const Rail* a, const Rail* b) {
+            if (a->minTri != b->minTri) return a->minTri < b->minTri;
+            if (a->k != b->k) return a->k < b->k;
+            if (a->U != b->U) return a->U < b->U;
+            return a->id < b->id;
+        });
+        for (const Rail* a : rejected) {
+            std::fprintf(stderr,
+                         "DIAG_TESSLAW_REJECT refRid=%d r=%.8g k=%d U=%.8g "
+                         "witnessRid=%d witnessR=%.8g witnessStep=%.8g\n",
+                         a->minTri, a->r, a->k, a->U, a->witnessMinTri, a->witnessR,
+                         a->witnessStep);
+        }
         for (const DiagLine& line : lines) {
             std::fprintf(stderr,
                          "DIAG_TESSLAW rid=%d N=%d R=%.8g step=%.8g refRid=%d refR=%.8g "
@@ -694,6 +952,8 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
                          line.minTri, line.N, line.R, line.step, line.refRid, line.refR,
                          line.refTheta, line.refK, line.bound, line.verdict);
         }
+        std::fprintf(stderr, "DIAG_TESSLAW_RAILS rails=%d equal=%d admissible=%d rejected=%d\n",
+                     nRails, nEqual, nAdm, nRej);
         std::fprintf(stderr, "DIAG_TESSLAW summary n=%d refute=%d keep=%d noref=%d\n",
                      nRefute + nKeep + nNoref, nRefute, nKeep, nNoref);
     }

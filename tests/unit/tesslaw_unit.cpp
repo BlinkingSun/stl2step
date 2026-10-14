@@ -98,6 +98,53 @@ struct Synth {
         return tb;
     }
 
+    // Open strip. angA / angB are increasing azimuths (radians) of the two
+    // boundary rails at z0 and z1. Interior edges are shared; the end caps are
+    // the only other boundary edges.
+    Tube addStrip(double R, const std::vector<double>& angA, const std::vector<double>& angB,
+                  double z0, double z1, double cx, double cy) {
+        Tube tb;
+        tb.firstVert = static_cast<int>(pts.size());
+        tb.firstTri = static_cast<int>(triFlat.size() / 3);
+        tb.N = 0;
+        tb.R = R;
+        tb.z0 = z0;
+        tb.z1 = z1;
+        tb.cx = cx;
+        tb.cy = cy;
+        const int nA = static_cast<int>(angA.size());
+        const int nB = static_cast<int>(angB.size());
+        const int baseA = tb.firstVert;
+        for (double a : angA)
+            pts.push_back(gp_XYZ(cx + R * std::cos(a), cy + R * std::sin(a), z0));
+        const int baseB = static_cast<int>(pts.size());
+        for (double a : angB)
+            pts.push_back(gp_XYZ(cx + R * std::cos(a), cy + R * std::sin(a), z1));
+        int i = 0, j = 0;
+        auto tri = [&](int a, int b, int c) {
+            triFlat.push_back(a);
+            triFlat.push_back(b);
+            triFlat.push_back(c);
+        };
+        while (i < nA - 1 || j < nB - 1) {
+            if (i == nA - 1) {
+                tri(baseA + i, baseB + j, baseB + j + 1);
+                ++j;
+            } else if (j == nB - 1) {
+                tri(baseA + i, baseA + i + 1, baseB + j);
+                ++i;
+            } else if (angA[static_cast<size_t>(i + 1)] <= angB[static_cast<size_t>(j + 1)]) {
+                tri(baseA + i, baseA + i + 1, baseB + j);
+                ++i;
+            } else {
+                tri(baseA + i, baseB + j, baseB + j + 1);
+                ++j;
+            }
+        }
+        tb.nTri = static_cast<int>(triFlat.size() / 3) - tb.firstTri;
+        return tb;
+    }
+
     // Move one bottom vertex radially by `delta` millimetres (breaks τ).
     void bump(const Tube& tb, int corner, double delta) {
         gp_XYZ& p = pts[static_cast<size_t>(tb.firstVert + corner)];
@@ -171,7 +218,9 @@ static void addClearedWalls(SegmentWork& work, const Synth::Tube& tb) {
 struct Outcome {
     int ngon6 = 0;
     int ngon8 = 0;
+    int ngon24 = 0;
     int ngon64 = 0;
+    int ngon126 = 0;
     int cylGrow = 0;
     int unclaimedTris = 0;
     int consumedWalls = 0;
@@ -192,7 +241,9 @@ static Outcome run(Synth& synth, SegmentWork& work, int threads, double q) {
         regs.push_back({n0, static_cast<int>(r.origin) * 1000 + r.nSides});
         if (r.origin == Origin::NgonWall && r.nSides == 6) ++o.ngon6;
         if (r.origin == Origin::NgonWall && r.nSides == 8) ++o.ngon8;
+        if (r.origin == Origin::NgonWall && r.nSides == 24) ++o.ngon24;
         if (r.origin == Origin::NgonWall && r.nSides == 64) ++o.ngon64;
+        if (r.origin == Origin::NgonWall && r.nSides == 126) ++o.ngon126;
         if (r.origin == Origin::CylGrow) ++o.cylGrow;
     }
     std::sort(regs.begin(), regs.end());
@@ -303,6 +354,110 @@ static void testThreadsAgree() {
     expect(a.ngon6 == 0 && a.unclaimedTris == 12, "case6 still refutes the hex");
 }
 
+static std::vector<double> cumulateDeg(const std::vector<double>& stepsDeg) {
+    std::vector<double> ang;
+    ang.push_back(0.0);
+    double a = 0.0;
+    for (double s : stepsDeg) {
+        a += s * kPi / 180.0;
+        ang.push_back(a);
+    }
+    return ang;
+}
+
+// Case 7. Interleaved quarter-turn: one rail is 6×15°, the other is
+// 5.625, 5.625, then 7×11.25°. The union of those azimuths is a 11.25° step
+// with k=13 (bound under 15°). The equal rail's bound is 18°, so the 24-gon
+// at R2.5 stays. The old union reading refutes this case.
+static void testInterleavedStripKeeps24() {
+    Synth s;
+    const std::vector<double> railA = cumulateDeg(std::vector<double>(6, 15.0));
+    std::vector<double> bSteps{5.625, 5.625};
+    bSteps.insert(bSteps.end(), 7, 11.25);
+    const std::vector<double> railB = cumulateDeg(bSteps);
+    const auto strip = s.addStrip(1.0, railA, railB, 0.0, 6.0, 0.0, 0.0);
+    const auto gon = s.addTube(2.5, 24, 0.0, 4.0, 30.0, 0.0);
+    SegmentWork w;
+    w.accepted.push_back(makeCyl(strip, Origin::CylGrow, false));
+    w.accepted.push_back(makeCyl(gon, Origin::NgonWall, true));
+    addClearedWalls(w, gon);
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.ngon24 == 1, "case7 24-gon kept (interleaved rails)");
+    expect(o.cylGrow == 1, "case7 strip kept");
+    expect(o.unclaimedTris == 0, "case7 nothing released");
+}
+
+// Case 8. Both rails graded 15, 15, 15, 13.5, 10.935, 9.8415, 5.3618, 5.3618°.
+// No equal-step sample, so the octagon at R7 stays.
+static void testGradedRailKeepsOctagon() {
+    const std::vector<double> steps{15.0, 15.0, 15.0, 13.5, 10.935, 9.8415, 5.3618, 5.3618};
+    const std::vector<double> ang = cumulateDeg(steps);
+    Synth s;
+    const auto strip = s.addStrip(1.0, ang, ang, 0.0, 6.0, 0.0, 0.0);
+    const auto oct = s.addTube(7.0, 8, 0.0, 4.0, 30.0, 0.0);
+    SegmentWork w;
+    w.accepted.push_back(makeCyl(strip, Origin::CylGrow, false));
+    w.accepted.push_back(makeCyl(oct, Origin::NgonWall, true));
+    addClearedWalls(w, oct);
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.ngon8 == 1, "case8 octagon kept (no law sample)");
+    expect(o.cylGrow == 1, "case8 graded strip kept");
+    expect(o.unclaimedTris == 0, "case8 nothing released");
+}
+
+// Case 9. R1.5 sample is 3×8.3336° (U 12.5°). A witness quarter at R2 steps
+// 6×15°, which exceeds that bound, so the 24-gon at R2.5 stays. Without the
+// witness the same sample refutes it.
+static Outcome guardCase(bool withWitness) {
+    Synth s;
+    const std::vector<double> sample = cumulateDeg({8.3336, 8.3336, 8.3336});
+    const std::vector<double> wit = cumulateDeg(std::vector<double>(6, 15.0));
+    const auto strip = s.addStrip(1.5, sample, sample, 0.0, 6.0, 0.0, 0.0);
+    Synth::Tube witness;
+    if (withWitness) witness = s.addStrip(2.0, wit, wit, 0.0, 6.0, 20.0, 0.0);
+    const auto gon = s.addTube(2.5, 24, 0.0, 4.0, 40.0, 0.0);
+    SegmentWork w;
+    w.accepted.push_back(makeCyl(strip, Origin::CylGrow, false));
+    if (withWitness) w.accepted.push_back(makeCyl(witness, Origin::CylGrow, false));
+    w.accepted.push_back(makeCyl(gon, Origin::NgonWall, true));
+    addClearedWalls(w, gon);
+    return run(s, w, 1, 1e-4);
+}
+
+static void testGuardRejectsSample() {
+    const Outcome kept = guardCase(true);
+    expect(kept.ngon24 == 1, "case9 24-gon kept when the R2 witness contradicts U");
+    expect(kept.cylGrow == 2, "case9 both witness strips kept");
+    expect(kept.unclaimedTris == 0, "case9 nothing released");
+    const Outcome dropped = guardCase(false);
+    expect(dropped.ngon24 == 0, "case9 24-gon refuted without the R2 witness");
+    expect(dropped.cylGrow == 1, "case9 sample strip kept");
+    expect(dropped.unclaimedTris == 48, "case9 walls unclaimed");
+}
+
+// Case 10. One rail is 32×2.5944° then 2.1928°; the other is 12.812° down by
+// ×0.9 per step while the step stays at least 0.559°. Neither is equal-step,
+// so the 126-gon at R16 stays.
+static void testRemainderAndGradedKeep126() {
+    std::vector<double> rem(32, 2.5944);
+    rem.push_back(2.1928);
+    std::vector<double> graded;
+    for (double s = 12.812; s + 1e-12 >= 0.559; s *= 0.9) graded.push_back(s);
+    const std::vector<double> angA = cumulateDeg(rem);
+    const std::vector<double> angB = cumulateDeg(graded);
+    Synth s;
+    const auto strip = s.addStrip(2.0, angA, angB, 0.0, 6.0, 0.0, 0.0);
+    const auto gon = s.addTube(16.0, 126, 0.0, 4.0, 80.0, 0.0);
+    SegmentWork w;
+    w.accepted.push_back(makeCyl(strip, Origin::CylGrow, false));
+    w.accepted.push_back(makeCyl(gon, Origin::NgonWall, true));
+    addClearedWalls(w, gon);
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.ngon126 == 1, "case10 126-gon kept");
+    expect(o.cylGrow == 1, "case10 remainder strip kept");
+    expect(o.unclaimedTris == 0, "case10 nothing released");
+}
+
 static void testTauZeroChangesNothing() {
     Synth s;
     const auto hex = s.addTube(8.66, 6, 0.0, 5.0, 0.0, 0.0);
@@ -324,6 +479,10 @@ int main() {
     testHexKeptWhenRefsAreLarger();
     testBadRefitIgnored();
     testThreadsAgree();
+    testInterleavedStripKeeps24();
+    testGradedRailKeepsOctagon();
+    testGuardRejectsSample();
+    testRemainderAndGradedKeep126();
     testTauZeroChangesNothing();
     if (gFail) {
         std::fprintf(stderr, "tesslaw_unit %d FAILED\n", gFail);
