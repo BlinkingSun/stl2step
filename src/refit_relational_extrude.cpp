@@ -1,6 +1,6 @@
-// Relational extrude (W1.1, D-fc-1.3 … D-fc-1.7, D-fc-1.15).
-// Claims a band whose section perpendicular to one axis is one circle at τ:
-// plane|plane fillets, U-turn hems, and closed pegs. Nothing else.
+// Relational extrude (W1.1, amended D-fc-3.2).
+// Anchor-pair vote, slab τ-membership, chord-bounded coverage, then pegs.
+// Hems are deferred. Growth and the ruled-chain seed are not used.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational.hpp"
@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -230,6 +231,15 @@ struct BandDiag {
     double tanAngA = 0, tanAngB = 0;
     int straddle = 0;
     double tau = 0;
+    int nI = 0;
+    int nCover = 0;
+    int compsI = 0;
+    int compsC = 0;
+    double certDev = 0;
+    double coverDev = 0;
+    double sDev = 0;
+    double anchorTolA = 0;
+    double anchorTolB = 0;
 };
 
 void emitDiag(const BandDiag& d) {
@@ -240,11 +250,15 @@ void emitDiag(const BandDiag& d) {
                  "stations=%d levels=%d params=%d fit=%s radius=%.9g halfAngle=0 "
                  "axis=%.9g,%.9g,%.9g maxDevMM=%.9g maxDevTau=%.9g lineResTau=%.9g "
                  "span=%.9g dihedral=%.9g spanTol=%.9g tanDistA=%.9g tanDistB=%.9g "
-                 "tanAngA=%.9g tanAngB=%.9g straddle=%d why=%s\n",
+                 "tanAngA=%.9g tanAngB=%.9g straddle=%d "
+                 "nI=%d nCover=%d compsI=%d compsC=%d certDevTau=%.9g coverDevTau=%.9g "
+                 "sTau=%.9g anchorTolATau=%.9g anchorTolBTau=%.9g why=%s\n",
                  d.mode, d.seed, d.nTri, d.nV, d.stations, d.levels, d.params, d.fit,
                  d.radius, d.axis.X(), d.axis.Y(), d.axis.Z(), d.maxDev, d.maxDev / tau,
                  d.lineRes / tau, d.span, d.dihedral, d.spanTolV, d.tanDistA, d.tanDistB,
-                 d.tanAngA, d.tanAngB, d.straddle, d.why);
+                 d.tanAngA, d.tanAngB, d.straddle, d.nI, d.nCover, d.compsI, d.compsC,
+                 d.certDev / tau, d.coverDev / tau, d.sDev / tau, d.anchorTolA / tau,
+                 d.anchorTolB / tau, d.why);
 }
 
 struct WhyCount {
@@ -257,6 +271,9 @@ struct WhyCount {
     int underdetermined = 0;
     int degenerate = 0;
     int noAnchor = 0;
+    int unstable = 0;
+    int hemDeferred = 0;
+    int anchorInBand = 0;
 };
 
 void tallyWhy(WhyCount& c, const char* why) {
@@ -269,6 +286,9 @@ void tallyWhy(WhyCount& c, const char* why) {
     else if (std::strcmp(why, "same-surface") == 0) ++c.sameSurface;
     else if (std::strcmp(why, "underdetermined") == 0) ++c.underdetermined;
     else if (std::strcmp(why, "no-anchor") == 0) ++c.noAnchor;
+    else if (std::strcmp(why, "unstable") == 0) ++c.unstable;
+    else if (std::strcmp(why, "hem-deferred") == 0) ++c.hemDeferred;
+    else if (std::strcmp(why, "anchor-in-band") == 0) ++c.anchorInBand;
     else ++c.degenerate;
 }
 
@@ -432,8 +452,8 @@ double devStats(const std::vector<Vert>& verts, const gp_XYZ& center, const gp_X
 }
 
 bool fitAnchored(const gp_XYZ& nA, const gp_XYZ& pA, const gp_XYZ& nB, const gp_XYZ& pB,
-                 const std::vector<Vert>& verts, int maxIter, gp_XYZ ruling,
-                 gp_XYZ& axis, gp_XYZ& center, double& radius) {
+                 const std::vector<Vert>& verts, int maxIter, gp_XYZ ruling, double sA,
+                 double sB, gp_XYZ& axis, gp_XYZ& center, double& radius) {
     if (verts.empty()) return false;
     gp_XYZ a = nA.Crossed(nB);
     const double am = a.Modulus();
@@ -443,8 +463,7 @@ bool fitAnchored(const gp_XYZ& nA, const gp_XYZ& pA, const gp_XYZ& nB, const gp_
     gp_XYZ C(0, 0, 0);
     for (const Vert& v : verts) C += v.p;
     C /= (double)verts.size();
-    const double sA = ((C - pA).Dot(nA) >= 0.0) ? 1.0 : -1.0;
-    const double sB = ((C - pB).Dot(nB) >= 0.0) ? 1.0 : -1.0;
+    if (!(std::abs(sA) > 0.0) || !(std::abs(sB) > 0.0)) return false;
     gp_XYZ c0, c1;
     if (!solve3(nA, nB, a, pA.Dot(nA), pB.Dot(nB), C.Dot(a), c0)) return false;
     if (!solve3(nA, nB, a, pA.Dot(nA) + sA, pB.Dot(nB) + sB, C.Dot(a), c1)) return false;
@@ -476,8 +495,15 @@ bool fitAnchored(const gp_XYZ& nA, const gp_XYZ& pA, const gp_XYZ& nB, const gp_
             }
             continue;
         }
-        const double disc = B * B - 4.0 * A * Cq;
-        if (disc < 0.0) continue;
+        // A tangent generator sits on a double root. Cancellation leaves a
+        // disc a few ulps below zero (case 10, 4° planes). That is rounding,
+        // not a geometric tolerance.
+        const double discRaw = B * B - 4.0 * A * Cq;
+        const double discScale = std::max(B * B, std::abs(4.0 * A * Cq));
+        const double discFloor =
+            64.0 * std::numeric_limits<double>::epsilon() * std::max(discScale, 1.0);
+        if (discRaw < -discFloor) continue;
+        const double disc = std::max(0.0, discRaw);
         const double s = std::sqrt(disc);
         const double r1 = (-B + s) / (2.0 * A);
         const double r2 = (-B - s) / (2.0 * A);
@@ -868,18 +894,114 @@ void refitPlaneProv(const MeshView& mv, const std::vector<int>& g2l, Provisional
 
 }  // namespace
 
+namespace {
+
+const char* originName(Origin o) {
+    switch (o) {
+    case Origin::PlaneGrow: return "PlaneGrow";
+    case Origin::CylGrow: return "CylGrow";
+    case Origin::FilletStrip: return "FilletStrip";
+    case Origin::NgonWall: return "NgonWall";
+    case Origin::ChamferCone: return "ChamferCone";
+    case Origin::TorusBlend: return "TorusBlend";
+    }
+    return "other";
+}
+
+void canonicalHemi(gp_XYZ& a) {
+    if (a.X() < -1e-15) {
+        a.Reverse();
+        return;
+    }
+    if (std::abs(a.X()) <= 1e-15 && a.Y() < -1e-15) {
+        a.Reverse();
+        return;
+    }
+    if (std::abs(a.X()) <= 1e-15 && std::abs(a.Y()) <= 1e-15 && a.Z() < 0.0) a.Reverse();
+}
+
+double wrap2pi(double a) {
+    const double t = std::fmod(a, kTwoPi);
+    return (t < 0.0) ? t + kTwoPi : t;
+}
+
+void pushCircleRoots(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& cR, const gp_XYZ& axis,
+                     double tau, std::vector<double>& roots) {
+    const gp_XYZ w = (p - c0).Crossed(axis);
+    const gp_XYZ dax = cR.Crossed(axis);
+    const double A = dax.Dot(dax) - 1.0;
+    const double B = -2.0 * w.Dot(dax);
+    const double Cq = w.Dot(w);
+    auto consider = [&](double r) {
+        if (!(r > 0.0) || !std::isfinite(r)) return;
+        const gp_XYZ c = c0 + cR * r;
+        if (std::abs(radialDist(p, c, axis) - r) <= tau) roots.push_back(r);
+    };
+    if (std::abs(A) < 1e-12) {
+        if (std::abs(B) > 1e-12) consider(-Cq / B);
+        return;
+    }
+    // Same ulp clamp as fitAnchored: a tangent double root cancels to a
+    // disc a few ulps negative. Not a geometric tolerance.
+    const double discRaw = B * B - 4.0 * A * Cq;
+    const double discScale = std::max(B * B, std::abs(4.0 * A * Cq));
+    const double discFloor =
+        64.0 * std::numeric_limits<double>::epsilon() * std::max(discScale, 1.0);
+    if (discRaw < -discFloor) return;
+    const double disc = std::max(0.0, discRaw);
+    const double s = std::sqrt(disc);
+    consider((-B + s) / (2.0 * A));
+    consider((-B - s) / (2.0 * A));
+}
+
+bool densestRadius(std::vector<double> roots, double tau, double& rOut) {
+    if (roots.empty()) return false;
+    std::sort(roots.begin(), roots.end());
+    bool any = false;
+    int bestN = 0;
+    double bestMed = 0.0;
+    int j = 0;
+    const int n = (int)roots.size();
+    for (int i = 0; i < n; ++i) {
+        while (j < i && roots[(std::size_t)i] - roots[(std::size_t)j] > 2.0 * tau) ++j;
+        const int nw = i - j + 1;
+        const int mid = j + nw / 2;
+        const double med = (nw % 2) ? roots[(std::size_t)mid]
+                                     : 0.5 * (roots[(std::size_t)mid - 1] + roots[(std::size_t)mid]);
+        if (!any || nw > bestN || (nw == bestN && med < bestMed)) {
+            any = true;
+            bestN = nw;
+            bestMed = med;
+        }
+    }
+    if (!any) return false;
+    rOut = bestMed;
+    return true;
+}
+
+bool shareRadiusWindow(const std::vector<double>& a, const std::vector<double>& b, double tau) {
+    if (a.empty() || b.empty()) return false;
+    std::size_t j = 0;
+    for (double ra : a) {
+        while (j < b.size() && b[j] < ra - 2.0 * tau) ++j;
+        if (j < b.size() && b[j] <= ra + 2.0 * tau) return true;
+    }
+    return false;
+}
+
+}  // namespace
+
 bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                      SegmentWork& work) {
     try {
+        const auto tStart = std::chrono::steady_clock::now();
         const double tau = tauOf(mv);
-        const double q = (mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
-        if (!(tau > 0.0) || !mv.pts || !mv.tris || !mv.triEdges || mv.nTri == 0)
-            return true;
+        if (!(tau > 0.0) || !mv.pts || !mv.tris || !mv.triEdges || mv.nTri == 0) return true;
 
         const int nTri = (int)mv.nTri;
         const int nVtx = (int)mv.nVtx;
         const int nEdge = (int)mv.nEdge;
-        const int nProv = (int)work.provisionals.size();
+        int nProv = (int)work.provisionals.size();
 
         std::vector<int> g2l;
         int maxG = 0;
@@ -929,624 +1051,149 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             if (pi < 0 || work.provisionals[pi].claim != ProvClaim::Unclaimed) taken[t] = 1;
         }
 
-        struct Seed {
+        auto candidate = [&](int t) -> bool {
+            if (t < 0 || t >= nTri || taken[t]) return false;
+            const int pi = triProv[t];
+            if (pi < 0 || pi >= (int)work.provisionals.size()) return false;
+            return work.provisionals[pi].claim == ProvClaim::Unclaimed;
+        };
+
+        auto triLevelCount = [&](int t, const gp_XYZ& axis) -> int {
+            std::vector<double> z(3);
+            for (int k = 0; k < 3; ++k) z[(std::size_t)k] = cornerPt(mv, t, k).Dot(axis);
+            return countLevels(z, tau);
+        };
+
+        struct ARef {
             int prov;
             int minTri;
-            gp_XYZ ruling;
-            double chord;
         };
-        std::vector<Seed> seeds;
+        std::vector<ARef> arefs;
+        std::vector<std::vector<int>> boundary((std::size_t)nProv);
         for (int pi = 0; pi < nProv; ++pi) {
             const Provisional& pr = work.provisionals[pi];
             if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) continue;
-            struct Fam {
-                gp_XYZ dir;
-                double len = 0;
-                int n = 0;
-                int minEdge = std::numeric_limits<int>::max();
-            };
-            std::vector<Fam> fams;
-            bool anyNbr = false;
+            if (!a3WouldCommit(mv, tol, pr, false)) continue;
+            ARef ar;
+            ar.prov = pi;
+            ar.minTri = minTriOf(pr.tris);
+            arefs.push_back(ar);
+            std::vector<int> ids;
             for (int t : pr.tris) {
-                if (t < 0 || t >= nTri || !mv.triEdges) continue;
+                if (t < 0 || t >= nTri) continue;
                 for (int s = 0; s < 3; ++s) {
                     const int e = mv.triEdges[t][s];
-                    if (e < 0 || e >= nEdge || !mv.compEdges) continue;
                     const int ot = otherTri(e, t);
                     const int op = (ot >= 0 && ot < nTri) ? triProv[ot] : -1;
-                    if (op == pi) continue;  // interior to the provisional
-                    const int va = mv.compEdges[e].first;
-                    const int vb = mv.compEdges[e].second;
-                    const int ga = mv.compVtx ? mv.compVtx[va] : va;
-                    const int gb = mv.compVtx ? mv.compVtx[vb] : vb;
-                    gp_XYZ d = mv.pts[gb] - mv.pts[ga];
-                    const double len = d.Modulus();
-                    if (!(len > tau)) continue;
-                    d.Divide(len);
-                    if (op >= 0 && op != pi) anyNbr = true;
-                    int slot = -1;
-                    for (int f = 0; f < (int)fams.size(); ++f) {
-                        gp_XYZ fd = fams[f].dir;
-                        if (fd.Dot(d) < 0.0) fd.Reverse();
-                        if (edgeParallel(d, len, fd, tau) || axisAngle(d, fams[f].dir) <=
-                                                                  tanAngTol(tau, tau, len)) {
-                            slot = f;
-                            break;
-                        }
-                    }
-                    if (slot < 0) {
-                        Fam f;
-                        f.dir = d;
-                        f.len = len;
-                        f.n = 1;
-                        f.minEdge = e;
-                        fams.push_back(f);
-                    } else {
-                        if (fams[slot].dir.Dot(d) < 0.0) d.Reverse();
-                        const double nl = fams[slot].len + len;
-                        fams[slot].dir = fams[slot].dir * fams[slot].len + d * len;
-                        const double dm = fams[slot].dir.Modulus();
-                        if (dm > 1e-15) fams[slot].dir.Divide(dm);
-                        fams[slot].len = nl;
-                        fams[slot].n += 1;
-                        fams[slot].minEdge = std::min(fams[slot].minEdge, e);
+                    if (op == pi) continue;
+                    for (int k = 0; k < 2; ++k) {
+                        const int lv = cornerLocal(g2l, mv, t, (s + k) % 3);
+                        if (lv >= 0) ids.push_back(lv);
                     }
                 }
             }
-            if (!anyNbr || fams.empty()) continue;
-            int best = 0;
-            for (int f = 1; f < (int)fams.size(); ++f) {
-                if (fams[f].len > fams[best].len + 1e-15) best = f;
-                else if (std::abs(fams[f].len - fams[best].len) <= 1e-15 &&
-                         fams[f].minEdge < fams[best].minEdge)
-                    best = f;
-            }
-            if (fams[best].n < 2) continue;
-            std::vector<gp_XYZ> pts;
-            provPoints(mv, g2l, pr, pts);
-            const double chord = sectionExtent(pts, fams[best].dir);
-            const double axial = axialExtent(pts, fams[best].dir);
-            // A face whose section is wider than its ruling is not a strip seed.
-            if (chord > axial + tau) continue;
-            Seed sd;
-            sd.prov = pi;
-            sd.minTri = minTriOf(pr.tris);
-            sd.ruling = fams[best].dir;
-            sd.chord = chord;
-            seeds.push_back(sd);
+            std::sort(ids.begin(), ids.end());
+            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+            boundary[(std::size_t)pi] = std::move(ids);
         }
-        std::sort(seeds.begin(), seeds.end(), [](const Seed& a, const Seed& b) {
+        std::sort(arefs.begin(), arefs.end(), [](const ARef& a, const ARef& b) {
             if (a.minTri != b.minTri) return a.minTri < b.minTri;
             return a.prov < b.prov;
         });
 
+        struct LiveAnchor {
+            int prov = -1;
+            int minTri = -1;
+            gp_XYZ n;
+            gp_XYZ p0;
+            double maxDev = 0;
+            double tolA = 0;
+            double extent = 0;
+            bool certified = false;
+        };
+        auto loadAnchor = [&](int prov, LiveAnchor& A) -> bool {
+            if (prov < 0 || prov >= (int)work.provisionals.size()) return false;
+            const Provisional& pr = work.provisionals[prov];
+            if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return false;
+            if (!a3WouldCommit(mv, tol, pr, false)) return false;
+            A.prov = prov;
+            A.minTri = minTriOf(pr.tris);
+            A.n = pr.plane.Direction().XYZ();
+            const double nm = A.n.Modulus();
+            if (!(nm > 1e-15)) return false;
+            A.n.Divide(nm);
+            A.p0 = pr.plane.Location().XYZ();
+            A.maxDev = pr.maxVertexDev;
+            A.tolA = anchorTol(tau, pr.maxVertexDev);
+            A.certified = anchorCertified(tau, pr.maxVertexDev);
+            std::vector<gp_XYZ> pts;
+            provPoints(mv, g2l, pr, pts);
+            A.extent = sectionExtent(pts, A.n);
+            if (!(A.extent > 0.0)) A.extent = tau;
+            return true;
+        };
+
         WhyCount yc;
-        std::vector<char> provInBand(nProv, 0);
+        int nPairs = 0;
+        int nEvalSides = 0;
 
-        for (const Seed& sd : seeds) {
-            if (sd.prov < 0 || sd.prov >= nProv) continue;
-            if (work.provisionals[sd.prov].claim != ProvClaim::Unclaimed) continue;
-            bool seedTaken = true;
-            for (int t : work.provisionals[sd.prov].tris) {
-                if (t >= 0 && t < nTri && !taken[t]) seedTaken = false;
+        auto edgeComps = [&](const std::vector<int>& tris) -> int {
+            std::vector<char> in(nTri, 0);
+            for (int t : tris)
+                if (t >= 0 && t < nTri) in[t] = 1;
+            std::vector<char> seen(nTri, 0);
+            int comps = 0;
+            std::vector<int> order = tris;
+            std::sort(order.begin(), order.end());
+            for (int t : order) {
+                if (t < 0 || t >= nTri || !in[t] || seen[t]) continue;
+                ++comps;
+                std::vector<int> st = {t};
+                seen[t] = 1;
+                while (!st.empty()) {
+                    const int u = st.back();
+                    st.pop_back();
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[u][s], u);
+                        if (ot < 0 || ot >= nTri || !in[ot] || seen[ot]) continue;
+                        seen[ot] = 1;
+                        st.push_back(ot);
+                    }
+                }
             }
-            if (seedTaken) continue;
+            return comps;
+        };
 
-            std::vector<int> band;
-            std::vector<char> inBand(nTri, 0);
-            provInBand.assign(nProv, 0);
-            std::vector<int> queue;
-            queue.push_back(sd.prov);
-            provInBand[sd.prov] = 1;
-            for (int t : work.provisionals[sd.prov].tris) {
-                if (t >= 0 && t < nTri && !taken[t]) {
-                    band.push_back(t);
-                    inBand[t] = 1;
-                }
-            }
-            if (band.empty()) continue;
-
-            struct Touch {
-                int prov;
-                double contact;
-            };
-            std::vector<Touch> touches;
-            auto addTouch = [&](int op, double len) {
-                if (op < 0 || op >= nProv) return;
-                for (Touch& tc : touches) {
-                    if (tc.prov == op) {
-                        tc.contact += len;
-                        return;
-                    }
-                }
-                touches.push_back({op, len});
-            };
-
-            std::vector<int> layer = queue;
-            while (!layer.empty()) {
-                std::vector<int> next;
-                std::vector<std::pair<int, double>> cand;  // prov, contact
-                for (int pi : layer) {
-                    if (pi < 0 || pi >= nProv) continue;
-                    for (int t : work.provisionals[pi].tris) {
-                        if (t < 0 || t >= nTri || !inBand[t]) continue;
-                        for (int s = 0; s < 3; ++s) {
-                            const int e = mv.triEdges[t][s];
-                            if (e < 0 || e >= nEdge || !mv.compEdges) continue;
-                            const int va = mv.compEdges[e].first;
-                            const int vb = mv.compEdges[e].second;
-                            const int ga = mv.compVtx ? mv.compVtx[va] : va;
-                            const int gb = mv.compVtx ? mv.compVtx[vb] : vb;
-                            gp_XYZ ed = mv.pts[gb] - mv.pts[ga];
-                            const double elen = ed.Modulus();
-                            if (!edgeParallel(ed / std::max(elen, 1e-30), elen, sd.ruling, tau) &&
-                                !(elen > tau && axisAngle(ed / elen, sd.ruling) <=
-                                                    tanAngTol(tau, tau, elen)))
-                                continue;
-                            const int ot = otherTri(e, t);
-                            if (ot < 0 || ot >= nTri || taken[ot]) continue;
-                            const int op = triProv[ot];
-                            if (op < 0 || op >= nProv || provInBand[op]) continue;
-                            if (work.provisionals[op].claim != ProvClaim::Unclaimed) continue;
-                            addTouch(op, elen);
-                            bool seen = false;
-                            for (auto& c : cand)
-                                if (c.first == op) {
-                                    c.second += elen;
-                                    seen = true;
-                                    break;
-                                }
-                            if (!seen) cand.push_back({op, elen});
-                        }
-                    }
-                }
-                std::sort(cand.begin(), cand.end(), [](const auto& a, const auto& b) {
-                    const int ma = a.first;
-                    const int mb = b.first;
-                    if (ma != mb) return ma < mb;
-                    return a.second > b.second;
-                });
-                cand.erase(std::unique(cand.begin(), cand.end(),
-                                       [](const auto& a, const auto& b) {
-                                           return a.first == b.first;
-                                       }),
-                           cand.end());
-                for (const auto& c : cand) {
-                    const int op = c.first;
-                    if (provInBand[op]) continue;
-                    std::vector<gp_XYZ> pts;
-                    provPoints(mv, g2l, work.provisionals[op], pts);
-                    const double ext = sectionExtent(pts, sd.ruling);
-                    // Anchor faces are wider in section than the seed strip.
-                    // The slack is τ (one vertex quantum on a measured length).
-                    if (ext > sd.chord + tau) continue;
-                    bool near = false;
-                    if (!pts.empty() && !band.empty()) {
-                        near = true;
-                        for (const gp_XYZ& pv : pts) {
-                            double md = 1e300;
-                            for (int bt : band) {
-                                for (int k = 0; k < 3; ++k) {
-                                    md = std::min(md, sectionDist(pv, cornerPt(mv, bt, k),
-                                                                   sd.ruling));
-                                }
-                            }
-                            if (md > sd.chord + tau) {
-                                near = false;
-                                break;
-                            }
-                        }
-                    }
-                    if (!near) continue;
-                    provInBand[op] = 1;
-                    next.push_back(op);
-                    for (int t : work.provisionals[op].tris) {
-                        if (t >= 0 && t < nTri && !taken[t] && !inBand[t]) {
-                            band.push_back(t);
-                            inBand[t] = 1;
-                        }
-                    }
-                }
-                layer.swap(next);
-            }
+        auto commitBand = [&](std::vector<int> band, const gp_XYZ& axis, const gp_XYZ& center,
+                              double radius, bool asFillet, int flankA, int flankB, int seed,
+                              BandDiag& dg) {
             std::sort(band.begin(), band.end());
             band.erase(std::unique(band.begin(), band.end()), band.end());
-            if (band.empty()) continue;
-
+            std::vector<char> inBand(nTri, 0);
+            for (int t : band)
+                if (t >= 0 && t < nTri) inBand[t] = 1;
             std::vector<Vert> verts;
             uniqueVerts(mv, g2l, band, verts);
-
-            std::vector<Flank> flanks;
-            std::vector<Flank> caps;
-            for (const Touch& tc : touches) {
-                if (tc.prov < 0 || tc.prov >= nProv) continue;
-                if (provInBand[tc.prov]) continue;
-                const Provisional& ap = work.provisionals[tc.prov];
-                if (ap.claim != ProvClaim::Unclaimed) continue;
-                if (!a3WouldCommit(mv, tol, ap, false)) continue;
-                Flank f;
-                f.prov = tc.prov;
-                f.contact = tc.contact;
-                f.n = ap.plane.Direction().XYZ();
-                const double nm = f.n.Modulus();
-                if (!(nm > 1e-15)) continue;
-                f.n.Divide(nm);
-                f.p0 = ap.plane.Location().XYZ();
-                f.maxDev = ap.maxVertexDev;
-                f.tol = anchorTol(tau, ap.maxVertexDev);
-                f.certified = anchorCertified(tau, ap.maxVertexDev);
-                // Cap: plane normal parallel to the ruling (a floor the peg stands on).
-                const double nang = axisAngle(f.n, sd.ruling);
-                if (nang <= tanAngTol(f.tol, tau, std::max(axialExtent(
-                    [&]() {
-                        std::vector<gp_XYZ> ps;
-                        provPoints(mv, g2l, ap, ps);
-                        return ps;
-                    }(),
-                    sd.ruling), tau))) {
-                    caps.push_back(f);
-                } else {
-                    flanks.push_back(f);
-                }
-            }
-            std::sort(flanks.begin(), flanks.end(), [](const Flank& a, const Flank& b) {
-                if (a.contact != b.contact) return a.contact > b.contact;
-                return a.prov < b.prov;
-            });
-            if (flanks.size() > 2) flanks.resize(2);
-            std::sort(flanks.begin(), flanks.end(),
-                      [](const Flank& a, const Flank& b) { return a.prov < b.prov; });
-
-            BandDiag dg;
-            dg.tau = tau;
-            dg.seed = sd.minTri;
-            dg.nTri = (int)band.size();
-            dg.nV = (int)verts.size();
-            dg.axis = sd.ruling;
-            dg.mode = "fillet";
-
-            const bool two = flanks.size() == 2;
-            bool anti = false;
-            if (two) {
-                const double cross = flanks[0].n.Crossed(flanks[1].n).Modulus();
-                const double dot = flanks[0].n.Dot(flanks[1].n);
-                const double Lref = std::max(axialExtent(
-                    [&]() {
-                        std::vector<gp_XYZ> ps;
-                        ps.reserve(verts.size());
-                        for (const Vert& v : verts) ps.push_back(v.p);
-                        return ps;
-                    }(),
-                    sd.ruling), tau);
-                const double atol = tanAngTol(std::max(flanks[0].tol, flanks[1].tol), tau, Lref);
-                anti = dot < 0.0 && cross <= std::sin(std::min(1.0, atol));
-                if (!anti && cross <= 1e-12 && dot < 0.0) anti = true;
-            }
-            const bool bothCert = two && flanks[0].certified && flanks[1].certified;
-            const bool hem = two && anti;
-            const bool filletPair = two && !anti;
-            if (hem) dg.mode = "hem";
-            else if (!filletPair && !caps.empty()) dg.mode = "peg";
-            else if (!filletPair) dg.mode = "free";
-
-            gp_XYZ hyp = sd.ruling;
-            if (filletPair) {
-                gp_XYZ cr = flanks[0].n.Crossed(flanks[1].n);
-                const double cm = cr.Modulus();
-                if (cm > 1e-12) {
-                    cr.Divide(cm);
-                    alignTo(cr, sd.ruling);
-                    hyp = cr;
-                }
-            } else if (!caps.empty()) {
-                gp_XYZ cn = caps[0].n;
-                alignTo(cn, sd.ruling);
-                hyp = cn;
-            }
-
-            const bool anchored = bothCert && (filletPair || hem);
-            dg.fit = anchored ? "anchored" : "free";
-            dg.params = anchored ? kParamsAnchored
-                                 : (kParamsCircle + kParamsAxisDir);
-            profileCounts(verts, hyp, tau, dg.stations, dg.levels, dg.lineRes);
-            dg.axis = hyp;
-
-            auto finish = [&](const char* why) {
-                dg.why = why;
-                emitDiag(dg);
-                tallyWhy(yc, why);
-            };
-
-            if (dg.stations < minStations(dg.params) ||
-                (!anchored && dg.levels < 2)) {
-                finish("underdetermined");
-                continue;
-            }
-            if (dg.lineRes <= tau) {
-                finish("line");
-                continue;
-            }
-
-            bool poleOk = false;
-            gp_XYZ pole;
-            const bool havePole = gaussPole(mv, band, pole, poleOk);
-            if (havePole) alignTo(pole, hyp);
-            std::vector<gp_XYZ> bandPts;
-            bandPts.reserve(verts.size());
-            for (const Vert& v : verts) bandPts.push_back(v.p);
-            const double Lband = std::max(axialExtent(bandPts, hyp), tau);
-            const double tolH = two ? std::max(flanks[0].tol, flanks[1].tol) : tau;
-            if (poleOk && havePole && axisAngle(pole, hyp) > tanAngTol(tolH, tau, Lband)) {
-                finish("degenerate");
-                continue;
-            }
-
-            Fit fit;
-            fit.anchored = anchored;
-            fit.params = dg.params;
-            gp_XYZ cR(0, 0, 0);
-            if (anchored && filletPair) {
-                gp_XYZ ax, c;
-                double r = 0;
-                fit.ok = fitAnchored(flanks[0].n, flanks[0].p0, flanks[1].n, flanks[1].p0,
-                                     verts, p.maxRefineIters, hyp, ax, c, r);
-                if (fit.ok) {
-                    fit.axis = ax;
-                    fit.center = c;
-                    fit.radius = r;
-                    // dc/dr for the hat row: rebuild cR from the same side choice.
-                    gp_XYZ C(0, 0, 0);
-                    for (const Vert& v : verts) C += v.p;
-                    C /= (double)verts.size();
-                    const double sA = ((C - flanks[0].p0).Dot(flanks[0].n) >= 0.0) ? 1.0 : -1.0;
-                    const double sB = ((C - flanks[1].p0).Dot(flanks[1].n) >= 0.0) ? 1.0 : -1.0;
-                    gp_XYZ c0, c1;
-                    if (solve3(flanks[0].n, flanks[1].n, ax, flanks[0].p0.Dot(flanks[0].n),
-                               flanks[1].p0.Dot(flanks[1].n), C.Dot(ax), c0) &&
-                        solve3(flanks[0].n, flanks[1].n, ax,
-                               flanks[0].p0.Dot(flanks[0].n) + sA,
-                               flanks[1].p0.Dot(flanks[1].n) + sB, C.Dot(ax), c1))
-                        cR = c1 - c0;
-                }
-            } else if (anchored && hem) {
-                gp_XYZ ax, c;
-                double r = 0;
-                fit.ok = fitHem(flanks[0].n, flanks[0].p0, flanks[1].n, flanks[1].p0, verts,
-                                hyp, p.maxRefineIters, ax, c, r);
-                if (fit.ok) {
-                    fit.axis = ax;
-                    fit.center = c;
-                    fit.radius = r;
-                }
-            } else {
-                if ((int)verts.size() < 6) {
-                    finish("underdetermined");
-                    continue;
-                }
-                gp_Dir axOut;
-                gp_Pnt cOut;
-                double rOut = 0, mOut = 0;
-                const gp_Dir seedDir(hyp.X(), hyp.Y(), hyp.Z());
-                fit.ok = cylinderFitLS(mv, band, seedDir, axOut, cOut, rOut, mOut,
-                                       p.maxRefineIters);
-                if (fit.ok) {
-                    fit.axis = axOut.XYZ();
-                    alignTo(fit.axis, hyp);
-                    fit.center = cOut.XYZ();
-                    fit.radius = rOut;
-                    if (poleOk && axisAngle(fit.axis, hyp) > tanAngTol(tolH, tau, Lband)) {
-                        dg.axis = fit.axis;
-                        dg.radius = fit.radius;
-                        finish("degenerate");
-                        continue;
-                    }
-                }
-            }
-            if (!fit.ok || !(fit.radius > 0.0)) {
-                // Anchored failure is a refusal. Free failure likewise: no second model.
-                finish(anchored ? "vertex-off" : "degenerate");
-                continue;
-            }
-            fit.maxDev = devStats(verts, fit.center, fit.axis, fit.radius, fit.rms);
-            dg.axis = fit.axis;
-            dg.radius = fit.radius;
-            dg.maxDev = fit.maxDev;
-            if (fit.maxDev > tau) {
-                finish("vertex-off");
-                continue;
-            }
-
-            // Growth across shared edges. A round that leaves the τ certificate
-            // is not admitted: the previous band is the maximal certified set.
-            std::vector<char> isAnchor(nProv, 0);
-            for (const Flank& f : flanks) isAnchor[f.prov] = 1;
-            for (const Flank& f : caps) isAnchor[f.prov] = 1;
-            const int growCap = std::max(1, p.maxRefineIters);
-            for (int round = 0; round < growCap; ++round) {
-                std::vector<std::array<double, 4>> rows;
-                jacobianRows(verts, fit.center, fit.axis, fit.radius, anchored && filletPair,
-                             cR, rows);
-                const int pc = (anchored && filletPair) ? 1 : 4;
-                std::vector<int> add;
-                for (int t : band) {
-                    for (int s = 0; s < 3; ++s) {
-                        const int e = mv.triEdges[t][s];
-                        const int ot = otherTri(e, t);
-                        if (ot < 0 || ot >= nTri || inBand[ot] || taken[ot]) continue;
-                        const int op = triProv[ot];
-                        if (op >= 0 && op < nProv && isAnchor[op]) continue;
-                        if (op >= 0 && op < nProv &&
-                            work.provisionals[op].claim != ProvClaim::Unclaimed)
-                            continue;
-                        bool ok3 = true;
-                        for (int k = 0; k < 3 && ok3; ++k) {
-                            const gp_XYZ pt = cornerPt(mv, ot, k);
-                            const double dev = std::abs(radialDist(pt, fit.center, fit.axis) -
-                                                        fit.radius);
-                            const double xb = extrapAt(pt, rows, pc, fit.center, fit.axis,
-                                                       fit.radius, anchored && filletPair, cR, q);
-                            if (dev > tau + xb) ok3 = false;
-                        }
-                        if (ok3) add.push_back(ot);
-                    }
-                }
-                std::sort(add.begin(), add.end());
-                add.erase(std::unique(add.begin(), add.end()), add.end());
-                if (add.empty()) break;
-                std::vector<int> trial = band;
-                trial.insert(trial.end(), add.begin(), add.end());
-                std::sort(trial.begin(), trial.end());
-                std::vector<Vert> tv;
-                uniqueVerts(mv, g2l, trial, tv);
-                Fit tf = fit;
-                bool tok = false;
-                if (anchored && filletPair) {
-                    gp_XYZ ax, c;
-                    double r = 0;
-                    tok = fitAnchored(flanks[0].n, flanks[0].p0, flanks[1].n, flanks[1].p0, tv,
-                                      p.maxRefineIters, hyp, ax, c, r);
-                    if (tok) {
-                        tf.axis = ax;
-                        tf.center = c;
-                        tf.radius = r;
-                    }
-                } else if (anchored && hem) {
-                    gp_XYZ ax, c;
-                    double r = 0;
-                    tok = fitHem(flanks[0].n, flanks[0].p0, flanks[1].n, flanks[1].p0, tv, hyp,
-                                 p.maxRefineIters, ax, c, r);
-                    if (tok) {
-                        tf.axis = ax;
-                        tf.center = c;
-                        tf.radius = r;
-                    }
-                } else if ((int)tv.size() >= 6) {
-                    gp_Dir axOut;
-                    gp_Pnt cOut;
-                    double rOut = 0, mOut = 0;
-                    gp_Dir seedDir(fit.axis.X(), fit.axis.Y(), fit.axis.Z());
-                    tok = cylinderFitLS(mv, trial, seedDir, axOut, cOut, rOut, mOut,
-                                        p.maxRefineIters);
-                    if (tok) {
-                        tf.axis = axOut.XYZ();
-                        alignTo(tf.axis, hyp);
-                        tf.center = cOut.XYZ();
-                        tf.radius = rOut;
-                    }
-                }
-                if (!tok) break;
-                double rms = 0;
-                const double mx = devStats(tv, tf.center, tf.axis, tf.radius, rms);
-                if (mx > tau) break;
-                band.swap(trial);
-                verts.swap(tv);
-                fit = tf;
-                fit.maxDev = mx;
-                fit.rms = rms;
-                inBand.assign(nTri, 0);
-                for (int t : band) inBand[t] = 1;
-                dg.nTri = (int)band.size();
-                dg.nV = (int)verts.size();
-                dg.radius = fit.radius;
-                dg.maxDev = mx;
-                dg.axis = fit.axis;
-            }
-
-            // Same-surface: an adjacent accepted cylinder whose vertices all lie on this fit.
-            bool same = false;
-            for (const Region& acc : work.accepted) {
-                if (acc.type != SurfType::Cylinder || acc.tris.empty()) continue;
-                bool adj = false;
-                for (int t : acc.tris) {
-                    if (t < 0 || t >= nTri) continue;
-                    for (int s = 0; s < 3 && !adj; ++s) {
-                        const int ot = otherTri(mv.triEdges[t][s], t);
-                        if (ot >= 0 && ot < nTri && inBand[ot]) adj = true;
-                    }
-                    if (adj) break;
-                }
-                if (!adj) continue;
-                std::vector<Vert> av;
-                uniqueVerts(mv, g2l, acc.tris, av);
-                if (av.empty()) continue;
-                bool all = true;
-                for (const Vert& v : av) {
-                    if (std::abs(radialDist(v.p, fit.center, fit.axis) - fit.radius) > tau) {
-                        all = false;
-                        break;
-                    }
-                }
-                if (all) {
-                    same = true;
-                    break;
-                }
-            }
-            if (same) {
-                dg.radius = fit.radius;
-                dg.maxDev = fit.maxDev;
-                dg.axis = fit.axis;
-                finish("same-surface");
-                continue;
-            }
-
-            // Blend classification against the two generator flanks.
-            bool blend = false;
-            double dih = 0, span = 0, stol = 0;
-            if (flanks.size() == 2 && fit.radius > tau) {
-                dih = std::acos(std::max(-1.0, std::min(1.0, flanks[0].n.Dot(flanks[1].n))));
-                const gp_XYZ xdir = lowestXDir(verts, fit.center, fit.axis);
-                const SpanInfo sp = measureSpan(mv, g2l, band, verts, fit.center, fit.axis,
-                                                xdir, tol.thetaBin);
-                span = sp.span;
-                stol = spanTol(flanks[0].tol, flanks[1].tol, fit.radius);
-                const double dA = std::abs((fit.center - flanks[0].p0).Dot(flanks[0].n));
-                const double dB = std::abs((fit.center - flanks[1].p0).Dot(flanks[1].n));
-                dg.tanDistA = std::abs(dA - fit.radius);
-                dg.tanDistB = std::abs(dB - fit.radius);
-                dg.tanAngA = std::abs(fit.axis.Dot(flanks[0].n));
-                dg.tanAngB = std::abs(fit.axis.Dot(flanks[1].n));
-                dg.span = span;
-                dg.dihedral = dih;
-                dg.spanTolV = stol;
-                const double angTolA = tanAngTol(flanks[0].tol, tau, Lband);
-                const double angTolB = tanAngTol(flanks[1].tol, tau, Lband);
-                blend = std::abs(span - dih) <= stol &&
-                        dg.tanDistA <= tanDistTol(flanks[0].tol, tau) &&
-                        dg.tanDistB <= tanDistTol(flanks[1].tol, tau) &&
-                        dg.tanAngA <= angTolA && dg.tanAngB <= angTolB;
-            }
-
-            const gp_XYZ xdir = lowestXDir(verts, fit.center, fit.axis);
-            SpanInfo sp = measureSpan(mv, g2l, band, verts, fit.center, fit.axis, xdir,
-                                      tol.thetaBin);
-            if (!blend && !sp.closed360) {
-                dg.span = sp.span;
-                finish(flanks.size() < 2 ? "no-anchor" : "not-blend");
-                continue;
-            }
-
-            const bool asFillet = blend;
-            // Area-weighted centroid, triangles in ascending id (already sorted).
+            const gp_XYZ xdir = lowestXDir(verts, center, axis);
+            SpanInfo sp = measureSpan(mv, g2l, band, verts, center, axis, xdir, tol.thetaBin);
             gp_XYZ cent(0, 0, 0);
             double areaSum = 0.0;
             for (int t : band) {
                 const double at = triArea(mv, t);
                 areaSum += at;
-                gp_XYZ ctri = (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) /
-                              3.0;
+                const gp_XYZ ctri =
+                    (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) / 3.0;
                 cent += ctri * at;
             }
             if (areaSum > 0.0) cent /= areaSum;
-            gp_XYZ loc = fit.center + fit.axis * ((cent - fit.center).Dot(fit.axis));
-
+            gp_XYZ loc = center + axis * ((cent - center).Dot(axis));
             double sigma = 0.0;
             for (int t : band) {
                 gp_XYZ nt;
                 const double at = triAreaNormal(mv, t, nt);
-                gp_XYZ rho = (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) /
-                                 3.0 -
-                             loc;
-                rho -= fit.axis * rho.Dot(fit.axis);
+                gp_XYZ rho =
+                    (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) / 3.0 - loc;
+                rho -= axis * rho.Dot(axis);
                 const double rm = rho.Modulus();
                 if (rm < 1e-15) continue;
                 rho /= rm;
@@ -1557,12 +1204,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             int nBands = std::max(sp.nBands, 1);
             int nSides = (int)std::llround(kTwoPi * (double)nBands / useSpan);
             if (nSides < 1) nSides = 1;
-
-            double rms = 0;
-            const double mx = devStats(verts, loc, fit.axis, fit.radius, rms);
-
+            double rms = 0.0;
+            const double mx = devStats(verts, loc, axis, radius, rms);
             int straddles = 0;
-            for (int pi = 0; pi < nProv; ++pi) {
+            const int nProvNow = (int)work.provisionals.size();
+            for (int pi = 0; pi < nProvNow; ++pi) {
                 int nin = 0, nout = 0;
                 for (int t : work.provisionals[pi].tris) {
                     if (t >= 0 && t < nTri && inBand[t]) ++nin;
@@ -1570,13 +1216,12 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 }
                 if (nin > 0 && nout > 0) ++straddles;
             }
-
             Region r;
             r.id = 0;
             r.type = SurfType::Cylinder;
             r.origin = asFillet ? Origin::FilletStrip : Origin::CylGrow;
-            r.ax = gp_Ax3(gp_Pnt(loc), gp_Dir(fit.axis), gp_Dir(xdir));
-            r.radius = fit.radius;
+            r.ax = gp_Ax3(gp_Pnt(loc), gp_Dir(axis), gp_Dir(xdir));
+            r.radius = radius;
             r.uMin = sp.uMin;
             r.uMax = sp.uMax;
             r.vMin = sp.vMin;
@@ -1587,20 +1232,17 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             r.maxVertexDev = mx;
             r.rmsVertexDev = rms;
             r.nSides = nSides;
-            r.chordSagitta = chordSagitta(fit.radius, nSides);
-            r.dVolPredicted = dVolCylinderSector(areaSum, fit.radius, nSides, outward);
+            r.chordSagitta = chordSagitta(radius, nSides);
+            r.dVolPredicted = dVolCylinderSector(areaSum, radius, nSides, outward);
             r.maxVertexSnap = 0.0;
             r.reject = Reject::None;
             r.builtAs = BuiltAs::NotBuilt;
-            r.filletNbrA = (asFillet && flanks.size() == 2) ? flanks[0].prov : -1;
-            r.filletNbrB = (asFillet && flanks.size() == 2) ? flanks[1].prov : -1;
+            r.filletNbrA = asFillet ? flankA : -1;
+            r.filletNbrB = asFillet ? flankB : -1;
 
-            const ProvClaim stamp = asFillet ? ProvClaim::ConsumedFillet
-                                             : ProvClaim::ConsumedCylinder;
-            // Triangle granularity: certified triangles leave their provisional.
-            // A straddling remainder keeps A2's plane fit and splits into components.
-            std::vector<int> fresh;
-            for (int pi = 0; pi < nProv; ++pi) {
+            const ProvClaim stamp =
+                asFillet ? ProvClaim::ConsumedFillet : ProvClaim::ConsumedCylinder;
+            for (int pi = 0; pi < nProvNow; ++pi) {
                 Provisional& pr = work.provisionals[pi];
                 std::vector<int> keep, drop;
                 for (int t : pr.tris) {
@@ -1614,7 +1256,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 }
                 pr.tris.swap(keep);
                 refitPlaneProv(mv, g2l, pr);
-                // Connected components of the remainder, ascending min tri.
                 std::vector<char> mark(pr.tris.size(), 0);
                 std::vector<std::vector<int>> comps;
                 for (std::size_t i = 0; i < pr.tris.size(); ++i) {
@@ -1648,11 +1289,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 pr.tris = comps[0];
                 pr.claim = ProvClaim::Unclaimed;
                 refitPlaneProv(mv, g2l, pr);
-                for (std::size_t c = 1; c < comps.size(); ++c) fresh.push_back((int)c);
-                // Stash extra components on the provisional by appending after the loop
-                // via a side list carried on `fresh` as encoded sizes — rebuilt below.
-                // Re-store components in a local that outlives this iteration.
-                // (handled by copying into side storage immediately)
                 for (std::size_t c = 1; c < comps.size(); ++c) {
                     Provisional np = pr;
                     np.tris = comps[c];
@@ -1661,30 +1297,729 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     work.provisionals.push_back(std::move(np));
                 }
             }
-            (void)fresh;
-
             for (int t : band)
                 if (t >= 0 && t < nTri) taken[t] = 1;
-
             dg.radius = r.radius;
             dg.maxDev = r.maxVertexDev;
-            dg.axis = fit.axis;
+            dg.axis = axis;
             dg.span = sp.span;
             dg.straddle = straddles;
             dg.nTri = (int)band.size();
             dg.nV = (int)verts.size();
-            profileCounts(verts, fit.axis, tau, dg.stations, dg.levels, dg.lineRes);
-            finish("accept");
+            dg.seed = seed;
+            profileCounts(verts, axis, tau, dg.stations, dg.levels, dg.lineRes);
+            dg.why = "accept";
+            emitDiag(dg);
+            tallyWhy(yc, "accept");
             work.accepted.push_back(std::move(r));
+        };
+
+        auto emitAdj = [&](int seed, const gp_XYZ& axis, const gp_XYZ& center, double radius,
+                           const std::vector<char>& inC) {
+            if (!diagOn()) return;
+            const int nAcc = (int)work.accepted.size();
+            for (int i = 0; i < nAcc; ++i) {
+                const Region& acc = work.accepted[i];
+                if (acc.type != SurfType::Cylinder || acc.tris.empty()) continue;
+                int nTouch = 0;
+                for (int t : acc.tris) {
+                    if (t < 0 || t >= nTri) continue;
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (ot >= 0 && ot < nTri && inC[ot]) ++nTouch;
+                    }
+                }
+                if (nTouch < 1) continue;
+                gp_Dir axOut = acc.ax.Direction();
+                gp_Pnt cOut = acc.ax.Location();
+                double rOut = acc.radius, mOut = acc.maxVertexDev;
+                const bool fitOk =
+                    cylinderFitLS(mv, acc.tris, acc.ax.Direction(), axOut, cOut, rOut, mOut,
+                                  std::max(1, p.maxRefineIters));
+                const double dev = fitOk ? mOut : acc.maxVertexDev;
+                int within = 1;
+                std::vector<Vert> av;
+                uniqueVerts(mv, g2l, acc.tris, av);
+                for (const Vert& v : av) {
+                    if (std::abs(radialDist(v.p, center, axis) - radius) > tau) within = 0;
+                }
+                std::fprintf(stderr,
+                             "DIAG_REL_ADJ stage=extrude seed=%d adjIndex=%d origin=%s "
+                             "radius=%.9g refitDevTau=%.9g withinTau=%d nTri=%d\n",
+                             seed, i, originName(acc.origin), acc.radius, dev / tau, within,
+                             (int)acc.tris.size());
+            }
+        };
+
+        auto sameSurface = [&](const gp_XYZ& axis, const gp_XYZ& center, double radius,
+                               const std::vector<char>& inC) -> bool {
+            for (const Region& acc : work.accepted) {
+                if (acc.type != SurfType::Cylinder || acc.tris.empty()) continue;
+                bool adj = false;
+                for (int t : acc.tris) {
+                    if (t < 0 || t >= nTri) continue;
+                    for (int s = 0; s < 3 && !adj; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (ot >= 0 && ot < nTri && inC[ot]) adj = true;
+                    }
+                    if (adj) break;
+                }
+                if (!adj) continue;
+                std::vector<Vert> av;
+                uniqueVerts(mv, g2l, acc.tris, av);
+                if (av.empty()) continue;
+                bool all = true;
+                for (const Vert& v : av) {
+                    if (std::abs(radialDist(v.p, center, axis) - radius) > tau) {
+                        all = false;
+                        break;
+                    }
+                }
+                if (all) return true;
+            }
+            return false;
+        };
+
+        const double sideSign[4][2] = {{1.0, 1.0}, {1.0, -1.0}, {-1.0, 1.0}, {-1.0, -1.0}};
+
+        for (std::size_t ia = 0; ia < arefs.size(); ++ia) {
+            for (std::size_t ib = ia + 1; ib < arefs.size(); ++ib) {
+                LiveAnchor A, B;
+                if (!loadAnchor(arefs[ia].prov, A) || !loadAnchor(arefs[ib].prov, B)) continue;
+                ++nPairs;
+                const int seed = std::min(arefs[ia].minTri, arefs[ib].minTri);
+                const double cross = A.n.Crossed(B.n).Modulus();
+                const double rhs = 2.0 * (A.tolA + tau) / A.extent + 2.0 * (B.tolA + tau) / B.extent;
+                if (cross <= rhs) {
+                    BandDiag dg;
+                    dg.tau = tau;
+                    dg.mode = "hem";
+                    dg.fit = (A.certified && B.certified) ? "anchored" : "free";
+                    dg.seed = seed;
+                    dg.anchorTolA = A.tolA;
+                    dg.anchorTolB = B.tolA;
+                    dg.why = "hem-deferred";
+                    emitDiag(dg);
+                    tallyWhy(yc, "hem-deferred");
+                    continue;
+                }
+                gp_XYZ axis0 = A.n.Crossed(B.n);
+                const double am = axis0.Modulus();
+                if (!(am > 1e-12)) continue;
+                axis0.Divide(am);
+                canonicalHemi(axis0);
+                const bool anchored = A.certified && B.certified;
+
+                for (int si = 0; si < 4; ++si) {
+                    const double sA = sideSign[si][0];
+                    const double sB = sideSign[si][1];
+                    gp_XYZ c0, c1;
+                    if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n), B.p0.Dot(B.n), 0.0, c0)) continue;
+                    if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n) + sA, B.p0.Dot(B.n) + sB, 0.0, c1))
+                        continue;
+                    const gp_XYZ cR = c1 - c0;
+
+                    auto rootsOf = [&](const std::vector<int>& vids, std::vector<double>& roots) {
+                        roots.clear();
+                        for (int lv : vids) {
+                            if (lv < 0 || lv >= nVtx) continue;
+                            const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                            pushCircleRoots(mv.pts[g], c0, cR, axis0, tau, roots);
+                        }
+                        std::sort(roots.begin(), roots.end());
+                    };
+                    std::vector<double> rootsA, rootsB;
+                    if (A.prov >= 0 && A.prov < nProv)
+                        rootsOf(boundary[(std::size_t)A.prov], rootsA);
+                    if (B.prov >= 0 && B.prov < nProv)
+                        rootsOf(boundary[(std::size_t)B.prov], rootsB);
+                    if (!shareRadiusWindow(rootsA, rootsB, tau)) continue;
+                    ++nEvalSides;
+
+                    int guard = 0;
+                    while (guard++ < nTri + 1) {
+                        std::vector<double> roots;
+                        std::vector<int> stamp(nVtx, 0);
+                        for (int t = 0; t < nTri; ++t) {
+                            if (!candidate(t)) continue;
+                            for (int k = 0; k < 3; ++k) {
+                                const int lv = cornerLocal(g2l, mv, t, k);
+                                if (lv < 0 || lv >= nVtx || stamp[lv]) continue;
+                                stamp[lv] = 1;
+                                const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                                pushCircleRoots(mv.pts[g], c0, cR, axis0, tau, roots);
+                            }
+                        }
+                        double rHyp = 0.0;
+                        BandDiag dg;
+                        dg.tau = tau;
+                        dg.mode = "fillet";
+                        dg.fit = anchored ? "anchored" : "free";
+                        dg.params = anchored ? kParamsAnchored : (kParamsCircle + kParamsAxisDir);
+                        dg.seed = seed;
+                        dg.axis = axis0;
+                        dg.anchorTolA = A.tolA;
+                        dg.anchorTolB = B.tolA;
+                        auto finish = [&](const char* why) {
+                            dg.why = why;
+                            emitDiag(dg);
+                            tallyWhy(yc, why);
+                        };
+                        if (!densestRadius(roots, tau, rHyp)) {
+                            finish("degenerate");
+                            break;
+                        }
+                        gp_XYZ axis = axis0;
+                        gp_XYZ center = c0 + cR * rHyp;
+                        double radius = rHyp;
+                        const int itCap = std::max(1, p.maxRefineIters);
+                        bool stable = false;
+                        std::vector<int> Iset;
+                        auto collectI = [&](const gp_XYZ& ax, const gp_XYZ& c, double r,
+                                            std::vector<int>& slab, std::vector<int>& I) {
+                            slab.clear();
+                            I.clear();
+                            gp_XYZ u, v;
+                            if (!frameOf(ax, u, v) || !(r > 0.0)) return;
+                            gp_XYZ dA = A.n * (-sA);
+                            gp_XYZ dB = B.n * (-sB);
+                            dA -= ax * dA.Dot(ax);
+                            dB -= ax * dB.Dot(ax);
+                            if (!(dA.Modulus() > 1e-15) || !(dB.Modulus() > 1e-15)) return;
+                            const double azA = std::atan2(dA.Dot(v), dA.Dot(u));
+                            const double azB = std::atan2(dB.Dot(v), dB.Dot(u));
+                            const double wAB = wrap2pi(azB - azA);
+                            const double wBA = kTwoPi - wAB;
+                            // Two closed arcs join the contact generators. Endpoints lie in
+                            // both. The arc that contains more interior τ-inliers is the
+                            // slab. A circular mean is not used: on an arc longer than
+                            // π the first Dirichlet kernel changes sign and the mean
+                            // falls in the empty gap (unit case 10, D-fc-1.6.7). A tie
+                            // (inliers only on the generators) takes the arc nearer the
+                            // dihedral acos(nA·nB).
+                            const double dih =
+                                std::acos(std::max(-1.0, std::min(1.0, A.n.Dot(B.n))));
+                            int nAB = 0, nBA = 0;
+                            for (int t = 0; t < nTri; ++t) {
+                                if (!candidate(t)) continue;
+                                for (int k = 0; k < 3; ++k) {
+                                    const gp_XYZ pnt = cornerPt(mv, t, k);
+                                    if (std::abs(radialDist(pnt, c, ax) - r) > tau) continue;
+                                    const gp_XYZ d = pnt - c;
+                                    const double az = std::atan2(d.Dot(v), d.Dot(u));
+                                    if (wrap2pi(az - azA) <= wAB + 1e-12) ++nAB;
+                                    if (wrap2pi(az - azB) <= wBA + 1e-12) ++nBA;
+                                }
+                            }
+                            double start = azA;
+                            double width = wAB;
+                            if (nBA > nAB ||
+                                (nBA == nAB && std::abs(wBA - dih) < std::abs(wAB - dih))) {
+                                start = azB;
+                                width = wBA;
+                            }
+                            const double slack = tau / r;
+                            start = wrap2pi(start - slack);
+                            width += 2.0 * slack;
+                            if (width > kTwoPi) width = kTwoPi;
+                            for (int t = 0; t < nTri; ++t) {
+                                if (!candidate(t)) continue;
+                                bool inSec = true;
+                                bool allTau = true;
+                                for (int k = 0; k < 3; ++k) {
+                                    const gp_XYZ pnt = cornerPt(mv, t, k);
+                                    const gp_XYZ d = pnt - c;
+                                    const double az = std::atan2((d - ax * d.Dot(ax)).Dot(v),
+                                                                 (d - ax * d.Dot(ax)).Dot(u));
+                                    if (!(width >= kTwoPi - 1e-9) &&
+                                        wrap2pi(az - start) > width + 1e-9)
+                                        inSec = false;
+                                    if (std::abs(radialDist(pnt, c, ax) - r) > tau) allTau = false;
+                                }
+                                if (!inSec) continue;
+                                slab.push_back(t);
+                                if (allTau && triLevelCount(t, ax) >= 2) I.push_back(t);
+                            }
+                            std::sort(I.begin(), I.end());
+                            std::sort(slab.begin(), slab.end());
+                        };
+
+                        std::vector<int> slab;
+                        collectI(axis, center, radius, slab, Iset);
+                        if (Iset.empty()) {
+                            finish(roots.empty() ? "degenerate" : "vertex-off");
+                            break;
+                        }
+                        for (int it = 0; it < itCap; ++it) {
+                            std::vector<Vert> iv;
+                            uniqueVerts(mv, g2l, Iset, iv);
+                            bool ok = false;
+                            if (anchored) {
+                                gp_XYZ ax, c;
+                                double r = 0;
+                                ok = fitAnchored(A.n, A.p0, B.n, B.p0, iv, itCap, axis0, sA, sB,
+                                                 ax, c, r);
+                                if (ok) {
+                                    axis = ax;
+                                    center = c;
+                                    radius = r;
+                                }
+                            } else {
+                                if ((int)iv.size() < 6) {
+                                    finish("underdetermined");
+                                    ok = false;
+                                    Iset.clear();
+                                    break;
+                                }
+                                gp_Dir axOut;
+                                gp_Pnt cOut;
+                                double rOut = 0, mOut = 0;
+                                const gp_Dir seedDir(axis.X(), axis.Y(), axis.Z());
+                                ok = cylinderFitLS(mv, Iset, seedDir, axOut, cOut, rOut, mOut,
+                                                   itCap);
+                                if (ok && rOut > 0.0) {
+                                    axis = axOut.XYZ();
+                                    alignTo(axis, axis0);
+                                    center = cOut.XYZ();
+                                    radius = rOut;
+                                } else {
+                                    ok = false;
+                                }
+                            }
+                            if (!ok) {
+                                if (dg.why == nullptr || std::strcmp(dg.why, "degenerate") == 0)
+                                    finish(anchored ? "vertex-off" : "degenerate");
+                                Iset.clear();
+                                break;
+                            }
+                            std::vector<int> I2, slab2;
+                            collectI(axis, center, radius, slab2, I2);
+                            if (I2 == Iset) {
+                                slab.swap(slab2);
+                                stable = true;
+                                break;
+                            }
+                            Iset.swap(I2);
+                            slab.swap(slab2);
+                            if (Iset.empty()) break;
+                        }
+                        if (!Iset.empty() && dg.why != nullptr &&
+                            std::strcmp(dg.why, "degenerate") != 0 &&
+                            std::strcmp(dg.why, "underdetermined") != 0 &&
+                            std::strcmp(dg.why, "vertex-off") != 0) {
+                            break;
+                        }
+                        if (Iset.empty()) {
+                            if (dg.why == nullptr) finish(stable ? "unstable" : "vertex-off");
+                            break;
+                        }
+                        if (!stable) {
+                            finish("unstable");
+                            break;
+                        }
+                        std::vector<Vert> iv;
+                        uniqueVerts(mv, g2l, Iset, iv);
+                        profileCounts(iv, axis, tau, dg.stations, dg.levels, dg.lineRes);
+                        dg.nV = (int)iv.size();
+                        dg.radius = radius;
+                        dg.axis = axis;
+                        dg.nI = (int)Iset.size();
+                        dg.compsI = edgeComps(Iset);
+                        double iRms = 0;
+                        dg.certDev = devStats(iv, center, axis, radius, iRms);
+                        dg.maxDev = dg.certDev;
+                        if (dg.stations < minStations(dg.params) || (!anchored && dg.levels < 2)) {
+                            finish("underdetermined");
+                            break;
+                        }
+                        if (dg.lineRes <= tau) {
+                            finish("line");
+                            break;
+                        }
+                        if (dg.certDev > tau) {
+                            finish("vertex-off");
+                            break;
+                        }
+                        double zlo = 1e300, zhi = -1e300;
+                        for (const Vert& v : iv) {
+                            const double z = v.p.Dot(axis);
+                            zlo = std::min(zlo, z);
+                            zhi = std::max(zhi, z);
+                        }
+                        const double L = std::max(zhi - zlo, tau);
+                        auto endDist = [&](const gp_XYZ& n, const gp_XYZ& p0, double z) {
+                            const gp_XYZ pt = center + axis * (z - center.Dot(axis));
+                            return std::abs((pt - p0).Dot(n));
+                        };
+                        const double dAlo = endDist(A.n, A.p0, zlo);
+                        const double dAhi = endDist(A.n, A.p0, zhi);
+                        const double dBlo = endDist(B.n, B.p0, zlo);
+                        const double dBhi = endDist(B.n, B.p0, zhi);
+                        const double dAmid = endDist(A.n, A.p0, 0.5 * (zlo + zhi));
+                        const double dBmid = endDist(B.n, B.p0, 0.5 * (zlo + zhi));
+                        dg.tanDistA = std::abs(dAmid - radius);
+                        dg.tanDistB = std::abs(dBmid - radius);
+                        dg.tanAngA = std::max(std::abs(dAlo - radius), std::abs(dAhi - radius));
+                        dg.tanAngB = std::max(std::abs(dBlo - radius), std::abs(dBhi - radius));
+                        dg.dihedral = std::acos(std::max(-1.0, std::min(1.0, A.n.Dot(B.n))));
+                        dg.spanTolV = (radius > 0.0) ? spanTol(A.tolA, B.tolA, radius) : 0.0;
+                        if (!anchored) {
+                            const bool tang =
+                                dg.tanDistA <= tanDistTol(A.tolA, tau) &&
+                                dg.tanDistB <= tanDistTol(B.tolA, tau) &&
+                                dg.tanAngA <= tanDistTol(A.tolA, tau) &&
+                                dg.tanAngB <= tanDistTol(B.tolA, tau);
+                            (void)L;
+                            if (!tang) {
+                                finish("not-blend");
+                                break;
+                            }
+                        }
+                        double sDev = 0.0;
+                        for (int t : Iset) {
+                            for (int e = 0; e < 3; ++e) {
+                                const gp_XYZ mid =
+                                    0.5 * (cornerPt(mv, t, e) + cornerPt(mv, t, (e + 1) % 3));
+                                sDev = std::max(sDev, std::abs(radialDist(mid, center, axis) - radius));
+                            }
+                        }
+                        dg.sDev = sDev;
+                        std::vector<char> inI(nTri, 0), inSlab(nTri, 0);
+                        for (int t : Iset)
+                            if (t >= 0 && t < nTri) inI[t] = 1;
+                        for (int t : slab)
+                            if (t >= 0 && t < nTri) inSlab[t] = 1;
+                        std::vector<int> cover;
+                        for (int t : slab) {
+                            if (t < 0 || t >= nTri || inI[t] || !candidate(t)) continue;
+                            if (triLevelCount(t, axis) < 2) continue;
+                            bool one = false, allS = true, allZ = true;
+                            for (int k = 0; k < 3; ++k) {
+                                const gp_XYZ pnt = cornerPt(mv, t, k);
+                                const double dev = std::abs(radialDist(pnt, center, axis) - radius);
+                                const double z = pnt.Dot(axis);
+                                if (dev <= tau) one = true;
+                                if (dev > sDev) allS = false;
+                                if (z < zlo - tau || z > zhi + tau) allZ = false;
+                            }
+                            if (one && allS && allZ) cover.push_back(t);
+                        }
+                        std::sort(cover.begin(), cover.end());
+                        dg.nCover = (int)cover.size();
+                        std::vector<Vert> cv;
+                        uniqueVerts(mv, g2l, cover, cv);
+                        double cRms = 0;
+                        dg.coverDev = cv.empty() ? 0.0 : devStats(cv, center, axis, radius, cRms);
+                        std::vector<int> C = Iset;
+                        C.insert(C.end(), cover.begin(), cover.end());
+                        std::sort(C.begin(), C.end());
+                        dg.compsC = edgeComps(C);
+                        dg.nTri = (int)C.size();
+                        std::vector<char> inC(nTri, 0);
+                        for (int t : C)
+                            if (t >= 0 && t < nTri) inC[t] = 1;
+                        auto outside = [&](int prov) -> bool {
+                            if (prov < 0 || prov >= (int)work.provisionals.size()) return true;
+                            const auto& tris = work.provisionals[prov].tris;
+                            if (tris.empty()) return false;
+                            for (int t : tris)
+                                if (t < 0 || t >= nTri || !inC[t]) return true;
+                            return false;
+                        };
+                        if (!outside(A.prov) || !outside(B.prov)) {
+                            finish("anchor-in-band");
+                            break;
+                        }
+                        emitAdj(seed, axis, center, radius, inC);
+                        if (sameSurface(axis, center, radius, inC)) {
+                            finish("same-surface");
+                            break;
+                        }
+                        std::vector<Vert> cvAll;
+                        uniqueVerts(mv, g2l, C, cvAll);
+                        const gp_XYZ xdir = lowestXDir(cvAll, center, axis);
+                        const SpanInfo sp =
+                            measureSpan(mv, g2l, C, cvAll, center, axis, xdir, tol.thetaBin);
+                        dg.span = sp.span;
+                        const bool blend = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
+                        if (!blend && !sp.closed360) {
+                            finish("not-blend");
+                            break;
+                        }
+                        const int before = (int)work.accepted.size();
+                        commitBand(C, axis, center, radius, blend, A.prov, B.prov, seed, dg);
+                        if ((int)work.accepted.size() == before) break;
+                        // Certified claim: re-vote the remaining vertices on this side.
+                    }
+                }
+            }
+        }
+
+        // Pegs. Axis is the plane anchor normal. Certified anchors keep that axis;
+        // an uncertified anchor is a free cylinder fit.
+        struct SeenCyl {
+            gp_XYZ c;
+            gp_XYZ a;
+            double r;
+        };
+        std::vector<SeenCyl> seenCyl;
+        auto onSeen = [&](const std::vector<Vert>& vs) -> bool {
+            if (vs.empty()) return false;
+            for (const SeenCyl& s : seenCyl) {
+                bool all = true;
+                for (const Vert& v : vs) {
+                    if (std::abs(radialDist(v.p, s.c, s.a) - s.r) > tau) {
+                        all = false;
+                        break;
+                    }
+                }
+                if (all) return true;
+            }
+            return false;
+        };
+        for (const ARef& ar : arefs) {
+            LiveAnchor A;
+            if (!loadAnchor(ar.prov, A)) continue;
+            gp_XYZ axis = A.n;
+            canonicalHemi(axis);
+            std::vector<char> pegTried(nTri, 0);
+            for (int seed = 0; seed < nTri; ++seed) {
+                if (pegTried[seed] || !candidate(seed) || triLevelCount(seed, axis) < 2) continue;
+                std::vector<Vert> seedVs;
+                uniqueVerts(mv, g2l, std::vector<int>{seed}, seedVs);
+                if (onSeen(seedVs)) continue;
+                std::vector<int> grown = {seed};
+                std::vector<char> inG(nTri, 0);
+                inG[seed] = 1;
+                auto stationCount = [&]() -> int {
+                    std::vector<Vert> vs;
+                    uniqueVerts(mv, g2l, grown, vs);
+                    int st = 0, lv = 0;
+                    double lr = 0;
+                    profileCounts(vs, axis, tau, st, lv, lr);
+                    return st;
+                };
+                int growGuard = 0;
+                while (stationCount() < 3 && growGuard++ < nTri) {
+                    int best = -1;
+                    for (int u : grown) {
+                        for (int s = 0; s < 3; ++s) {
+                            const int ot = otherTri(mv.triEdges[u][s], u);
+                            if (!candidate(ot) || inG[ot]) continue;
+                            if (best < 0 || ot < best) best = ot;
+                        }
+                    }
+                    if (best < 0) break;
+                    inG[best] = 1;
+                    grown.push_back(best);
+                }
+                for (int gt : grown)
+                    if (gt >= 0 && gt < nTri) pegTried[gt] = 1;
+                if (stationCount() < 3) continue;
+                gp_Pnt cOut;
+                double r0 = 0;
+                if (!eberlyCenterRadius(mv, grown, gp_Dir(axis), cOut, r0) || !(r0 > 0.0))
+                    continue;
+                gp_XYZ center = cOut.XYZ();
+                std::vector<Vert> gvs;
+                uniqueVerts(mv, g2l, grown, gvs);
+                if (onSeen(gvs)) continue;
+                seenCyl.push_back(SeenCyl{center, axis, r0});
+
+                auto gather = [&](const gp_XYZ& ax, const gp_XYZ& c, double r) {
+                    std::vector<int> I;
+                    for (int t = 0; t < nTri; ++t) {
+                        if (!candidate(t) || triLevelCount(t, ax) < 2) continue;
+                        bool all = true;
+                        for (int k = 0; k < 3; ++k) {
+                            if (std::abs(radialDist(cornerPt(mv, t, k), c, ax) - r) > tau)
+                                all = false;
+                        }
+                        if (all) I.push_back(t);
+                    }
+                    std::sort(I.begin(), I.end());
+                    return I;
+                };
+                std::vector<int> Iset = gather(axis, center, r0);
+                const bool pegAnchored = A.certified;
+                const int itCap = std::max(1, p.maxRefineIters);
+                bool stable = false;
+                gp_XYZ pAxis = axis;
+                for (int it = 0; it < itCap && !Iset.empty(); ++it) {
+                    bool ok = false;
+                    if (pegAnchored) {
+                        gp_Pnt c2;
+                        double r2 = 0;
+                        ok = eberlyCenterRadius(mv, Iset, gp_Dir(axis), c2, r2) && r2 > 0.0;
+                        if (ok) {
+                            center = c2.XYZ();
+                            r0 = r2;
+                            pAxis = axis;
+                        }
+                    } else {
+                        std::vector<Vert> iv;
+                        uniqueVerts(mv, g2l, Iset, iv);
+                        if ((int)iv.size() < 6) break;
+                        gp_Dir axOut;
+                        gp_Pnt c2;
+                        double r2 = 0, m2 = 0;
+                        ok = cylinderFitLS(mv, Iset, gp_Dir(pAxis), axOut, c2, r2, m2, itCap) &&
+                             r2 > 0.0;
+                        if (ok) {
+                            pAxis = axOut.XYZ();
+                            alignTo(pAxis, axis);
+                            center = c2.XYZ();
+                            r0 = r2;
+                        }
+                    }
+                    if (!ok) break;
+                    std::vector<int> I2 = gather(pAxis, center, r0);
+                    if (I2 == Iset) {
+                        stable = true;
+                        break;
+                    }
+                    Iset.swap(I2);
+                }
+                BandDiag dg;
+                dg.tau = tau;
+                dg.mode = "peg";
+                dg.fit = pegAnchored ? "anchored" : "free";
+                dg.params = pegAnchored ? kParamsCircle : (kParamsCircle + kParamsAxisDir);
+                dg.seed = seed;
+                dg.axis = pAxis;
+                dg.radius = r0;
+                dg.anchorTolA = A.tolA;
+                dg.nI = (int)Iset.size();
+                dg.compsI = edgeComps(Iset);
+                dg.compsC = dg.compsI;
+                auto finish = [&](const char* why) {
+                    dg.why = why;
+                    emitDiag(dg);
+                    tallyWhy(yc, why);
+                };
+                if (!stable || Iset.empty()) {
+                    finish(Iset.empty() ? "vertex-off" : "unstable");
+                    continue;
+                }
+                std::vector<Vert> iv;
+                uniqueVerts(mv, g2l, Iset, iv);
+                profileCounts(iv, pAxis, tau, dg.stations, dg.levels, dg.lineRes);
+                dg.nV = (int)iv.size();
+                double rms = 0;
+                dg.certDev = devStats(iv, center, pAxis, r0, rms);
+                dg.maxDev = dg.certDev;
+                if (dg.stations < minStations(dg.params) || dg.levels < 2) {
+                    finish("underdetermined");
+                    continue;
+                }
+                if (dg.certDev > tau) {
+                    finish("vertex-off");
+                    continue;
+                }
+                std::vector<char> inC(nTri, 0);
+                for (int t : Iset)
+                    if (t >= 0 && t < nTri) inC[t] = 1;
+                const gp_XYZ xdir = lowestXDir(iv, center, pAxis);
+                const SpanInfo sp =
+                    measureSpan(mv, g2l, Iset, iv, center, pAxis, xdir, tol.thetaBin);
+                dg.span = sp.span;
+                if (!sp.closed360) {
+                    finish("not-blend");
+                    continue;
+                }
+                emitAdj(seed, pAxis, center, r0, inC);
+                if (sameSurface(pAxis, center, r0, inC)) {
+                    finish("same-surface");
+                    continue;
+                }
+                seenCyl.push_back(SeenCyl{center, pAxis, r0});
+                commitBand(Iset, pAxis, center, r0, false, A.prov, -1, seed, dg);
+            }
+        }
+
+        // D-fc-1.6.11 observation. An accepted cylinder whose own vertices lie
+        // within τ, with an adjacent unclaimed triangle also within τ, is the
+        // same surface. Nothing is claimed. The stored axis is the certificate
+        // when it already meets τ; a free refit is only a fallback. A second
+        // fit of the unclaimed side must put every accepted vertex back within τ.
+        {
+            const int nAcc = (int)work.accepted.size();
+            for (int i = 0; i < nAcc; ++i) {
+                const Region& acc = work.accepted[i];
+                if (acc.type != SurfType::Cylinder || acc.tris.empty()) continue;
+                gp_XYZ ax = acc.ax.Direction().XYZ();
+                gp_XYZ c = acc.ax.Location().XYZ();
+                double radius = acc.radius;
+                std::vector<Vert> av;
+                uniqueVerts(mv, g2l, acc.tris, av);
+                if (av.empty() || !(radius > 0.0)) continue;
+                bool stored = true;
+                for (const Vert& v : av) {
+                    if (std::abs(radialDist(v.p, c, ax) - radius) > tau) stored = false;
+                }
+                if (!stored) {
+                    gp_Dir axOut;
+                    gp_Pnt cOut;
+                    double rOut = 0, mOut = 0;
+                    if (!cylinderFitLS(mv, acc.tris, acc.ax.Direction(), axOut, cOut, rOut, mOut,
+                                       std::max(1, p.maxRefineIters)) ||
+                        !(rOut > 0.0) || mOut > tau)
+                        continue;
+                    ax = axOut.XYZ();
+                    c = cOut.XYZ();
+                    radius = rOut;
+                }
+                std::vector<int> U;
+                std::vector<char> seenU(nTri, 0);
+                for (int t : acc.tris) {
+                    if (t < 0 || t >= nTri) continue;
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (!candidate(ot) || seenU[ot]) continue;
+                        if (triLevelCount(ot, ax) < 2) continue;
+                        bool all = true;
+                        for (int k = 0; k < 3; ++k) {
+                            if (std::abs(radialDist(cornerPt(mv, ot, k), c, ax) - radius) > tau)
+                                all = false;
+                        }
+                        if (!all) continue;
+                        seenU[ot] = 1;
+                        U.push_back(ot);
+                    }
+                }
+                if (U.empty()) continue;
+                // Every vertex of U is already within τ of this cylinder, and
+                // every accepted vertex is too. That is the same surface.
+                // A free refit of a semicircle is not required: it can fail
+                // while the vertices still lie on the accepted cylinder.
+                BandDiag dg;
+                dg.tau = tau;
+                dg.mode = "fillet";
+                dg.fit = "free";
+                dg.seed = minTriOf(U);
+                dg.axis = ax;
+                dg.radius = radius;
+                dg.nTri = (int)U.size();
+                dg.nI = (int)U.size();
+                dg.maxDev = 0.0;
+                dg.why = "same-surface";
+                emitDiag(dg);
+                tallyWhy(yc, "same-surface");
+            }
         }
 
         if (diagOn()) {
+            const double seconds = std::chrono::duration<double>(
+                                       std::chrono::steady_clock::now() - tStart)
+                                       .count();
             std::fprintf(stderr,
                          "DIAG_REL_SUM stage=extrude bands=%d accept=%d line=%d "
                          "vertex-off=%d not-blend=%d same-surface=%d underdetermined=%d "
-                         "degenerate=%d no-anchor=%d\n",
-                         yc.bands, yc.accept, yc.line, yc.vertexOff, yc.notBlend,
-                         yc.sameSurface, yc.underdetermined, yc.degenerate, yc.noAnchor);
+                         "degenerate=%d no-anchor=%d unstable=%d hem-deferred=%d "
+                         "anchor-in-band=%d pairs=%d evaluatedSides=%d seconds=%.6f\n",
+                         yc.bands, yc.accept, yc.line, yc.vertexOff, yc.notBlend, yc.sameSurface,
+                         yc.underdetermined, yc.degenerate, yc.noAnchor, yc.unstable,
+                         yc.hemDeferred, yc.anchorInBand, nPairs, nEvalSides, seconds);
         }
         return true;
     } catch (...) {

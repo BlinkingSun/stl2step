@@ -70,6 +70,21 @@ static bool hasWhy(const std::string& diag, const char* why) {
     return !lineWithWhy(diag, why).empty();
 }
 
+static double fieldNum(const std::string& line, const char* key) {
+    // Anchor on a field boundary. A bare find("sTau=") hits the suffix of lineResTau=.
+    const std::string k = std::string(key) + "=";
+    std::size_t p = std::string::npos;
+    if (line.compare(0, k.size(), k) == 0) {
+        p = 0;
+    } else {
+        const std::string sp = std::string(" ") + k;
+        const auto at = line.find(sp);
+        if (at == std::string::npos) return std::nan("");
+        p = at + 1;
+    }
+    return std::strtod(line.c_str() + p + k.size(), nullptr);
+}
+
 struct Synth {
     struct Tri3 {
         int v[3];
@@ -359,15 +374,9 @@ static void case4() {
     addAnchor(w, {wa}, gp_XYZ(0, -1, 0), gp_XYZ(0, 0, 0), 0.0);
     addAnchor(w, {wb}, gp_XYZ(0, 1, 0), gp_XYZ(0, 2, 0), 0.0);
     Run r = runClaim(s, std::move(w), 1e-4, 1);
-    bool ok = r.work.accepted.size() == 1;
-    if (ok) {
-        const Region& a = r.work.accepted[0];
-        ok = nearRadius(a, 1.0, r.tau) && a.origin == Origin::FilletStrip;
-        std::fprintf(stderr, "case4 r=%.9g dev=%.3g origin=%d span=%.6f\n", a.radius,
-                     a.maxVertexDev, (int)a.origin, a.uMax - a.uMin);
-    }
+    const bool ok = r.work.accepted.empty() && hasWhy(r.diag, "hem-deferred");
     if (!ok) dumpFail("case4", r);
-    expect(ok, "case4 antiparallel hem r = gap/2");
+    expect(ok, "case4 antiparallel hem deferred");
 }
 
 static void case5() {
@@ -627,6 +636,338 @@ static void case11() {
     expect(ok, "case11 threads 1 and 4 identical");
 }
 
+// One-layer R3 fillet. On-circle azimuths come in pairs (an all-on-circle quad,
+// one edge-component of I) separated by a trim azimuth 100 tau inside the circle.
+// Five pairs => compsI >= 5; the trim quads are the cover that joins them.
+struct TrimFillet {
+    Synth synth;
+    stl2step::refit::SegmentWork work;
+    std::vector<int> lo;
+    std::vector<int> hi;
+    std::vector<int> bandTris;
+    double R = 3.0;
+    double inward = 0.0;
+};
+
+static TrimFillet makeTrimFillet() {
+    TrimFillet m;
+    const double R = 3.0;
+    const double y0 = 0.0;
+    const double y1 = 8.0;
+    m.R = R;
+    m.inward = 100.0 * 2.0 * 1e-4;
+    const double pull = m.inward / R;
+    struct St {
+        double deg;
+        bool in;
+    };
+    const St st[] = {
+        {0.0, false},  {16.0, false}, {18.5, true}, {21.0, false}, {37.0, false},
+        {39.5, true},  {42.0, false}, {58.0, false}, {60.5, true}, {63.0, false},
+        {79.0, false}, {81.5, true},  {84.0, false}, {90.0, false},
+    };
+    const int n = (int)(sizeof st / sizeof st[0]);
+    m.lo.resize((std::size_t)n);
+    m.hi.resize((std::size_t)n);
+    for (int i = 0; i < n; ++i) {
+        const double th = st[i].deg * kPi / 180.0;
+        gp_XYZ p0(R * (1.0 - std::cos(th)), y0, R * (1.0 - std::sin(th)));
+        gp_XYZ p1(R * (1.0 - std::cos(th)), y1, R * (1.0 - std::sin(th)));
+        if (st[i].in) {
+            const gp_XYZ c0(R, y0, R);
+            const gp_XYZ c1(R, y1, R);
+            p0 += (c0 - p0) * pull;
+            p1 += (c1 - p1) * pull;
+        }
+        m.lo[(std::size_t)i] = m.synth.addV(p0);
+        m.hi[(std::size_t)i] = m.synth.addV(p1);
+    }
+    for (int i = 0; i + 1 < n; ++i) {
+        std::vector<int> tris;
+        m.synth.addQuad(m.lo[(std::size_t)i], m.hi[(std::size_t)i], m.lo[(std::size_t)i + 1],
+                        m.hi[(std::size_t)i + 1], tris);
+        for (int t : tris) m.bandTris.push_back(t);
+        addStrip(m.work, tris);
+    }
+    const double ym = 0.5 * (y0 + y1);
+    const int wa = m.synth.tri(m.lo.front(), m.hi.front(), m.synth.addV(gp_XYZ(0.0, ym, R + 30.0)));
+    const int wb = m.synth.tri(m.lo.back(), m.hi.back(), m.synth.addV(gp_XYZ(R + 30.0, ym, 0.0)));
+    addAnchor(m.work, {wa}, gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(m.work, {wb}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    return m;
+}
+
+static bool regionHas(const stl2step::refit::Region& a, int t) {
+    return std::find(a.tris.begin(), a.tris.end(), t) != a.tris.end();
+}
+
+static void case12() {
+    using namespace stl2step::refit;
+    auto built = makeTrimFillet();
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    const std::string acc = lineWithWhy(r.diag, "accept");
+    const double cert = fieldNum(acc, "certDevTau");
+    const double cover = fieldNum(acc, "coverDevTau");
+    const double sTau = fieldNum(acc, "sTau");
+    const int compsI = (int)fieldNum(acc, "compsI");
+    const int compsC = (int)fieldNum(acc, "compsC");
+    const bool ok = r.work.accepted.size() == 1 && !acc.empty() && compsI >= 5 && compsC == 1 &&
+                    cert <= 1.0 && cover <= sTau;
+    std::fprintf(stderr, "case12 compsI=%d compsC=%d cert=%.6g cover=%.6g sTau=%.6g\n", compsI,
+                 compsC, cert, cover, sTau);
+    if (!ok) dumpFail("case12", r);
+    expect(ok, "case12 alternating trim cover joins I");
+}
+
+static void case13() {
+    using namespace stl2step::refit;
+    auto built = makeTrimFillet();
+    // Widest I chord is 16 deg. s is at least that sagitta; a vertex at 2 s is outside cover.
+    const double sag = built.R * (1.0 - std::cos(8.0 * kPi / 180.0));
+    const double dev = 2.0 * sag;
+    const double th = 50.0 * kPi / 180.0;
+    const double y = 4.0;
+    const gp_XYZ centre(built.R, y, built.R);
+    const gp_XYZ on(built.R * (1.0 - std::cos(th)), y, built.R * (1.0 - std::sin(th)));
+    const gp_XYZ spike = centre + (on - centre) * ((built.R - dev) / built.R);
+    const int sv = built.synth.addV(spike);
+    // Index 6 is the on-circle azimuth at 42 deg, so the facet spans two levels.
+    const int facet = built.synth.tri(built.lo[6], built.hi[6], sv);
+    addStrip(built.work, {facet});
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    bool in = false;
+    for (const Region& a : r.work.accepted)
+        if (regionHas(a, facet)) in = true;
+    const bool ok = r.work.accepted.size() == 1 && !in;
+    std::fprintf(stderr, "case13 accepted=%d facetIn=%d sag=%.6g\n",
+                 (int)r.work.accepted.size(), in ? 1 : 0, sag);
+    if (!ok) dumpFail("case13", r);
+    expect(ok, "case13 vertex at 2s is not claimed");
+}
+
+static void case14() {
+    using namespace stl2step::refit;
+    auto built = makeTrimFillet();
+    // Three on-circle vertices of the y=0 ring. All within tau of the cylinder,
+    // one axial level, so the ear is not a member of I or Cover.
+    const int ear = built.synth.tri(built.lo[0], built.lo[1], built.lo[3]);
+    addStrip(built.work, {ear});
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    bool in = false;
+    for (const Region& a : r.work.accepted)
+        if (regionHas(a, ear)) in = true;
+    const bool ok = r.work.accepted.size() == 1 && !in;
+    std::fprintf(stderr, "case14 accepted=%d earIn=%d\n", (int)r.work.accepted.size(), in ? 1 : 0);
+    if (!ok) dumpFail("case14", r);
+    expect(ok, "case14 end-ring section ear is not claimed");
+}
+
+static void case15() {
+    using namespace stl2step::refit;
+    Synth s;
+    SegmentWork w;
+    const double R = 3.0;
+    const double yFar = R + 8.0;
+    const int nStrips = 12;
+    auto addArc = [&](auto mapP, const gp_XYZ& nA, const gp_XYZ& pA, const gp_XYZ& nB,
+                      const gp_XYZ& pB, bool anchors) {
+        std::vector<int> lo((std::size_t)nStrips + 1), hi((std::size_t)nStrips + 1);
+        for (int i = 0; i <= nStrips; ++i) {
+            const double th = 0.5 * kPi * (double)i / (double)nStrips;
+            const gp_XYZ a = mapP(th, R);
+            const gp_XYZ b = mapP(th, yFar);
+            lo[(std::size_t)i] = s.addV(a);
+            hi[(std::size_t)i] = s.addV(b);
+        }
+        for (int i = 0; i < nStrips; ++i) {
+            std::vector<int> tris;
+            s.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                      hi[(std::size_t)i + 1], tris);
+            addStrip(w, tris);
+        }
+        if (anchors) {
+            const gp_XYZ midA = mapP(0.0, 0.5 * (R + yFar)) + nA * (-30.0);
+            const gp_XYZ midB = mapP(0.5 * kPi, 0.5 * (R + yFar)) + nB * (-30.0);
+            const int wa = s.tri(lo.front(), hi.front(), s.addV(midA));
+            const int wb = s.tri(lo.back(), hi.back(), s.addV(midB));
+            addAnchor(w, {wa}, nA, pA, 0.0);
+            addAnchor(w, {wb}, nB, pB, 0.0);
+        }
+        return lo;
+    };
+    // Fillet along +Y between x=0 and z=0, starting at the sphere's boundary y=R.
+    addArc([&](double th, double y) { return gp_XYZ(R * (1.0 - std::cos(th)), y, R * (1.0 - std::sin(th))); },
+           gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), true);
+    // Fillet along +X between y=0 and z=0.
+    addArc([&](double th, double x) { return gp_XYZ(x, R * (1.0 - std::cos(th)), R * (1.0 - std::sin(th))); },
+           gp_XYZ(0, -1, 0), gp_XYZ(0, 0, 0), gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), true);
+    // Fillet along +Z between x=0 and y=0.
+    addArc([&](double th, double z) { return gp_XYZ(R * (1.0 - std::cos(th)), R * (1.0 - std::sin(th)), z); },
+           gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), gp_XYZ(0, -1, 0), gp_XYZ(0, 0, 0), true);
+
+    const double step = 2.0 * kPi / 180.0;
+    const int nG = (int)std::lround(0.5 * kPi / step);
+    std::vector<int> grid((std::size_t)(nG + 1) * (nG + 1), -1);
+    auto at = [&](int i, int j) -> int& { return grid[(std::size_t)i * (nG + 1) + (std::size_t)j]; };
+    for (int i = 0; i <= nG; ++i) {
+        const double a = step * (double)i;
+        for (int j = 0; j <= nG; ++j) {
+            const double b = step * (double)j;
+            const double cg2 = 1.0 - std::cos(a) * std::cos(a) - std::cos(b) * std::cos(b);
+            if (cg2 < -1e-12) continue;
+            const double cg = std::sqrt(std::max(0.0, cg2));
+            at(i, j) = s.addV(gp_XYZ(R * (1.0 - std::cos(a)), R * (1.0 - std::cos(b)), R * (1.0 - cg)));
+        }
+    }
+    std::vector<int> sphereTris;
+    for (int i = 0; i < nG; ++i) {
+        for (int j = 0; j < nG; ++j) {
+            const int a = at(i, j);
+            const int b = at(i + 1, j);
+            const int c = at(i, j + 1);
+            const int d = at(i + 1, j + 1);
+            if (a < 0 || b < 0 || c < 0 || d < 0) continue;
+            sphereTris.push_back(s.tri(a, b, d));
+            sphereTris.push_back(s.tri(a, d, c));
+        }
+    }
+    addStrip(w, sphereTris);
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    int fillets = 0;
+    int sphereIn = 0;
+    for (const Region& a : r.work.accepted) {
+        if (a.origin == Origin::FilletStrip) ++fillets;
+        for (int t : a.tris) {
+            if (std::find(sphereTris.begin(), sphereTris.end(), t) != sphereTris.end()) ++sphereIn;
+        }
+    }
+    const bool ok = fillets == 3 && sphereIn == 0;
+    std::fprintf(stderr, "case15 fillets=%d sphereTris=%d sphereIn=%d accepted=%d\n", fillets,
+                 (int)sphereTris.size(), sphereIn, (int)r.work.accepted.size());
+    if (!ok) dumpFail("case15", r);
+    expect(ok, "case15 three fillets, sphere corner not claimed");
+}
+
+static void addVariable(Synth& s, stl2step::refit::SegmentWork& w, int nY) {
+    const double L = 16.0;
+    const int nAng = 3;
+    std::vector<std::vector<int>> id((std::size_t)nY + 1, std::vector<int>((std::size_t)nAng));
+    for (int j = 0; j <= nY; ++j) {
+        const double y = L * (double)j / (double)std::max(nY, 1);
+        for (int i = 0; i < nAng; ++i) {
+            const double th = 0.5 * kPi * (double)i / (double)(nAng - 1);
+            const double rad = (i == 0 || i == nAng - 1) ? 3.0 : 8.0;
+            id[(std::size_t)j][(std::size_t)i] =
+                s.addV(gp_XYZ(rad * (1.0 - std::cos(th)), y, rad * (1.0 - std::sin(th))));
+        }
+    }
+    for (int j = 0; j < nY; ++j) {
+        for (int i = 0; i < nAng - 1; ++i) {
+            std::vector<int> tris;
+            s.addQuad(id[(std::size_t)j][(std::size_t)i], id[(std::size_t)j + 1][(std::size_t)i],
+                      id[(std::size_t)j][(std::size_t)i + 1],
+                      id[(std::size_t)j + 1][(std::size_t)i + 1], tris);
+            addStrip(w, tris);
+        }
+    }
+    const int wa = s.tri(id[0][0], id[1][0], s.addV(gp_XYZ(0.0, 0.25 * L, 40.0)));
+    const int wb = s.tri(id[0][nAng - 1], id[1][nAng - 1], s.addV(gp_XYZ(40.0, 0.25 * L, 0.0)));
+    addAnchor(w, {wa}, gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(w, {wb}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+}
+
+static void case16() {
+    using namespace stl2step::refit;
+    Synth oneS;
+    SegmentWork oneW;
+    addVariable(oneS, oneW, 1);
+    Run one = runClaim(oneS, std::move(oneW), 1e-4, 1);
+    Synth manyS;
+    SegmentWork manyW;
+    addVariable(manyS, manyW, 4);
+    Run many = runClaim(manyS, std::move(manyW), 1e-4, 1);
+    const bool ok = one.work.accepted.empty() && many.work.accepted.empty();
+    std::fprintf(stderr, "case16 one=%d many=%d\n", (int)one.work.accepted.size(),
+                 (int)many.work.accepted.size());
+    if (!ok) {
+        dumpFail("case16-one", one);
+        dumpFail("case16-many", many);
+    }
+    expect(ok, "case16 variable radius one-layer and multi-layer refused");
+}
+
+static void case17() {
+    using namespace stl2step::refit;
+    const double q = 1e-4;
+    const double tau = 2.0 * q;
+    auto built = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
+    auto& provs = built.work.provisionals;
+    const int ia = (int)provs.size() - 2;
+    std::vector<int> moved;
+    for (int k = 0; k < 2; ++k) {
+        for (int t : provs[(std::size_t)k].tris) moved.push_back(t);
+        provs[(std::size_t)k].tris.clear();
+    }
+    for (int t : moved) provs[(std::size_t)ia].tris.push_back(t);
+    provs[(std::size_t)ia].maxVertexDev = 140.0 * tau;
+    Run r = runClaim(built.synth, std::move(built.work), q, 1);
+    const std::string acc = lineWithWhy(r.diag, "accept");
+    const double tolA = fieldNum(acc, "anchorTolATau");
+    const double tolB = fieldNum(acc, "anchorTolBTau");
+    const int straddle = (int)fieldNum(acc, "straddle");
+    bool facetsIn = !moved.empty();
+    if (r.work.accepted.size() == 1) {
+        for (int t : moved)
+            if (!regionHas(r.work.accepted[0], t)) facetsIn = false;
+    } else {
+        facetsIn = false;
+    }
+    const double fat = std::max(tolA, tolB);
+    const bool ok = r.work.accepted.size() == 1 && acc.find("fit=free") != std::string::npos &&
+                    fat >= 100.0 && fat <= 180.0 && facetsIn && straddle >= 1;
+    std::fprintf(stderr, "case17 tolA=%.6g tolB=%.6g straddle=%d facets=%d\n", tolA, tolB,
+                 straddle, (int)moved.size());
+    if (!ok) dumpFail("case17", r);
+    expect(ok, "case17 mis-assigned flank is a free accept with straddle");
+}
+
+static void case18() {
+    using namespace stl2step::refit;
+    Synth s;
+    SegmentWork w;
+    const double R = 3.0;
+    const double y0 = 0.0;
+    const double y1 = 8.0;
+    const int nStrips = 8;
+    std::vector<int> lo((std::size_t)nStrips + 1), hi((std::size_t)nStrips + 1);
+    for (int i = 0; i <= nStrips; ++i) {
+        const double th = 0.5 * kPi * (double)i / (double)nStrips;
+        lo[(std::size_t)i] = s.addV(gp_XYZ(R * (1.0 - std::cos(th)), y0, R * (1.0 - std::sin(th))));
+        hi[(std::size_t)i] = s.addV(gp_XYZ(R * (1.0 - std::cos(th)), y1, R * (1.0 - std::sin(th))));
+    }
+    for (int i = 0; i < nStrips; ++i) {
+        std::vector<int> tris;
+        s.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                  hi[(std::size_t)i + 1], tris);
+        for (int t : tris) {
+            const auto& tr = s.tris[(std::size_t)t];
+            const gp_XYZ& a = s.pts[(std::size_t)tr.v[0]];
+            const gp_XYZ& b = s.pts[(std::size_t)tr.v[1]];
+            const gp_XYZ& c = s.pts[(std::size_t)tr.v[2]];
+            gp_XYZ n = (b - a).Crossed(c - a);
+            const double m = n.Modulus();
+            if (!(m > 1e-12)) continue;
+            n.Divide(m);
+            addAnchor(w, {t}, n, a, 0.0);
+        }
+    }
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    const bool ok = r.work.accepted.empty();
+    std::fprintf(stderr, "case18 accepted=%d\n", (int)r.work.accepted.size());
+    if (!ok) dumpFail("case18", r);
+    expect(ok, "case18 chord-plane anchors do not accept");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -641,6 +982,13 @@ int main() {
     case9();
     case10();
     case11();
+    case12();
+    case13();
+    case14();
+    case15();
+    case16();
+    case17();
+    case18();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
