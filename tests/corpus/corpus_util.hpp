@@ -112,6 +112,15 @@ struct LiveExpectation {
     bool buildFaces = true;
 };
 
+// Per-face tessellation fold of one B-rep face (SPEC-fixtures). `maxFoldDeg` is
+// the largest angle between normals of triangles that share an edge inside that
+// face's own triangulation. Planes are recorded too so a hex wall can show ~0.
+struct FaceFold {
+    std::string surface;  // "plane","cylinder","cone","sphere","torus","bspline",...
+    double maxFoldDeg = 0;
+    int nTri = 0;
+};
+
 struct Provenance {
     std::string sourcePath;
     std::string statement;
@@ -128,6 +137,12 @@ struct Sidecar {
     // D-130-15(1): the exact analytic volume of the generator's own parameters
     // (closed form; never from engine output). 0 = not recorded, key omitted.
     double exactVolume = 0;
+    // SPEC-fixtures. < 0 omits the keys so S01–S22 sidecars stay byte-identical.
+    // angularDeflectionRad is the value passed to tessellate() (params.Angle).
+    // maxFoldDeg is the max FaceFold::maxFoldDeg over non-plane faces.
+    double angularDeflectionRad = -1;
+    double maxFoldDeg = -1;
+    std::vector<FaceFold> faceFolds;
     std::string battery;  // e.g. "130" — 1.3.0 battery fixtures; empty = omit
     std::vector<Intersection> intersections;
     std::vector<Recoverable> recoverable;
@@ -439,6 +454,18 @@ inline std::string writeSidecarJson(const Sidecar& s) {
         os << "  },\n";
     }
     os << "  \"deflection\": " << s.deflection << ",\n";
+    if (s.angularDeflectionRad >= 0.0) {
+        os << "  \"angularDeflectionRad\": " << s.angularDeflectionRad << ",\n";
+        os << "  \"maxFoldDeg\": " << s.maxFoldDeg << ",\n";
+        os << "  \"faceFolds\": [\n";
+        for (size_t i = 0; i < s.faceFolds.size(); ++i) {
+            const auto& f = s.faceFolds[i];
+            os << "    {\"surface\": \"" << f.surface << "\", \"maxFoldDeg\": " << f.maxFoldDeg
+               << ", \"nTri\": " << f.nTri << "}"
+               << (i + 1 < s.faceFolds.size() ? "," : "") << "\n";
+        }
+        os << "  ],\n";
+    }
     os << "  \"triangleCount\": " << s.triangleCount << ",\n";
     os << "  \"meshVolume\": " << s.meshVolume << ",\n";
     if (s.exactVolume > 0.0)
