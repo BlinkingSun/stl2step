@@ -449,6 +449,26 @@ set_tests_properties(result_tojson_unit PROPERTIES
     LABELS "unit;tojson"
     TIMEOUT 30)
 
+# fc/heal-r1: zero-area T-junction absorb. One registration of the new TU.
+add_executable(tjunction_absorb_test tjunction_absorb_test.cpp)
+target_compile_features(tjunction_absorb_test PRIVATE cxx_std_17)
+set_target_properties(tjunction_absorb_test PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(tjunction_absorb_test PRIVATE stl2step::core)
+target_include_directories(tjunction_absorb_test PRIVATE
+    "${_stl2step_root}/include")
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(tjunction_absorb_test)
+endif()
+add_test(NAME tjunction_absorb_test
+    COMMAND tjunction_absorb_test
+        "/private/tmp/claude-502/-Users-jroberts/190c9bd1-a710-4598-a7de-b0c9f3c2be7e/scratchpad/fc/heal-r1")
+set_tests_properties(tjunction_absorb_test PROPERTIES
+    LABELS "unit;heal"
+    TIMEOUT 120)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

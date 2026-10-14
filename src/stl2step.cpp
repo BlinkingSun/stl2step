@@ -101,11 +101,156 @@ void prismBindDxfDir(const std::string& d);
 void prismBindDxfStem(const std::string& s);
 }
 
+namespace detail {
+
+// The faceted builder's existing zero-area test (stl2step.cpp face loop and
+// makeFacet in refit_build.cpp). Same expression, both call sites. Not a new gate.
+bool triangleAreaDegenerate(const gp_XYZ& A, const gp_XYZ& B, const gp_XYZ& C) {
+    const gp_XYZ n = (B - A).Crossed(C - A);
+    const double mag = n.Modulus();
+    const double l2 = std::max((B - A).SquareModulus(), (C - A).SquareModulus());
+    return mag < 1e-12 || mag * mag < l2 * l2 * 1e-20;
+}
+
+// Absorb a zero-area T-junction before the edge graph is built.
+// A triangle is removed only when it fails triangleAreaDegenerate, one vertex
+// lies within tau = 2·quantFloor of the open segment of the opposite edge
+// (t strictly inside (0,1)), and that edge is shared by exactly one other
+// triangle. The neighbour is split at the vertex, keeping its winding.
+// Net triangle count is unchanged. Stable by ascending triangle index.
+// quantFloor <= 0 absorbs nothing. Returns the number absorbed.
+int absorbZeroAreaTJunctions(std::vector<std::array<int, 3>>& tris,
+                             const std::vector<std::array<double, 3>>& pts,
+                             double quantFloor, bool diag) {
+    const double tau = 2.0 * quantFloor; // D-130-12. The only length threshold.
+    auto summary = [&](int n) {
+        if (!diag) return;
+        std::fprintf(stderr, "DIAG_ABSORB summary n=%d trisNow=%zu\n", n, tris.size());
+    };
+    if (!(quantFloor > 0.0)) {
+        summary(0);
+        return 0;
+    }
+
+    auto ekey = [](int a, int b) -> uint64_t {
+        return a < b ? ((uint64_t)(uint32_t)a << 32) | (uint32_t)b
+                     : ((uint64_t)(uint32_t)b << 32) | (uint32_t)a;
+    };
+    struct EdgeUse { int cnt = 0; int t0 = -1; int t1 = -1; };
+    std::unordered_map<uint64_t, EdgeUse> edges;
+    auto buildEdges = [&]() {
+        edges.clear();
+        edges.reserve(tris.size() * 2);
+        for (int t = 0; t < (int)tris.size(); ++t) {
+            const int v[4] = { tris[t][0], tris[t][1], tris[t][2], tris[t][0] };
+            for (int s = 0; s < 3; ++s) {
+                EdgeUse& e = edges[ekey(v[s], v[s + 1])];
+                if (e.cnt == 0) e.t0 = t;
+                else if (e.cnt == 1) e.t1 = t;
+                e.cnt++;
+            }
+        }
+    };
+    auto at = [&](int i) -> gp_XYZ {
+        const std::array<double, 3>& p = pts[(size_t)i];
+        return gp_XYZ(p[0], p[1], p[2]);
+    };
+    auto inRange = [&](int i) {
+        return i >= 0 && (size_t)i < pts.size();
+    };
+
+    buildEdges();
+    int absorbed = 0;
+    for (int t = 0; t < (int)tris.size(); ++t) {
+        const int v[3] = { tris[t][0], tris[t][1], tris[t][2] };
+        if (!inRange(v[0]) || !inRange(v[1]) || !inRange(v[2])) continue;
+        if (!triangleAreaDegenerate(at(v[0]), at(v[1]), at(v[2]))) continue;
+
+        bool did = false;
+        for (int slot = 0; slot < 3 && !did; ++slot) {
+            const int vertex = v[slot];
+            const int ea = v[(slot + 1) % 3];
+            const int eb = v[(slot + 2) % 3];
+            const gp_XYZ P = at(vertex), A = at(ea), B = at(eb);
+            const gp_XYZ ab = B - A;
+            const double ab2 = ab.SquareModulus();
+            if (!(ab2 > 0.0)) continue;
+            const double param = (P - A).Dot(ab) / ab2;
+            if (!(param > 0.0 && param < 1.0)) continue;
+            const gp_XYZ closest(A.X() + ab.X() * param,
+                                 A.Y() + ab.Y() * param,
+                                 A.Z() + ab.Z() * param);
+            const double dist = (P - closest).Modulus();
+            if (!(dist <= tau)) continue;
+
+            auto it = edges.find(ekey(ea, eb));
+            if (it == edges.end() || it->second.cnt != 2) continue;
+            const int other = (it->second.t0 == t) ? it->second.t1 : it->second.t0;
+            if (other < 0 || other == t || other >= (int)tris.size()) continue;
+
+            const int nv[3] = { tris[other][0], tris[other][1], tris[other][2] };
+            int sFound = -1;
+            for (int s = 0; s < 3; ++s) {
+                const int x = nv[s], y = nv[(s + 1) % 3];
+                if ((x == ea && y == eb) || (x == eb && y == ea)) { sFound = s; break; }
+            }
+            if (sFound < 0) continue;
+            const int vi = nv[sFound];
+            const int vj = nv[(sFound + 1) % 3];
+            const int apex = nv[(sFound + 2) % 3];
+            if (vertex == vi || vertex == vj || vertex == apex) continue;
+
+            // Neighbour winding vi → vj → apex. Insert vertex on vi→vj.
+            tris[other] = { vi, vertex, apex };
+            tris[t] = { vertex, vj, apex };
+            absorbed++;
+            did = true;
+            if (diag) {
+                std::fprintf(stderr,
+                    "DIAG_ABSORB degenTri=%d neigh=%d vertex=%d distMM=%.9g "
+                    "distTau=%.4f t=%.6f tau=%.9g q=%.9g\n",
+                    t, other, vertex, dist, dist / tau, param, tau, quantFloor);
+            }
+        }
+        if (did) buildEdges();
+    }
+    summary(absorbed);
+    return absorbed;
+}
+
+}  // namespace detail
+
 namespace {
 
 namespace fs = std::filesystem;
 
 constexpr double kPi = 3.14159265358979323846;  // avoids MSVC's _USE_MATH_DEFINES dance
+
+// Result has no slot for an additive key (the public header is frozen).
+// convert() records the count under the input/output pair; toJson() reads it
+// back. A Result that never went through convert() emits no key.
+std::mutex gAbsorbMu;
+std::unordered_map<std::string, int> gAbsorbCount;
+
+std::string absorbIoKey(const std::string& in, const std::string& out) {
+    std::string k;
+    k.reserve(in.size() + out.size() + 1);
+    k += in;
+    k.push_back('\n');
+    k += out;
+    return k;
+}
+
+void noteMeshTJunctionsAbsorbed(const std::string& in, const std::string& out, int n) {
+    std::lock_guard<std::mutex> lk(gAbsorbMu);
+    gAbsorbCount[absorbIoKey(in, out)] = n;
+}
+
+int meshTJunctionsAbsorbedOf(const std::string& in, const std::string& out) {
+    std::lock_guard<std::mutex> lk(gAbsorbMu);
+    auto it = gAbsorbCount.find(absorbIoKey(in, out));
+    return it == gAbsorbCount.end() ? -1 : it->second;
+}
 
 // ---------------------------------------------------------------- small helpers
 
@@ -342,6 +487,7 @@ Result Converter::run() {
     Timer timer, total;
     int solidsOut = 0, openShellsOut = 0, facesBefore = 0, facesAfter = 0;
     int nTri = 0, nVert = 0, nComp = 0;
+    int meshTJunctionsAbsorbed = 0;
     double meshVolume = 0, brepVolume = 0, stepVolume = 0, volDeltaPct = -1;
     bool watertight = true;
 
@@ -425,6 +571,24 @@ Result Converter::run() {
             tris.push_back({ a, b, c });
         }
         mesh.Nullify();
+
+        // T-junction absorb, before ekey / UnionFind / chartsA1. Heals the mesh
+        // the segmenter and the faceted builder both see.
+        {
+            std::vector<std::array<int, 3>> raw;
+            raw.reserve(tris.size());
+            for (const Tri& t : tris) raw.push_back({ t.a, t.b, t.c });
+            std::vector<std::array<double, 3>> xyz;
+            xyz.reserve(pts.size());
+            for (const gp_XYZ& p : pts) xyz.push_back({ p.X(), p.Y(), p.Z() });
+            const char* envAbsorb = std::getenv("STL2STEP_DIAG_ABSORB");
+            const bool absorbDiag = envAbsorb && envAbsorb[0] && envAbsorb[0] != '0';
+            meshTJunctionsAbsorbed =
+                detail::absorbZeroAreaTJunctions(raw, xyz, quantFloor, absorbDiag);
+            tris.clear();
+            tris.reserve(raw.size());
+            for (const auto& t : raw) tris.push_back({ t[0], t[1], t[2] });
+        }
 
         auto ekey = [](int a, int b) {
             return a < b ? ((uint64_t)(uint32_t)a << 32) | (uint32_t)b
@@ -742,6 +906,7 @@ Result Converter::run() {
                 if (!ok)
                     warn("smooth: analytic rebuild reverted on one component -- kept faceted");
             }
+            std::atomic<long long> degenSkipped{ 0 };
             if (!usedRefit) {
             if (pit != refitPlans.end()) {
                 // R2 must be verbatim: P2 UpdateVertex's TShapes in place.
@@ -762,9 +927,11 @@ Result Converter::run() {
                 const Tri& T = tris[cs.tris[k]];
                 const gp_XYZ &A = pts[T.a], &Bp = pts[T.b], &Cp = pts[T.c];
                 gp_XYZ n = (Bp - A).Crossed(Cp - A);
-                double mag = n.Modulus();
-                double l2 = std::max((Bp - A).SquareModulus(), (Cp - A).SquareModulus());
-                if (mag < 1e-12 || mag * mag < l2 * l2 * 1e-20) { skipped++; return; }
+                if (detail::triangleAreaDegenerate(A, Bp, Cp)) {
+                    skipped++;
+                    degenSkipped++;
+                    return;
+                }
                 BRep_Builder bb;
                 TopoDS_Wire w;
                 bb.MakeWire(w);
@@ -825,7 +992,11 @@ Result Converter::run() {
                 TopoDS_Shell sh;
                 B.MakeShell(sh);
                 for (auto& f : built) B.Add(sh, f);
-                finishShell(sh, usedRefit ? false : true, "direct");
+                // A skipped degenerate is not a face, so the shell is open.
+                // knownClosed would wrap it as a solid and solidsOut would
+                // count a body ShapeFix rewrites as an OPEN_SHELL.
+                const bool knownClosed = !usedRefit && degenSkipped.load() == 0;
+                finishShell(sh, knownClosed, "direct");
                 return;
             }
             // Repair: sew cracks, then fix face orientation.
@@ -1245,6 +1416,7 @@ Result Converter::run() {
             r.radiusDriftMaxAbs = refitTotals.radiusMaxAbs;
             r.radiusDriftMaxRel = refitTotals.radiusMaxRel;
         }
+        noteMeshTJunctionsAbsorbed(r.input, r.output, meshTJunctionsAbsorbed);
         r.ok = true;
         r.exitCode = warnings.empty() ? 0 : 2;
         return r;
@@ -1340,6 +1512,9 @@ std::string Result::toJson() const {
             edgeClassUnhandled, edgeClassOverTol, edgeClassOverCap, radiusDriftN,
             radiusDriftMaxAbs, radiusDriftMaxRel);
     }
+    const int absorbed = meshTJunctionsAbsorbedOf(input, output);
+    if (absorbed >= 0)
+        jsonAppendFmt(o, ",\"meshTJunctionsAbsorbed\":%d", absorbed);
     o += '}';
     return o;
 }
