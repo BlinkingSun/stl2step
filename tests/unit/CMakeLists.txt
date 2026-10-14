@@ -464,10 +464,37 @@ if(COMMAND stl2step_adhoc_sign)
 endif()
 add_test(NAME tjunction_absorb_test
     COMMAND tjunction_absorb_test
-        "/private/tmp/claude-502/-Users-jroberts/190c9bd1-a710-4598-a7de-b0c9f3c2be7e/scratchpad/fc/heal-r1")
+        "${CMAKE_CURRENT_BINARY_DIR}")
 set_tests_properties(tjunction_absorb_test PROPERTIES
     LABELS "unit;heal"
     TIMEOUT 120)
+
+# fc/contract (D-fc-1.3, D-fc-1.12). relational_extrude_unit pins the shared
+# closed forms. The other three register and return 0 until their lanes fill them.
+foreach(_fc_unit IN ITEMS relational_extrude relational_revolve tesslaw relational_reclaim)
+    add_executable(${_fc_unit}_unit ${_fc_unit}_unit.cpp)
+    target_compile_features(${_fc_unit}_unit PRIVATE cxx_std_17)
+    set_target_properties(${_fc_unit}_unit PROPERTIES
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+    target_link_libraries(${_fc_unit}_unit PRIVATE stl2step::core)
+    target_include_directories(${_fc_unit}_unit PRIVATE
+        "${_stl2step_root}/include"
+        "${_stl2step_root}/src")
+    if(MSVC)
+        target_compile_definitions(${_fc_unit}_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+        target_compile_options(${_fc_unit}_unit PRIVATE /EHsc)
+    endif()
+    if(COMMAND stl2step_adhoc_sign)
+        stl2step_adhoc_sign(${_fc_unit}_unit)
+    endif()
+    add_test(NAME ${_fc_unit}_unit COMMAND ${_fc_unit}_unit)
+    set_tests_properties(${_fc_unit}_unit PROPERTIES
+        LABELS "unit;fc-contract"
+        TIMEOUT 60)
+endforeach()
+unset(_fc_unit)
 
 unset(_stl2step_root)
 unset(_anat)

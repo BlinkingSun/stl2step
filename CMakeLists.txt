@@ -73,6 +73,11 @@ add_library(stl2step_core
     src/refit_ngon.cpp
     src/refit_chamfer_cone.cpp
     src/refit_torus.cpp
+    src/refit_profile_cert.cpp
+    src/refit_relational_extrude.cpp
+    src/refit_relational_revolve.cpp
+    src/refit_relational_reclaim.cpp
+    src/refit_tesslaw.cpp
     src/refit_plane_circle.cpp
     src/refit_prism.cpp
     src/refit_profile.cpp

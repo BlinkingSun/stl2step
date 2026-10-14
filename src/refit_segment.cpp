@@ -25,6 +25,14 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const Derive
 
 bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                 SegmentWork& work);
+bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work);
+bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work);
+bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work, RelRevolveMode mode);
+bool reclaimRelational(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                       SegmentWork& work, RelRevolveMode mode);
 
 namespace {
 
@@ -80,9 +88,19 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
         if (!claimFilletsC1(mv, p, tol, work)) return false;
     }
 
+    // H0 (D-fc-1.3): after C1, before the pre-torus snapshot.
+    if (!claimRelExtrude(mv, p, tol, work)) return false;
+    if (!refuteNgonByLaw(mv, p, tol, work)) return false;
+    if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Line)) return false;
+    if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Line)) return false;
+
     const SegmentWork preTorus = work;
 
     if (!claimToriT(mv, p, tol, work)) return false;
+
+    // H1 (D-fc-1.3): after stage T, before A3. The pre-T snapshot already closed.
+    if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Torus)) return false;
+    if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Torus)) return false;
 
     if (!commitPlanesA3(mv, p, tol, work)) return false;
 

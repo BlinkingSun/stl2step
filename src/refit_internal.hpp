@@ -305,6 +305,15 @@ bool claimNgonWallsA(const MeshView& mv, const SegmentParams& p, const DerivedTo
 bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                         SegmentWork& work, int pass = 2);
 
+// D-fc-1.3 / D-fc-1.12. Wave-1 relational stages. W1.0 definitions are no-op
+// stubs; the owning lane fills each TU. RelRevolveMode selects H0 (Line) or
+// H1 (Torus).
+enum class RelRevolveMode : uint8_t { Line, Torus };
+bool claimRelExtrude (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+bool refuteNgonByLaw (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+bool claimRelRevolve (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
+bool reclaimRelational(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
+
 bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
 
 // --- D-140-8 U-R5..U-R8, U-R13: the same-surface UNION CENSUS -----------------
