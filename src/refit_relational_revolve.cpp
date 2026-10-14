@@ -1,6 +1,8 @@
-// Relational revolve (D-fc-1.3 … 1.7, D-fc-1.10). Line mode claims closed
-// cones; Torus mode claims tori. Axis comes from a donor refit and is not
-// re-fit on the band. Certificate is τ = tauOf(mv). Never throws.
+// Relational revolve (D-fc-1.3 … 1.7, D-fc-1.10, D-fc-3.5). Line mode gathers
+// rings about a certified donor axis and claims closed cones. A 2-station
+// chain whose next rings are a profile circle is why=profile-row. Torus mode
+// is the r4 adjacency growth, unchanged. Axis comes from a donor refit and is
+// not re-fit on the band. Certificate is τ = tauOf(mv). Never throws.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational.hpp"
@@ -14,6 +16,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -214,23 +218,6 @@ double radialMiss(const SurfaceFit& f, const ProfPt& p) {
     return std::fabs(p.z - (f.a + f.b * p.rho));
 }
 
-// ℓ1 of the hat row that maps fitted samples onto the predicted dependent
-// variable at `p`. Constant model: every weight is 1/n, ℓ1 = 1.
-double hatL1(const SurfaceFit& f, const std::vector<ProfPt>& samples, const ProfPt& p) {
-    if (!f.hatOk || samples.empty()) return std::numeric_limits<double>::infinity();
-    if (f.sXX == 0.0 && f.b == 0.0) return 1.0;
-    const double xq = dependentOf(f, p);
-    const double det = f.det;
-    if (!(std::abs(det) > gp::Resolution())) return std::numeric_limits<double>::infinity();
-    double l1 = 0.0;
-    for (const ProfPt& s : samples) {
-        const double xi = dependentOf(f, s);
-        const double h = ((f.sXX - xq * f.sX) + xi * (f.n * xq - f.sX)) / det;
-        l1 += std::abs(h);
-    }
-    return l1;
-}
-
 double extrapOf(double q, double l1) { return q * l1; }
 
 // Perpendicular profile distance from the regression line, so growth and the
@@ -240,13 +227,6 @@ double linePerp(const SurfaceFit& f, const ProfPt& p) {
     if (!std::isfinite(miss)) return miss;
     const double scale = std::sqrt(1.0 + f.b * f.b);
     return miss / scale;
-}
-
-double growTolLine(const SurfaceFit& f, const std::vector<ProfPt>& samples, const ProfPt& p,
-                   double tau, double q) {
-    const double scale = std::sqrt(1.0 + f.b * f.b);
-    const double prop = extrapOf(q, hatL1(f, samples, p)) / scale;
-    return tau + prop;
 }
 
 bool solve3(const double m[3][3], const double rhs[3], double x[3]) {
@@ -471,29 +451,6 @@ ClosedM closedOf(const MeshView& mv, const Frame& f, const std::vector<int>& tri
     return m;
 }
 
-bool stationsConcyclic(const std::vector<ProfPt>& P, double tau, const SurfaceFit& fit) {
-    if (P.empty() || !fit.hatOk) return false;
-    std::vector<ProfPt> s = P;
-    std::sort(s.begin(), s.end(), [](const ProfPt& a, const ProfPt& b) { return a.z < b.z; });
-    std::size_t i = 0;
-    while (i < s.size()) {
-        std::size_t j = i + 1;
-        while (j < s.size() && s[j].z - s[i].z <= tau) ++j;
-        double rMin = s[i].rho, rMax = s[i].rho;
-        for (std::size_t k = i; k < j; ++k) {
-            rMin = std::min(rMin, s[k].rho);
-            rMax = std::max(rMax, s[k].rho);
-        }
-        // A station bin τ wide on a slanted generator moves ρ by |b|·τ.
-        const double allow = tau * std::sqrt(1.0 + fit.b * fit.b) + tau;
-        if (rMax - rMin > allow) return false;
-        for (std::size_t k = i; k < j; ++k)
-            if (linePerp(fit, s[k]) > tau) return false;
-        i = j;
-    }
-    return true;
-}
-
 struct Adj {
     std::vector<std::array<int, 2>> edgeTris;
     std::vector<std::vector<int>> nbr;
@@ -578,6 +535,8 @@ struct DiagRec {
     double span = 0, dihedral = 0, spanTol = 0;
     double tan0 = 0, tan1 = 0;
     int straddle = 0;
+    const char* side0 = "na";
+    const char* side1 = "na";
     const char* why = "underdetermined";
 };
 
@@ -587,11 +546,12 @@ void printBand(const DiagRec& d) {
                  "DIAG_REL_BAND stage=revolve mode=%s seed=%d nTri=%d nV=%d stations=%d "
                  "levels=%d params=%d fit=%s radii=%.8g/%.8g halfAng=%.6f "
                  "axis=%.6g,%.6g,%.6g maxDev=%.6g maxDevTau=%.4f lineResTau=%.4f "
-                 "span=%.6g dihedral=%.6g spanTol=%.6g tan=%.4f,%.4f straddle=%d why=%s\n",
+                 "span=%.6g dihedral=%.6g spanTol=%.6g tan=%.4f,%.4f straddle=%d "
+                 "side0=%s side1=%s why=%s\n",
                  d.mode, d.seed, d.nTri, d.nV, d.stations, d.levels, d.params, d.fit, d.r0,
                  d.r1, d.halfAng, d.axis.X(), d.axis.Y(), d.axis.Z(), d.maxDev, d.maxDevTau,
                  d.lineResTau, d.span, d.dihedral, d.spanTol, d.tan0, d.tan1, d.straddle,
-                 d.why);
+                 d.side0, d.side1, d.why);
 }
 
 void printSum(const char* mode, int donors, int claimed, int refused) {
@@ -617,11 +577,6 @@ int localId(const WorkMesh& wm, int t, int k) {
     const int g = mv.tris[gt][k];
     if (g >= 0 && g < (int)wm.g2l.size() && wm.g2l[g] >= 0) return wm.g2l[g];
     return g;
-}
-
-bool vertOkLine(const SurfaceFit& fit, const std::vector<ProfPt>& samples, const ProfPt& p,
-                double tau, double q) {
-    return linePerp(fit, p) <= growTolLine(fit, samples, p, tau, q);
 }
 
 std::vector<int> frontierOf(const WorkMesh& wm, const Band& b) {
@@ -676,139 +631,12 @@ bool largerSheet(const WorkMesh& wm, const Frame& fr, const Band& band, Band& ex
     return true;
 }
 
-// A line band that is only a subset of a certifyTorus sheet is a fillet
-// chord, not a cone (D-fc-1.6.9). A sheet that is still a line is a cone.
-bool lineIsCircleSubset(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
-    Band ext;
-    if (!largerSheet(wm, fr, band, ext)) return false;
-    if ((int)ext.pts.size() < minStations(kParamsCircle)) return false;
-    if (profileLineMaxResid(ext.pts) <= tau) return false;
-    return certifyTorus(ext.pts, tau).ok;
-}
-
-struct ConeCand {
-    Band band;
-    SurfaceFit fit;
-    ClosedM cl;
-    double maxP = 0;
-};
-
-bool ptsOnCircle(const std::vector<ProfPt>& pts, double Rmaj, double z0, double Rmin, double tau) {
-    if (pts.empty()) return false;
-    for (const ProfPt& p : pts)
-        if (std::fabs(std::hypot(p.rho - Rmaj, p.z - z0) - Rmin) > tau) return false;
-    return true;
-}
-
-// A 2-station line band that grows, through free neighbours, into a
-// certifyTorus profile is one row of that blend (D-fc-1.6.9). A cone that
-// only meets the blend does not lie on the circle, so the grow stops.
-bool rowOfTorus(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
-    const int nTri = (int)wm.mv->nTri;
-    std::vector<char> in((std::size_t)std::max(nTri, 0), 0);
-    for (int t : band.tris)
-        if (t >= 0 && t < nTri) in[(std::size_t)t] = 1;
-    std::vector<ProfPt> pts = band.pts;
-    bool grew = false;
-    for (int guard = 0; guard < nTri; ++guard) {
-        std::vector<int> frnt;
-        for (int t = 0; t < nTri; ++t) {
-            if (!in[(std::size_t)t]) continue;
-            for (int n : wm.adj.nbr[(std::size_t)t]) {
-                if (n < 0 || n >= nTri || in[(std::size_t)n] || !wm.freeTri[(std::size_t)n]) continue;
-                if (sheetOf(*wm.mv, n, fr) != band.sheet) continue;
-                frnt.push_back(n);
-            }
-        }
-        std::sort(frnt.begin(), frnt.end());
-        frnt.erase(std::unique(frnt.begin(), frnt.end()), frnt.end());
-        if (frnt.empty()) break;
-        std::vector<char> infr((std::size_t)nTri, 0);
-        for (int t : frnt) infr[(std::size_t)t] = 1;
-        bool any = false;
-        std::vector<char> seen((std::size_t)nTri, 0);
-        for (int seed : frnt) {
-            if (seen[(std::size_t)seed]) continue;
-            std::vector<int> comp;
-            std::vector<int> stack{seed};
-            seen[(std::size_t)seed] = 1;
-            while (!stack.empty()) {
-                const int t = stack.back();
-                stack.pop_back();
-                comp.push_back(t);
-                for (int n : wm.adj.nbr[(std::size_t)t]) {
-                    if (n < 0 || n >= nTri || !infr[(std::size_t)n] || seen[(std::size_t)n]) continue;
-                    seen[(std::size_t)n] = 1;
-                    stack.push_back(n);
-                }
-            }
-            std::vector<ProfPt> trial = pts;
-            for (int t : comp)
-                for (int k = 0; k < 3; ++k)
-                    trial.push_back(profOfPoint(triVert(*wm.mv, t, k), fr, 0));
-            double Rmaj = 0, z0 = 0, Rmin = 0;
-            if (!fitProfileCircle(trial, tau, Rmaj, z0, Rmin)) continue;
-            if (!ptsOnCircle(trial, Rmaj, z0, Rmin, tau)) continue;
-            pts.swap(trial);
-            for (int t : comp) in[(std::size_t)t] = 1;
-            any = true;
-            grew = true;
-        }
-        if (!any) break;
-    }
-    return grew && certifyTorus(pts, tau).ok;
-}
-
-void markTorusChords(const WorkMesh& wm, const Frame& fr, const std::vector<ConeCand>& cs, double tau,
-                     std::vector<char>& drop) {
-    drop.assign(cs.size(), 0);
-    for (int i = 0; i < (int)cs.size(); ++i)
-        if (rowOfTorus(wm, fr, cs[(std::size_t)i].band, tau)) drop[(std::size_t)i] = 1;
-}
-
 // A torus band that is a strict subset of a sheet certifyTorus refuses is
 // the plate-mouth window (D-fc-1.6.9). The sheet that is the band is kept.
 bool torusIsFailingSubset(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
     Band ext;
     if (!largerSheet(wm, fr, band, ext)) return false;
     return !certifyTorus(ext.pts, tau).ok;
-}
-
-void growLineDrain(WorkMesh& wm, const Frame& fr, Band& band, const std::vector<int>& stamp) {
-    const int nTri = (int)wm.mv->nTri;
-    for (int round = 0; round < wm.maxIter; ++round) {
-        collectBand(*wm.mv, fr, wm.g2l, band);
-        const SurfaceFit fit = fitSurface(band.pts, wm.tau);
-        if (!fit.hatOk || !fit.line) break;
-        bool any = false;
-        for (;;) {
-            std::vector<int> add;
-            for (int t : band.tris) {
-                if (t < 0 || t >= nTri) continue;
-                for (int n : wm.adj.nbr[(std::size_t)t]) {
-                    if (n < 0 || n >= nTri || band.in[(std::size_t)n]) continue;
-                    if (!wm.freeTri[(std::size_t)n] || stamp[(std::size_t)n] != 0) continue;
-                    if (sheetOf(*wm.mv, n, fr) != band.sheet) continue;
-                    bool ok = true;
-                    for (int k = 0; k < 3 && ok; ++k) {
-                        const ProfPt pp = profOfPoint(triVert(*wm.mv, n, k), fr, 0);
-                        if (!vertOkLine(fit, band.pts, pp, wm.tau, wm.q)) ok = false;
-                    }
-                    if (ok) add.push_back(n);
-                }
-            }
-            std::sort(add.begin(), add.end());
-            add.erase(std::unique(add.begin(), add.end()), add.end());
-            if (add.empty()) break;
-            for (int n : add) {
-                band.in[(std::size_t)n] = 1;
-                band.tris.push_back(n);
-            }
-            any = true;
-        }
-        if (!any) break;
-    }
-    collectBand(*wm.mv, fr, wm.g2l, band);
 }
 
 // Torus growth. While the circle fit cannot yet resolve τ (extrapBound > τ),
@@ -1397,6 +1225,624 @@ const char* torusWhy(const TorusCert& c) {
     return "vertex-off";
 }
 
+// One scan per axis. Later donors share it only when the longer axis length
+// makes tanAngTol strict, so a short tilted sliver cannot lock out a real axis.
+struct AxisScan {
+    Frame fr;
+    double length = 0;
+    bool scanned = false;
+};
+
+struct SideFit {
+    bool have = false;
+    double circDev = 0;
+    double lineRes = 0;
+};
+
+void fmtSide(char* buf, int n, const SideFit& s, double tau) {
+    if (!s.have || !(tau > 0.0)) {
+        std::snprintf(buf, (std::size_t)n, "na");
+        return;
+    }
+    if (!std::isfinite(s.circDev))
+        std::snprintf(buf, (std::size_t)n, "circTau=na,lineTau=%.4f", s.lineRes / tau);
+    else
+        std::snprintf(buf, (std::size_t)n, "circTau=%.4f,lineTau=%.4f", s.circDev / tau, s.lineRes / tau);
+}
+
+bool sideIsProfileCircle(const SideFit& s, double tau) {
+    return s.have && std::isfinite(s.circDev) && s.circDev <= tau && s.lineRes > tau;
+}
+
+// D-fc-3.5 line mode. Rings are vertices at equal (ρ, z) within τ, ≥ 3.
+// A band is a maximal collinear chain of those rings. Edge adjacency to the
+// donor is not required.
+void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisScan>& scans,
+                 int& claimed, int& refused) {
+    const MeshView& mv = *wm.mv;
+    const int nTri = (int)mv.nTri;
+    const double tau = wm.tau;
+    if (!(tau > 0.0) || nTri <= 0) return;
+    const double axisLen = std::max(donor.length, tau);
+    for (const AxisScan& s : scans) {
+        const double L = std::max(axisLen, std::max(s.length, tau));
+        if (s.scanned && sameAxis(s.fr, donor.fr, tau, L)) return;
+    }
+    AxisScan scan;
+    scan.fr = donor.fr;
+    scan.length = donor.length;
+    const Frame& fr = donor.fr;
+    int maxV = 0;
+    for (int t = 0; t < nTri; ++t) {
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            const int v = mv.tris[gt][k];
+            if (v > maxV) maxV = v;
+        }
+    }
+    std::vector<double> rhoOf((std::size_t)maxV + 1, 0.0), zOf((std::size_t)maxV + 1, 0.0);
+    std::vector<char> seenV((std::size_t)maxV + 1, 0);
+    std::vector<int> allV;
+    allV.reserve((std::size_t)nTri);
+    for (int t = 0; t < nTri; ++t) {
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            const int v = mv.tris[gt][k];
+            if (v < 0 || v > maxV || seenV[(std::size_t)v]) continue;
+            const ProfPt p = profOfPoint(mv.pts[v], fr, 0);
+            if (!std::isfinite(p.rho) || !std::isfinite(p.z)) continue;
+            seenV[(std::size_t)v] = 1;
+            rhoOf[(std::size_t)v] = p.rho;
+            zOf[(std::size_t)v] = p.z;
+            allV.push_back(v);
+        }
+    }
+
+    struct Cell {
+        int parent = 0;
+        long long kr = 0, kz = 0;
+        double rMin = 0, rMax = 0, zMin = 0, zMax = 0;
+        std::vector<int> verts;
+    };
+    std::vector<Cell> cells;
+    std::map<std::pair<long long, long long>, int> buckets;
+    for (int v : allV) {
+        const double rho = rhoOf[(std::size_t)v];
+        const double z = zOf[(std::size_t)v];
+        const long long kr = std::llround(rho / tau);
+        const long long kz = std::llround(z / tau);
+        const auto key = std::make_pair(kr, kz);
+        auto it = buckets.find(key);
+        int id;
+        if (it == buckets.end()) {
+            id = (int)cells.size();
+            Cell c;
+            c.parent = id;
+            c.kr = kr;
+            c.kz = kz;
+            c.rMin = c.rMax = rho;
+            c.zMin = c.zMax = z;
+            c.verts.push_back(v);
+            cells.push_back(std::move(c));
+            buckets.emplace(key, id);
+        } else {
+            Cell& c = cells[(std::size_t)it->second];
+            c.verts.push_back(v);
+            c.rMin = std::min(c.rMin, rho);
+            c.rMax = std::max(c.rMax, rho);
+            c.zMin = std::min(c.zMin, z);
+            c.zMax = std::max(c.zMax, z);
+        }
+    }
+    auto findCell = [&](int x) {
+        while (cells[(std::size_t)x].parent != x) {
+            cells[(std::size_t)x].parent = cells[(std::size_t)cells[(std::size_t)x].parent].parent;
+            x = cells[(std::size_t)x].parent;
+        }
+        return x;
+    };
+    auto uniteCell = [&](int a, int b) {
+        a = findCell(a);
+        b = findCell(b);
+        if (a == b) return false;
+        const double rMin = std::min(cells[(std::size_t)a].rMin, cells[(std::size_t)b].rMin);
+        const double rMax = std::max(cells[(std::size_t)a].rMax, cells[(std::size_t)b].rMax);
+        const double zMin = std::min(cells[(std::size_t)a].zMin, cells[(std::size_t)b].zMin);
+        const double zMax = std::max(cells[(std::size_t)a].zMax, cells[(std::size_t)b].zMax);
+        if (rMax - rMin > tau || zMax - zMin > tau) return false;
+        cells[(std::size_t)b].parent = a;
+        cells[(std::size_t)a].rMin = rMin;
+        cells[(std::size_t)a].rMax = rMax;
+        cells[(std::size_t)a].zMin = zMin;
+        cells[(std::size_t)a].zMax = zMax;
+        return true;
+    };
+    if (!cells.empty()) {
+        bool changed = true;
+        for (int guard = 0; changed && guard < (int)cells.size() + 2; ++guard) {
+            changed = false;
+            for (int i = 0; i < (int)cells.size(); ++i) {
+                for (int dr = -1; dr <= 1; ++dr) {
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dr == 0 && dz == 0) continue;
+                        const auto it = buckets.find(
+                            std::make_pair(cells[(std::size_t)i].kr + dr, cells[(std::size_t)i].kz + dz));
+                        if (it == buckets.end()) continue;
+                        if (uniteCell(i, it->second)) changed = true;
+                    }
+                }
+            }
+        }
+    }
+    struct Ring {
+        double rho = 0, z = 0;
+        int minV = 0;
+        std::vector<int> verts;
+    };
+    std::vector<Ring> rings;
+    std::vector<int> ringOf((std::size_t)maxV + 1, -1);
+    {
+        std::vector<std::vector<int>> groups(cells.size());
+        for (int i = 0; i < (int)cells.size(); ++i) {
+            const int r = findCell(i);
+            auto& g = groups[(std::size_t)r];
+            g.insert(g.end(), cells[(std::size_t)i].verts.begin(), cells[(std::size_t)i].verts.end());
+        }
+        for (const auto& g : groups) {
+            if ((int)g.size() < 3) continue;
+            Ring ring;
+            ring.minV = g.front();
+            double sr = 0, sz = 0;
+            for (int v : g) {
+                sr += rhoOf[(std::size_t)v];
+                sz += zOf[(std::size_t)v];
+                ring.minV = std::min(ring.minV, v);
+            }
+            ring.rho = sr / (double)g.size();
+            ring.z = sz / (double)g.size();
+            ring.verts = g;
+            rings.push_back(std::move(ring));
+        }
+    }
+    std::sort(rings.begin(), rings.end(), [](const Ring& a, const Ring& b) {
+        if (a.z != b.z) return a.z < b.z;
+        if (a.rho != b.rho) return a.rho < b.rho;
+        return a.minV < b.minV;
+    });
+    for (int i = 0; i < (int)rings.size(); ++i)
+        for (int v : rings[(std::size_t)i].verts)
+            if (v >= 0 && v <= maxV) ringOf[(std::size_t)v] = i;
+    const int nRings = (int)rings.size();
+    auto triRings = [&](int t, int out[3], int& nOut) {
+        nOut = 0;
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            const int v = mv.tris[gt][k];
+            if (v < 0 || v > maxV) continue;
+            const int r = ringOf[(std::size_t)v];
+            if (r < 0) continue;
+            bool dup = false;
+            for (int i = 0; i < nOut; ++i)
+                if (out[i] == r) dup = true;
+            if (!dup && nOut < 3) out[nOut++] = r;
+        }
+    };
+    auto vertOnRing = [&](int t) {
+        int on = 0;
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            const int v = mv.tris[gt][k];
+            if (v >= 0 && v <= maxV && ringOf[(std::size_t)v] >= 0) ++on;
+        }
+        return on;
+    };
+
+    std::vector<std::vector<int>> fullAdj((std::size_t)std::max(nRings, 0));
+    struct Cand {
+        int t = -1;
+        int sheet = 0;
+        int nR = 0;
+        int ids[3] = {-1, -1, -1};
+    };
+    std::vector<Cand> cands;
+    for (int t = 0; t < nTri; ++t) {
+        int ids[3], nIds = 0;
+        triRings(t, ids, nIds);
+        if (nIds >= 2) {
+            for (int a = 0; a < nIds; ++a) {
+                for (int b = a + 1; b < nIds; ++b) {
+                    fullAdj[(std::size_t)ids[a]].push_back(ids[b]);
+                    fullAdj[(std::size_t)ids[b]].push_back(ids[a]);
+                }
+            }
+        }
+        if (!wm.freeTri[(std::size_t)t]) continue;
+        if (vertOnRing(t) < 3 || nIds < 2) continue;
+        const int sh = sheetOf(mv, t, fr);
+        if (sh == 0) continue;
+        Cand c;
+        c.t = t;
+        c.sheet = sh;
+        c.nR = nIds;
+        for (int i = 0; i < nIds; ++i) c.ids[i] = ids[i];
+        cands.push_back(c);
+    }
+    for (auto& nbr : fullAdj) {
+        std::sort(nbr.begin(), nbr.end());
+        nbr.erase(std::unique(nbr.begin(), nbr.end()), nbr.end());
+    }
+
+    struct Edge {
+        int u = 0, v = 0;
+        int minTri = 0;
+        bool used = false;
+        int sheet = 0;
+    };
+    std::vector<Edge> edges;
+    std::map<std::tuple<int, int, int>, int> edgeKey;
+    for (const Cand& c : cands) {
+        for (int a = 0; a < c.nR; ++a) {
+            for (int b = a + 1; b < c.nR; ++b) {
+                int u = c.ids[a], v = c.ids[b];
+                if (u > v) std::swap(u, v);
+                const auto key = std::make_tuple(c.sheet, u, v);
+                auto it = edgeKey.find(key);
+                if (it == edgeKey.end()) {
+                    Edge e;
+                    e.u = u;
+                    e.v = v;
+                    e.sheet = c.sheet;
+                    e.minTri = c.t;
+                    edgeKey.emplace(key, (int)edges.size());
+                    edges.push_back(e);
+                } else if (c.t < edges[(std::size_t)it->second].minTri) {
+                    edges[(std::size_t)it->second].minTri = c.t;
+                }
+            }
+        }
+    }
+    std::vector<std::vector<int>> edgeAt((std::size_t)std::max(nRings, 0));
+    for (int i = 0; i < (int)edges.size(); ++i) {
+        edgeAt[(std::size_t)edges[(std::size_t)i].u].push_back(i);
+        edgeAt[(std::size_t)edges[(std::size_t)i].v].push_back(i);
+    }
+    auto chainCollinear = [&](const std::vector<int>& ids) {
+        if ((int)ids.size() <= 2) return true;
+        std::vector<ProfPt> pts;
+        pts.reserve(ids.size());
+        for (int id : ids) {
+            ProfPt p;
+            p.rho = rings[(std::size_t)id].rho;
+            p.z = rings[(std::size_t)id].z;
+            pts.push_back(p);
+        }
+        return profileLineMaxResid(pts) <= tau;
+    };
+    struct Chain {
+        std::vector<int> rings;
+        std::vector<int> tris;
+        int sheet = 0;
+        int seed = 0;
+    };
+    std::vector<Chain> chains;
+    std::vector<int> edgeOrder(edges.size());
+    for (int i = 0; i < (int)edges.size(); ++i) edgeOrder[(std::size_t)i] = i;
+    std::sort(edgeOrder.begin(), edgeOrder.end(), [&](int a, int b) {
+        if (edges[(std::size_t)a].minTri != edges[(std::size_t)b].minTri)
+            return edges[(std::size_t)a].minTri < edges[(std::size_t)b].minTri;
+        if (edges[(std::size_t)a].u != edges[(std::size_t)b].u)
+            return edges[(std::size_t)a].u < edges[(std::size_t)b].u;
+        return edges[(std::size_t)a].v < edges[(std::size_t)b].v;
+    });
+    for (int ei0 : edgeOrder) {
+        if (edges[(std::size_t)ei0].used) continue;
+        edges[(std::size_t)ei0].used = true;
+        std::vector<int> chain{edges[(std::size_t)ei0].u, edges[(std::size_t)ei0].v};
+        const int sheet = edges[(std::size_t)ei0].sheet;
+        auto grow = [&](bool front) {
+            while ((int)chain.size() >= 2) {
+                const int cur = front ? chain.front() : chain.back();
+                const int prev = front ? chain[1] : chain[(int)chain.size() - 2];
+                int bestE = -1, bestN = -1, bestMin = std::numeric_limits<int>::max();
+                for (int ei : edgeAt[(std::size_t)cur]) {
+                    Edge& e = edges[(std::size_t)ei];
+                    if (e.used || e.sheet != sheet) continue;
+                    const int nxt = (e.u == cur) ? e.v : e.u;
+                    if (nxt == prev) continue;
+                    std::vector<int> trial = chain;
+                    if (front) trial.insert(trial.begin(), nxt);
+                    else trial.push_back(nxt);
+                    if (!chainCollinear(trial)) continue;
+                    if (e.minTri < bestMin || (e.minTri == bestMin && (bestN < 0 || nxt < bestN))) {
+                        bestMin = e.minTri;
+                        bestE = ei;
+                        bestN = nxt;
+                    }
+                }
+                if (bestE < 0) break;
+                edges[(std::size_t)bestE].used = true;
+                if (front) chain.insert(chain.begin(), bestN);
+                else chain.push_back(bestN);
+            }
+        };
+        grow(false);
+        grow(true);
+        std::vector<char> inR((std::size_t)nRings, 0);
+        for (int id : chain)
+            if (id >= 0 && id < nRings) inR[(std::size_t)id] = 1;
+        for (Edge& e : edges)
+            if (e.sheet == sheet && inR[(std::size_t)e.u] && inR[(std::size_t)e.v]) e.used = true;
+        Chain ch;
+        ch.rings = chain;
+        ch.sheet = sheet;
+        for (const Cand& c : cands) {
+            if (c.sheet != sheet || c.nR < 2) continue;
+            bool inside = true;
+            for (int i = 0; i < c.nR; ++i)
+                if (c.ids[i] < 0 || c.ids[i] >= nRings || !inR[(std::size_t)c.ids[i]]) inside = false;
+            if (inside) ch.tris.push_back(c.t);
+        }
+        if (ch.tris.empty()) continue;
+        std::sort(ch.tris.begin(), ch.tris.end());
+        ch.tris.erase(std::unique(ch.tris.begin(), ch.tris.end()), ch.tris.end());
+        ch.seed = minTriOf(ch.tris);
+        chains.push_back(std::move(ch));
+    }
+    std::sort(chains.begin(), chains.end(), [](const Chain& a, const Chain& b) {
+        if (a.seed != b.seed) return a.seed < b.seed;
+        return a.sheet < b.sheet;
+    });
+
+    auto pickNext = [&](int cur, int prev, int extra) {
+        std::vector<int> opts;
+        if (cur < 0 || cur >= nRings) return -1;
+        for (int n : fullAdj[(std::size_t)cur]) {
+            if (n == prev || n == extra) continue;
+            opts.push_back(n);
+        }
+        if (opts.empty()) return -1;
+        if (opts.size() == 1) return opts[0];
+        if (prev < 0 || prev >= nRings) return *std::min_element(opts.begin(), opts.end());
+        const double dx = rings[(std::size_t)cur].rho - rings[(std::size_t)prev].rho;
+        const double dz = rings[(std::size_t)cur].z - rings[(std::size_t)prev].z;
+        int best = -1;
+        double bestF = -1e300;
+        for (int n : opts) {
+            const double fwd = (rings[(std::size_t)n].rho - rings[(std::size_t)cur].rho) * dx +
+                               (rings[(std::size_t)n].z - rings[(std::size_t)cur].z) * dz;
+            if (best < 0 || fwd > bestF || (fwd == bestF && n < best)) {
+                best = n;
+                bestF = fwd;
+            }
+        }
+        if (!(bestF > 0.0)) return -1;
+        return best;
+    };
+    auto measureSide = [&](int end, int other) {
+        SideFit s;
+        const int n1 = pickNext(end, other, -1);
+        if (n1 < 0) return s;
+        const int n2 = pickNext(n1, end, other);
+        if (n2 < 0) return s;
+        const int seq[4] = {other, end, n1, n2};
+        std::vector<ProfPt> pts;
+        pts.reserve(4);
+        for (int id : seq) {
+            if (id < 0 || id >= nRings) return SideFit();
+            ProfPt p;
+            p.rho = rings[(std::size_t)id].rho;
+            p.z = rings[(std::size_t)id].z;
+            pts.push_back(p);
+        }
+        s.have = true;
+        s.lineRes = profileLineMaxResid(pts);
+        double Rmaj = 0, z0 = 0, Rmin = 0;
+        if (!fitProfileCircle(pts, tau, Rmaj, z0, Rmin) || !std::isfinite(Rmin)) {
+            s.circDev = std::numeric_limits<double>::infinity();
+            return s;
+        }
+        s.circDev = 0;
+        for (const ProfPt& p : pts)
+            s.circDev = std::max(s.circDev, std::fabs(std::hypot(p.rho - Rmaj, p.z - z0) - Rmin));
+        return s;
+    };
+
+    for (const Chain& ch : chains) {
+        std::vector<int> live;
+        for (int t : ch.tris)
+            if (t >= 0 && t < nTri && wm.freeTri[(std::size_t)t]) live.push_back(t);
+        if (live.empty()) continue;
+        Band band;
+        band.in.assign((std::size_t)nTri, 0);
+        band.tris = live;
+        band.sheet = ch.sheet;
+        band.seed = minTriOf(live);
+        for (int t : live)
+            if (t >= 0 && t < nTri) band.in[(std::size_t)t] = 1;
+        collectBand(mv, fr, wm.g2l, band);
+        if (band.pts.empty()) continue;
+        const bool two = (int)ch.rings.size() == 2;
+        SideFit s0, s1;
+        if (two) {
+            s0 = measureSide(ch.rings[0], ch.rings[1]);
+            s1 = measureSide(ch.rings[1], ch.rings[0]);
+        }
+        char sideBuf0[96], sideBuf1[96];
+        fmtSide(sideBuf0, (int)sizeof(sideBuf0), s0, tau);
+        fmtSide(sideBuf1, (int)sizeof(sideBuf1), s1, tau);
+        const SurfaceFit fit = fitSurface(band.pts, tau);
+        const ClosedM cl = closedOf(mv, fr, band.tris, band.verts, wm.thetaBin);
+        std::vector<double> zs, psis, rhos;
+        for (const ProfPt& pp : band.pts) {
+            zs.push_back(pp.z);
+            psis.push_back(pp.psi);
+            rhos.push_back(pp.rho);
+        }
+        const int levels = countLevels(zs, tau);
+        const int stations = countProfPts(band.pts, tau);
+        double maxP = 0;
+        for (const ProfPt& pp : band.pts) maxP = std::max(maxP, linePerp(fit, pp));
+        double rLoS = 1e300, rHiS = -1e300;
+        for (int id : ch.rings) {
+            if (id < 0 || id >= nRings) continue;
+            rLoS = std::min(rLoS, rings[(std::size_t)id].rho);
+            rHiS = std::max(rHiS, rings[(std::size_t)id].rho);
+        }
+        auto refuse = [&](const char* why) {
+            ++refused;
+            DiagRec d = baseDiag("line", donor, band, tau);
+            d.stations = stations;
+            d.levels = levels;
+            d.params = kParamsLine;
+            d.maxDev = std::isfinite(maxP) ? maxP : 0;
+            d.maxDevTau = tau > 0 ? d.maxDev / tau : 0;
+            d.lineResTau = (tau > 0 && fit.hatOk) ? fit.orthMax / tau : 0;
+            d.span = cl.span;
+            d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
+            d.halfAng = fit.hatOk ? std::atan(std::fabs(fit.b)) * 180.0 / kPi : 0;
+            d.dihedral = d.halfAng;
+            d.r0 = rLoS;
+            d.r1 = rHiS;
+            d.side0 = sideBuf0;
+            d.side1 = sideBuf1;
+            d.why = why;
+            printBand(d);
+        };
+        if (two && (sideIsProfileCircle(s0, tau) || sideIsProfileCircle(s1, tau))) {
+            refuse("profile-row");
+            continue;
+        }
+        if (stations < 2 || !fit.hatOk) {
+            refuse("underdetermined");
+            continue;
+        }
+        if (!(fit.orthMax <= tau)) {
+            refuse("vertex-off");
+            continue;
+        }
+        double zMin = band.pts[0].z, zMax = zMin, rMin = band.pts[0].rho, rMax = rMin;
+        for (const ProfPt& pp : band.pts) {
+            zMin = std::min(zMin, pp.z);
+            zMax = std::max(zMax, pp.z);
+            rMin = std::min(rMin, pp.rho);
+            rMax = std::max(rMax, pp.rho);
+        }
+        if (zMax - zMin <= tau && rMax - rMin <= tau) {
+            refuse("underdetermined");
+            continue;
+        }
+        if (zMax - zMin <= tau) {
+            refuse("line");
+            continue;
+        }
+        if (rMax - rMin <= tau) {
+            refuse("same-surface");
+            continue;
+        }
+        if (!(maxP <= tau)) {
+            refuse("vertex-off");
+            continue;
+        }
+        if (sameSurfaceFr(wm, work, fr, band, fit, false)) {
+            refuse("same-surface");
+            continue;
+        }
+        if (!cl.closed) {
+            refuse("partial-cone");
+            continue;
+        }
+        {
+            double best = 1e300;
+            gp_XYZ bestR(0, 0, 0);
+            bool have = false;
+            for (const Vtx& v : band.verts) {
+                gp_XYZ rad = v.p - fr.origin;
+                rad -= fr.axis * rad.Dot(fr.axis);
+                const double m = rad.Modulus();
+                if (!(m > gp::Resolution())) continue;
+                rad /= m;
+                const double miss = 1.0 - rad.Dot(donor.fr.e1);
+                if (!have || miss < best) {
+                    best = miss;
+                    bestR = rad;
+                    have = true;
+                }
+            }
+            if (have) donor.fr.e1 = bestR;
+        }
+        double ang0 = 0, ang1 = 0;
+        int straddle = 0;
+        if (!emitCone(wm, work, donor, band, fit, cl, ang0, ang1, straddle)) {
+            refuse("degenerate");
+            continue;
+        }
+        shareSeamFrame(wm, work, donor, band);
+        updateDonor(work, donor);
+        for (int t : band.tris)
+            if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+        ++claimed;
+        DiagRec d = baseDiag("line", donor, band, tau);
+        d.stations = stations;
+        d.levels = levels;
+        d.params = kParamsLine;
+        d.maxDev = maxP;
+        d.maxDevTau = tau > 0 ? maxP / tau : 0;
+        d.lineResTau = tau > 0 ? fit.orthMax / tau : 0;
+        d.span = cl.span;
+        d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
+        d.halfAng = std::atan(std::fabs(fit.b)) * 180.0 / kPi;
+        d.dihedral = d.halfAng;
+        d.r0 = work.accepted.back().radius;
+        d.r1 = work.accepted.back().vMax;
+        d.tan0 = ang0;
+        d.tan1 = ang1;
+        d.straddle = straddle;
+        d.side0 = sideBuf0;
+        d.side1 = sideBuf1;
+        d.why = "accept";
+        printBand(d);
+    }
+
+    // Triangles with some, but not all, vertices on rings are not a line band.
+    // Score them (the elliptical cap) and do not claim them.
+    std::vector<char> mixed((std::size_t)nTri, 0), seenT((std::size_t)nTri, 0);
+    for (int t = 0; t < nTri; ++t) {
+        if (!wm.freeTri[(std::size_t)t]) continue;
+        const int on = vertOnRing(t);
+        if (on > 0 && on < 3) mixed[(std::size_t)t] = 1;
+    }
+    for (int t = 0; t < nTri; ++t) {
+        if (!mixed[(std::size_t)t] || seenT[(std::size_t)t]) continue;
+        std::vector<int> comp, stack{t};
+        seenT[(std::size_t)t] = 1;
+        while (!stack.empty()) {
+            const int c = stack.back();
+            stack.pop_back();
+            comp.push_back(c);
+            for (int n : wm.adj.nbr[(std::size_t)c]) {
+                if (n < 0 || n >= nTri || !mixed[(std::size_t)n] || seenT[(std::size_t)n]) continue;
+                seenT[(std::size_t)n] = 1;
+                stack.push_back(n);
+            }
+        }
+        Band band;
+        band.in.assign((std::size_t)nTri, 0);
+        band.tris = std::move(comp);
+        band.seed = minTriOf(band.tris);
+        for (int c : band.tris)
+            if (c >= 0 && c < nTri) band.in[(std::size_t)c] = 1;
+        collectBand(mv, fr, wm.g2l, band);
+        ++refused;
+        DiagRec d = baseDiag("line", donor, band, tau);
+        d.params = kParamsLine;
+        d.why = "vertex-off";
+        printBand(d);
+    }
+
+    scan.scanned = true;
+    scans.push_back(scan);
+}
+
 }  // namespace
 
 bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -1522,14 +1968,18 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
         std::vector<int> stamp(nTri, 0);
         std::vector<char> hold((std::size_t)std::max(nTri, 0), 0);
         int stampGen = 0;
+        std::vector<AxisScan> axisScans;
 
         for (Donor& donor : donors) {
+            if (mode != RelRevolveMode::Torus) {
+                gatherLines(wm, work, donor, axisScans, claimed, refused);
+                continue;
+            }
             // A failed band on one donor is not a refusal on another axis.
             // Held triangles are rows of a blend already refused as cones.
             for (int t = 0; t < nTri; ++t)
                 stamp[(std::size_t)t] = hold[(std::size_t)t] ? 1 : 0;
             stampGen = 1;
-            std::vector<ConeCand> cands;
             // The candidate set is every free triangle reachable from the
             // donor without crossing an accepted triangle. A cone that meets
             // the donor only through an unclaimed blend is in this set; growth
@@ -1589,9 +2039,7 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 band.in[(std::size_t)seed] = 1;
                 collectBand(mv, donor.fr, wm.g2l, band);
 
-                const bool wantTorus = mode == RelRevolveMode::Torus;
-                if (!wantTorus) growLineDrain(wm, donor.fr, band, stamp);
-                else growTorusDrain(wm, donor.fr, band, stamp);
+                growTorusDrain(wm, donor.fr, band, stamp);
 
                 collectBand(mv, donor.fr, wm.g2l, band);
                 if (band.tris.empty()) continue;
@@ -1624,8 +2072,8 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     DiagRec d = baseDiag(modeName, donor, band, tau);
                     d.stations = stations;
                     d.levels = levels;
-                    d.params = wantTorus ? kParamsCircle : kParamsLine;
-                    d.maxDev = wantTorus ? fit.circMax : fit.orthMax;
+                    d.params = kParamsCircle;
+                    d.maxDev = fit.circMax;
                     d.maxDevTau = tau > 0 ? d.maxDev / tau : 0;
                     d.lineResTau = tau > 0 ? fit.orthMax / tau : 0;
                     d.span = cl.span;
@@ -1639,85 +2087,6 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     }
                     printBand(d);
                 };
-
-                if (!wantTorus) {
-                    if (stations < 2 || !fit.hatOk) {
-                        stampFail("underdetermined");
-                        continue;
-                    }
-                    if (!(fit.orthMax <= tau)) {
-                        stampFail("vertex-off");
-                        continue;
-                    }
-                    double zMin = band.pts[0].z, zMax = zMin, rMin = band.pts[0].rho, rMax = rMin;
-                    for (const ProfPt& pp : band.pts) {
-                        zMin = std::min(zMin, pp.z);
-                        zMax = std::max(zMax, pp.z);
-                        rMin = std::min(rMin, pp.rho);
-                        rMax = std::max(rMax, pp.rho);
-                    }
-                    const double zSpan = zMax - zMin;
-                    const double rSpan = rMax - rMin;
-                    if (zSpan <= tau && rSpan <= tau) {
-                        stampFail("underdetermined");
-                        continue;
-                    }
-                    if (zSpan <= tau) {
-                        stampFail("line");
-                        continue;
-                    }
-                    if (rSpan <= tau) {
-                        stampFail("same-surface");
-                        continue;
-                    }
-                    // Two stations are a cone only when each is a τ-ring.
-                    // Three or more still have to be concyclic stations.
-                    if (stations < minStations(kParamsLine) && stations < 2) {
-                        stampFail("underdetermined");
-                        continue;
-                    }
-                    if (stations == 2 || stations < minStations(kParamsLine)) {
-                        if (stations < 2 || !stationsConcyclic(band.pts, tau, fit)) {
-                            stampFail("underdetermined");
-                            continue;
-                        }
-                    }
-                    if (!stationsConcyclic(band.pts, tau, fit)) {
-                        stampFail("vertex-off");
-                        continue;
-                    }
-                    if (lineIsCircleSubset(wm, donor.fr, band, tau)) {
-                        stampFail("line");
-                        continue;
-                    }
-                    if (sameSurfaceFr(wm, work, donor.fr, band, fit, false)) {
-                        stampFail("same-surface");
-                        continue;
-                    }
-                    double maxP = 0;
-                    for (const ProfPt& pp : band.pts) maxP = std::max(maxP, linePerp(fit, pp));
-                    if (maxP > tau) {
-                        stampFail("vertex-off");
-                        continue;
-                    }
-                    if (!cl.closed) {
-                        stampFail("partial-cone");
-                        continue;
-                    }
-                    ConeCand cand;
-                    cand.band = band;
-                    cand.fit = fit;
-                    cand.cl = cl;
-                    cand.maxP = maxP;
-                    cands.push_back(std::move(cand));
-                    const int g = ++stampGen;
-                    for (int t : band.tris)
-                        if (t >= 0 && t < nTri) {
-                            stamp[(std::size_t)t] = g;
-                            hold[(std::size_t)t] = 1;
-                        }
-                    continue;
-                }
 
                 // Torus mode. Line class was claimed, or refused, in Line mode.
                 if (fit.line && fit.orthMax <= tau) {
@@ -1768,81 +2137,6 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 d.why = "accept";
                 d.nV = (int)band.pts.size();
                 printBand(d);
-            }
-            if (!cands.empty()) {
-                std::vector<char> drop;
-                markTorusChords(wm, donor.fr, cands, tau, drop);
-                for (int i = 0; i < (int)cands.size(); ++i) {
-                    ConeCand& cand = cands[(std::size_t)i];
-                    if (!drop.empty() && drop[(std::size_t)i]) {
-                        ++refused;
-                        DiagRec d = baseDiag(modeName, donor, cand.band, tau);
-                        d.stations = countProfPts(cand.band.pts, tau);
-                        d.levels = d.stations;
-                        d.params = kParamsLine;
-                        d.maxDev = cand.maxP;
-                        d.maxDevTau = tau > 0 ? cand.maxP / tau : 0;
-                        d.lineResTau = tau > 0 ? cand.fit.orthMax / tau : 0;
-                        d.span = cand.cl.span;
-                        d.halfAng = std::atan(std::abs(cand.fit.b)) * 180.0 / kPi;
-                        d.why = "line";
-                        printBand(d);
-                        continue;
-                    }
-                    // The cone pcurve treats the rim circle's first parameter as
-                    // cone-u. A vertex a hair on the negative side of X is stored
-                    // as 2π − ε and the pcurve doubles it. Put X through a band
-                    // vertex so that parameter is 0.
-                    {
-                        double best = 1e300;
-                        gp_XYZ bestR(0, 0, 0);
-                        bool have = false;
-                        for (const Vtx& v : cand.band.verts) {
-                            gp_XYZ rad = v.p - donor.fr.origin;
-                            rad -= donor.fr.axis * rad.Dot(donor.fr.axis);
-                            const double m = rad.Modulus();
-                            if (!(m > gp::Resolution())) continue;
-                            rad /= m;
-                            const double miss = 1.0 - rad.Dot(donor.fr.e1);
-                            if (!have || miss < best) {
-                                best = miss;
-                                bestR = rad;
-                                have = true;
-                            }
-                        }
-                        if (have) donor.fr.e1 = bestR;
-                    }
-                    double ang0 = 0, ang1 = 0;
-                    int straddle = 0;
-                    if (!emitCone(wm, work, donor, cand.band, cand.fit, cand.cl, ang0, ang1,
-                                  straddle)) {
-                        ++refused;
-                        continue;
-                    }
-                    shareSeamFrame(wm, work, donor, cand.band);
-                    updateDonor(work, donor);
-                    for (int t : cand.band.tris)
-                        if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
-                    ++claimed;
-                    DiagRec d = baseDiag(modeName, donor, cand.band, tau);
-                    d.stations = countProfPts(cand.band.pts, tau);
-                    d.levels = d.stations;
-                    d.params = kParamsLine;
-                    d.maxDev = cand.maxP;
-                    d.maxDevTau = tau > 0 ? cand.maxP / tau : 0;
-                    d.lineResTau = tau > 0 ? cand.fit.orthMax / tau : 0;
-                    d.span = cand.cl.span;
-                    d.spanTol = (cand.cl.nBands > 0) ? 1.5 * kTwoPi / cand.cl.nBands : 0;
-                    d.halfAng = std::atan(std::abs(cand.fit.b)) * 180.0 / kPi;
-                    d.dihedral = d.halfAng;
-                    d.r0 = work.accepted.back().radius;
-                    d.r1 = work.accepted.back().vMax;
-                    d.tan0 = ang0;
-                    d.tan1 = ang1;
-                    d.straddle = straddle;
-                    d.why = "accept";
-                    printBand(d);
-                }
             }
         }
         printSum(modeName, (int)donors.size(), claimed, refused + refusedDonors);

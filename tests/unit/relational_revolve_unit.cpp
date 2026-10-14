@@ -509,19 +509,17 @@ static void caseWedge() {
     auto top = ring(p.mesh, 5.0, 6.0, N);
     std::vector<int> donorTris, cap;
     band(p.mesh, bot, top, N, donorTris);
-    const int c = p.mesh.add(0, 0, 6.0);
-    for (int i = 0; i < N; ++i) {
-        const int t = (int)(p.mesh.triFlat.size() / 3);
-        p.mesh.addTri(top[(std::size_t)i], top[(std::size_t)((i + 1) % N)], c);
-        cap.push_back(t);
-    }
-    // Elliptical cap: a second ring, constant z, radii of an ellipse, tied to `top`.
+    // Elliptical cap shares each rim edge with the donor wall and nothing else.
+    // A center fan on that edge used to fill both adjacency slots, so the cap
+    // was never scored.
     std::vector<int> ell;
     for (int i = 0; i < N; ++i) {
         const double th = kPi * 2.0 * (double)i / (double)N;
         const double rho = (4.0 * 7.0) / std::sqrt(std::pow(7.0 * std::cos(th), 2.0) +
                                                    std::pow(4.0 * std::sin(th), 2.0));
-        ell.push_back(p.mesh.add(rho * std::cos(th), rho * std::sin(th), 6.4));
+        // Stagger z so no three ellipse vertices share (ρ, z). An axis-aligned
+        // ellipse repeats ρ four times; those vertices would be a ring.
+        ell.push_back(p.mesh.add(rho * std::cos(th), rho * std::sin(th), 6.4 + 0.05 * (double)i));
     }
     band(p.mesh, top, ell, N, cap);
     p.mesh.finish();
@@ -542,10 +540,217 @@ static void caseWedge() {
     SegmentParams sp;
     DerivedTols tol;
     params(sp, tol, 1);
+    Grab g;
     claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
     claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Torus);
+    const std::string diag = g.stop();
     expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 0, "wedge claims no cone");
     expect(countType(p.work, SurfType::Torus, Origin::TorusBlend) == 0, "wedge claims no torus");
+    expect(hasWhy(diag, "vertex-off"), "wedge cap scored");
+    expect(diag.find("nTri=16") != std::string::npos, "wedge cap triangle count");
+    if (!hasWhy(diag, "vertex-off")) std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+}
+
+static void addCyl(Part& p, std::vector<int> tris, double R, double zMid) {
+    Region d;
+    d.id = 0;
+    d.type = SurfType::Cylinder;
+    d.origin = Origin::CylGrow;
+    d.ax = gp_Ax3(gp_Pnt(0, 0, zMid), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    d.radius = R;
+    d.closed360 = true;
+    d.tris = std::move(tris);
+    d.maxVertexDev = 0;
+    p.work.accepted.push_back(std::move(d));
+}
+
+static void caseProfileRow() {
+    const char* names[] = {"unclaimed", "pending-torus", "consumed-cylinder"};
+    const ProvClaim claims[] = {ProvClaim::Unclaimed, ProvClaim::PendingTorus,
+                                ProvClaim::ConsumedCylinder};
+    for (int run = 0; run < 3; ++run) {
+        Part p;
+        const int N = 16;
+        const int nRing = 6;
+        const double Rmaj = 20.0, rad = 3.0;
+        const double phi0 = kPi, phi1 = 0.5 * kPi;
+        std::vector<std::vector<int>> rings;
+        for (int j = 0; j < nRing; ++j) {
+            const double t = (double)j / (double)(nRing - 1);
+            const double phi = phi0 + t * (phi1 - phi0);
+            rings.push_back(ring(p.mesh, Rmaj + rad * std::cos(phi), rad * std::sin(phi), N));
+        }
+        const double rho0 = Rmaj + rad * std::cos(phi0);
+        const double z0 = rad * std::sin(phi0);
+        auto lower = ring(p.mesh, rho0, z0 - 5.0, N);
+        std::vector<int> donorTris, mid, nbr;
+        band(p.mesh, lower, rings[0], N, donorTris);
+        for (int j = 0; j + 1 < nRing; ++j) {
+            std::vector<int>& dest = (j == 2) ? mid : nbr;
+            band(p.mesh, rings[(std::size_t)j], rings[(std::size_t)j + 1], N, dest);
+        }
+        p.mesh.finish();
+        addCyl(p, donorTris, rho0, z0 - 2.5);
+        Provisional a;
+        a.claim = ProvClaim::Unclaimed;
+        a.tris = mid;
+        p.work.provisionals.push_back(a);
+        Provisional b;
+        b.claim = claims[run];
+        b.tris = nbr;
+        p.work.provisionals.push_back(b);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        const std::string diag = g.stop();
+        const std::string label = std::string("profile-row ") + names[run];
+        expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 0, label.c_str());
+        expect(hasWhy(diag, "profile-row"), label.c_str());
+        if (!hasWhy(diag, "profile-row")) std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+    }
+}
+
+static void caseCreaseFrustum() {
+    Part p;
+    const int N = 16;
+    auto b0 = ring(p.mesh, 10.0, -6.0, N);
+    auto b1 = ring(p.mesh, 10.0, -3.0, N);
+    auto b2 = ring(p.mesh, 10.0, 0.0, N);
+    auto t0 = ring(p.mesh, 14.0, 4.0, N);
+    auto t1 = ring(p.mesh, 14.0, 7.0, N);
+    auto t2 = ring(p.mesh, 14.0, 10.0, N);
+    std::vector<int> lower, fr, upper;
+    band(p.mesh, b0, b1, N, lower);
+    band(p.mesh, b1, b2, N, lower);
+    band(p.mesh, b2, t0, N, fr);
+    band(p.mesh, t0, t1, N, upper);
+    band(p.mesh, t1, t2, N, upper);
+    p.mesh.finish();
+    addCyl(p, lower, 10.0, -3.0);
+    addCyl(p, upper, 14.0, 7.0);
+    Provisional pr;
+    pr.tris = fr;
+    p.work.provisionals.push_back(pr);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    Grab g;
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+    const std::string diag = g.stop();
+    const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+    expect(c != nullptr, "crease cone");
+    expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 1, "crease one cone");
+    if (!c) {
+        std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+        return;
+    }
+    expect(c->closed360, "crease closed");
+    expect(std::fabs(c->radius - 10.0) <= tauOf(mv), "crease Rlo");
+    expect(std::fabs(c->vMax - 14.0) <= tauOf(mv), "crease Rhi");
+    const double ang = std::atan((c->vMax - c->radius) / std::fabs(c->maxVertexSnap)) * 180.0 / kPi;
+    expect(std::fabs(ang - 45.0) <= 1e-4, "crease 45");
+    expect(!hasWhy(diag, "profile-row"), "crease is not a profile row");
+}
+
+static void caseGapFunnel() {
+    Part p;
+    const int N = 16;
+    auto d0 = ring(p.mesh, 10.0, -4.0, N);
+    auto d1 = ring(p.mesh, 10.0, 0.0, N);
+    auto g1 = ring(p.mesh, 12.0, 2.0, N);
+    auto f1 = ring(p.mesh, 18.0, 10.0, N);
+    std::vector<int> donor, gap, fun;
+    band(p.mesh, d0, d1, N, donor);
+    band(p.mesh, d1, g1, N, gap);
+    band(p.mesh, g1, f1, N, fun);
+    p.mesh.finish();
+    addCyl(p, donor, 10.0, -2.0);
+    Provisional g;
+    g.claim = ProvClaim::ConsumedCylinder;
+    g.tris = gap;
+    p.work.provisionals.push_back(g);
+    Provisional u;
+    u.tris = fun;
+    p.work.provisionals.push_back(u);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+    const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+    expect(c != nullptr, "gap funnel cone");
+    expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 1, "gap funnel one");
+    if (!c) return;
+    expect(c->closed360, "gap funnel closed");
+    expect((int)c->tris.size() == (int)fun.size(), "gap funnel triangles");
+    expect(c->maxVertexDev <= tauOf(mv), "gap funnel within tau");
+}
+
+static void caseBlendBesideCone() {
+    Part p;
+    const int N = 16;
+    auto c0 = ring(p.mesh, 10.0, -4.0, N);
+    auto c1 = ring(p.mesh, 10.0, 0.0, N);
+    auto c2 = ring(p.mesh, 14.0, 4.0, N);
+    auto at = [&](double deg) {
+        const double phi = deg * kPi / 180.0;
+        return ring(p.mesh, 16.0 + 2.0 * std::cos(phi), 4.0 + 2.0 * std::sin(phi), N);
+    };
+    // Six stations on the circle. Every blend pair then has two further rings
+    // on the circle on at least one side, so each pair is a profile row.
+    auto t1 = at(150.0);
+    auto t2 = at(120.0);
+    auto t3 = at(90.0);
+    auto t4 = at(60.0);
+    auto t5 = at(30.0);
+    std::vector<int> donor, cone, blend;
+    band(p.mesh, c0, c1, N, donor);
+    band(p.mesh, c1, c2, N, cone);
+    band(p.mesh, c2, t1, N, blend);
+    band(p.mesh, t1, t2, N, blend);
+    band(p.mesh, t2, t3, N, blend);
+    band(p.mesh, t3, t4, N, blend);
+    band(p.mesh, t4, t5, N, blend);
+    p.mesh.finish();
+    addCyl(p, donor, 10.0, -2.0);
+    Provisional pr;
+    pr.tris = cone;
+    pr.tris.insert(pr.tris.end(), blend.begin(), blend.end());
+    p.work.provisionals.push_back(pr);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    Grab g;
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+    const std::string diag = g.stop();
+    const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+    expect(c != nullptr, "blend-side cone");
+    expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 1, "blend-side one cone");
+    expect(hasWhy(diag, "profile-row"), "blend edge row refused");
+    if (!c) {
+        std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+        return;
+    }
+    expect((int)c->tris.size() == (int)cone.size(), "cone does not take the blend row");
+    expect(c->maxVertexDev <= tauOf(mv), "blend-side cone within tau");
+}
+
+static void caseThreeRing() {
+    Part p = frustum(12, 3, 12, 8.0, 0.0, 14.0, 6.0, 4.0, false);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+    expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 1, "three-ring one cone");
+    const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+    expect(c != nullptr && (int)c->tris.size() == (int)p.feature.size(), "three-ring takes every station");
+    if (c) expect(c->closed360, "three-ring closed");
 }
 
 static void snapshot(const Region& c, double& Rlo, double& Rhi, double& h, int& n, double& vol) {
@@ -586,6 +791,11 @@ int main() {
     casePartial();
     caseBadDonor();
     caseWedge();
+    caseProfileRow();
+    caseCreaseFrustum();
+    caseGapFunnel();
+    caseBlendBesideCone();
+    caseThreeRing();
     caseThreads();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
