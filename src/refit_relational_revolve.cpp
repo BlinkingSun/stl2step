@@ -1263,9 +1263,13 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
     const int nTri = (int)mv.nTri;
     const double tau = wm.tau;
     if (!(tau > 0.0) || nTri <= 0) return;
+    // A later donor shares this gather only when its axis stays inside τ over
+    // the whole mesh. Donor length alone is too short: a sliver's angle
+    // tolerance swings a distant ring by many τ.
     const double axisLen = std::max(donor.length, tau);
+    const double reach = std::max(mv.diag, axisLen);
     for (const AxisScan& s : scans) {
-        const double L = std::max(axisLen, std::max(s.length, tau));
+        const double L = std::max(reach, std::max(s.length, tau));
         if (s.scanned && sameAxis(s.fr, donor.fr, tau, L)) return;
     }
     AxisScan scan;
@@ -1768,7 +1772,14 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     have = true;
                 }
             }
-            if (have) donor.fr.e1 = bestR;
+            if (have) {
+                // ρ is hypot(d·e1, d·e2). A later chain in this gather reads the
+                // same donor frame, so e2 has to stay the complement of e1.
+                donor.fr.e1 = bestR;
+                gp_XYZ e2 = donor.fr.axis.Crossed(donor.fr.e1);
+                const double em = e2.Modulus();
+                if (em > gp::Resolution()) donor.fr.e2 = e2 / em;
+            }
         }
         double ang0 = 0, ang1 = 0;
         int straddle = 0;
