@@ -954,41 +954,6 @@ void pushCircleRoots(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& cR, const 
     consider((-B - s) / (2.0 * A));
 }
 
-bool densestRadius(std::vector<double> roots, double tau, double& rOut) {
-    if (roots.empty()) return false;
-    std::sort(roots.begin(), roots.end());
-    bool any = false;
-    int bestN = 0;
-    double bestMed = 0.0;
-    int j = 0;
-    const int n = (int)roots.size();
-    for (int i = 0; i < n; ++i) {
-        while (j < i && roots[(std::size_t)i] - roots[(std::size_t)j] > 2.0 * tau) ++j;
-        const int nw = i - j + 1;
-        const int mid = j + nw / 2;
-        const double med = (nw % 2) ? roots[(std::size_t)mid]
-                                     : 0.5 * (roots[(std::size_t)mid - 1] + roots[(std::size_t)mid]);
-        if (!any || nw > bestN || (nw == bestN && med < bestMed)) {
-            any = true;
-            bestN = nw;
-            bestMed = med;
-        }
-    }
-    if (!any) return false;
-    rOut = bestMed;
-    return true;
-}
-
-bool shareRadiusWindow(const std::vector<double>& a, const std::vector<double>& b, double tau) {
-    if (a.empty() || b.empty()) return false;
-    std::size_t j = 0;
-    for (double ra : a) {
-        while (j < b.size() && b[j] < ra - 2.0 * tau) ++j;
-        if (j < b.size() && b[j] <= ra + 2.0 * tau) return true;
-    }
-    return false;
-}
-
 }  // namespace
 
 bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -1069,7 +1034,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             int minTri;
         };
         std::vector<ARef> arefs;
-        std::vector<std::vector<int>> boundary((std::size_t)nProv);
         for (int pi = 0; pi < nProv; ++pi) {
             const Provisional& pr = work.provisionals[pi];
             if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) continue;
@@ -1078,23 +1042,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             ar.prov = pi;
             ar.minTri = minTriOf(pr.tris);
             arefs.push_back(ar);
-            std::vector<int> ids;
-            for (int t : pr.tris) {
-                if (t < 0 || t >= nTri) continue;
-                for (int s = 0; s < 3; ++s) {
-                    const int e = mv.triEdges[t][s];
-                    const int ot = otherTri(e, t);
-                    const int op = (ot >= 0 && ot < nTri) ? triProv[ot] : -1;
-                    if (op == pi) continue;
-                    for (int k = 0; k < 2; ++k) {
-                        const int lv = cornerLocal(g2l, mv, t, (s + k) % 3);
-                        if (lv >= 0) ids.push_back(lv);
-                    }
-                }
-            }
-            std::sort(ids.begin(), ids.end());
-            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-            boundary[(std::size_t)pi] = std::move(ids);
         }
         std::sort(arefs.begin(), arefs.end(), [](const ARef& a, const ARef& b) {
             if (a.minTri != b.minTri) return a.minTri < b.minTri;
@@ -1418,22 +1365,12 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n) + sA, B.p0.Dot(B.n) + sB, 0.0, c1))
                         continue;
                     const gp_XYZ cR = c1 - c0;
-
-                    auto rootsOf = [&](const std::vector<int>& vids, std::vector<double>& roots) {
-                        roots.clear();
-                        for (int lv : vids) {
-                            if (lv < 0 || lv >= nVtx) continue;
-                            const int g = mv.compVtx ? mv.compVtx[lv] : lv;
-                            pushCircleRoots(mv.pts[g], c0, cR, axis0, tau, roots);
-                        }
-                        std::sort(roots.begin(), roots.end());
-                    };
-                    std::vector<double> rootsA, rootsB;
-                    if (A.prov >= 0 && A.prov < nProv)
-                        rootsOf(boundary[(std::size_t)A.prov], rootsA);
-                    if (B.prov >= 0 && B.prov < nProv)
-                        rootsOf(boundary[(std::size_t)B.prov], rootsB);
-                    if (!shareRadiusWindow(rootsA, rootsB, tau)) continue;
+                    // Boundary-window pruning is not lossless here. On the plate the
+                    // accepting E1/E2 sides have no shared 2τ root among the two anchors'
+                    // boundary vertices (the 140.7τ flank's contact vertex is not within
+                    // τ of the fillet circle), while the interior vertices still vote one
+                    // radius. Every solved side is evaluated. D-fc-3.2 requires the prune
+                    // to be lossless, so the lossy skip is not applied.
                     ++nEvalSides;
 
                     int guard = 0;
@@ -1465,10 +1402,69 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                             emitDiag(dg);
                             tallyWhy(yc, why);
                         };
-                        if (!densestRadius(roots, tau, rHyp)) {
-                            finish("degenerate");
-                            break;
+                        // Hypothesis, one per pair-side (D-fc-3.2.3, prototype _vote_radius).
+                        // Admissible roots are clustered into 2τ windows. A window is scored
+                        // by how many candidate vertices lie within τ of its median circle.
+                        // The densest root cluster can be a spurious quadratic mode, so the
+                        // score is the geometric inlier count, not the root count. The
+                        // maximum score is the hypothesis. A later certificate refusal ends
+                        // the side: the window is not replaced.
+                        {
+                            std::vector<double> pool = roots;
+                            std::sort(pool.begin(), pool.end());
+                            bool any = false;
+                            int bestIn = -1;
+                            double bestR = 0.0;
+                            // Five residual modes, as _vote_radius. Not a geometric tolerance:
+                            // hypothesis selection only. A certificate refusal still ends the side.
+                            for (int mode = 0; mode < 5; ++mode) {
+                                const int n = (int)pool.size();
+                                if (n <= 0) break;
+                                int j = 0, bn = 0, bj = 0, bi = 0;
+                                for (int i = 0; i < n; ++i) {
+                                    while (pool[(std::size_t)i] - pool[(std::size_t)j] > 2.0 * tau)
+                                        ++j;
+                                    const int nw = i - j + 1;
+                                    if (nw > bn) {
+                                        bn = nw;
+                                        bj = j;
+                                        bi = i;
+                                    }
+                                }
+                                if (bn <= 0) break;
+                                const int mid = bj + bn / 2;
+                                const double rmed =
+                                    (bn % 2) != 0
+                                        ? pool[(std::size_t)mid]
+                                        : 0.5 * (pool[(std::size_t)mid - 1] + pool[(std::size_t)mid]);
+                                const gp_XYZ hc = c0 + cR * rmed;
+                                int nIn = 0;
+                                std::vector<int> seen(nVtx, 0);
+                                for (int t = 0; t < nTri; ++t) {
+                                    if (!candidate(t)) continue;
+                                    for (int k = 0; k < 3; ++k) {
+                                        const int lv = cornerLocal(g2l, mv, t, k);
+                                        if (lv < 0 || lv >= nVtx || seen[lv]) continue;
+                                        seen[lv] = 1;
+                                        const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                                        if (std::abs(radialDist(mv.pts[g], hc, axis0) - rmed) <= tau)
+                                            ++nIn;
+                                    }
+                                }
+                                if (!any || nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
+                                    any = true;
+                                    bestIn = nIn;
+                                    bestR = rmed;
+                                }
+                                pool.erase(pool.begin() + bj, pool.begin() + bi + 1);
+                            }
+                            if (!any || bestIn <= 0) {
+                                finish("degenerate");
+                                break;
+                            }
+                            rHyp = bestR;
                         }
+                        dg.radius = rHyp;
                         gp_XYZ axis = axis0;
                         gp_XYZ center = c0 + cR * rHyp;
                         double radius = rHyp;
