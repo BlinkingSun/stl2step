@@ -148,6 +148,11 @@ struct Sidecar {
     std::vector<Recoverable> recoverable;
     std::vector<FacetedRegion> mustRemainFaceted;
     std::vector<std::string> expectedRejects;
+    // The gate's `rejected` key (check_regionset reads it; it never reads
+    // expectedRejects). false omits the key so every other sidecar stays
+    // byte-identical; true writes the list even when it is empty.
+    bool emitRejected = false;
+    std::vector<std::string> rejected;
     bool expectFillet = false;
     std::string rLadderRole;  // S16 sub-fixtures only
     // Authored-mesh manifold (after coincident-vertex weld). S15 is dirty on
@@ -547,6 +552,14 @@ inline std::string writeSidecarJson(const Sidecar& s) {
         os << "\"" << s.expectedRejects[i] << "\"";
     }
     os << "],\n";
+    if (s.emitRejected) {
+        os << "  \"rejected\": [";
+        for (size_t i = 0; i < s.rejected.size(); ++i) {
+            if (i) os << ", ";
+            os << "\"" << s.rejected[i] << "\"";
+        }
+        os << "],\n";
+    }
     if (!s.intersections.empty()) {
         os << "  \"intersections\": [\n";
         for (size_t i = 0; i < s.intersections.size(); ++i) {

@@ -3099,6 +3099,9 @@ FixtureResult buildS27() {
     // CLOSURES 2026-10-15 21:10 (ruling F1(b)): no `expectedRejects: sphereNYI`.
     // S27 is a new fixture and its sidecar is being calibrated: the engine files
     // no reject for the octant (rejected=[]). The guard is mustRemainFaceted.
+    // CLOSURES 2026-10-15 22:20 (ruling C): write that explicitly as
+    // `"rejected": []`, which overrides the gate's "sphere" name heuristic.
+    sc.emitRejected = true;
     sc.exactVolume = exactVolumeS27();
     certifyExactVolume(solid, sc.exactVolume, "S27");
     FixtureResult fx = emitShape(
