@@ -30,6 +30,19 @@ bool diagOn() {
     return e && e[0] && e[0] != '0';
 }
 
+// REV ORCH-3. A wave-1 claim exists only when both plane anchors are
+// anchorCertified (D-fc-1.4), so the fit has one free parameter. Free-mode
+// fits and the peg walk stay compiled below and are not called. The predicate
+// is the anchor state, not a per-part switch.
+bool extrudeAnchoredPair(bool certA, bool certB) { return certA && certB; }
+
+// ORCH-3. A chamfer has one facet normal, so its separation is 0 and it does
+// not span the dihedral. A fillet's facets turn by more than spanTol.
+// Reaching the dihedral itself is the vertex-span test (|span - dihedral| <=
+// spanTol): discrete facets stop one step short of the walls, and that step
+// is the mesh angle, which spanTol (a function of anchorTol/r) does not cover.
+bool normalsSpanDihedral(double normSep, double spanTolV) { return normSep > spanTolV; }
+
 gp_XYZ cornerPt(const MeshView& mv, int t, int k) {
     const int gt = mv.compTris ? mv.compTris[t] : t;
     return mv.pts[mv.tris[gt][k]];
@@ -1400,12 +1413,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 if (!(am > 1e-12)) continue;
                 axis0.Divide(am);
                 canonicalHemi(axis0);
-                const bool anchored = A.certified && B.certified;
-                gp_XYZ witnessP;
-                bool haveWitness = false;
+                const bool anchored = extrudeAnchoredPair(A.certified, B.certified);
+                // Free mode stays in the fit branch below and is not entered.
+                if (!anchored) continue;
 
                 for (int si = 0; si < 4; ++si) {
-                    haveWitness = false;
                     const double sA = sideSign[si][0];
                     const double sB = sideSign[si][1];
                     gp_XYZ c0, c1;
@@ -1423,7 +1435,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
 
                     int guard = 0;
                     while (guard++ < nTri + 1) {
-                        haveWitness = false;
                         std::vector<double> roots;
                         std::vector<int> stamp(nVtx, 0);
                         for (int t = 0; t < nTri; ++t) {
@@ -1488,8 +1499,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                         : 0.5 * (pool[(std::size_t)mid - 1] + pool[(std::size_t)mid]);
                                 const gp_XYZ hc = c0 + cR * rmed;
                                 int nIn = 0;
-                                gp_XYZ modeWitness;
-                                bool modeHave = false;
                                 std::vector<int> seen(nVtx, 0);
                                 for (int t = 0; t < nTri; ++t) {
                                     if (!candidate(t)) continue;
@@ -1498,23 +1507,14 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                         if (lv < 0 || lv >= nVtx || seen[lv]) continue;
                                         seen[lv] = 1;
                                         const int g = mv.compVtx ? mv.compVtx[lv] : lv;
-                                        if (std::abs(radialDist(mv.pts[g], hc, axis0) - rmed) <= tau) {
+                                        if (std::abs(radialDist(mv.pts[g], hc, axis0) - rmed) <= tau)
                                             ++nIn;
-                                            if (!modeHave) {
-                                                modeWitness = mv.pts[g];
-                                                modeHave = true;
-                                            }
-                                        }
                                     }
                                 }
                                 if (!any || nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
                                     any = true;
                                     bestIn = nIn;
                                     bestR = rmed;
-                                    if (modeHave) {
-                                        witnessP = modeWitness;
-                                        haveWitness = true;
-                                    }
                                 }
                                 pool.erase(pool.begin() + bj, pool.begin() + bi + 1);
                             }
@@ -1528,6 +1528,40 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         gp_XYZ axis = axis0;
                         gp_XYZ center = c0 + cR * rHyp;
                         double radius = rHyp;
+                        // Line first (D-fc-1.6.3) on the hypothesis inliers. A sagitta
+                        // within τ lies on two tangent radii; the smaller-r tie then
+                        // misses the sector, so the slab is empty (case 6). The inliers
+                        // are that section. A line residual within τ is a plane.
+                        {
+                            std::vector<int> seen(nVtx, 0);
+                            std::vector<Vert> inl;
+                            for (int t = 0; t < nTri; ++t) {
+                                if (!candidate(t)) continue;
+                                for (int k = 0; k < 3; ++k) {
+                                    const int lv = cornerLocal(g2l, mv, t, k);
+                                    if (lv < 0 || lv >= nVtx || seen[lv]) continue;
+                                    seen[lv] = 1;
+                                    const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                                    if (std::abs(radialDist(mv.pts[g], center, axis) - radius) > tau)
+                                        continue;
+                                    Vert vt;
+                                    vt.id = lv;
+                                    vt.p = mv.pts[g];
+                                    inl.push_back(vt);
+                                }
+                            }
+                            int st = 0, lv = 0;
+                            double lr = 0;
+                            profileCounts(inl, axis, tau, st, lv, lr);
+                            if (st >= minStations(kParamsLine) && lr <= tau) {
+                                dg.stations = st;
+                                dg.levels = lv;
+                                dg.nV = (int)inl.size();
+                                dg.lineRes = lr;
+                                finish("line");
+                                break;
+                            }
+                        }
                         const int itCap = std::max(1, p.maxRefineIters);
                         bool stable = false;
                         std::vector<int> Iset;
@@ -1545,19 +1579,16 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                             const double azA = std::atan2(dA.Dot(v), dA.Dot(u));
                             const double azB = std::atan2(dB.Dot(v), dB.Dot(u));
                             const double wAB = wrap2pi(azB - azA);
-                            const double wBA = kTwoPi - wAB;
-                            // Slab sector is fixed by A, B and the bisector (D-fc-3.3): the
-                            // closed arc between the two contact generators that contains the
-                            // vote witness (not an inlier score over the two arcs).
-                            if (!haveWitness) return;
-                            gp_XYZ dC = witnessP - c;
-                            dC -= ax * dC.Dot(ax);
-                            const double azC = std::atan2(dC.Dot(v), dC.Dot(u));
+                            // D-fc-3.3. The sector is fixed by the two contact generators.
+                            // Of the two arcs, the fillet is the one nearer the anchor
+                            // dihedral. That dihedral is <= pi, and the shorter arc is
+                            // always the nearer one. A witness on a generator used to
+                            // keep the reflex (rw2b audit, case 1).
                             double start = azA;
                             double width = wAB;
-                            if (wrap2pi(azC - azA) > wAB + 1e-12) {
+                            if (width > kPi) {
                                 start = azB;
-                                width = wBA;
+                                width = kTwoPi - width;
                             }
                             const double slack = tau / r;
                             start = wrap2pi(start - slack);
@@ -1742,7 +1773,10 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                 if (dev > sDev) allS = false;
                                 if (z < zlo - tau || z > zhi + tau) allZ = false;
                             }
-                            if (one && allS && allZ) cover.push_back(t);
+                            // D-fc-3.2 item 1: fewer than 2 axial levels is never a member
+                            // (section ear). Item 7's cover does not put it back.
+                            if (one && allS && allZ && triLevelCount(t, axis) >= 2)
+                                cover.push_back(t);
                         }
                         std::sort(cover.begin(), cover.end());
                         dg.nCover = (int)cover.size();
@@ -1783,8 +1817,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         dg.span = sp.span;
                         const double normSep = maxFacetNormalSep(mv, C);
                         const bool blendVerts = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
-                        const bool blendNorms =
-                            normSep > dg.spanTolV || normSep + dg.spanTolV >= dg.dihedral;
+                        const bool blendNorms = normalsSpanDihedral(normSep, dg.spanTolV);
                         const bool blend = blendVerts && blendNorms;
                         if (!blend) {
                             finish("not-blend");
@@ -1824,6 +1857,9 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         for (const ARef& ar : arefs) {
             LiveAnchor A;
             if (!loadAnchor(ar.prov, A)) continue;
+            // A peg has one plane anchor. extrudeAnchoredPair requires two, so
+            // this walk is not called. The body stays compiled (REV ORCH-3).
+            if (!extrudeAnchoredPair(A.certified, false)) continue;
             gp_XYZ axis = A.n;
             canonicalHemi(axis);
             std::vector<char> pegTried(nTri, 0);

@@ -551,9 +551,12 @@ static void case9() {
     const double tau = 2.0 * q;
     auto built = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 2, 10.0 * tau);
     Run r = runClaim(built.synth, std::move(built.work), q, 1);
-    const bool ok = r.work.accepted.empty() && hasWhy(r.diag, "underdetermined");
+    // Anchors sit at 10 tau, so the pair is not extrudeAnchoredPair. REV ORCH-3
+    // does not call the free fit, whose station gate used to return
+    // underdetermined. Nothing is claimed.
+    const bool ok = r.work.accepted.empty() && !hasWhy(r.diag, "accept");
     if (!ok) dumpFail("case9", r);
-    expect(ok, "case9 free stations < params+1 why=underdetermined");
+    expect(ok, "case9 uncertified anchors claim nothing");
 }
 
 static void case10() {
@@ -907,24 +910,13 @@ static void case17() {
     for (int t : moved) provs[(std::size_t)ia].tris.push_back(t);
     provs[(std::size_t)ia].maxVertexDev = 140.0 * tau;
     Run r = runClaim(built.synth, std::move(built.work), q, 1);
-    const std::string acc = lineWithWhy(r.diag, "accept");
-    const double tolA = fieldNum(acc, "anchorTolATau");
-    const double tolB = fieldNum(acc, "anchorTolBTau");
-    const int straddle = (int)fieldNum(acc, "straddle");
-    bool facetsIn = !moved.empty();
-    if (r.work.accepted.size() == 1) {
-        for (int t : moved)
-            if (!regionHas(r.work.accepted[0], t)) facetsIn = false;
-    } else {
-        facetsIn = false;
-    }
-    const double fat = std::max(tolA, tolB);
-    const bool ok = r.work.accepted.size() == 1 && acc.find("fit=free") != std::string::npos &&
-                    fat >= 100.0 && fat <= 180.0 && facetsIn && straddle >= 1;
-    std::fprintf(stderr, "case17 tolA=%.6g tolB=%.6g straddle=%d facets=%d\n", tolA, tolB,
-                 straddle, (int)moved.size());
+    // The flank provisional is 140 tau, so the pair is not extrudeAnchoredPair.
+    // REV ORCH-3 does not call the free fit. The mis-assigned facets stay unclaimed.
+    const bool ok = r.work.accepted.empty() && !hasWhy(r.diag, "accept");
+    std::fprintf(stderr, "case17 accepted=%d moved=%d\n", (int)r.work.accepted.size(),
+                 (int)moved.size());
     if (!ok) dumpFail("case17", r);
-    expect(ok, "case17 mis-assigned flank is a free accept with straddle");
+    expect(ok, "case17 uncertified flank is not a wave-1 claim");
 }
 
 static void case18() {
