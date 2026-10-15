@@ -2,7 +2,7 @@
 """corpus_census_allowance — anti-silent-waiver for censusValidExpected:false.
 
 The set of corpus parts with any live[] row censusValidExpected == false
-must be exactly {Body11}. Each such part must have a non-empty
+must be exactly ALLOWED_FALSE. Each such part must have a non-empty
 censusValidReason and a non-zero builtCylindersFloor.
 
 Body11 also carries the D-S3-9 sibling gate: every live[] row must pin
@@ -148,7 +148,10 @@ def _self_test() -> int:
             }
         ]
     }
-    check(evaluate({"Body11": ok_doc}) == [], "Body11-only with reason+floor+sibling PASSES")
+    check(
+        evaluate({"Body11": ok_doc, "Body244": ok_doc}) == [],
+        "Body11+Body244 with reason+floor+sibling PASSES",
+    )
     extra = evaluate({"Body11": ok_doc, "S09": ok_doc})
     check(any("S09" in f for f in extra), "second false part FAILS")
     missing = evaluate({})
