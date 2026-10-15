@@ -489,6 +489,10 @@ foreach(_fc_unit IN ITEMS relational_extrude relational_revolve tesslaw relation
     if(COMMAND stl2step_adhoc_sign)
         stl2step_adhoc_sign(${_fc_unit}_unit)
     endif()
+    if(_fc_unit STREQUAL "tesslaw")
+        target_include_directories(tesslaw_unit PRIVATE
+            "${_stl2step_root}/tests/support")
+    endif()
     add_test(NAME ${_fc_unit}_unit COMMAND ${_fc_unit}_unit)
     set_tests_properties(${_fc_unit}_unit PROPERTIES
         LABELS "unit;fc-contract"

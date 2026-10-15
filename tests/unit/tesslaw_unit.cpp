@@ -1,6 +1,7 @@
 // tess-law unit cases (SPEC-tess-law). Synthetic meshes only.
 // SPDX-License-Identifier: MIT
 
+#include "posix_compat.hpp"
 #include "refit_internal.hpp"
 #include "refit_relational.hpp"
 
