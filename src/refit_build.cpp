@@ -11828,6 +11828,190 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
     return false;
 }
 
+// D-130-14 / D-fc-3.2.10. A relational FilletStrip is one surface and one face
+// per edge-component. The chain stitch keeps every component on this region and
+// tags only the largest loop Outer, so one partial-cylinder face treats the
+// other components as holes. Their triangles never become faces and the shell
+// opens. 0 = single component (caller keeps the existing path). 1 = faces
+// appended. -1 = several components and a face could not be built; the caller
+// must not ship the single-face path (R1 explodes this region only).
+int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
+                          const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
+                          const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
+                          double sewTol, std::vector<TopoDS_Face>& acc) {
+    if (r.origin != Origin::FilletStrip || r.type != SurfType::Cylinder) return 0;
+    if (r.tris.size() < 2 || !mv.triEdges) return 0;
+    std::unordered_map<int, int> parent;
+    parent.reserve(r.tris.size() * 2);
+    for (int t : r.tris) {
+        if (t >= 0) parent[t] = t;
+    }
+    auto find = [&](int x) {
+        int root = x;
+        while (parent[root] != root) root = parent[root];
+        while (parent[x] != root) {
+            const int nxt = parent[x];
+            parent[x] = root;
+            x = nxt;
+        }
+        return root;
+    };
+    auto unite = [&](int a, int b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) parent[b] = a;
+    };
+    std::unordered_map<int, int> edgeOwner;
+    edgeOwner.reserve(r.tris.size() * 3);
+    for (int t : r.tris) {
+        if (t < 0 || (size_t)t >= mv.nTri || !parent.count(t)) continue;
+        for (int s = 0; s < 3; ++s) {
+            const int eid = mv.triEdges[t][s];
+            if (eid < 0) continue;
+            auto it = edgeOwner.find(eid);
+            if (it == edgeOwner.end()) edgeOwner.emplace(eid, t);
+            else unite(it->second, t);
+        }
+    }
+    std::unordered_map<int, int> rootIndex;
+    int nComp = 0;
+    for (int t : r.tris) {
+        if (!parent.count(t)) continue;
+        const int root = find(t);
+        if (!rootIndex.count(root)) rootIndex.emplace(root, nComp++);
+    }
+    if (nComp <= 1) return 0;
+
+    auto compOfChain = [&](int ci) -> int {
+        if (ci < 0 || (size_t)ci >= rs.chains.size()) return -1;
+        for (int eid : rs.chains[(size_t)ci].meshEdges) {
+            auto it = edgeOwner.find(eid);
+            if (it == edgeOwner.end()) continue;
+            auto rit = rootIndex.find(find(it->second));
+            if (rit != rootIndex.end()) return rit->second;
+        }
+        return -1;
+    };
+
+    std::vector<std::vector<Loop>> groups((size_t)nComp);
+    bool mixed = false;
+    for (const Loop& lp : r.loops) {
+        int c = -1;
+        for (int ci : lp.chainIdx) {
+            const int cc = compOfChain(ci);
+            if (cc < 0) continue;
+            if (c < 0) c = cc;
+            else if (c != cc) mixed = true;
+        }
+        if (c >= 0) groups[(size_t)c].push_back(lp);
+    }
+    if (diagRelEnabled())
+        std::fprintf(stderr,
+                     "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder nComp=%d nLoop=%zu "
+                     "mixed=%d closed360=%d maxDev=%.6g why=split\n",
+                     r.id, nComp, r.loops.size(), mixed ? 1 : 0, r.closed360 ? 1 : 0,
+                     r.maxVertexDev);
+    // A closed-360 fillet has cap loops, not an outer wire. Several components
+    // of one closed band are not a partial-cylinder trim. Explode the region.
+    if (mixed || r.closed360) return -1;
+    for (const auto& g : groups)
+        if (g.empty()) return -1;
+
+    auto dumpFaceCheck = [&](const TopoDS_Face& f, int comp) {
+        if (!diagRelEnabled()) return;
+        std::fprintf(stderr, "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder comp=%d check=",
+                     r.id, comp);
+        if (f.IsNull()) {
+            std::fprintf(stderr, "none\n");
+            return;
+        }
+        try {
+            BRepCheck_Analyzer an(f, Standard_True);
+            auto dumpNamed = [&](const Handle(BRepCheck_Result)& res, const TopoDS_Shape& ctx) {
+                bool any = false;
+                if (!res.IsNull()) {
+                    for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next()) {
+                        if (it.Value() == BRepCheck_NoError) continue;
+                        std::fprintf(stderr, "%s%s", any ? "," : "", brepCheckName((int)it.Value()));
+                        any = true;
+                    }
+                    for (res->InitContextIterator(); res->MoreShapeInContext();
+                         res->NextShapeInContext()) {
+                        if (!res->ContextualShape().IsSame(ctx)) continue;
+                        for (BRepCheck_ListOfStatus::Iterator it(res->StatusOnShape()); it.More();
+                             it.Next()) {
+                            if (it.Value() == BRepCheck_NoError) continue;
+                            std::fprintf(stderr, "%s%s", any ? "," : "",
+                                         brepCheckName((int)it.Value()));
+                            any = true;
+                        }
+                    }
+                }
+                if (!any) std::fprintf(stderr, "NoError");
+            };
+            std::fprintf(stderr, "face:");
+            dumpNamed(an.Result(f), f);
+            int wi = 0;
+            for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                std::fprintf(stderr, " wire%d:", wi);
+                dumpNamed(an.Result(w), f);
+                int ei = 0;
+                for (TopExp_Explorer ex(w, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+                    const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                    std::fprintf(stderr, " e%d:", ei);
+                    dumpNamed(an.Result(e), f);
+                }
+            }
+        } catch (const Standard_Failure&) {
+            std::fprintf(stderr, "threw");
+        }
+        std::fprintf(stderr, "\n");
+    };
+
+    const std::vector<Loop> saved = r.loops;
+    std::vector<TopoDS_Face> faces;
+    bool ok = true;
+    for (size_t gi = 0; gi < groups.size(); ++gi) {
+        std::vector<Loop> loops = groups[gi];
+        int iOuter = -1;
+        for (size_t i = 0; i < loops.size(); ++i)
+            if (loops[i].role == LoopRole::Outer) iOuter = (int)i;
+        if (iOuter < 0) {
+            iOuter = 0;
+            for (size_t i = 1; i < loops.size(); ++i)
+                if (loops[i].chainIdx.size() > loops[(size_t)iOuter].chainIdx.size())
+                    iOuter = (int)i;
+        }
+        for (size_t i = 0; i < loops.size(); ++i)
+            loops[i].role = ((int)i == iOuter) ? LoopRole::Outer : LoopRole::Inner;
+        r.loops = loops;
+        TopoDS_Face f;
+        if (!buildPartialCylinder(r, rs, mv, geom, collapsed, meshE, edgeOk, sewTol, f) ||
+            f.IsNull()) {
+            ok = false;
+            dumpFaceCheck(f, (int)gi);
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder "
+                             "builtAs=NotBuilt why=component-face nComp=%d comp=%zu\n",
+                             r.id, nComp, gi);
+            break;
+        }
+        dumpFaceCheck(f, (int)gi);
+        faces.push_back(f);
+    }
+    r.loops = std::move(saved);
+    if (!ok) return -1;
+    for (auto& f : faces) acc.push_back(f);
+    if (diagRelEnabled())
+        std::fprintf(stderr,
+                     "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder builtAs=Single "
+                     "why=ok nComp=%d faces=%zu\n",
+                     r.id, nComp, faces.size());
+    return 1;
+}
+
 TopoDS_Edge makeFullCircle(const gp_Circ& circ, const TopoDS_Vertex& V) {
     if (!V.IsNull()) {
         const gp_Pnt p = BRep_Tool::Pnt(V);
@@ -15124,6 +15308,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         int rounds = 0;
         int fallbackGuardPass = 0;
         int j6UncollapsePass = 0;
+        // One local-explode attempt for a relational FilletStrip whose contact
+        // edges are free. Same containment as a failed chamfer cone: the region
+        // becomes facets, the component does not revert.
+        bool relFilletContainDone = false;
         // D-140-13: any trySeamed360 that took the mintRefused composite path.
         // Survives try_rebuild so a later open/invalid shell can take the
         // existing ChainUnstable facet path. Components without this flag keep
@@ -17484,6 +17672,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 r.builtAs = BuiltAs::ExplodedToFacets;
                 return true;
             }
+            if (r.origin == Origin::FilletStrip && r.type == SurfType::Cylinder) {
+                const int split = buildFilletStripFaces(r, rs, mv, geom, collapsed, meshE, edgeOk,
+                                                        sewTol, acc);
+                if (split > 0) {
+                    r.builtAs = BuiltAs::Single;
+                    return true;
+                }
+                // Several components and a face failed. A single outer face would
+                // drop the others and open the shell. R1 explodes this region.
+                if (split < 0) return false;
+            }
             if (r.closed360 && r.type == SurfType::Cylinder) {
                 TopoDS_Face f360;
                 if (trySeamed360(r, rs, mv, verts, geom, collapsed, meshE, edgeOk, sewTol, warn,
@@ -18199,6 +18398,62 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // ChainUnstable → all-facet path rather than fail the component.
             // Leave mint sites returning true. Components with no mintRefused
             // face keep the J6 / recover / return-false semantics below.
+            if (!relFilletContainDone) {
+                relFilletContainDone = true;
+                TopTools_IndexedDataMapOfShapeListOfShape ancFil;
+                TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, ancFil);
+                std::vector<std::pair<gp_Pnt, gp_Pnt>> freeSegs;
+                for (int i = 1; i <= ancFil.Extent(); ++i) {
+                    if (ancFil(i).Extent() >= 2) continue;
+                    const TopoDS_Edge& e = TopoDS::Edge(ancFil.FindKey(i));
+                    TopoDS_Vertex va, vb;
+                    TopExp::Vertices(e, va, vb, Standard_True);
+                    if (va.IsNull() || vb.IsNull()) continue;
+                    freeSegs.emplace_back(BRep_Tool::Pnt(va), BRep_Tool::Pnt(vb));
+                }
+                const double qMesh =
+                    (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+                const double tau = (qMesh > 0.0) ? (2.0 * qMesh) : 0.0;
+                // Sum of the two endpoint gaps. Each end is known to max(sewTol, τ).
+                const double matchTol = 2.0 * std::max(sewTol, tau);
+                std::vector<int> hit;
+                auto consider = [&](int id) {
+                    if (id < 0 || regionExploded(exploded, id)) return;
+                    const Region* rr = regionById(rs, id);
+                    if (!rr || rr->origin != Origin::FilletStrip) return;
+                    if (std::find(hit.begin(), hit.end(), id) != hit.end()) return;
+                    hit.push_back(id);
+                };
+                for (size_t ci = 0; ci < rs.chains.size() && !freeSegs.empty(); ++ci) {
+                    const BoundaryChain& ch = rs.chains[ci];
+                    const Region* A = regionById(rs, ch.regA);
+                    const Region* B = regionById(rs, ch.regB);
+                    const bool fil = (A && A->origin == Origin::FilletStrip) ||
+                                     (B && B->origin == Origin::FilletStrip);
+                    if (!fil || ch.meshVerts.size() < 2) continue;
+                    const gp_Pnt p0 = pntOf(mv, ch.meshVerts.front());
+                    const gp_Pnt p1 = pntOf(mv, ch.meshVerts.back());
+                    for (const auto& seg : freeSegs) {
+                        const double d = std::min(seg.first.Distance(p0) + seg.second.Distance(p1),
+                                                   seg.first.Distance(p1) + seg.second.Distance(p0));
+                        if (d > matchTol) continue;
+                        if (A) consider(A->id);
+                        if (B) consider(B->id);
+                        break;
+                    }
+                }
+                if (!hit.empty()) {
+                    for (int id : hit) {
+                        if (diagRelEnabled())
+                            std::fprintf(stderr,
+                                         "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder "
+                                         "builtAs=ExplodedToFacets why=exploded reason=shell-open\n",
+                                         id);
+                        explodeRegion(id);
+                    }
+                    goto try_rebuild;
+                }
+            }
             if (tryMintRefusedFacetFallback()) {
                 restoreShared();
                 goto unstable_fallback;
