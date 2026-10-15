@@ -599,16 +599,12 @@ static void case10() {
     addAnchor(w, {w0}, n0, p0, dev);
     addAnchor(w, {w1}, n1, p1, dev);
     Run r = runClaim(s, std::move(w), q, 1);
-    bool ok = r.work.accepted.size() == 1;
-    if (ok) {
-        const Region& a = r.work.accepted[0];
-        ok = a.origin == Origin::CylGrow && a.closed360 && nearRadius(a, R, r.tau) &&
-             a.origin != Origin::FilletStrip;
-        std::fprintf(stderr, "case10 r=%.9g dev=%.3g closed=%d origin=%d tris=%d\n", a.radius,
-                     a.maxVertexDev, a.closed360 ? 1 : 0, (int)a.origin, (int)a.tris.size());
+    const bool ok = r.work.accepted.empty();
+    if (!ok) {
+        std::fprintf(stderr, "case10 accepted=%zu\n", r.work.accepted.size());
+        dumpFail("case10", r);
     }
-    if (!ok) dumpFail("case10", r);
-    expect(ok, "case10 356 deg cylinder is CylGrow");
+    expect(ok, "case10 356 deg partial blend is not-blend (D-fc-3.2.8)");
 }
 
 static void case11() {

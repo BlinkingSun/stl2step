@@ -853,6 +853,28 @@ SpanInfo measureSpan(const MeshView& mv, const std::vector<int>& g2l,
     return s;
 }
 
+// D-fc-1.4: fillet facet normals must span the anchor dihedral (chamfer ⇒ one normal).
+double maxFacetNormalSep(const MeshView& mv, const std::vector<int>& tris) {
+    std::vector<gp_XYZ> ns;
+    ns.reserve(tris.size());
+    for (int t : tris) {
+        gp_XYZ nt;
+        triAreaNormal(mv, t, nt);
+        const double nm = nt.Modulus();
+        if (!(nm > 1e-15)) continue;
+        nt.Divide(nm);
+        ns.push_back(nt);
+    }
+    double best = 0.0;
+    for (std::size_t i = 0; i < ns.size(); ++i) {
+        for (std::size_t j = i + 1; j < ns.size(); ++j) {
+            const double d = std::max(-1.0, std::min(1.0, ns[i].Dot(ns[j])));
+            best = std::max(best, std::acos(d));
+        }
+    }
+    return best;
+}
+
 gp_XYZ lowestXDir(const std::vector<Vert>& verts, const gp_XYZ& center, const gp_XYZ& axis) {
     for (const Vert& vt : verts) {
         gp_XYZ rad = vt.p - center;
@@ -1014,6 +1036,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         for (int t = 0; t < nTri; ++t) {
             const int pi = triProv[t];
             if (pi < 0 || work.provisionals[pi].claim != ProvClaim::Unclaimed) taken[t] = 1;
+        }
+        for (const Region& acc : work.accepted) {
+            for (int t : acc.tris) {
+                if (t >= 0 && t < nTri) taken[t] = 1;
+            }
         }
 
         auto candidate = [&](int t) -> bool {
@@ -1298,6 +1325,24 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             }
         };
 
+        auto adjacentAcceptedSurf = [&](int t) -> bool {
+            if (t < 0 || t >= nTri) return false;
+            for (int s = 0; s < 3; ++s) {
+                const int ot = otherTri(mv.triEdges[t][s], t);
+                if (ot < 0) continue;
+                for (const Region& acc : work.accepted) {
+                    if (acc.tris.empty()) continue;
+                    if (acc.type != SurfType::Torus && acc.type != SurfType::Cone &&
+                        acc.type != SurfType::Cylinder)
+                        continue;
+                    for (int at : acc.tris) {
+                        if (at == ot) return true;
+                    }
+                }
+            }
+            return false;
+        };
+
         auto sameSurface = [&](const gp_XYZ& axis, const gp_XYZ& center, double radius,
                                const std::vector<char>& inC) -> bool {
             for (const Region& acc : work.accepted) {
@@ -1356,8 +1401,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 axis0.Divide(am);
                 canonicalHemi(axis0);
                 const bool anchored = A.certified && B.certified;
+                gp_XYZ witnessP;
+                bool haveWitness = false;
 
                 for (int si = 0; si < 4; ++si) {
+                    haveWitness = false;
                     const double sA = sideSign[si][0];
                     const double sB = sideSign[si][1];
                     gp_XYZ c0, c1;
@@ -1375,6 +1423,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
 
                     int guard = 0;
                     while (guard++ < nTri + 1) {
+                        haveWitness = false;
                         std::vector<double> roots;
                         std::vector<int> stamp(nVtx, 0);
                         for (int t = 0; t < nTri; ++t) {
@@ -1439,6 +1488,8 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                         : 0.5 * (pool[(std::size_t)mid - 1] + pool[(std::size_t)mid]);
                                 const gp_XYZ hc = c0 + cR * rmed;
                                 int nIn = 0;
+                                gp_XYZ modeWitness;
+                                bool modeHave = false;
                                 std::vector<int> seen(nVtx, 0);
                                 for (int t = 0; t < nTri; ++t) {
                                     if (!candidate(t)) continue;
@@ -1447,14 +1498,23 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                         if (lv < 0 || lv >= nVtx || seen[lv]) continue;
                                         seen[lv] = 1;
                                         const int g = mv.compVtx ? mv.compVtx[lv] : lv;
-                                        if (std::abs(radialDist(mv.pts[g], hc, axis0) - rmed) <= tau)
+                                        if (std::abs(radialDist(mv.pts[g], hc, axis0) - rmed) <= tau) {
                                             ++nIn;
+                                            if (!modeHave) {
+                                                modeWitness = mv.pts[g];
+                                                modeHave = true;
+                                            }
+                                        }
                                     }
                                 }
                                 if (!any || nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
                                     any = true;
                                     bestIn = nIn;
                                     bestR = rmed;
+                                    if (modeHave) {
+                                        witnessP = modeWitness;
+                                        haveWitness = true;
+                                    }
                                 }
                                 pool.erase(pool.begin() + bj, pool.begin() + bi + 1);
                             }
@@ -1486,31 +1546,16 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                             const double azB = std::atan2(dB.Dot(v), dB.Dot(u));
                             const double wAB = wrap2pi(azB - azA);
                             const double wBA = kTwoPi - wAB;
-                            // Two closed arcs join the contact generators. Endpoints lie in
-                            // both. The arc that contains more interior τ-inliers is the
-                            // slab. A circular mean is not used: on an arc longer than
-                            // π the first Dirichlet kernel changes sign and the mean
-                            // falls in the empty gap (unit case 10, D-fc-1.6.7). A tie
-                            // (inliers only on the generators) takes the arc nearer the
-                            // dihedral acos(nA·nB).
-                            const double dih =
-                                std::acos(std::max(-1.0, std::min(1.0, A.n.Dot(B.n))));
-                            int nAB = 0, nBA = 0;
-                            for (int t = 0; t < nTri; ++t) {
-                                if (!candidate(t)) continue;
-                                for (int k = 0; k < 3; ++k) {
-                                    const gp_XYZ pnt = cornerPt(mv, t, k);
-                                    if (std::abs(radialDist(pnt, c, ax) - r) > tau) continue;
-                                    const gp_XYZ d = pnt - c;
-                                    const double az = std::atan2(d.Dot(v), d.Dot(u));
-                                    if (wrap2pi(az - azA) <= wAB + 1e-12) ++nAB;
-                                    if (wrap2pi(az - azB) <= wBA + 1e-12) ++nBA;
-                                }
-                            }
+                            // Slab sector is fixed by A, B and the bisector (D-fc-3.3): the
+                            // closed arc between the two contact generators that contains the
+                            // vote witness (not an inlier score over the two arcs).
+                            if (!haveWitness) return;
+                            gp_XYZ dC = witnessP - c;
+                            dC -= ax * dC.Dot(ax);
+                            const double azC = std::atan2(dC.Dot(v), dC.Dot(u));
                             double start = azA;
                             double width = wAB;
-                            if (nBA > nAB ||
-                                (nBA == nAB && std::abs(wBA - dih) < std::abs(wAB - dih))) {
+                            if (wrap2pi(azC - azA) > wAB + 1e-12) {
                                 start = azB;
                                 width = wBA;
                             }
@@ -1688,7 +1733,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         std::vector<int> cover;
                         for (int t : slab) {
                             if (t < 0 || t >= nTri || inI[t] || !candidate(t)) continue;
-                            if (triLevelCount(t, axis) < 2) continue;
                             bool one = false, allS = true, allZ = true;
                             for (int k = 0; k < 3; ++k) {
                                 const gp_XYZ pnt = cornerPt(mv, t, k);
@@ -1737,13 +1781,17 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         const SpanInfo sp =
                             measureSpan(mv, g2l, C, cvAll, center, axis, xdir, tol.thetaBin);
                         dg.span = sp.span;
-                        const bool blend = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
-                        if (!blend && !sp.closed360) {
+                        const double normSep = maxFacetNormalSep(mv, C);
+                        const bool blendVerts = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
+                        const bool blendNorms =
+                            normSep > dg.spanTolV || normSep + dg.spanTolV >= dg.dihedral;
+                        const bool blend = blendVerts && blendNorms;
+                        if (!blend) {
                             finish("not-blend");
                             break;
                         }
                         const int before = (int)work.accepted.size();
-                        commitBand(C, axis, center, radius, blend, A.prov, B.prov, seed, dg);
+                        commitBand(C, axis, center, radius, true, A.prov, B.prov, seed, dg);
                         if ((int)work.accepted.size() == before) break;
                         // Certified claim: re-vote the remaining vertices on this side.
                     }
@@ -1920,6 +1968,22 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     measureSpan(mv, g2l, Iset, iv, center, pAxis, xdir, tol.thetaBin);
                 dg.span = sp.span;
                 if (!sp.closed360) {
+                    finish("not-blend");
+                    continue;
+                }
+                const int pegMinTri = 2 * minStations(dg.params);
+                if ((int)Iset.size() < pegMinTri) {
+                    finish("underdetermined");
+                    continue;
+                }
+                bool pegAdj = false;
+                for (int t : Iset) {
+                    if (adjacentAcceptedSurf(t)) {
+                        pegAdj = true;
+                        break;
+                    }
+                }
+                if (pegAdj) {
                     finish("not-blend");
                     continue;
                 }
