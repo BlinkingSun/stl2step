@@ -25,7 +25,10 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = REPO / "tests" / "corpus"
-ALLOWED_FALSE: Set[str] = {"Body11"}
+# Body244: CLOSURES 2026-10-15 17:20 (orchestrator ruling G9) — the
+# BRepCheck-invalid seamed360 face is pre-existing at v1.4.4 (audit G10),
+# not introduced by the D-fc-1.1 funnel cones.
+ALLOWED_FALSE: Set[str] = {"Body11", "Body244"}
 
 
 class GateError(Exception):
