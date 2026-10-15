@@ -1465,15 +1465,6 @@ bool buildSeamedOuterWire(const Handle(Geom_Surface)& S,
                           double vLo,
                           double angTol,
                           TopoDS_Wire& out) {
-    auto orientContinuous = [](std::vector<TopoDS_Edge>& path) {
-        for (size_t i = 1; i < path.size(); ++i) {
-            const TopoDS_Vertex prev = TopExp::LastVertex(path[i - 1], Standard_True);
-            const TopoDS_Vertex a = TopExp::FirstVertex(path[i], Standard_True);
-            const TopoDS_Vertex b = TopExp::LastVertex(path[i], Standard_True);
-            if (!a.IsNull() && a.IsSame(prev)) continue;
-            if (!b.IsNull() && b.IsSame(prev)) path[i] = TopoDS::Edge(path[i].Reversed());
-        }
-    };
     auto uAtPnt = [&](const gp_Pnt& p) -> double {
         if (S.IsNull()) return 0.0;
         try {
@@ -1539,8 +1530,47 @@ bool buildSeamedOuterWire(const Handle(Geom_Surface)& S,
         const TopoDS_Vertex alt = nearestU(pathHi, uAtPnt(BRep_Tool::Pnt(seamHi)));
         if (alt.IsNull() || !rotateEdgesToVertex(pathHi, alt)) return false;
     }
-    orientContinuous(pathLo);
-    orientContinuous(pathHi);
+    // WireExplorer order is not a cycle when the source wire itself stops
+    // early and the iterator fallback dumps the rest. Rebuild each rim as
+    // the unique cycle through its seam vertex. A rim that does not return
+    // to that vertex cannot close the outer wire.
+    auto orderFrom = [&](std::vector<TopoDS_Edge>& path, const TopoDS_Vertex& start) -> bool {
+        if (path.empty() || start.IsNull()) return false;
+        std::vector<char> used(path.size(), 0);
+        std::vector<TopoDS_Edge> ordered;
+        ordered.reserve(path.size());
+        TopoDS_Vertex cur = start;
+        for (size_t n = 0; n < path.size(); ++n) {
+            int found = -1;
+            bool rev = false;
+            for (size_t i = 0; i < path.size(); ++i) {
+                if (used[i]) continue;
+                TopoDS_Vertex a, b;
+                TopExp::Vertices(path[i], a, b, Standard_True);
+                if (!a.IsNull() && a.IsSame(cur)) {
+                    found = (int)i;
+                    break;
+                }
+                if (!b.IsNull() && b.IsSame(cur)) {
+                    found = (int)i;
+                    rev = true;
+                    break;
+                }
+            }
+            if (found < 0) break;
+            used[(size_t)found] = 1;
+            TopoDS_Edge e = path[(size_t)found];
+            if (rev) e = TopoDS::Edge(e.Reversed());
+            ordered.push_back(e);
+            cur = TopExp::LastVertex(ordered.back(), Standard_True);
+            if (cur.IsNull()) return false;
+        }
+        if (ordered.size() != path.size()) return false;
+        if (!TopExp::LastVertex(ordered.back(), Standard_True).IsSame(start)) return false;
+        path.swap(ordered);
+        return true;
+    };
+    if (!orderFrom(pathLo, seamLo) || !orderFrom(pathHi, seamHi)) return false;
     const double sweepHi = sweepU(pathHi);
     const double sweepLo = sweepU(pathLo);
     if (diag130Enabled() || diagP2Enabled()) {
@@ -1604,6 +1634,31 @@ bool buildSeamedOuterWire(const Handle(Geom_Surface)& S,
         TopExp::Vertices(eSeam, a, b, Standard_True);
         if (!a.IsNull() && a.IsSame(seamHi) && (seamLo.IsNull() || !a.IsSame(seamLo)))
             eSeam = TopoDS::Edge(eSeam.Reversed());
+        TopExp::Vertices(eSeam, a, b, Standard_True);
+        // MakeEdge(UIso, V1, V2, p1, p2) substitutes fresh vertices when the
+        // rim points sit off the ruling (funnel dGen is hundreds of q). The
+        // rim walk still starts on the original vertices, so WireExplorer
+        // stops after the seam and the wire is NotClosed. Rebuild on those
+        // same vertices; the edge tolerance is the measured ruling gap.
+        if (a.IsNull() || b.IsNull() || !a.IsSame(seamLo) || !b.IsSame(seamHi)) {
+            const double tolE = std::max(std::max(dGenLo, dGenHi), Precision::Confusion());
+            TopoDS_Edge forced;
+            BRep_Builder Bf;
+            Bf.MakeEdge(forced, iso, tolE);
+            if (vLo <= vHi) {
+                Bf.Add(forced, seamLo.Oriented(TopAbs_FORWARD));
+                Bf.Add(forced, seamHi.Oriented(TopAbs_REVERSED));
+                Bf.Range(forced, vLo, vHi);
+            } else {
+                Bf.Add(forced, seamHi.Oriented(TopAbs_FORWARD));
+                Bf.Add(forced, seamLo.Oriented(TopAbs_REVERSED));
+                Bf.Range(forced, vHi, vLo);
+            }
+            Bf.SameParameter(forced, Standard_False);
+            Bf.SameRange(forced, Standard_False);
+            forced.Closed(Standard_False);
+            eSeam = forced;
+        }
     }
     const double edgeTol =
         std::max(BRep_Tool::Tolerance(seamLo), BRep_Tool::Tolerance(seamHi));
@@ -1625,12 +1680,151 @@ bool buildSeamedOuterWire(const Handle(Geom_Surface)& S,
     }
     BRep_Builder Bw;
     Bw.MakeWire(out);
+    // Both rims are closed loops rotated so they START at the seam vertex.
+    // Walking either one backwards (reverse index and reverse each edge)
+    // still starts at that vertex, and flipping both keeps the opposite
+    // sweeps the caller already required. Reversing pathHi's edges in
+    // forward index order starts the walk at the far end of the first edge,
+    // so the seam (one edge) is the only edge WireExplorer can follow and
+    // the wire is NotClosed. pathLo already walked backwards; pathHi matches.
     Bw.Add(out, eSeam);
-    for (const TopoDS_Edge& e : pathHi) Bw.Add(out, TopoDS::Edge(e.Reversed()));
+    for (int i = (int)pathHi.size() - 1; i >= 0; --i)
+        Bw.Add(out, TopoDS::Edge(pathHi[(size_t)i].Reversed()));
     Bw.Add(out, TopoDS::Edge(eSeam.Reversed()));
     for (int i = (int)pathLo.size() - 1; i >= 0; --i)
         Bw.Add(out, TopoDS::Edge(pathLo[(size_t)i].Reversed()));
+    // Each rim chord is projected on its own into [0, 2π), so a full turn
+    // contains one edge whose pcurve takes the long way and the next seam
+    // branch sits 2π away (rid 1: gap=12.56). Rewrite every chord as the
+    // short UV segment (Δu in (-π, π]) and carry u forward. The reversed
+    // seam then sits on the u the high rim actually reached, which is
+    // uSeam ± 2π. A whole-period shift of a periodic cone is exact.
+    auto projectUV = [&](const gp_Pnt& p, double& u, double& v) -> bool {
+        try {
+            GeomAPI_ProjectPointOnSurf pr(p, S);
+            if (pr.NbPoints() < 1) return false;
+            Standard_Real uu = 0, vv = 0;
+            pr.LowerDistanceParameters(uu, vv);
+            if (!std::isfinite(uu) || !std::isfinite(vv)) return false;
+            u = uu;
+            v = vv;
+            return true;
+        } catch (const Standard_Failure&) {
+            return false;
+        }
+    };
+    auto unwrapTo = [](double u, double ref) {
+        double du = u - ref;
+        while (du > kPi) du -= 2.0 * kPi;
+        while (du < -kPi) du += 2.0 * kPi;
+        return ref + du;
+    };
+    auto bindChord = [&](const TopoDS_Edge& eWalk, double& uPrev) -> bool {
+        const TopoDS_Edge fwd = TopoDS::Edge(eWalk.Oriented(TopAbs_FORWARD));
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(fwd, f, l);
+        if (c3.IsNull() || !(l > f)) return false;
+        TopoDS_Vertex vA, vB;
+        TopExp::Vertices(fwd, vA, vB, Standard_True);
+        if (vA.IsNull() || vB.IsNull()) return false;
+        const bool rev = eWalk.Orientation() == TopAbs_REVERSED;
+        const TopoDS_Vertex& w0 = rev ? vB : vA;
+        const TopoDS_Vertex& w1 = rev ? vA : vB;
+        // The seam vertices sit off the mean ruling (Body244 dGen ~0.11–0.16 mm,
+        // hundreds of q). Their projected u does not equal uSeam, so the UV
+        // wire misses the seam by that angle. Pin those vertices to the seam's
+        // own (u, v); unwrapTo picks uSeam or uSeam±2π, whichever continues
+        // the walk. The edge tolerance carries the ruling gap.
+        auto assignUV = [&](const TopoDS_Vertex& V, double ref, double& u, double& v) -> bool {
+            if (!V.IsNull() && V.IsSame(seamHi)) {
+                u = unwrapTo(uSeam, ref);
+                v = vHi;
+                return true;
+            }
+            if (!V.IsNull() && V.IsSame(seamLo)) {
+                u = unwrapTo(uSeam, ref);
+                v = vLo;
+                return true;
+            }
+            if (!projectUV(BRep_Tool::Pnt(V), u, v)) return false;
+            u = unwrapTo(u, ref);
+            return true;
+        };
+        double u0 = 0, vv0 = 0, u1 = 0, vv1 = 0;
+        if (!assignUV(w0, uPrev, u0, vv0) || !assignUV(w1, u0, u1, vv1)) return false;
+        const double uF = rev ? u1 : u0;
+        const double vF = rev ? vv1 : vv0;
+        const double uL = rev ? u0 : u1;
+        const double vL = rev ? vv0 : vv1;
+        TColgp_Array1OfPnt2d poles(1, 2);
+        poles.SetValue(1, gp_Pnt2d(uF, vF));
+        poles.SetValue(2, gp_Pnt2d(uL, vL));
+        TColStd_Array1OfReal knots(1, 2);
+        knots.SetValue(1, f);
+        knots.SetValue(2, l);
+        TColStd_Array1OfInteger mults(1, 2);
+        mults.SetValue(1, 2);
+        mults.SetValue(2, 2);
+        Handle(Geom2d_BSplineCurve) pc = new Geom2d_BSplineCurve(poles, knots, mults, 1);
+        double dev = 0.0;
+        for (int k = 0; k <= 4; ++k) {
+            const double t = f + (l - f) * (double)k / 4.0;
+            const gp_Pnt2d uv = pc->Value(t);
+            try {
+                dev = std::max(dev, c3->Value(t).Distance(S->Value(uv.X(), uv.Y())));
+            } catch (const Standard_Failure&) {
+                return false;
+            }
+        }
+        const double chord = c3->Value(f).Distance(c3->Value(l));
+        if (!(chord > Precision::Confusion()) || dev > chord) return false;
+        const double tolE = std::max(BRep_Tool::Tolerance(fwd), dev);
+        BRep_Builder Bb;
+        Bb.UpdateEdge(fwd, pc, S, TopLoc_Location(), tolE);
+        Bb.Range(fwd, f, l);
+        uPrev = u1;
+        return true;
+    };
+    double uCur = uSeam;
+    bool bound = true;
+    for (int i = (int)pathHi.size() - 1; i >= 0 && bound; --i)
+        bound = bindChord(TopoDS::Edge(pathHi[(size_t)i].Reversed()), uCur);
+    const double uAfterHi = uCur;
+    if (bound) {
+        BRep_Builder Bs;
+        Standard_Real fs = 0, ls = 0;
+        Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
+        Handle(Geom2d_Line) pcS0 = new Geom2d_Line(gp_Pnt2d(uSeam, 0.0), gp_Dir2d(0.0, 1.0));
+        Handle(Geom2d_Line) pcS1 =
+            new Geom2d_Line(gp_Pnt2d(uAfterHi, 0.0), gp_Dir2d(0.0, 1.0));
+        Bs.UpdateEdge(eSeam, pcS0, pcS1, S, TopLoc_Location(), edgeTol);
+        if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
+    }
+    for (int i = (int)pathLo.size() - 1; i >= 0 && bound; --i)
+        bound = bindChord(TopoDS::Edge(pathLo[(size_t)i].Reversed()), uCur);
+    if (diag130Enabled() || diagP2Enabled())
+        std::fprintf(stderr,
+                     "DIAG_CONEUNWRAP bound=%d uSeam=%.6f uAfterHi=%.6f uAfterLo=%.6f "
+                     "dHi=%.6f dLo=%.6f\n",
+                     bound ? 1 : 0, uSeam, uAfterHi, uCur, uAfterHi - uSeam, uCur - uSeam);
+    if (!bound) return false;
     out.Closed(Standard_True);
+    if (diag130Enabled() || diagP2Enabled()) {
+        int nE = 0;
+        for (TopoDS_Iterator it(out); it.More(); it.Next()) ++nE;
+        const TopoDS_Vertex pHi0 =
+            pathHi.empty() ? TopoDS_Vertex() : TopExp::FirstVertex(pathHi.front(), Standard_True);
+        const TopoDS_Vertex pLo0 =
+            pathLo.empty() ? TopoDS_Vertex() : TopExp::FirstVertex(pathLo.front(), Standard_True);
+        TopoDS_Vertex a, b;
+        TopExp::Vertices(eSeam, a, b, Standard_True);
+        std::fprintf(stderr,
+                     "DIAG_CONEJOIN nE=%d aLo=%d bHi=%d hi0=%d lo0=%d\n", nE,
+                     (!a.IsNull() && a.IsSame(seamLo)) ? 1 : 0,
+                     (!b.IsNull() && b.IsSame(seamHi)) ? 1 : 0,
+                     (!pHi0.IsNull() && pHi0.IsSame(seamHi)) ? 1 : 0,
+                     (!pLo0.IsNull() && pLo0.IsSame(seamLo)) ? 1 : 0);
+    }
     return true;
 }
 
@@ -11986,6 +12180,43 @@ int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
         for (size_t i = 0; i < loops.size(); ++i)
             loops[i].role = ((int)i == iOuter) ? LoopRole::Outer : LoopRole::Inner;
         r.loops = loops;
+        if (diagRelEnabled()) {
+            int nTriC = 0, nCert = 0;
+            const double qMesh =
+                (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? mv.quantFloor : 0.0;
+            const double tau = (qMesh > 0.0) ? (2.0 * qMesh) : 0.0;
+            double zLo = 1e300, zHi = -1e300;
+            for (int t : r.tris) {
+                if (t < 0 || (size_t)t >= mv.nTri || !parent.count(t)) continue;
+                const auto rit = rootIndex.find(find(t));
+                if (rit == rootIndex.end() || rit->second != (int)gi) continue;
+                ++nTriC;
+                double md = 0.0;
+                bool anyV = false;
+                if (mv.triEdges) {
+                    for (int s = 0; s < 3; ++s) {
+                        const int eid = mv.triEdges[t][s];
+                        if (eid < 0 || (size_t)eid >= mv.nEdge) continue;
+                        const auto& pe = mv.compEdges[eid];
+                        const int lv = ((mv.triDirs[t] >> s) & 1) ? pe.first : pe.second;
+                        if (lv < 0 || (size_t)lv >= mv.nVtx) continue;
+                        const gp_Pnt p = pntOf(mv, lv);
+                        const gp_Vec d(r.ax.Location(), p);
+                        const double vz = d.Dot(r.ax.Direction());
+                        zLo = std::min(zLo, vz);
+                        zHi = std::max(zHi, vz);
+                        const double rad = (d - gp_Vec(r.ax.Direction()) * vz).Magnitude();
+                        md = std::max(md, std::fabs(rad - r.radius));
+                        anyV = true;
+                    }
+                }
+                if (anyV && tau > 0.0 && md <= tau) ++nCert;
+            }
+            std::fprintf(stderr,
+                         "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder comp=%zu "
+                         "nTri=%d nCert=%d z=[%.4f,%.4f] tau=%.6g\n",
+                         r.id, gi, nTriC, nCert, zLo, zHi, tau);
+        }
         TopoDS_Face f;
         if (!buildPartialCylinder(r, rs, mv, geom, collapsed, meshE, edgeOk, sewTol, f) ||
             f.IsNull()) {
@@ -16792,6 +17023,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                 Handle(Geom_Surface) seamSurf = csurf;
                                 if (buildSeamedOuterWire(seamSurf, pathHi, pathLo, seamHiV, seamLoV,
                                                          uSeam, vHi, vLo, angTol, ow)) {
+                                    // Rim pcurves are already the continuous short-chord
+                                    // unwrap. rebranchConeChart would fold the uSeam-2π
+                                    // end back into the chart and reopen the 2π gap.
+                                    coneChart = false;
                                     TopoDS_Edge seamE;
                                     for (TopoDS_Iterator sit(ow); sit.More(); sit.Next()) {
                                         if (sit.Value().ShapeType() == TopAbs_EDGE) {
@@ -17151,9 +17386,38 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     acc.push_back(f);
                     return true;
                 }
-                if (r.type == SurfType::Torus && r.origin == Origin::TorusBlend) {
+                    if (r.type == SurfType::Torus && r.origin == Origin::TorusBlend) {
+                    // Closed-360 construction bumps shared-vertex tolerances.
+                    // A later torusFail retries the pre-T solid on those same
+                    // vertices; restore the tolerances the region arrived with
+                    // so a failed ring cannot open the component.
+                    std::vector<std::pair<TopoDS_Vertex, double>> torusTolSave;
+                    for (const Loop& lpSave : r.loops) {
+                        for (int ciSave : lpSave.chainIdx) {
+                            if (ciSave < 0 || (size_t)ciSave >= rs.chains.size()) continue;
+                            for (int lvSave : rs.chains[(size_t)ciSave].meshVerts) {
+                                if (lvSave < 0 || (size_t)lvSave >= verts.size()) continue;
+                                const TopoDS_Vertex& vv = verts[(size_t)lvSave];
+                                if (vv.IsNull()) continue;
+                                bool seen = false;
+                                for (const auto& sv : torusTolSave) {
+                                    if (sv.first.IsSame(vv)) {
+                                        seen = true;
+                                        break;
+                                    }
+                                }
+                                if (!seen)
+                                    torusTolSave.emplace_back(vv, BRep_Tool::Tolerance(vv));
+                            }
+                        }
+                    }
                     auto torusFail = [&](const char* step, int site,
                                          const TopoDS_Face* face) -> bool {
+                        {
+                            BRep_Builder Br;
+                            for (const auto& sv : torusTolSave)
+                                Br.UpdateVertex(sv.first, sv.second);
+                        }
                         revertTorusTopology();
                         if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
                             std::fprintf(stderr,
@@ -17289,6 +17553,50 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         collapsed[(size_t)ci] = 1;
                     };
 
+                    double uSpanRing = r.uMax - r.uMin;
+                    if (uSpanRing < 0.0) uSpanRing += 2.0 * kPi;
+                    const double ringGap = 2.0 * kPi - uSpanRing;
+                    double maxStep = 0.0;
+                    int nChain = 0, nClosedChain = 0;
+                    for (const Loop& lp : r.loops) {
+                        for (int ci : lp.chainIdx) {
+                            if (ci < 0 || (size_t)ci >= rs.chains.size()) continue;
+                            const BoundaryChain& ch = rs.chains[(size_t)ci];
+                            ++nChain;
+                            if (ch.closedLoop) ++nClosedChain;
+                            for (size_t i = 1; i < ch.meshVerts.size(); ++i) {
+                                const int va = ch.meshVerts[i - 1];
+                                const int vb = ch.meshVerts[i];
+                                if (va < 0 || vb < 0 || (size_t)va >= mv.nVtx ||
+                                    (size_t)vb >= mv.nVtx)
+                                    continue;
+                                maxStep = std::max(
+                                    maxStep, angularDistance(azimuthOf(r, pntOf(mv, va)),
+                                                             azimuthOf(r, pntOf(mv, vb))));
+                            }
+                        }
+                    }
+                    // The uncovered azimuth of a full ring is the interior of one
+                    // boundary edge: the rectangular trim's cut falls inside that
+                    // edge and the partial face is UnorientableShape. A real
+                    // partial sector is wider than every boundary edge, so it
+                    // stays on the partial path. Two closed chains are the same
+                    // ring written as two rims (rid 6: chains=2 closed=2).
+                    const bool fullRing = !r.closed360 && maxStep > 0.0 && ringGap <= maxStep;
+                    const bool twoClosedRims = !r.closed360 && nChain == 2 && nClosedChain == 2;
+                    if (diag130Enabled() || diagRelEnabled())
+                        std::fprintf(stderr,
+                                     "DIAG_TORUSRING rid=%d closed360=%d gap=%.6f maxStep=%.6f "
+                                     "nChain=%d nClosed=%d fullRing=%d twoRims=%d loops=%zu\n",
+                                     r.id, r.closed360 ? 1 : 0, ringGap, maxStep, nChain,
+                                     nClosedChain, fullRing ? 1 : 0, twoClosedRims ? 1 : 0,
+                                     r.loops.size());
+                    // fullRing / twoClosedRims are measured (DIAG_TORUSRING) but must
+                    // not enter this constructor yet. Minting analytic cap vertices
+                    // builds a valid face that shares no rim edge, BRep_Tool::IsClosed
+                    // fails, and the probe drops the whole component (rev 1). A
+                    // partial that fails stays on torusFail and the pre-T retry
+                    // keeps the cylinders. Shipping the ring requires the mesh rims.
                     if (r.closed360) {
                         // Shared-rim probe (torus-u3-2): c-rev wire on the
                         // cylinder rim TShape; v-isoline pcurve maps 3d param
