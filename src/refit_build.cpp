@@ -7007,6 +7007,10 @@ thread_local int gCompNTri = 0;
 // (measured: it re-approximated a 69-pole loop as a degree-11, 419-pole 2d
 // curve that self-intersects at the window tip -- R2 probe invalid).
 thread_local std::unordered_set<const void*> gTier2TShapes;
+// Rims whose 3d circle was replaced by the cone iso. SameParameter then
+// rewrites the tolerance down to the sampled gap; the census reads the
+// closed-form supremum, which is larger. Raised again after SameParameter.
+thread_local std::unordered_set<const void*> gConeIsoCapTShapes;
 
 int countSeamEdgesOnWire(const TopoDS_Wire& w) {
     int n = 0;
@@ -7901,6 +7905,32 @@ Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Rea
                 return GeomAPI::To2d(src, pl->Pln());
             } catch (const Standard_Failure&) {
                 return {};
+            }
+        }
+        // D-130-2 tier 2 on a plane: the same degree-1 2d spline the cylinder
+        // branch writes, through the poles projected onto the plane. An
+        // endpoint line leaves the intermediate poles off the pcurve and the
+        // polyline class (exactMaxAtBind) records that gap as overTol.
+        if (kind && std::strcmp(kind, "tier2poly") == 0) {
+            Handle(Geom_BSplineCurve) bs = Handle(Geom_BSplineCurve)::DownCast(src);
+            if (!bs.IsNull() && bs->Degree() == 1 && bs->NbPoles() >= 2) {
+                try {
+                    const int n = bs->NbPoles();
+                    TColgp_Array1OfPnt2d poles2(1, n);
+                    const gp_Pln pln = pl->Pln();
+                    for (int i = 1; i <= n; i++) {
+                        Standard_Real u = 0, v = 0;
+                        ElSLib::Parameters(pln, bs->Pole(i), u, v);
+                        poles2.SetValue(i, gp_Pnt2d(u, v));
+                    }
+                    TColStd_Array1OfReal knots(1, bs->NbKnots());
+                    TColStd_Array1OfInteger mults(1, bs->NbKnots());
+                    bs->Knots(knots);
+                    bs->Multiplicities(mults);
+                    return new Geom2d_BSplineCurve(poles2, knots, mults, 1);
+                } catch (const Standard_Failure&) {
+                    return {};
+                }
             }
         }
         try {
@@ -15589,6 +15619,104 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             };
             std::vector<SpanPlan> spanPlan(rs.chains.size());
             int nGuardA = 0, nGuardB = 0, nC2ok = 0, nC2no = 0;
+            // One degree-1 B-spline through the mesh vertices, shared by both
+            // faces. Same edge the closed360 skew publisher builds, for an
+            // uncollapsed FilletStrip chain (nV >= 3, the publisher's own
+            // floor): N mesh lines each count as polylineTier2. A chain whose
+            // exact supremum exceeds meshTolCap is left as mesh so a new
+            // overTol cannot appear. Kept analytic curves never reach here.
+            auto publishFilletTier2 = [&](size_t ci, const BoundaryChain& ch, const Region* A,
+                                          const Region* B) -> bool {
+                if (!A || !B) return false;
+                if (A->origin != Origin::FilletStrip && B->origin != Origin::FilletStrip)
+                    return false;
+                // Tangent contacts belong to g1Tangent → constructedGenerator
+                // (D-fc-1.7). Replacing the mesh they already ship moves a
+                // fixture whose ceiling was met (Body28). The ceiling breaks
+                // are the non-tangent misses.
+                if (ch.tangent) return false;
+                if (ch.meshVerts.size() < 3) return false;
+                const bool closed = ch.closedLoop;
+                const int nV = (int)ch.meshVerts.size();
+                const int nPoles = closed ? (nV + 1) : nV;
+                const int lv0 = ch.meshVerts.front();
+                const int lv1 = closed ? lv0 : ch.meshVerts.back();
+                if (lv0 < 0 || lv1 < 0 || (size_t)lv0 >= verts.size() ||
+                    (size_t)lv1 >= verts.size())
+                    return false;
+                if (verts[(size_t)lv0].IsNull() || verts[(size_t)lv1].IsNull()) return false;
+                TopoDS_Edge ePoly;
+                Handle(Geom_BSplineCurve) bsp;
+                try {
+                    TColgp_Array1OfPnt poles(1, nPoles);
+                    TColStd_Array1OfReal knots(1, nPoles);
+                    TColStd_Array1OfInteger mults(1, nPoles);
+                    for (int i = 0; i < nPoles; i++) {
+                        const int lv = ch.meshVerts[(size_t)(closed ? (i % nV) : i)];
+                        poles.SetValue(i + 1, pntOf(mv, lv));
+                        knots.SetValue(i + 1, (double)i);
+                        mults.SetValue(i + 1, (i == 0 || i == nPoles - 1) ? 2 : 1);
+                    }
+                    bsp = new Geom_BSplineCurve(poles, knots, mults, 1);
+                    BRepBuilderAPI_MakeEdge me(bsp, verts[(size_t)lv0], verts[(size_t)lv1], 0.0,
+                                               (double)(nPoles - 1));
+                    if (me.IsDone()) ePoly = me.Edge();
+                } catch (const Standard_Failure&) {
+                    ePoly.Nullify();
+                }
+                if (ePoly.IsNull() || bsp.IsNull()) return false;
+                auto sideDev = [&](const Region* R) -> double {
+                    SurfVar vars[6];
+                    int nv = 0;
+                    variantsForRegion(*R, vars, nv);
+                    double m = -1.0;
+                    bool any = false;
+                    const double fE = 0.0;
+                    const double lE = (double)(nPoles - 1);
+                    for (int i = 0; i < nv; ++i) {
+                        Handle(Geom_Surface) srf = regionSurf(*R, vars[i]);
+                        if (srf.IsNull()) continue;
+                        Handle(Geom2d_Curve) c2d =
+                            makePCurveOnSurf(bsp, fE, lE, srf, "tier2poly");
+                        if (c2d.IsNull()) continue;
+                        const char* cls = nullptr;
+                        double ex = exactMaxAtBind(bsp, fE, lE, srf, c2d, TopLoc_Location(), &cls);
+                        if (!(ex >= 0.0))
+                            ex = brepDevMaxOnSurf(bsp, fE, lE, srf, c2d, fE, lE, TopLoc_Location());
+                        if (ex > m) m = ex;
+                        any = true;
+                    }
+                    return any ? m : -1.0;
+                };
+                const double dA = sideDev(A);
+                const double dB = sideDev(B);
+                if (!(dA >= 0.0 && dA <= meshTolCap(mv, A) + Precision::PConfusion())) return false;
+                if (!(dB >= 0.0 && dB <= meshTolCap(mv, B) + Precision::PConfusion())) return false;
+                const Region* ownerR = A->id <= B->id ? A : B;
+                const Region* consumerR = ownerR == A ? B : A;
+                SeamBindCounts acc;
+                bindAllVariants(ePoly, *ownerR, "tier2poly", mv, (int)ci, acc);
+                bindAllVariants(ePoly, *consumerR, "tier2poly", mv, (int)ci, acc);
+                geom[ci] = ChainGeom{};
+                geom[ci].collapsed = true;
+                geom[ci].edges = {ePoly};
+                geom[ci].ia = lv0;
+                geom[ci].ib = lv1;
+                geom[ci].regA = A->id;
+                geom[ci].regB = B->id;
+                geom[ci].chainSnapCap = analyticSnapCap(mv, A, B);
+                geom[ci].tier2Polyline = true;
+                if (const void* ts2 = diagTShapePtr(ePoly)) gTier2TShapes.insert(ts2);
+                noteWirePop(ePoly, "rebuildCollapsed", (int)ci);
+                collapsed[ci] = 1;
+                if (diagP2Enabled() || diag130Enabled())
+                    std::fprintf(stderr,
+                                 "DIAG_130_TIER2 ci=%d regA=%d regB=%d nSeg=%d seamLv=%d "
+                                 "capOwner=%d tol=%.6f fillet=1\n",
+                                 (int)ci, A->id, B->id, nV, lv0, -1,
+                                 BRep_Tool::Tolerance(ePoly));
+                return true;
+            };
             (void)tryPlaneLoopCircles(rs, mv, sewTol);
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 collapsed[ci] = 0;
@@ -15657,6 +15785,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gSurfIdent.clear();
                     gSeamTShapes.clear();
                     gTier2TShapes.clear();
+                    gConeIsoCapTShapes.clear();
                     gMeshTShapes.clear();
                     gWirePopCi.clear();
                     gWirePopSite.clear();
@@ -15853,7 +15982,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 // IntAna none: cyl|cyl is legal polyline (IA_CYLCYL_NOGEOM).
                 // plane|plane and plane|cyl misses are post-fit edge failures.
+                // A FilletStrip chain with no analytic contact ships as ONE
+                // degree-1 spline (D-fc-1.7), not N mesh lines.
                 if (curve.kind == AnalyticCurve::None) {
+                    if (publishFilletTier2(ci, ch, A, B)) {
+                        nOk++;
+                        continue;
+                    }
                     nNone++;
                     if (anaPair) intanaMiss[ci] = 1;
                     if (anaPair && A && B &&
@@ -16050,6 +16185,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                              (int)ci, sp.runsCert);
                         }
                         if (!kept) {
+                            if (publishFilletTier2(ci, ch, A, B)) {
+                                nOk++;
+                                continue;
+                            }
                             geom[ci] = ChainGeom{};
                             nNone++;
                             nChainSewFb++;
@@ -16898,15 +17037,162 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         const double angTol =
                             (tau > 0.0) ? (tau / rho) : Precision::Angular();
                         const bool rewrite = dChart > angTol;
-                        const double originX = rewrite ? (seamTarget - cf) : cf;
                         if ((diag130Enabled() || diagRelEnabled()) && rewrite)
                             std::fprintf(stderr,
                                          "DIAG_CONECAP rid=%d cf=%.6f seam=%.6f dChart=%.6g "
                                          "angTol=%.6g tau=%.6g rho=%.6g\n",
                                          r.id, cf, seamTarget, dChart, angTol, tau, rho);
-                        Handle(Geom2d_Line) pc =
-                            new Geom2d_Line(gp_Pnt2d(originX, vIso), gp_Dir2d(1.0, 0.0));
+                        // rewrite==false keeps the bytes a cap that already sits
+                        // on the seam chart has always had (origin cf, dir +1).
+                        // rewrite==true is the reused rim whose first parameter
+                        // is ~2π: the chart line of dir +1 is what NotClosed
+                        // needs, and it is what circle-on-cone refuses. Prefer
+                        // the certified pcurve, shifted by 2πk so Value(cf)
+                        // meets the seam. A 2πk shift is exact on a cone. If
+                        // the shared circle itself fails the certificate,
+                        // replace it with this cone's iso (coaxial by
+                        // construction) phased so the edge's first parameter
+                        // stays on the start vertex, then the same 2πk shift.
+                        Handle(Geom2d_Curve) pc;
+                        double supRaise = -1.0;
+                        if (!rewrite) {
+                            pc = new Geom2d_Line(gp_Pnt2d(cf, vIso), gp_Dir2d(1.0, 0.0));
+                        } else {
+                            const gp_Cone gcone = csurf->Cone();
+                            const double period = 2.0 * kPi;
+                            auto shiftToSeam = [&](const Handle(Geom2d_Curve)& raw)
+                                -> Handle(Geom2d_Curve) {
+                                Handle(Geom2d_Line) ln = Handle(Geom2d_Line)::DownCast(raw);
+                                if (ln.IsNull()) return {};
+                                const gp_Dir2d d2 = ln->Direction();
+                                const double atCf = ln->Location().X() + d2.X() * cf;
+                                const double k = std::round((seamTarget - atCf) / period);
+                                return new Geom2d_Line(
+                                    gp_Pnt2d(ln->Location().X() + k * period, ln->Location().Y()),
+                                    d2);
+                            };
+                            auto certSup = [&](const Handle(Geom_Curve)& curve,
+                                               const Handle(Geom2d_Curve)& cand) -> double {
+                                if (curve.IsNull() || cand.IsNull()) return -1.0;
+                                const char* cls = nullptr;
+                                const double sup = coneCircleBindSup(
+                                    curve, cf, cl, csurf, cand, TopLoc_Location(), &cls);
+                                if (!(sup >= 0.0) || !std::isfinite(sup)) return -1.0;
+                                Handle(Geom2d_Line) ln = Handle(Geom2d_Line)::DownCast(cand);
+                                if (ln.IsNull()) return -1.0;
+                                const double got = ln->Location().X() + ln->Direction().X() * cf;
+                                if (std::fabs(got - seamTarget) > angTol) return -1.0;
+                                return sup;
+                            };
+                            Handle(Geom_Circle) gc =
+                                Handle(Geom_Circle)::DownCast(basisCurveOf(cc));
+                            if (!gc.IsNull()) {
+                                Handle(Geom2d_Curve) shifted =
+                                    shiftToSeam(conePCurveForCircle(gcone, gc->Circ()));
+                                const double sup = certSup(cc, shifted);
+                                if (sup >= 0.0) {
+                                    pc = shifted;
+                                    supRaise = sup;
+                                }
+                            }
+                            if (pc.IsNull()) {
+                                const double vHiS = coneVAtRadius(gcone, chamferRhiOf(r));
+                                const bool hiRim =
+                                    std::fabs(vIso - vHiS) <= std::fabs(vIso);
+                                const gp_Circ base =
+                                    coneIsoCircle(r, hiRim ? chamferHeightOf(r) : 0.0);
+                                TopoDS_Vertex vStart, vEnd;
+                                TopExp::Vertices(eCap, vStart, vEnd);
+                                const gp_Pnt p0 =
+                                    vStart.IsNull() ? (cc.IsNull() ? base.Location() : cc->Value(cf))
+                                                    : BRep_Tool::Pnt(vStart);
+                                const gp_Pnt loc = base.Location();
+                                const gp_Dir N = base.Axis().Direction();
+                                gp_Vec radial(loc, p0);
+                                const gp_Vec ax(N);
+                                radial = radial - ax * radial.Dot(ax);
+                                if (base.Radius() > Precision::Confusion() &&
+                                    radial.Magnitude() > Precision::Confusion()) {
+                                    const gp_Dir U(radial);
+                                    const gp_Vec W = gp_Vec(N).Crossed(gp_Vec(U));
+                                    const gp_Vec xVec =
+                                        gp_Vec(U) * std::cos(cf) - W * std::sin(cf);
+                                    if (xVec.Magnitude() > Precision::Confusion()) {
+                                        const gp_Circ iso(gp_Ax2(loc, N, gp_Dir(xVec)),
+                                                          base.Radius());
+                                        Handle(Geom_Circle) neu = new Geom_Circle(iso);
+                                        Handle(Geom2d_Curve) shifted =
+                                            shiftToSeam(conePCurveForCircle(gcone, iso));
+                                        const double sup = certSup(neu, shifted);
+                                        if (sup >= 0.0) {
+                                            const double span = (cl > cf) ? (cl - cf) : period;
+                                            try {
+                                                B.UpdateEdge(eCap, neu, TopLoc_Location(), sewTol);
+                                                B.Range(eCap, cf, cf + span);
+                                                for (int idx = 1;; ++idx) {
+                                                    Handle(Geom2d_Curve) oldPc;
+                                                    Handle(Geom_Surface) srf;
+                                                    TopLoc_Location oloc;
+                                                    Standard_Real a = 0, b = 0;
+                                                    BRep_Tool::CurveOnSurface(eCap, oldPc, srf,
+                                                                               oloc, a, b, idx);
+                                                    if (oldPc.IsNull() || srf.IsNull()) break;
+                                                    if (!basisConeOf(srf).IsNull()) continue;
+                                                    Handle(Geom2d_Curve) npc = makePCurveOnSurf(
+                                                        neu, cf, cf + span, srf, "circ");
+                                                    if (npc.IsNull()) continue;
+                                                    // The partner face (the cylinder rim) already
+                                                    // closed on the old pcurve's chart. The iso's
+                                                    // X axis is phased to the cone seam, so the
+                                                    // new pcurve is a whole turn off that chart
+                                                    // and the partner wire is NotClosed. A 2πk
+                                                    // shift is exact on a cylinder and puts
+                                                    // Value(cf) back on the chart the seam uses.
+                                                    const double oldU = oldPc->Value(cf).X();
+                                                    const double newU = npc->Value(cf).X();
+                                                    const double kShift =
+                                                        std::round((oldU - newU) / period);
+                                                    if (kShift != 0.0) {
+                                                        Handle(Geom2d_Curve) sh =
+                                                            Handle(Geom2d_Curve)::DownCast(
+                                                                npc->Translated(gp_Vec2d(
+                                                                    kShift * period, 0.0)));
+                                                        if (!sh.IsNull()) npc = sh;
+                                                    }
+                                                    B.UpdateEdge(eCap, npc, srf, oloc, sewTol);
+                                                    B.Range(eCap, srf, oloc, cf, cf + span);
+                                                }
+                                            } catch (const Standard_Failure&) {
+                                                shifted.Nullify();
+                                            }
+                                            if (!shifted.IsNull()) {
+                                                pc = shifted;
+                                                supRaise = sup;
+                                                if (const void* ts = diagTShapePtr(eCap))
+                                                    gConeIsoCapTShapes.insert(ts);
+                                                if (diag130Enabled() || diagRelEnabled())
+                                                    std::fprintf(
+                                                        stderr,
+                                                        "DIAG_CONECAP_ISO rid=%d sup=%.6g\n",
+                                                        r.id, sup);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (pc.IsNull())
+                                pc = new Geom2d_Line(gp_Pnt2d(seamTarget - cf, vIso),
+                                                     gp_Dir2d(1.0, 0.0));
+                        }
                         B.UpdateEdge(eCap, pc, csurf, TopLoc_Location(), sewTol);
+                        if (supRaise >= 0.0) {
+                            const double capMesh = meshTolCap(mv, &r);
+                            double tol = 0.0, maxAll = 0.0;
+                            bool over = false;
+                            if (applyBindTolAllPcurves(eCap, supRaise, supRaise, capMesh, &tol,
+                                                       &over, &maxAll))
+                                fireTolRewriteEdge(B, eCap, tol, "cone-iso-cap", capMesh);
+                        }
                     };
 
                     TopoDS_Face f;
@@ -18712,6 +18998,25 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         } catch (const Standard_Failure&) {
             return false;
+        }
+
+        // Cone-iso rims: SameParameter has just set the tolerance to the
+        // sampled gap. The census supremum is circle-on-cylinder's off-axis
+        // branch, |d0 − R|, because the iso is coaxial with the cone and the
+        // two axes differ by more than Precision::Confusion. Cover that
+        // supremum after SameParameter so it is not lowered again.
+        if (!gConeIsoCapTShapes.empty()) {
+            BRep_Builder bb;
+            for (TopExp_Explorer ex(sh, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                const void* ts = diagTShapePtr(e);
+                if (!ts || !gConeIsoCapTShapes.count(ts)) continue;
+                const double exm = maxExactAllPcurves(e, -1.0);
+                if (!(exm >= 0.0) || !std::isfinite(exm)) continue;
+                const double want =
+                    std::max(Precision::Confusion(), exm + Precision::PConfusion());
+                fireTolRewriteEdge(bb, e, want, "cone-iso-cap", meshTolCap(mv, nullptr));
+            }
         }
 
         // J6
