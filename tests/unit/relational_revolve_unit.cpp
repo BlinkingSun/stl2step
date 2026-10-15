@@ -1,6 +1,7 @@
 // Synthetic relational-revolve cases (D-fc-1.6, D-fc-1.7). No training mesh.
 // SPDX-License-Identifier: MIT
 
+#include "posix_compat.hpp"
 #include "refit_relational.hpp"
 
 #include <algorithm>
@@ -22,7 +23,13 @@
 #define rr_fileno _fileno
 #define rr_close _close
 #else
-#include <unistd.h>
+// dup/dup2/close are libc. Declared here so this file does not include <unistd.h>.
+// fileno comes from <cstdio>.
+extern "C" {
+int dup(int);
+int dup2(int, int);
+int close(int);
+}
 #define rr_dup dup
 #define rr_dup2 dup2
 #define rr_fileno fileno
@@ -209,11 +216,7 @@ struct Grab {
     int saved = -1;
     bool on = false;
     Grab() {
-#if defined(_WIN32)
-        _putenv("STL2STEP_DIAG_REL=1");
-#else
-        setenv("STL2STEP_DIAG_REL", "1", 1);
-#endif
+        ::setenv("STL2STEP_DIAG_REL", "1", 1);
         saved = rr_dup(rr_fileno(stderr));
         FILE* f = std::fopen("rel-revolve-diag.txt", "w");
         if (!f) return;

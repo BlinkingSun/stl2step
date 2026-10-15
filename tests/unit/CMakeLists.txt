@@ -489,6 +489,11 @@ foreach(_fc_unit IN ITEMS relational_extrude relational_revolve tesslaw relation
     if(COMMAND stl2step_adhoc_sign)
         stl2step_adhoc_sign(${_fc_unit}_unit)
     endif()
+    # posix_compat.hpp lives in tests/support (winfix 159e22a did this for tesslaw).
+    if(_fc_unit STREQUAL "relational_extrude" OR _fc_unit STREQUAL "relational_revolve")
+        target_include_directories(${_fc_unit}_unit PRIVATE
+            "${_stl2step_root}/tests/support")
+    endif()
     add_test(NAME ${_fc_unit}_unit COMMAND ${_fc_unit}_unit)
     set_tests_properties(${_fc_unit}_unit PROPERTIES
         LABELS "unit;fc-contract"
