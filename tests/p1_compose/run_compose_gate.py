@@ -83,6 +83,38 @@ def ichecker_blocking_fail(proc: subprocess.CompletedProcess) -> str | None:
     return None
 
 
+_FAIL_LINE = re.compile(r"(SCHEMA|I[1-9]|I7b|G5|SIDECAR_RECOVERABLE|SIDECAR) FAIL\b(.*)$")
+_RECOVERABLE_ID = re.compile(r"recoverable\d+")
+
+
+def recoverable_misses_only(text: str) -> bool:
+    """True iff every blocking ichecker FAIL is a recoverable[] miss.
+
+    Orchestrator ruling 17:20 (G3): a fixture listed in expected-red.json
+    p1_compose_gate may XFAIL only SIDECAR / SIDECAR_RECOVERABLE failures
+    whose offenders are all `recoverable<N>` ids. Any other failing rule or
+    offender (SCHEMA, I1-I9, I7b, G5, SIDECAR rejected / region / faceted),
+    or a non-zero exit with no FAIL line at all, stays hard.
+    """
+    seen = False
+    for line in text.splitlines():
+        s = line.strip()
+        if "minLocalTriId" in s and "ties rejected" in s:
+            continue
+        if re.match(r"I5 FAIL rejected\b", s):
+            continue
+        m = _FAIL_LINE.match(s)
+        if not m:
+            continue
+        if m.group(1) not in ("SIDECAR", "SIDECAR_RECOVERABLE"):
+            return False
+        offenders = [o for o in m.group(2).strip().split(",") if o]
+        if not offenders or not all(_RECOVERABLE_ID.fullmatch(o) for o in offenders):
+            return False
+        seen = True
+    return seen
+
+
 def sidecar_for(stl: Path, corpus: Path) -> Path | None:
     sc = corpus / (stl.stem + ".expected.json")
     return sc if sc.is_file() else None
@@ -91,10 +123,11 @@ def sidecar_for(stl: Path, corpus: Path) -> Path | None:
 def load_p1_expected_red(repo: Path) -> dict[str, str]:
     """Fixture ids whose unbuilt recoverable features are a recorded deferral.
 
-    D-fc-1.14. A listed fixture whose I-checker or recoverable-union check
-    fails is XFAIL (exit 0) and the row's note is printed. A listed fixture
-    that passes prints XPASS and does not fail. Determinism and the
-    recognition checks stay hard.
+    D-fc-1.14, narrowed by orchestrator ruling 17:20 (G3). On a listed
+    fixture only recoverable[] misses (recoverable_misses_only) are XFAIL
+    (exit 0, the row's note is printed); every other I-checker failure,
+    determinism and the recognition checks stay hard. A listed fixture whose
+    every row passes prints XPASS and does not fail.
     """
     path = repo / "tests" / "gates" / "baseline" / "expected-red.json"
     if not path.is_file():
@@ -269,6 +302,8 @@ def main() -> int:
                 rows.append(f"SKIP {stl.name}: no clean components")
                 continue
             sidecar = sidecar_for(stl, args.corpus)
+            note = listed.get(stl.stem)
+            first_row = len(rows)
 
             # Every clean component is dumped before any is checked: the
             # fixture-wide recoverable[] pool is the union of all of them.
@@ -309,20 +344,24 @@ def main() -> int:
                     icmd += ["--skip-recoverable", "--component", str(comp)]
                 proc = run(icmd, capture=True)
                 blocked = ichecker_blocking_fail(proc)
+                xfail = False
                 if blocked is not None:
-                    note = listed.get(stl.stem)
-                    if note:
-                        rows.append(f"XFAIL {tag}: {note}")
+                    if note and recoverable_misses_only(blocked):
+                        xfail = True
+                    else:
+                        failures.append(f"{tag}: ichecker\n{blocked}")
+                        rows.append(f"FAIL {tag}: ichecker")
                         continue
-                    failures.append(f"{tag}: ichecker\n{blocked}")
-                    rows.append(f"FAIL {tag}: ichecker")
-                    continue
+                # Recognition runs on an XFAIL component too: it stays hard.
                 rs = json.loads(t1.read_text())
                 rec = check_recognition(stl.name, rs)
                 rec.extend(check_fillet_nbrs(rs))
                 if rec:
                     failures.extend(f"{tag}: {m}" for m in rec)
                     rows.append(f"FAIL {tag}: recognition")
+                    continue
+                if xfail:
+                    rows.append(f"XFAIL {tag}: {note}")
                     continue
                 rows.append(f"PASS {tag}")
 
@@ -335,20 +374,19 @@ def main() -> int:
                     "--rule", "SIDECAR_RECOVERABLE",
                 ]
                 proc = run(ucmd, capture=True)
-                note = listed.get(stl.stem)
                 if proc.returncode != 0:
-                    if note:
+                    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                    if note and recoverable_misses_only(text):
                         rows.append(f"XFAIL {tag}: {note}")
                     else:
-                        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
                         failures.append(f"{tag}: ichecker\n{text}")
                         rows.append(f"FAIL {tag}: ichecker")
                 else:
-                    if note:
-                        rows.append(
-                            f"XPASS {stl.stem} — shrink expected-red.json"
-                        )
                     rows.append(f"PASS {tag}")
+
+            fixture_rows = rows[first_row:]
+            if note and fixture_rows and all(r.startswith("PASS") for r in fixture_rows):
+                rows.append(f"XPASS {stl.stem} — shrink expected-red.json")
 
     print("P1 COMPOSE GATE")
     for row in rows:
