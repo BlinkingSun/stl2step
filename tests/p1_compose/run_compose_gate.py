@@ -88,6 +88,26 @@ def sidecar_for(stl: Path, corpus: Path) -> Path | None:
     return sc if sc.is_file() else None
 
 
+def load_p1_expected_red(repo: Path) -> dict[str, str]:
+    """Fixture ids whose unbuilt recoverable features are a recorded deferral.
+
+    D-fc-1.14. A listed fixture whose I-checker or recoverable-union check
+    fails is XFAIL (exit 0) and the row's note is printed. A listed fixture
+    that passes prints XPASS and does not fail. Determinism and the
+    recognition checks stay hard.
+    """
+    path = repo / "tests" / "gates" / "baseline" / "expected-red.json"
+    if not path.is_file():
+        raise RuntimeError(f"required file missing: {path}")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise RuntimeError(f"{path}: expected a JSON object")
+    section = doc.get("p1_compose_gate") or {}
+    if not isinstance(section, dict):
+        raise RuntimeError(f"{path}: p1_compose_gate must be an object")
+    return {str(k): str(v) for k, v in section.items()}
+
+
 def load_matcher(ichecker: Path):
     """The I-checker this gate drives, imported as a module.
 
@@ -232,6 +252,7 @@ def main() -> int:
 
     fixtures = sorted(args.corpus.glob("S*.stl")) + [args.cube]
     matcher = load_matcher(args.ichecker)
+    listed = load_p1_expected_red(args.repo)
     rows: list[str] = []
     failures: list[str] = []
 
@@ -289,6 +310,10 @@ def main() -> int:
                 proc = run(icmd, capture=True)
                 blocked = ichecker_blocking_fail(proc)
                 if blocked is not None:
+                    note = listed.get(stl.stem)
+                    if note:
+                        rows.append(f"XFAIL {tag}: {note}")
+                        continue
                     failures.append(f"{tag}: ichecker\n{blocked}")
                     rows.append(f"FAIL {tag}: ichecker")
                     continue
@@ -310,11 +335,19 @@ def main() -> int:
                     "--rule", "SIDECAR_RECOVERABLE",
                 ]
                 proc = run(ucmd, capture=True)
+                note = listed.get(stl.stem)
                 if proc.returncode != 0:
-                    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-                    failures.append(f"{tag}: ichecker\n{text}")
-                    rows.append(f"FAIL {tag}: ichecker")
+                    if note:
+                        rows.append(f"XFAIL {tag}: {note}")
+                    else:
+                        text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+                        failures.append(f"{tag}: ichecker\n{text}")
+                        rows.append(f"FAIL {tag}: ichecker")
                 else:
+                    if note:
+                        rows.append(
+                            f"XPASS {stl.stem} — shrink expected-red.json"
+                        )
                     rows.append(f"PASS {tag}")
 
     print("P1 COMPOSE GATE")

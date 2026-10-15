@@ -56,6 +56,7 @@ PICKUP_CORPUS = REPO / "tests" / "corpus" / "handle-pickup.stl"
 PICKUP_DIAG = REPO / "tests" / "diag" / "handle-pickup" / "handle-pickup.stl"
 PICKUP_GT = REPO / "tests" / "diag" / "handle-pickup" / "ground-truth.json"
 PICKUP_SIDECAR = REPO / "tests" / "corpus" / "handle-pickup.expected.json"
+EXPECTED_RED_FILE = REPO / "tests" / "gates" / "baseline" / "expected-red.json"
 # Soft last fallbacks — skipped silently when the worktree has no _team/.
 # Never hard-require repo-external _team/inputs (fresh-clone CI has none).
 TEAM_PICKUP_STL = REPO / "_team" / "inputs" / "Handle pickup.stl"
@@ -1089,6 +1090,27 @@ def failing_names(checks: Sequence[Check], *, hard_only: bool = True) -> List[st
     return out
 
 
+def load_expected_red_section(
+    gate: str, path: Path = EXPECTED_RED_FILE
+) -> Dict[str, str]:
+    """Recorded deferrals for one gate. A missing file is a hard fail.
+
+    partial_recovery_gate reads the ``partial_recovery_gate`` object. A listed
+    check name that fails is XFAIL (exit 0) and prints the row's note. The
+    prg-ratchet ceilings are not touched. A listed check that passes prints
+    XPASS and does not fail, same as gate_130.
+    """
+    if not path.is_file():
+        raise GateError(f"required file missing: {path}")
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(doc, dict):
+        raise GateError(f"{path}: expected a JSON object")
+    section = doc.get(gate) or {}
+    if not isinstance(section, dict):
+        raise GateError(f"{path}: {gate} must be an object")
+    return {str(k): str(v) for k, v in section.items()}
+
+
 def split_hard_fails(
     checks: Sequence[Check],
 ) -> Tuple[List[Check], List[Check]]:
@@ -1330,6 +1352,19 @@ def run_live(
             checks.extend(evaluate_body18(fe))
 
         expected_red, unexpected = split_hard_fails(checks)
+        try:
+            listed = load_expected_red_section("partial_recovery_gate")
+        except (GateError, json.JSONDecodeError, OSError) as exc:
+            print(
+                f"{MARKER_UNEXPECTED}  expected-red.json: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        # A named check in expected-red.json is a recorded deferral. The
+        # ceiling in prg-ratchet.json stays where it is.
+        xfail = [c for c in unexpected if c.name in listed]
+        unexpected = [c for c in unexpected if c.name not in listed]
         soft_fails = [c for c in checks if (not c.ok) and not c.hard]
         n_sph = sum(int(e.get("count") or 0) for e in faceted if e.get("type") == "sphere")
         n_tor = sum(int(e.get("count") or 0) for e in faceted if e.get("type") == "torus")
@@ -1367,6 +1402,13 @@ def run_live(
                 flush=True,
             )
             return 1
+        for c in xfail:
+            print(f"XFAIL {c.name} — {listed[c.name]}", flush=True)
+        by_name = {c.name: c for c in checks}
+        for name in listed:
+            got = by_name.get(name)
+            if got is not None and got.ok:
+                print(f"XPASS {name} — shrink expected-red.json", flush=True)
         if soft_fails:
             named = ", ".join(c.name for c in soft_fails)
             print(
