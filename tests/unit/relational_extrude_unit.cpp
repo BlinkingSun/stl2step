@@ -910,13 +910,24 @@ static void case17() {
     for (int t : moved) provs[(std::size_t)ia].tris.push_back(t);
     provs[(std::size_t)ia].maxVertexDev = 140.0 * tau;
     Run r = runClaim(built.synth, std::move(built.work), q, 1);
-    // The flank provisional is 140 tau, so the pair is not extrudeAnchoredPair.
-    // REV ORCH-3 does not call the free fit. The mis-assigned facets stay unclaimed.
-    const bool ok = r.work.accepted.empty() && !hasWhy(r.diag, "accept");
-    std::fprintf(stderr, "case17 accepted=%d moved=%d\n", (int)r.work.accepted.size(),
-                 (int)moved.size());
+    // REV ORCH-4. The flank is 140τ because fillet facets were merged into the
+    // wall. The τ-inlier of that plane is the wall triangle, which
+    // anchorCertified admits. The fillet is then an anchored claim.
+    const bool one = r.work.accepted.size() == 1;
+    bool ok = one && hasWhy(r.diag, "accept");
+    if (one) {
+        const Region& a = r.work.accepted[0];
+        ok = ok && a.origin == Origin::FilletStrip && nearRadius(a, 3.0, r.tau) && !a.closed360;
+        std::fprintf(stderr, "case17 r=%.9g dev=%.3g tris=%d moved=%d origin=%d\n", a.radius,
+                     a.maxVertexDev, (int)a.tris.size(), (int)moved.size(), (int)a.origin);
+    } else {
+        std::fprintf(stderr, "case17 accepted=%d moved=%d\n", (int)r.work.accepted.size(),
+                     (int)moved.size());
+    }
+    const std::string acc = lineWithWhy(r.diag, "accept");
+    ok = ok && acc.find("fit=anchored") != std::string::npos;
     if (!ok) dumpFail("case17", r);
-    expect(ok, "case17 uncertified flank is not a wave-1 claim");
+    expect(ok, "case17 τ-inlier of a contaminated flank is an anchored claim");
 }
 
 static void case18() {
