@@ -85,6 +85,20 @@ add_custom_command(
 
 add_custom_target(stl2step_corpus_data ALL DEPENDS "${_corpus_stamp}")
 
+# SPEC-fixtures (D-fc-1.12): ids the generator writes after S21. The existing
+# corpus loops (corpus_generate, corpus_sidecar_check, and the phase-end
+# corpus_engine_convert glob) pick them up from this directory. No new ctest:
+# expected-red rows are orchestrator-owned (D-fc-1.14).
+set(STL2STEP_CORPUS_FC_IDS
+    S23_plane_fillet_lowfold
+    S24_hem_uturn
+    S25_peg_fillet
+    S26_funnel_rev
+    S27_sphere_corner_fine
+    S28_varradius_negative
+    S29_hex_law
+)
+
 enable_testing()
 
 add_test(NAME corpus_generate

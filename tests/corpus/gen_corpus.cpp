@@ -12,12 +12,18 @@
 #include <map>
 #include <set>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
+#include <Poly_Triangle.hxx>
+
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
@@ -33,6 +39,9 @@
 #include <BRepTools.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepFill.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <GC_MakeArcOfCircle.hxx>
@@ -77,6 +86,9 @@ struct FixtureResult {
     MeshData mesh;
     TopoDS_Shape exact;  // D-140-1(7): null unless writeFixture emits <id>.exact.step
 };
+
+void recordFaceFolds(const TopoDS_Shape& shape, Sidecar& sc);
+void replaceFilletSphereOctant(TopoDS_Shape& shape);
 
 Recoverable cylRec(double R, const Vec3& loc, const Vec3& dir, int count, int nSides,
                    bool closed360) {
@@ -400,17 +412,26 @@ void fillLiveExpectations(FixtureResult& out) {
 
 FixtureResult emitShape(const std::string& id, const std::string& desc, TopoDS_Shape shape,
                         double deflection, double angDeflection, Sidecar sidecar,
-                        bool emitExactStep = false) {
+                        bool emitExactStep = false, bool retessSphereOctant = false) {
     // A.4: capture the exact BRep before tessellate() adds Poly_Triangulation
     // data to it (tessellation never touches the analytic surfaces/curves).
     const TopoDS_Shape exactBeforeTess = shape;
     tessellate(shape, deflection, angDeflection);
+    // D-fc-3.6: only buildS27 sets retessSphereOctant. The cylinders stay the
+    // mesher's triangles; the sphere octant is replaced after this call.
+    if (retessSphereOctant) replaceFilletSphereOctant(shape);
     FixtureResult out;
     out.mesh = weldQuantized(quantizeMesh(extractMesh(shape)));
     out.sidecar = std::move(sidecar);
     out.sidecar.id = id;
     out.sidecar.description = desc;
     out.sidecar.deflection = deflection;
+    if (out.sidecar.angularDeflectionRad >= 0.0) {
+        if (std::fabs(out.sidecar.angularDeflectionRad - angDeflection) > 1e-12) {
+            throw std::runtime_error(id + std::string(": angularDeflectionRad disagrees with tessellate"));
+        }
+        recordFaceFolds(shape, out.sidecar);
+    }
     if (emitExactStep) {
         out.exact = exactBeforeTess;
     } else if (id == "S01" || id == "S02" || id == "S03") {
@@ -1950,6 +1971,1350 @@ FixtureResult buildS21RimOffplane() {
     return out;
 }
 
+// ---- SPEC-fixtures S23–S29 (D-fc-1.12). Append-only; S01–S22 builders above
+// are untouched. angularDeflectionRad is passed through to tessellate. ----
+
+// Spike Q3 measured 4° keeping curved-face folds under 5° on this mesher.
+// S29's round hole is specified at 64/turn, so its angle is 2π/64 instead.
+constexpr double kFcLin = 0.02;
+constexpr double kFcAng = 4.0 * M_PI / 180.0;
+// This mesher's circumferential step is half the requested angle (a cylinder
+// at kFcAng = 4° measured 180 sides). 64/turn needs twice 2π/64.
+constexpr double kFcAng64 = 2.0 * (2.0 * M_PI / 64.0);
+// S25 at kFcAng measured 180 sides on the R6 peg. Spec band is 90..100;
+// target the midpoint, 96.
+constexpr double kFcAngPeg = kFcAng * (180.0 / 96.0);
+
+// D-fc-3.6. Triangulate the S27 sphere octant. Boundary nodes are the three
+// cylinders' end-ring nodes, so the welded STL has no T-junction on those
+// curves. Interior nodes lie on the sphere. The grid step is the shorter
+// end-ring's own step (the mesher's circumferential step on these fillets).
+gp_Pnt filletOctantPoint(const gp_Pnt& center, double radius, const gp_Vec& towardX,
+                         const gp_Vec& towardY, const gp_Vec& towardZ, int i, int j,
+                         int nSteps) {
+    auto slerp = [](const gp_Vec& a, const gp_Vec& b, double t) {
+        double d = a.Dot(b);
+        if (d > 1.0) d = 1.0;
+        if (d < -1.0) d = -1.0;
+        const double th = std::acos(d);
+        if (th < 1e-12) return a;
+        const double s = std::sin(th);
+        return a.Multiplied(std::sin((1.0 - t) * th) / s).Added(b.Multiplied(std::sin(t * th) / s));
+    };
+    if (i == 0 && j == 0) return center.Translated(towardX.Multiplied(radius));
+    const double a = (static_cast<double>(i + j) / static_cast<double>(nSteps)) * (M_PI / 2.0);
+    const double b = static_cast<double>(j) / static_cast<double>(i + j);
+    const gp_Vec alongY = towardX.Multiplied(std::cos(a)).Added(towardY.Multiplied(std::sin(a)));
+    const gp_Vec alongZ = towardX.Multiplied(std::cos(a)).Added(towardZ.Multiplied(std::sin(a)));
+    gp_Vec dir = slerp(alongY, alongZ, b);
+    if (dir.SquareMagnitude() < 1e-18) return center;
+    dir.Normalize();
+    return center.Translated(dir.Multiplied(radius));
+}
+
+void replaceFilletSphereOctant(TopoDS_Shape& shape) {
+    TopoDS_Face sphereFace;
+    int nSphere = 0;
+    gp_Pnt center;
+    double radius = 0;
+    double want = 0;
+    bool haveWant = false;
+    TopLoc_Location sphereLoc;
+    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+        TopoDS_Face face = TopoDS::Face(exp.Current());
+        BRepAdaptor_Surface sa(face, Standard_False);
+        if (sa.GetType() != GeomAbs_Sphere) continue;
+        ++nSphere;
+        sphereFace = face;
+        center = sa.Sphere().Location();
+        radius = sa.Sphere().Radius();
+        Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, sphereLoc);
+        if (tri.IsNull() || tri->NbTriangles() < 1)
+            throw std::runtime_error("S27: sphere has no triangulation");
+        const gp_Trsf tr = sphereLoc.Transformation();
+        for (int i = 1; i <= tri->NbTriangles() && !haveWant; ++i) {
+            int n1, n2, n3;
+            tri->Triangle(i).Get(n1, n2, n3);
+            gp_Pnt a = tri->Node(n1);
+            gp_Pnt b = tri->Node(n2);
+            gp_Pnt c = tri->Node(n3);
+            a.Transform(tr);
+            b.Transform(tr);
+            c.Transform(tr);
+            gp_Vec nrm = gp_Vec(a, b).Crossed(gp_Vec(a, c));
+            if (nrm.SquareMagnitude() < 1e-24) continue;
+            const gp_Pnt mid((a.X() + b.X() + c.X()) / 3.0, (a.Y() + b.Y() + c.Y()) / 3.0,
+                             (a.Z() + b.Z() + c.Z()) / 3.0);
+            want = nrm.Dot(gp_Vec(center, mid));
+            haveWant = true;
+        }
+    }
+    if (nSphere != 1) throw std::runtime_error("S27: expected one sphere face");
+    if (!haveWant) throw std::runtime_error("S27: sphere triangulation has no area");
+
+    std::vector<gp_Pnt> cornerPts;
+    for (TopExp_Explorer vx(sphereFace, TopAbs_VERTEX); vx.More(); vx.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(vx.Current()));
+        bool seen = false;
+        for (const gp_Pnt& q : cornerPts) {
+            if (p.Distance(q) <= Precision::Confusion()) seen = true;
+        }
+        if (!seen) cornerPts.push_back(p);
+    }
+    if (cornerPts.size() != 3) throw std::runtime_error("S27: sphere does not have 3 vertices");
+
+    gp_Vec cornerDir[3];
+    int axisOf[3] = {-1, -1, -1};
+    for (int c = 0; c < 3; ++c) {
+        cornerDir[c] = gp_Vec(center, cornerPts[static_cast<size_t>(c)]);
+        if (cornerDir[c].SquareMagnitude() < 1e-18)
+            throw std::runtime_error("S27: sphere corner at the centre");
+        cornerDir[c].Normalize();
+        const double ax[3] = {std::fabs(cornerDir[c].X()), std::fabs(cornerDir[c].Y()),
+                              std::fabs(cornerDir[c].Z())};
+        axisOf[c] = 0;
+        if (ax[1] > ax[axisOf[c]]) axisOf[c] = 1;
+        if (ax[2] > ax[axisOf[c]]) axisOf[c] = 2;
+    }
+    if (axisOf[0] == axisOf[1] || axisOf[1] == axisOf[2] || axisOf[0] == axisOf[2])
+        throw std::runtime_error("S27: sphere corners are not on three axes");
+    int byAxis[3] = {-1, -1, -1};
+    for (int c = 0; c < 3; ++c) byAxis[axisOf[c]] = c;
+    const gp_Vec towardX = cornerDir[byAxis[0]];
+    const gp_Vec towardY = cornerDir[byAxis[1]];
+    const gp_Vec towardZ = cornerDir[byAxis[2]];
+    const double ortho = std::max(
+        std::fabs(towardX.Dot(towardY)),
+        std::max(std::fabs(towardY.Dot(towardZ)), std::fabs(towardZ.Dot(towardX))));
+    if (!(ortho < 1e-6)) throw std::runtime_error("S27: sphere corner radii are not orthogonal");
+
+    struct Ring {
+        std::vector<gp_Pnt> pts;
+        int c0 = -1;
+        int c1 = -1;
+        gp_Vec axis;
+    };
+    std::vector<Ring> rings;
+    int nCyl = 0;
+    for (TopExp_Explorer exp(shape, TopAbs_FACE); exp.More(); exp.Next()) {
+        TopoDS_Face face = TopoDS::Face(exp.Current());
+        BRepAdaptor_Surface sa(face, Standard_False);
+        if (sa.GetType() != GeomAbs_Cylinder) continue;
+        ++nCyl;
+        const gp_Cylinder cyl = sa.Cylinder();
+        const gp_Vec axisDir(cyl.Axis().Direction());
+        const double axisDist =
+            gp_Vec(cyl.Axis().Location(), center).Crossed(axisDir).Magnitude();
+        if (std::fabs(cyl.Radius() - radius) > Precision::Confusion() ||
+            axisDist > Precision::Confusion()) {
+            throw std::runtime_error("S27: cylinder is not coaxial with the sphere at radius R");
+        }
+        TopLoc_Location loc;
+        Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+        if (tri.IsNull() || tri->NbTriangles() < 1)
+            throw std::runtime_error("S27: cylinder has no triangulation");
+        const gp_Trsf tr = loc.Transformation();
+        const int nNodes = tri->NbNodes();
+        std::vector<gp_Pnt> world(static_cast<size_t>(nNodes));
+        std::vector<char> onRing(static_cast<size_t>(nNodes), 0);
+        int nOn = 0;
+        for (int i = 1; i <= nNodes; ++i) {
+            gp_Pnt p = tri->Node(i);
+            p.Transform(tr);
+            world[static_cast<size_t>(i - 1)] = p;
+            const gp_Vec fromC(center, p);
+            const double axial = fromC.Dot(axisDir);
+            const double rho2 = fromC.SquareMagnitude() - axial * axial;
+            const double rho = std::sqrt(std::max(0.0, rho2));
+            // End ring: the cylinder|sphere curve. It is the great circle in the
+            // plane through the sphere centre. The next mesher row is at least
+            // one chord down the axis, and kFcLin is the chord cap given to the
+            // mesher, so a node inside that cap of the plane is the ring.
+            if (std::fabs(axial) <= kFcLin && std::fabs(rho - radius) <= kFcLin &&
+                std::fabs(p.Distance(center) - radius) <= kFcLin) {
+                onRing[static_cast<size_t>(i - 1)] = 1;
+                ++nOn;
+            }
+        }
+        std::map<std::pair<int, int>, int> edgeCount;
+        auto ek = [](int a, int b) {
+            return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+        };
+        for (int i = 1; i <= tri->NbTriangles(); ++i) {
+            int n1, n2, n3;
+            tri->Triangle(i).Get(n1, n2, n3);
+            const int ns[3] = {n1 - 1, n2 - 1, n3 - 1};
+            for (int k = 0; k < 3; ++k) edgeCount[ek(ns[k], ns[(k + 1) % 3])] += 1;
+        }
+        std::map<int, std::vector<int>> adj;
+        for (const auto& kv : edgeCount) {
+            if (kv.second != 1) continue;
+            const int u = kv.first.first;
+            const int v = kv.first.second;
+            if (!onRing[static_cast<size_t>(u)] || !onRing[static_cast<size_t>(v)]) continue;
+            adj[u].push_back(v);
+            adj[v].push_back(u);
+        }
+        if (adj.empty()) {
+            throw std::runtime_error("S27: cylinder end ring has no boundary edges (" +
+                                     std::to_string(nOn) + " on-sphere nodes)");
+        }
+        int start = -1;
+        for (const auto& kv : adj) {
+            if (kv.second.size() == 1) {
+                start = kv.first;
+                break;
+            }
+            if (kv.second.size() != 2)
+                throw std::runtime_error("S27: cylinder end ring branches");
+        }
+        if (start < 0) throw std::runtime_error("S27: cylinder end ring is closed");
+        std::vector<int> order;
+        int prev = -1;
+        int cur = start;
+        while (static_cast<int>(order.size()) <= static_cast<int>(adj.size())) {
+            order.push_back(cur);
+            int nxt = -1;
+            for (int v : adj[cur]) {
+                if (v != prev) {
+                    nxt = v;
+                    break;
+                }
+            }
+            if (nxt < 0) break;
+            prev = cur;
+            cur = nxt;
+        }
+        if (order.size() != adj.size())
+            throw std::runtime_error("S27: cylinder end ring did not walk as one chain");
+        Ring ring;
+        ring.axis = axisDir;
+        ring.pts.reserve(order.size());
+        for (int idx : order) ring.pts.push_back(world[static_cast<size_t>(idx)]);
+        auto cornerOf = [&](const gp_Pnt& p) {
+            int best = -1;
+            double bd = 1e300;
+            for (int c = 0; c < 3; ++c) {
+                const double d = p.Distance(cornerPts[static_cast<size_t>(c)]);
+                if (d < bd) {
+                    bd = d;
+                    best = c;
+                }
+            }
+            if (best < 0 || bd > kFcLin)
+                throw std::runtime_error("S27: end-ring endpoint is not a sphere corner");
+            return best;
+        };
+        ring.c0 = cornerOf(ring.pts.front());
+        ring.c1 = cornerOf(ring.pts.back());
+        if (ring.c0 == ring.c1) throw std::runtime_error("S27: end ring meets one corner twice");
+        rings.push_back(std::move(ring));
+    }
+    if (nCyl != 3 || rings.size() != 3)
+        throw std::runtime_error("S27: expected 3 cylinder end rings");
+
+    auto findRing = [&](int a, int b) -> const Ring& {
+        for (const Ring& ring : rings) {
+            if ((ring.c0 == a && ring.c1 == b) || (ring.c0 == b && ring.c1 == a)) return ring;
+        }
+        throw std::runtime_error("S27: missing end ring between two corners");
+    };
+    auto oriented = [&](int from, int to) {
+        const Ring& ring = findRing(from, to);
+        std::vector<gp_Pnt> pts = ring.pts;
+        if (ring.c0 != from) std::reverse(pts.begin(), pts.end());
+        return pts;
+    };
+    const std::vector<gp_Pnt> arcXY = oriented(byAxis[0], byAxis[1]);
+    const std::vector<gp_Pnt> arcXZ = oriented(byAxis[0], byAxis[2]);
+    const std::vector<gp_Pnt> arcZY = oriented(byAxis[2], byAxis[1]);
+    const int nXY = static_cast<int>(arcXY.size()) - 1;
+    const int nXZ = static_cast<int>(arcXZ.size()) - 1;
+    const int nZY = static_cast<int>(arcZY.size()) - 1;
+    if (nXY < 2 || nXZ < 2 || nZY < 2) throw std::runtime_error("S27: end ring is too short");
+    const int nSteps = std::min(nXY, std::min(nXZ, nZY));
+
+    struct ArcMap {
+        std::vector<int> slot;
+        std::vector<std::vector<int>> extras;
+        bool ok = false;
+    };
+    auto mapArc = [&](int mSeg) {
+        ArcMap mapped;
+        if (mSeg < nSteps) return mapped;
+        mapped.slot.assign(static_cast<size_t>(nSteps + 1), 0);
+        mapped.extras.resize(static_cast<size_t>(nSteps));
+        for (int k = 0; k <= nSteps; ++k) {
+            int idx = static_cast<int>(std::lround(static_cast<double>(k) /
+                                                   static_cast<double>(nSteps) *
+                                                   static_cast<double>(mSeg)));
+            if (idx < 0) idx = 0;
+            if (idx > mSeg) idx = mSeg;
+            mapped.slot[static_cast<size_t>(k)] = idx;
+        }
+        mapped.slot.front() = 0;
+        mapped.slot.back() = mSeg;
+        for (int k = 1; k <= nSteps; ++k) {
+            if (mapped.slot[static_cast<size_t>(k)] <= mapped.slot[static_cast<size_t>(k - 1)])
+                mapped.slot[static_cast<size_t>(k)] = mapped.slot[static_cast<size_t>(k - 1)] + 1;
+        }
+        if (mapped.slot.back() != mSeg) return mapped;
+        std::vector<char> used(static_cast<size_t>(mSeg + 1), 0);
+        for (int idx : mapped.slot) used[static_cast<size_t>(idx)] = 1;
+        for (int p = 0; p <= mSeg; ++p) {
+            if (used[static_cast<size_t>(p)]) continue;
+            int edge = -1;
+            for (int k = 0; k < nSteps; ++k) {
+                if (mapped.slot[static_cast<size_t>(k)] < p &&
+                    p < mapped.slot[static_cast<size_t>(k + 1)]) {
+                    edge = k;
+                    break;
+                }
+            }
+            if (edge < 0) return mapped;
+            mapped.extras[static_cast<size_t>(edge)].push_back(p);
+        }
+        mapped.ok = true;
+        return mapped;
+    };
+    const ArcMap mapXY = mapArc(nXY);
+    const ArcMap mapXZ = mapArc(nXZ);
+    const ArcMap mapZY = mapArc(nZY);
+    if (!mapXY.ok || !mapXZ.ok || !mapZY.ok)
+        throw std::runtime_error("S27: end-ring step does not map onto the grid");
+    const bool cornerClash =
+        (!mapXY.extras.front().empty() && !mapXZ.extras.front().empty()) ||
+        (!mapXY.extras.back().empty() && !mapZY.extras.back().empty()) ||
+        (!mapXZ.extras.back().empty() && !mapZY.extras.front().empty());
+    if (cornerClash) throw std::runtime_error("S27: extra end-ring nodes collide at a corner");
+
+    const int gridNodes = (nSteps + 1) * (nSteps + 2) / 2;
+    std::vector<std::vector<int>> slot(static_cast<size_t>(nSteps + 1));
+    int filled = 0;
+    for (int i = 0; i <= nSteps; ++i) {
+        slot[static_cast<size_t>(i)].assign(static_cast<size_t>(nSteps - i + 1), -1);
+        for (int j = 0; j <= nSteps - i; ++j)
+            slot[static_cast<size_t>(i)][static_cast<size_t>(j)] = filled++;
+    }
+    if (filled != gridNodes) throw std::runtime_error("S27: octant grid count");
+    std::vector<gp_Pnt> nodes(static_cast<size_t>(gridNodes));
+    auto put = [&](int i, int j, const gp_Pnt& p) {
+        nodes[static_cast<size_t>(slot[static_cast<size_t>(i)][static_cast<size_t>(j)])] = p;
+    };
+    for (int i = 0; i <= nSteps; ++i) {
+        for (int j = 0; j <= nSteps - i; ++j) {
+            put(i, j, filletOctantPoint(center, radius, towardX, towardY, towardZ, i, j, nSteps));
+        }
+    }
+    auto plant = [&](const std::vector<gp_Pnt>& arc, const ArcMap& mapped, int i, int ii, int jj) {
+        put(ii, jj, arc[static_cast<size_t>(mapped.slot[static_cast<size_t>(i)])]);
+    };
+    for (int i = 0; i <= nSteps; ++i) {
+        plant(arcXY, mapXY, i, i, 0);
+        plant(arcXZ, mapXZ, i, 0, i);
+        put(i, nSteps - i, arcZY[static_cast<size_t>(mapZY.slot[static_cast<size_t>(i)])]);
+    }
+    auto appendExtras = [&](const std::vector<gp_Pnt>& arc, const ArcMap& mapped) {
+        std::vector<std::vector<int>> ids(static_cast<size_t>(nSteps));
+        for (int e = 0; e < nSteps; ++e) {
+            for (int src : mapped.extras[static_cast<size_t>(e)]) {
+                ids[static_cast<size_t>(e)].push_back(static_cast<int>(nodes.size()));
+                nodes.push_back(arc[static_cast<size_t>(src)]);
+            }
+        }
+        return ids;
+    };
+    const std::vector<std::vector<int>> xyExtra = appendExtras(arcXY, mapXY);
+    const std::vector<std::vector<int>> xzExtra = appendExtras(arcXZ, mapXZ);
+    const std::vector<std::vector<int>> zyExtra = appendExtras(arcZY, mapZY);
+
+    double interiorErr = 0;
+    for (int i = 1; i < nSteps; ++i) {
+        for (int j = 1; j < nSteps - i; ++j) {
+            const gp_Pnt& p =
+                nodes[static_cast<size_t>(slot[static_cast<size_t>(i)][static_cast<size_t>(j)])];
+            interiorErr = std::max(interiorErr, std::fabs(p.Distance(center) - radius));
+        }
+    }
+    if (!(interiorErr <= 1e-9))
+        throw std::runtime_error("S27: an interior octant node is off the sphere");
+
+    auto weldKey = [](const gp_Pnt& p) {
+        return std::make_tuple(roundFloat(p.X()), roundFloat(p.Y()), roundFloat(p.Z()));
+    };
+    std::set<std::tuple<float, float, float>> keys;
+    for (const gp_Pnt& p : nodes) keys.insert(weldKey(p));
+    int ringNodes = 0;
+    for (const Ring& ring : rings) {
+        for (const gp_Pnt& p : ring.pts) {
+            ++ringNodes;
+            if (!keys.count(weldKey(p)))
+                throw std::runtime_error("S27: a cylinder end-ring node does not weld to the sphere");
+        }
+    }
+
+    struct Tri {
+        int a, b, c;
+    };
+    const gp_Pnt probeA = nodes[static_cast<size_t>(slot[0][0])];
+    const gp_Pnt probeB = nodes[static_cast<size_t>(slot[1][0])];
+    const gp_Pnt probeC = nodes[static_cast<size_t>(slot[0][1])];
+    const gp_Pnt probeM((probeA.X() + probeB.X() + probeC.X()) / 3.0,
+                        (probeA.Y() + probeB.Y() + probeC.Y()) / 3.0,
+                        (probeA.Z() + probeB.Z() + probeC.Z()) / 3.0);
+    const double got =
+        gp_Vec(probeA, probeB).Crossed(gp_Vec(probeA, probeC)).Dot(gp_Vec(center, probeM));
+    const bool flipWinding = (want * got < 0.0);
+    std::vector<Tri> outTris;
+    auto emitTri = [&](int a, int b, int c) {
+        if (a == b || b == c || a == c) return;
+        if (flipWinding) std::swap(b, c);
+        const gp_Pnt& pa = nodes[static_cast<size_t>(a)];
+        const gp_Pnt& pb = nodes[static_cast<size_t>(b)];
+        const gp_Pnt& pc = nodes[static_cast<size_t>(c)];
+        if (gp_Vec(pa, pb).Crossed(gp_Vec(pa, pc)).SquareMagnitude() < 1e-24) return;
+        outTris.push_back({a, b, c});
+    };
+    for (int i = 0; i < nSteps; ++i) {
+        for (int j = 0; j < nSteps - i; ++j) {
+            const int a = slot[static_cast<size_t>(i)][static_cast<size_t>(j)];
+            const int b = slot[static_cast<size_t>(i + 1)][static_cast<size_t>(j)];
+            const int c = slot[static_cast<size_t>(i)][static_cast<size_t>(j + 1)];
+            if (j == 0 && !xyExtra[static_cast<size_t>(i)].empty()) {
+                int prev = a;
+                for (int e : xyExtra[static_cast<size_t>(i)]) {
+                    emitTri(prev, e, c);
+                    prev = e;
+                }
+                emitTri(prev, b, c);
+            } else if (i == 0 && !xzExtra[static_cast<size_t>(j)].empty()) {
+                int prev = a;
+                for (int e : xzExtra[static_cast<size_t>(j)]) {
+                    emitTri(prev, b, e);
+                    prev = e;
+                }
+                emitTri(prev, b, c);
+            } else if (i + j == nSteps - 1 && !zyExtra[static_cast<size_t>(i)].empty()) {
+                int prev = b;
+                const std::vector<int>& extras = zyExtra[static_cast<size_t>(i)];
+                for (int k = static_cast<int>(extras.size()) - 1; k >= 0; --k) {
+                    emitTri(a, prev, extras[static_cast<size_t>(k)]);
+                    prev = extras[static_cast<size_t>(k)];
+                }
+                emitTri(a, prev, c);
+            } else {
+                emitTri(a, b, c);
+            }
+            if (i + j < nSteps - 1) {
+                const int d = slot[static_cast<size_t>(i + 1)][static_cast<size_t>(j + 1)];
+                emitTri(b, d, c);
+            }
+        }
+    }
+    if (outTris.empty()) throw std::runtime_error("S27: octant produced no triangles");
+
+    const gp_Trsf inv = sphereLoc.Transformation().Inverted();
+    const int totalNodes = static_cast<int>(nodes.size());
+    const int nTri = static_cast<int>(outTris.size());
+    Handle(Poly_Triangulation) neu =
+        new Poly_Triangulation(totalNodes, nTri, Standard_False, Standard_False);
+    for (int i = 0; i < totalNodes; ++i) {
+        gp_Pnt stored = nodes[static_cast<size_t>(i)];
+        if (!sphereLoc.IsIdentity()) stored.Transform(inv);
+        neu->SetNode(i + 1, stored);
+    }
+    for (int i = 0; i < nTri; ++i) {
+        const Tri& t = outTris[static_cast<size_t>(i)];
+        neu->SetTriangle(i + 1, Poly_Triangle(t.a + 1, t.b + 1, t.c + 1));
+    }
+    BRep_Builder().UpdateFace(sphereFace, neu, Standard_True);
+
+    auto chordSag = [&](const std::vector<gp_Pnt>& arc, const gp_Vec& axis) {
+        double sag = 0;
+        double stepMin = 1e300;
+        double stepMax = 0;
+        for (size_t i = 1; i < arc.size(); ++i) {
+            const gp_Pnt& a = arc[i - 1];
+            const gp_Pnt& b = arc[i];
+            const gp_Pnt mid((a.X() + b.X()) / 2.0, (a.Y() + b.Y()) / 2.0, (a.Z() + b.Z()) / 2.0);
+            const gp_Vec fromC(center, mid);
+            const double axial = fromC.Dot(axis);
+            const double rho =
+                std::sqrt(std::max(0.0, fromC.SquareMagnitude() - axial * axial));
+            sag = std::max(sag, radius - rho);
+            const gp_Vec ua(center, a);
+            const gp_Vec ub(center, b);
+            double d = ua.Dot(ub) / (ua.Magnitude() * ub.Magnitude());
+            if (d > 1) d = 1;
+            if (d < -1) d = -1;
+            const double deg = std::acos(d) * (180.0 / M_PI);
+            stepMin = std::min(stepMin, deg);
+            stepMax = std::max(stepMax, deg);
+        }
+        return std::make_tuple(sag, stepMin, stepMax);
+    };
+    // One index step off the XY ring (cylinder axis towardZ). That vertex is the
+    // mesh's first step into the sphere, the coverage negative in D-fc-3.6.
+    const int midI = nSteps / 2;
+    const gp_Pnt inward = nodes[static_cast<size_t>(slot[static_cast<size_t>(midI)][1])];
+    const gp_Vec fromIn(center, inward);
+    const double axialIn = fromIn.Dot(towardZ);
+    const double rhoIn =
+        std::sqrt(std::max(0.0, fromIn.SquareMagnitude() - axialIn * axialIn));
+    const double offMeas = radius - rhoIn;
+    const double phi = (M_PI / 2.0) / static_cast<double>(nSteps);
+    const double sagPred = radius * (1.0 - std::cos(phi / 2.0));
+    const double offPred = radius * (1.0 - std::cos(phi));
+    const auto sagXY = chordSag(arcXY, towardZ);
+    std::cout << std::setprecision(17) << "S27SPHERE nSteps=" << nSteps << " arcs=" << nXY << ","
+              << nXZ << "," << nZY << " nodes=" << totalNodes << " tris=" << nTri
+              << " ringNodes=" << ringNodes << " interiorRadialErr=" << interiorErr
+              << " gridStepDeg=" << (90.0 / static_cast<double>(nSteps)) << "\n";
+    std::cout << std::setprecision(17) << "S27RING xyStepDeg=" << std::get<1>(sagXY) << ".."
+              << std::get<2>(sagXY) << " sag=" << std::get<0>(sagXY) << "\n";
+    std::cout << std::setprecision(17) << "S27COVER phiDeg=" << (phi * 180.0 / M_PI)
+              << " sagittaMeas=" << std::get<0>(sagXY) << " sagittaPred=" << sagPred
+              << " offMeas=" << offMeas << " offPred=" << offPred
+              << " ratioMeas=" << (std::get<0>(sagXY) > 0 ? offMeas / std::get<0>(sagXY) : 0)
+              << " ratioPred=" << (sagPred > 0 ? offPred / sagPred : 0) << "\n";
+}
+
+
+const char* surfKindName(GeomAbs_SurfaceType t) {
+    switch (t) {
+        case GeomAbs_Plane: return "plane";
+        case GeomAbs_Cylinder: return "cylinder";
+        case GeomAbs_Cone: return "cone";
+        case GeomAbs_Sphere: return "sphere";
+        case GeomAbs_Torus: return "torus";
+        case GeomAbs_BezierSurface: return "bezier";
+        case GeomAbs_BSplineSurface: return "bspline";
+        case GeomAbs_SurfaceOfRevolution: return "revolution";
+        case GeomAbs_SurfaceOfExtrusion: return "extrusion";
+        case GeomAbs_OffsetSurface: return "offset";
+        default: return "other";
+    }
+}
+
+// maxFoldDeg is the largest dihedral between adjacent non-zero-area triangles
+// inside one B-rep face's own triangulation (SPEC-fixtures requirement 2,
+// D-fc-3.6). Zero area is |cross|^2 < 1e-24. There is no altitude filter.
+void recordFaceFolds(const TopoDS_Shape& shape, Sidecar& sc) {
+    sc.faceFolds.clear();
+    double curvedMax = 0;
+    bool anyCurved = false;
+    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+        const TopoDS_Face face = TopoDS::Face(ex.Current());
+        TopLoc_Location loc;
+        const Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+        BRepAdaptor_Surface adapt(face);
+        FaceFold fold;
+        fold.surface = surfKindName(adapt.GetType());
+        if (tri.IsNull() || tri->NbTriangles() == 0) {
+            sc.faceFolds.push_back(fold);
+            continue;
+        }
+        fold.nTri = tri->NbTriangles();
+        std::vector<gp_Vec> normals(static_cast<size_t>(tri->NbTriangles()));
+        std::vector<char> live(static_cast<size_t>(tri->NbTriangles()), 0);
+        for (int i = 1; i <= tri->NbTriangles(); ++i) {
+            int n1, n2, n3;
+            tri->Triangle(i).Get(n1, n2, n3);
+            const gp_Pnt p1 = tri->Node(n1);
+            const gp_Pnt p2 = tri->Node(n2);
+            const gp_Pnt p3 = tri->Node(n3);
+            gp_Vec n = gp_Vec(p1, p2).Crossed(gp_Vec(p1, p3));
+            if (n.SquareMagnitude() < 1e-24) continue;
+            n.Normalize();
+            normals[static_cast<size_t>(i - 1)] = n;
+            live[static_cast<size_t>(i - 1)] = 1;
+        }
+        std::map<std::pair<int, int>, std::vector<int>> edges;
+        auto ek = [](int a, int b) {
+            return a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+        };
+        for (int i = 1; i <= tri->NbTriangles(); ++i) {
+            if (!live[static_cast<size_t>(i - 1)]) continue;
+            int n1, n2, n3;
+            tri->Triangle(i).Get(n1, n2, n3);
+            const int ns[3] = {n1, n2, n3};
+            for (int k = 0; k < 3; ++k) edges[ek(ns[k], ns[(k + 1) % 3])].push_back(i - 1);
+        }
+        double faceMax = 0;
+        for (const auto& kv : edges) {
+            if (kv.second.size() != 2) continue;
+            const gp_Vec& a = normals[static_cast<size_t>(kv.second[0])];
+            const gp_Vec& b = normals[static_cast<size_t>(kv.second[1])];
+            double c = a.Dot(b);
+            if (c > 1) c = 1;
+            if (c < -1) c = -1;
+            const double deg = std::acos(c) * (180.0 / M_PI);
+            if (deg > faceMax) faceMax = deg;
+        }
+        fold.maxFoldDeg = faceMax;
+        if (fold.surface != "plane") {
+            anyCurved = true;
+            if (faceMax > curvedMax) curvedMax = faceMax;
+        }
+        sc.faceFolds.push_back(fold);
+    }
+    sc.maxFoldDeg = anyCurved ? curvedMax : 0;
+}
+
+double snapAxis(double v) {
+    if (std::fabs(v) < 1e-9) return 0;
+    if (std::fabs(v - 1.0) < 1e-9) return 1;
+    if (std::fabs(v + 1.0) < 1e-9) return -1;
+    return v;
+}
+
+void appendSolidPlanes(Sidecar& sc, const TopoDS_Shape& solid) {
+    struct Item {
+        Vec3 n;
+        int ord;
+    };
+    std::vector<Item> items;
+    int ord = 0;
+    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next()) {
+        const TopoDS_Face face = TopoDS::Face(ex.Current());
+        BRepAdaptor_Surface adapt(face);
+        if (adapt.GetType() != GeomAbs_Plane) continue;
+        Standard_Real u1, u2, v1, v2;
+        BRepTools::UVBounds(face, u1, u2, v1, v2);
+        const gp_Pnt c = adapt.Value(0.5 * (u1 + u2), 0.5 * (v1 + v2));
+        gp_Dir n = adapt.Plane().Axis().Direction();
+        if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+        BRepClass3d_SolidClassifier cls(solid);
+        cls.Perform(c.Translated(gp_Vec(n) * 0.2), 1e-6);
+        if (cls.State() != TopAbs_OUT) n.Reverse();
+        items.push_back({{snapAxis(n.X()), snapAxis(n.Y()), snapAxis(n.Z())}, ord++});
+    }
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.n.z != b.n.z) return a.n.z < b.n.z;
+        if (a.n.y != b.n.y) return a.n.y < b.n.y;
+        if (a.n.x != b.n.x) return a.n.x < b.n.x;
+        return a.ord < b.ord;
+    });
+    for (const Item& it : items) sc.recoverable.push_back(planeRec(it.n, 1));
+}
+
+struct KindCount {
+    int plane = 0, cylinder = 0, cone = 0, torus = 0, sphere = 0, bspline = 0, other = 0;
+};
+
+KindCount countKinds(const TopoDS_Shape& solid) {
+    KindCount k;
+    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next()) {
+        switch (BRepAdaptor_Surface(TopoDS::Face(ex.Current())).GetType()) {
+            case GeomAbs_Plane: ++k.plane; break;
+            case GeomAbs_Cylinder: ++k.cylinder; break;
+            case GeomAbs_Cone: ++k.cone; break;
+            case GeomAbs_Torus: ++k.torus; break;
+            case GeomAbs_Sphere: ++k.sphere; break;
+            case GeomAbs_BSplineSurface:
+            case GeomAbs_BezierSurface: ++k.bspline; break;
+            default: ++k.other; break;
+        }
+    }
+    return k;
+}
+
+void logKinds(const char* id, const KindCount& k) {
+    std::cout << "FACES " << id << " plane=" << k.plane << " cylinder=" << k.cylinder
+              << " cone=" << k.cone << " torus=" << k.torus << " sphere=" << k.sphere
+              << " bspline=" << k.bspline << " other=" << k.other << "\n";
+}
+
+TopoDS_Shape positiveSolid(TopoDS_Shape s, const char* what) {
+    if (brepVolume(s) < 0) s.Reverse();
+    BRepCheck_Analyzer az(s);
+    if (!az.IsValid()) throw std::runtime_error(std::string(what) + ": BRepCheck invalid");
+    if (!(brepVolume(s) > 0)) throw std::runtime_error(std::string(what) + ": non-positive volume");
+    return s;
+}
+
+class PlanarWire {
+public:
+    void line(const gp_Pnt& a, const gp_Pnt& b) {
+        BRepBuilderAPI_MakeEdge e(a, b);
+        if (!e.IsDone()) throw std::runtime_error("line edge failed");
+        edges_.push_back(e.Edge());
+    }
+    void arc(const gp_Pnt& a, const gp_Pnt& mid, const gp_Pnt& b) {
+        GC_MakeArcOfCircle mk(a, mid, b);
+        if (!mk.IsDone()) throw std::runtime_error("arc failed");
+        BRepBuilderAPI_MakeEdge e(mk.Value());
+        if (!e.IsDone()) throw std::runtime_error("arc edge failed");
+        edges_.push_back(e.Edge());
+    }
+    TopoDS_Wire wire() const {
+        BRepBuilderAPI_MakeWire w;
+        for (const TopoDS_Edge& e : edges_) w.Add(e);
+        if (!w.IsDone()) throw std::runtime_error("wire failed");
+        return w.Wire();
+    }
+private:
+    std::vector<TopoDS_Edge> edges_;
+};
+
+TopoDS_Shape extrudeX(const TopoDS_Wire& wire, double length, const char* what) {
+    BRepBuilderAPI_MakeFace mf(wire);
+    if (!mf.IsDone()) throw std::runtime_error(std::string(what) + ": face failed");
+    BRepPrimAPI_MakePrism prism(mf.Face(), gp_Vec(length, 0, 0));
+    if (!prism.IsDone()) throw std::runtime_error(std::string(what) + ": prism failed");
+    return positiveSolid(prism.Shape(), what);
+}
+
+TopoDS_Shape revolveAbout(const TopoDS_Wire& wire, const gp_Ax1& axis, const char* what) {
+    BRepBuilderAPI_MakeFace mf(wire);
+    if (!mf.IsDone()) throw std::runtime_error(std::string(what) + ": face failed");
+    BRepPrimAPI_MakeRevol rev(mf.Face(), axis);
+    if (!rev.IsDone()) throw std::runtime_error(std::string(what) + ": revolve failed");
+    return positiveSolid(rev.Shape(), what);
+}
+
+TopoDS_Shape fuseSolids(const TopoDS_Shape& a, const TopoDS_Shape& b, const char* what) {
+    BRepAlgoAPI_Fuse f(a, b);
+    f.Build();
+    if (!f.IsDone()) throw std::runtime_error(std::string(what) + ": fuse failed");
+    return positiveSolid(f.Shape(), what);
+}
+
+void tagFc(Sidecar& sc, double ang) {
+    sc.angularDeflectionRad = ang;
+    sc.expectFillet = false;
+}
+
+void requireWatertight(const FixtureResult& fx, const char* id) {
+    if (!fx.sidecar.watertight) {
+        std::ostringstream os;
+        os << id << ": mesh not watertight open=" << fx.sidecar.openEdges
+           << " nm=" << fx.sidecar.nonManifoldEdges;
+        throw std::runtime_error(os.str());
+    }
+}
+
+void requireCurvedFold(const FixtureResult& fx, const char* id, bool strictUnder5) {
+    bool any = false;
+    for (const FaceFold& f : fx.sidecar.faceFolds) {
+        std::cout << std::setprecision(17) << "FOLD " << id << " surface=" << f.surface
+                  << " maxFoldDeg=" << f.maxFoldDeg << " nTri=" << f.nTri << "\n";
+        if (f.surface == "plane") continue;
+        any = true;
+        if (strictUnder5 && !(f.maxFoldDeg < 5.0)) {
+            std::ostringstream os;
+            os << std::setprecision(17) << id << ": curved " << f.surface
+               << " maxFoldDeg=" << f.maxFoldDeg << " nTri=" << f.nTri;
+            throw std::runtime_error(os.str());
+        }
+    }
+    if (!any) throw std::runtime_error(std::string(id) + ": no curved face");
+}
+
+void requireChord(const FixtureResult& fx, const TopoDS_Shape& solid, const char* id) {
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(solid, props);
+    const double budget = props.Mass() * fx.sidecar.deflection;
+    const double delta = std::fabs(fx.sidecar.meshVolume - fx.sidecar.exactVolume);
+    std::cout << std::setprecision(17) << "CHORD " << id << " mesh=" << fx.sidecar.meshVolume
+              << " exact=" << fx.sidecar.exactVolume << " absDelta=" << delta
+              << " area=" << props.Mass() << " budget=" << budget
+              << " tris=" << fx.sidecar.triangleCount << "\n";
+    if (!(delta <= budget)) {
+        throw std::runtime_error(std::string(id) + ": |mesh-exact| outside chord sagitta");
+    }
+}
+
+int cylinderFaceCountNear(const TopoDS_Shape& solid, double radius, double tol) {
+    int n = 0;
+    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next()) {
+        BRepAdaptor_Surface s(TopoDS::Face(ex.Current()));
+        if (s.GetType() != GeomAbs_Cylinder) continue;
+        if (std::fabs(s.Cylinder().Radius() - radius) <= tol) ++n;
+    }
+    return n;
+}
+
+void requireTorusFace(const TopoDS_Shape& solid, double rMaj, double rMin, const char* id) {
+    bool found = false;
+    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next()) {
+        BRepAdaptor_Surface s(TopoDS::Face(ex.Current()));
+        if (s.GetType() != GeomAbs_Torus) continue;
+        const gp_Torus t = s.Torus();
+        std::cout << std::setprecision(17) << "TORUS " << id << " Rmaj=" << t.MajorRadius()
+                  << " r=" << t.MinorRadius() << " loc=(" << t.Location().X() << ","
+                  << t.Location().Y() << "," << t.Location().Z() << ")\n";
+        if (std::fabs(t.MajorRadius() - rMaj) > 1e-6 || std::fabs(t.MinorRadius() - rMin) > 1e-6) {
+            std::ostringstream os;
+            os << std::setprecision(17) << id << ": torus Rmaj=" << t.MajorRadius()
+               << " r=" << t.MinorRadius() << " expected " << rMaj << " " << rMin;
+            throw std::runtime_error(os.str());
+        }
+        found = true;
+    }
+    if (!found) throw std::runtime_error(std::string(id) + ": no torus face");
+}
+
+// Sharp L area 544 mm^2 (40*8 + 8*28) times length 80. The concave R3 fillet
+// adds R^2(1-π/4) and the convex R3 fillet removes the same area, so the
+// extruded volume is the sharp volume.
+double exactVolumeS23() {
+    const double sharpArea = 40.0 * 8.0 + 8.0 * 28.0;
+    return sharpArea * 80.0;
+}
+
+// Two legs 60*2*40 plus a 180° annulus between R1 and R3, width 40.
+double exactVolumeS24() {
+    const double legs = 2.0 * 60.0 * 2.0 * 40.0;
+    const double bend = 0.5 * M_PI * (3.0 * 3.0 - 1.0 * 1.0) * 40.0;
+    return legs + bend;
+}
+
+// Plate + peg cylinder + added root fillet. The fillet profile area is the
+// r×r square minus the quarter disk, revolved about the peg (torusRemInternal
+// is that Pappus integral; see its derivation above exactVolumeS04).
+double exactVolumeS25() {
+    return 50.0 * 50.0 * 8.0 + M_PI * 6.0 * 6.0 * 18.0 + torusRemInternal(6.0, 2.0);
+}
+
+// Box minus three edge rounds of length (L-R) and the spherical octant corner.
+double exactVolumeS27() {
+    const double L = 40.0;
+    const double R = 3.0;
+    const double A = R * R * (1.0 - M_PI / 4.0);
+    const double corner = R * R * R * (1.0 - M_PI / 6.0);
+    return L * L * L - 3.0 * (L - R) * A - corner;
+}
+
+// r(x) = 2 + x/30 on x in [0,60]. ∫ r^2 dx = 30 * ∫_2^4 u^2 du = 560.
+double exactVolumeS28() {
+    return 60.0 * 20.0 * 20.0 - 560.0 * (1.0 - M_PI / 4.0);
+}
+
+// Plate minus four regular hex prisms (across-flats 15), one R5 hole, and
+// four vertical R1 corner rounds of height 5.
+double exactVolumeS29() {
+    const double hexArea = 112.5 * std::sqrt(3.0);  // (3*sqrt(3)/2) * (5*sqrt(3))^2
+    const double rounds = 4.0 * 5.0 * (1.0 - M_PI / 4.0);
+    return 80.0 * 60.0 * 5.0 - 4.0 * hexArea * 5.0 - M_PI * 5.0 * 5.0 * 5.0 - rounds;
+}
+
+FixtureResult buildS23() {
+    const double s2 = 1.5 * std::sqrt(2.0);
+    PlanarWire w;
+    const gp_Pnt a(0, 0, 0);
+    const gp_Pnt b(0, 40, 0);
+    const gp_Pnt c(0, 40, 33);
+    const gp_Pnt d(0, 37, 36);
+    const gp_Pnt e(0, 32, 36);
+    const gp_Pnt f(0, 32, 11);
+    const gp_Pnt g(0, 29, 8);
+    const gp_Pnt h(0, 0, 8);
+    w.line(a, b);
+    w.line(b, c);
+    w.arc(c, gp_Pnt(0, 37 + s2, 33 + s2), d);  // convex R3, centre (0,37,33)
+    w.line(d, e);
+    w.line(e, f);
+    w.arc(f, gp_Pnt(0, 29 + s2, 11 - s2), g);  // concave R3, centre (0,29,11)
+    w.line(g, h);
+    w.line(h, a);
+    TopoDS_Shape solid = extrudeX(w.wire(), 80.0, "S23");
+    const KindCount kinds = countKinds(solid);
+    logKinds("S23", kinds);
+    if (kinds.cylinder != 2 || kinds.torus != 0 || kinds.sphere != 0 || kinds.cone != 0) {
+        throw std::runtime_error("S23: expected 2 cylinder faces and no cone/torus/sphere");
+    }
+    Sidecar sc;
+    tagFc(sc, kFcAng);
+    appendSolidPlanes(sc, solid);
+    sc.recoverable.push_back(cylRec(3.0, {0, 29, 11}, {1, 0, 0}, 1, 0, false));
+    sc.recoverable.push_back(cylRec(3.0, {0, 37, 33}, {1, 0, 0}, 1, 0, false));
+    sc.exactVolume = exactVolumeS23();
+    certifyExactVolume(solid, sc.exactVolume, "S23");
+    FixtureResult fx = emitShape(
+        "S23_plane_fillet_lowfold",
+        "L-extrusion 80 mm: concave R3 inside fillet and convex R3 outer fillet, fold < 5 deg",
+        solid, kFcLin, kFcAng, sc);
+    requireWatertight(fx, "S23");
+    requireCurvedFold(fx, "S23", true);
+    requireChord(fx, solid, "S23");
+    return fx;
+}
+
+FixtureResult buildS24() {
+    PlanarWire w;
+    const gp_Pnt o0(0, -60, 3);
+    const gp_Pnt o1(0, 0, 3);
+    const gp_Pnt o2(0, 0, -3);
+    const gp_Pnt o3(0, -60, -3);
+    const gp_Pnt i3(0, -60, -1);
+    const gp_Pnt i2(0, 0, -1);
+    const gp_Pnt i1(0, 0, 1);
+    const gp_Pnt i0(0, -60, 1);
+    w.line(o0, o1);
+    w.arc(o1, gp_Pnt(0, 3, 0), o2);
+    w.line(o2, o3);
+    w.line(o3, i3);
+    w.line(i3, i2);
+    w.arc(i2, gp_Pnt(0, 1, 0), i1);
+    w.line(i1, i0);
+    w.line(i0, o0);
+    TopoDS_Shape solid = extrudeX(w.wire(), 40.0, "S24");
+    const KindCount kinds = countKinds(solid);
+    logKinds("S24", kinds);
+    if (kinds.cylinder != 2) throw std::runtime_error("S24: expected 2 cylinder faces");
+    Sidecar sc;
+    tagFc(sc, kFcAng);
+    appendSolidPlanes(sc, solid);
+    sc.recoverable.push_back(cylRec(1.0, {0, 0, 0}, {1, 0, 0}, 1, 0, false));
+    sc.recoverable.push_back(cylRec(3.0, {0, 0, 0}, {1, 0, 0}, 1, 0, false));
+    sc.exactVolume = exactVolumeS24();
+    certifyExactVolume(solid, sc.exactVolume, "S24");
+    FixtureResult fx = emitShape(
+        "S24_hem_uturn",
+        "U-turn hem thickness 2, inner gap 2, coaxial half-rounds R1 and R3, legs 60, width 40",
+        solid, kFcLin, kFcAng, sc);
+    requireWatertight(fx, "S24");
+    requireCurvedFold(fx, "S24", true);
+    requireChord(fx, solid, "S24");
+    return fx;
+}
+
+FixtureResult buildS25() {
+    // Peg + root fillet as one revolution, then the square plate.
+    // Profile in the plane y=25, axis through (25,25). Fillet centre (33,25,10):
+    // Rmaj = 8, r = 2, tangent to the R6 wall and to the plate top.
+    const double s2 = std::sqrt(2.0);
+    PlanarWire w;
+    const gp_Pnt axisBot(25, 25, 8);
+    const gp_Pnt plateTan(33, 25, 8);
+    const gp_Pnt wallTan(31, 25, 10);
+    const gp_Pnt wallTop(31, 25, 26);
+    const gp_Pnt axisTop(25, 25, 26);
+    w.line(axisBot, plateTan);
+    w.arc(plateTan, gp_Pnt(33 - s2, 25, 10 - s2), wallTan);
+    w.line(wallTan, wallTop);
+    w.line(wallTop, axisTop);
+    w.line(axisTop, axisBot);
+    TopoDS_Shape peg = revolveAbout(w.wire(), gp_Ax1(gp_Pnt(25, 25, 0), gp_Dir(0, 0, 1)), "S25-peg");
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(50, 50, 8);
+    TopoDS_Shape solid = fuseSolids(plate, peg, "S25");
+    requireTorusFace(solid, 8.0, 2.0, "S25");
+    const KindCount kinds = countKinds(solid);
+    logKinds("S25", kinds);
+    if (kinds.cylinder != 1 || kinds.torus != 1 || kinds.sphere != 0) {
+        throw std::runtime_error("S25: expected 1 cylinder and 1 torus");
+    }
+    Sidecar sc;
+    tagFc(sc, kFcAngPeg);
+    appendSolidPlanes(sc, solid);
+    sc.recoverable.push_back(cylRec(6.0, {25, 25, 8}, {0, 0, 1}, 1, 0, true));
+    sc.recoverable.push_back(torusRec(8.0, 2.0, {25, 25, 10}, {0, 0, 1}, 1, true));
+    sc.exactVolume = exactVolumeS25();
+    certifyExactVolume(solid, sc.exactVolume, "S25");
+    FixtureResult fx = emitShape(
+        "S25_peg_fillet",
+        "50x50x8 plate, peg R6 height 18 at (25,25), concave base fillet torus Rmaj 8 r 2, flat tip",
+        solid, kFcLin, kFcAngPeg, sc);
+    requireWatertight(fx, "S25");
+    requireCurvedFold(fx, "S25", true);
+    requireChord(fx, solid, "S25");
+    int nSides = -1;
+    for (const auto& r : fx.sidecar.recoverable) {
+        if (r.type == "cylinder") nSides = r.nSides;
+    }
+    std::cout << "S25 peg nSides=" << nSides << "\n";
+    if (nSides < 90 || nSides > 100) {
+        throw std::runtime_error("S25: peg nSides " + std::to_string(nSides) + " not in 90..100");
+    }
+    return fx;
+}
+
+// S26 funnel. One revolution about Z.
+// Inner (the SPEC leaves the inner-cone z open; a single profile cannot be
+// rho=8 on the whole of z in [0,28] and also carry the 1.5 mm 45 deg step):
+//   z [0, 1.5]  cylinder rho=9.5
+//   z [1.5, 3]  45 deg cone rho 9.5 -> 8
+//   z [3, 28]   cylinder rho=8          (bore depth 28; the step is the mouth)
+//   z [28, 32]  cone rho 8 -> 20
+// Outer: cylinder rho=11 from z=0, cone (11,12)->(24,32). The r=3 blend is the
+// torus tangent to both finite faces. Its centre sits at rho = 11+3 (outside
+// the neck wall): a removing fillet of r=3 is tangent only to the extensions
+// past the corner, not to both finite segments. Setback t = r*tan(alpha/2),
+// alpha = atan(13/20), trims the cylinder to z=12-t and the cone to the
+// matching foot. Volume is pi * int (rho_outer^2 - rho_inner^2) dz, with the
+// arc band rho = Rmaj - sqrt(r^2 - u^2).
+struct S26Blend {
+    double L;
+    double t;
+    double za;
+    double zt;
+    double rhoT;
+    double Rmaj;
+    double blendR;
+};
+
+S26Blend s26Blend() {
+    S26Blend g;
+    const double dRho = 24.0 - 11.0;
+    const double dZ = 32.0 - 12.0;
+    g.blendR = 3.0;
+    g.L = std::sqrt(dRho * dRho + dZ * dZ);
+    // tan(alpha/2) = sin(alpha)/(1+cos(alpha)) = dRho / (L + dZ)
+    g.t = g.blendR * dRho / (g.L + dZ);
+    g.za = 12.0 - g.t;
+    g.zt = 12.0 + (dZ / g.L) * g.t;
+    g.rhoT = 11.0 + (dRho / g.L) * g.t;
+    g.Rmaj = 11.0 + g.blendR;
+    return g;
+}
+
+double exactVolumeS26() {
+    const S26Blend g = s26Blend();
+    auto integR2 = [](double z0, double z1, double a0, double a1) {
+        const double dz = z1 - z0;
+        const double b = (a1 - a0) / dz;
+        return a0 * a0 * dz + a0 * b * dz * dz + b * b * dz * dz * dz / 3.0;
+    };
+    const double du = g.zt - g.za;
+    const double root = std::sqrt(g.blendR * g.blendR - du * du);
+    const double iSqrt =
+        0.5 * (du * root + g.blendR * g.blendR * std::asin(du / g.blendR));
+    const double intArc = (g.Rmaj * g.Rmaj + g.blendR * g.blendR) * du - du * du * du / 3.0 -
+                          2.0 * g.Rmaj * iSqrt;
+    const double outer = integR2(0.0, g.za, 11.0, 11.0) + intArc +
+                         integR2(g.zt, 32.0, g.rhoT, 24.0);
+    const double inner = integR2(0.0, 1.5, 9.5, 9.5) + integR2(1.5, 3.0, 9.5, 8.0) +
+                         integR2(3.0, 28.0, 8.0, 8.0) + integR2(28.0, 32.0, 8.0, 20.0);
+    return M_PI * (outer - inner);
+}
+
+FixtureResult buildS26() {
+    const S26Blend g = s26Blend();
+    const double alpha = std::atan((24.0 - 11.0) / (32.0 - 12.0));
+    const double half = 0.5 * alpha;
+    PlanarWire w;
+    const gp_Pnt ob(11, 0, 0);
+    const gp_Pnt neck(11, 0, g.za);
+    const gp_Pnt arcMid(g.Rmaj - g.blendR * std::cos(half), 0.0,
+                        g.za + g.blendR * std::sin(half));
+    const gp_Pnt flareFoot(g.rhoT, 0, g.zt);
+    const gp_Pnt flare(24, 0, 32);
+    const gp_Pnt itop(20, 0, 32);
+    const gp_Pnt ib(8, 0, 28);
+    const gp_Pnt bore(8, 0, 3);
+    const gp_Pnt step(9.5, 0, 1.5);
+    const gp_Pnt mouth(9.5, 0, 0);
+    std::cout << std::setprecision(17) << "S26 blend t=" << g.t << " za=" << g.za
+              << " zt=" << g.zt << " rhoT=" << g.rhoT << " Rmaj=" << g.Rmaj << "\n";
+    w.line(ob, neck);
+    w.arc(neck, arcMid, flareFoot);
+    w.line(flareFoot, flare);
+    w.line(flare, itop);
+    w.line(itop, ib);
+    w.line(ib, bore);
+    w.line(bore, step);
+    w.line(step, mouth);
+    w.line(mouth, ob);
+    TopoDS_Shape solid =
+        revolveAbout(w.wire(), gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), "S26");
+    requireTorusFace(solid, g.Rmaj, g.blendR, "S26");
+    const KindCount kinds = countKinds(solid);
+    logKinds("S26", kinds);
+    if (kinds.cylinder < 2 || kinds.cone != 3 || kinds.torus != 1) {
+        throw std::runtime_error("S26: expected cylinders, 3 cones, 1 torus");
+    }
+    Sidecar sc;
+    tagFc(sc, kFcAng);
+    appendSolidPlanes(sc, solid);
+    sc.recoverable.push_back(cylRec(11.0, {0, 0, 0}, {0, 0, 1}, 1, 0, true));
+    sc.recoverable.push_back(cylRec(8.0, {0, 0, 3}, {0, 0, 1}, 1, 0, true));
+    sc.recoverable.push_back(cylRec(9.5, {0, 0, 0}, {0, 0, 1}, 1, 0, true));
+    const double halfOuter = std::atan((24.0 - 11.0) / (32.0 - 12.0)) * (180.0 / M_PI);
+    const double halfInner = std::atan((20.0 - 8.0) / (32.0 - 28.0)) * (180.0 / M_PI);
+    const double halfStep = std::atan((9.5 - 8.0) / (3.0 - 1.5)) * (180.0 / M_PI);
+    sc.recoverable.push_back(coneRec(g.rhoT, 24.0, halfOuter, {0, 0, g.zt}, {0, 0, 1}, 1, 0));
+    sc.recoverable.push_back(coneRec(8.0, 20.0, halfInner, {0, 0, 28}, {0, 0, 1}, 1, 0));
+    sc.recoverable.push_back(coneRec(9.5, 8.0, halfStep, {0, 0, 1.5}, {0, 0, 1}, 1, 0));
+    sc.recoverable.push_back(torusRec(g.Rmaj, g.blendR, {0, 0, g.za}, {0, 0, 1}, 1, true));
+    sc.exactVolume = exactVolumeS26();
+    certifyExactVolume(solid, sc.exactVolume, "S26");
+    FixtureResult fx = emitShape(
+        "S26_funnel_rev",
+        "revolution about Z: neck R11/R8, outer and inner cones, r=3 neck blend torus, 45 deg bore step",
+        solid, kFcLin, kFcAng, sc);
+    requireWatertight(fx, "S26");
+    requireCurvedFold(fx, "S26", true);
+    requireChord(fx, solid, "S26");
+    return fx;
+}
+
+FixtureResult buildS27() {
+    const double L = 40.0;
+    const double R = 3.0;
+    TopoDS_Shape box = BRepPrimAPI_MakeBox(L, L, L);
+    BRepFilletAPI_MakeFillet fillet(box);
+    int nEdge = 0;
+    const gp_Pnt corner(L, L, L);
+    std::set<const TopoDS_TShape*> seenEdge;
+    for (TopExp_Explorer ex(box, TopAbs_EDGE); ex.More(); ex.Next()) {
+        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+        if (!seenEdge.insert(e.TShape().get()).second) continue;
+        TopoDS_Vertex v1, v2;
+        TopExp::Vertices(e, v1, v2);
+        const gp_Pnt p1 = BRep_Tool::Pnt(v1);
+        const gp_Pnt p2 = BRep_Tool::Pnt(v2);
+        if (p1.Distance(corner) < 1e-6 || p2.Distance(corner) < 1e-6) {
+            fillet.Add(R, e);
+            ++nEdge;
+        }
+    }
+    if (nEdge != 3) {
+        throw std::runtime_error("S27: expected 3 edges at the corner, got " +
+                                 std::to_string(nEdge));
+    }
+    fillet.Build();
+    if (!fillet.IsDone()) throw std::runtime_error("S27: MakeFillet failed");
+    TopoDS_Shape solid = positiveSolid(fillet.Shape(), "S27");
+    const KindCount kinds = countKinds(solid);
+    logKinds("S27", kinds);
+    if (kinds.cylinder != 3 || kinds.sphere != 1) {
+        throw std::runtime_error("S27: expected 3 cylinders and 1 sphere");
+    }
+    Sidecar sc;
+    tagFc(sc, kFcAng);
+    appendSolidPlanes(sc, solid);
+    const double inset = L - R;
+    const double hi = L - R - 0.45 * R;
+    auto edgeCyl = [&](const Vec3& loc, const Vec3& dir) {
+        Recoverable r = cylRec(R, loc, dir, 1, 0, false);
+        r.vMin = 0;
+        r.vMax = hi;
+        return r;
+    };
+    sc.recoverable.push_back(edgeCyl({0, inset, inset}, {1, 0, 0}));
+    sc.recoverable.push_back(edgeCyl({inset, 0, inset}, {0, 1, 0}));
+    sc.recoverable.push_back(edgeCyl({inset, inset, 0}, {0, 0, 1}));
+    sc.mustRemainFaceted = {{"sphere", 1, "SphereNYI vertex blend where the three R3 fillets meet"}};
+    sc.expectedRejects = {"sphereNYI"};
+    sc.exactVolume = exactVolumeS27();
+    certifyExactVolume(solid, sc.exactVolume, "S27");
+    FixtureResult fx = emitShape(
+        "S27_sphere_corner_fine",
+        "40 mm cube, R3 fillets on the three edges of one corner; spherical corner stays faceted",
+        solid, kFcLin, kFcAng, sc, false, true);
+    requireWatertight(fx, "S27");
+    requireCurvedFold(fx, "S27", true);
+    requireChord(fx, solid, "S27");
+    return fx;
+}
+
+FixtureResult buildS28() {
+    // MakeFillet::Add(R1, R2, Edge) does not put a radius linear in x on the
+    // contact curve (measured y(15) = 2.39286, not 2.5). Build the blend as
+    // the ruled surface between quarter-circles r=2 and r=4. Radius r(x)=2+x/30
+    // and each normal section is that quarter-circle, so the removed volume is
+    // ∫ r(x)^2 (1-π/4) dx = 560*(1-π/4).
+    auto filletArc = [](double x, double radius) {
+        gp_Circ circ(gp_Ax2(gp_Pnt(x, radius, radius), gp_Dir(1, 0, 0), gp_Dir(0, -1, 0)),
+                     radius);
+        Handle(Geom_TrimmedCurve) tc =
+            new Geom_TrimmedCurve(new Geom_Circle(circ), 0.0, M_PI / 2.0);
+        BRepBuilderAPI_MakeEdge edge(tc);
+        if (!edge.IsDone()) throw std::runtime_error("S28: arc edge failed");
+        return edge.Edge();
+    };
+    auto endCap = [](const TopoDS_Edge& arc, double x, double radius) {
+        const gp_Pnt corner(x, 0, 0);
+        const gp_Pnt front(x, 0, radius);
+        const gp_Pnt bottom(x, radius, 0);
+        BRepBuilderAPI_MakeWire wire;
+        wire.Add(BRepBuilderAPI_MakeEdge(corner, front).Edge());
+        wire.Add(arc);
+        wire.Add(BRepBuilderAPI_MakeEdge(bottom, corner).Edge());
+        if (!wire.IsDone()) {
+            BRepBuilderAPI_MakeWire flipped;
+            flipped.Add(BRepBuilderAPI_MakeEdge(corner, front).Edge());
+            flipped.Add(TopoDS::Edge(arc.Reversed()));
+            flipped.Add(BRepBuilderAPI_MakeEdge(bottom, corner).Edge());
+            if (!flipped.IsDone()) throw std::runtime_error("S28: end wire failed");
+            BRepBuilderAPI_MakeFace face(flipped.Wire());
+            if (!face.IsDone()) throw std::runtime_error("S28: end face failed");
+            return face.Face();
+        }
+        BRepBuilderAPI_MakeFace face(wire.Wire());
+        if (!face.IsDone()) throw std::runtime_error("S28: end face failed");
+        return face.Face();
+    };
+    const TopoDS_Edge arc0 = filletArc(0.0, 2.0);
+    const TopoDS_Edge arc1 = filletArc(60.0, 4.0);
+    const TopoDS_Face ruled = BRepFill::Face(arc0, arc1);
+    if (ruled.IsNull()) throw std::runtime_error("S28: ruled blend face failed");
+    BRepBuilderAPI_MakeWire bot;
+    bot.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(60, 0, 0)).Edge());
+    bot.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(60, 0, 0), gp_Pnt(60, 4, 0)).Edge());
+    bot.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(60, 4, 0), gp_Pnt(0, 2, 0)).Edge());
+    bot.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 2, 0), gp_Pnt(0, 0, 0)).Edge());
+    if (!bot.IsDone()) throw std::runtime_error("S28: bottom wire failed");
+    BRepBuilderAPI_MakeFace botFace(bot.Wire());
+    if (!botFace.IsDone()) throw std::runtime_error("S28: bottom face failed");
+    BRepBuilderAPI_MakeWire front;
+    front.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(0, 0, 2)).Edge());
+    front.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 2), gp_Pnt(60, 0, 4)).Edge());
+    front.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(60, 0, 4), gp_Pnt(60, 0, 0)).Edge());
+    front.Add(BRepBuilderAPI_MakeEdge(gp_Pnt(60, 0, 0), gp_Pnt(0, 0, 0)).Edge());
+    if (!front.IsDone()) throw std::runtime_error("S28: front wire failed");
+    BRepBuilderAPI_MakeFace frontFace(front.Wire());
+    if (!frontFace.IsDone()) throw std::runtime_error("S28: front face failed");
+    BRepBuilderAPI_Sewing sew(1.0e-7);
+    sew.Add(ruled);
+    sew.Add(endCap(arc0, 0.0, 2.0));
+    sew.Add(endCap(arc1, 60.0, 4.0));
+    sew.Add(botFace.Face());
+    sew.Add(frontFace.Face());
+    sew.Perform();
+    const TopoDS_Shape sewed = sew.SewedShape();
+    if (sewed.ShapeType() != TopAbs_SHELL)
+        throw std::runtime_error("S28: blend tool did not sew to a shell");
+    BRepBuilderAPI_MakeSolid mkSolid(TopoDS::Shell(sewed));
+    if (!mkSolid.IsDone()) throw std::runtime_error("S28: blend tool solid failed");
+    TopoDS_Shape tool = positiveSolid(mkSolid.Solid(), "S28-tool");
+    certifyExactVolume(tool, 560.0 * (1.0 - M_PI / 4.0), "S28-tool");
+    TopoDS_Shape box = BRepPrimAPI_MakeBox(60.0, 20.0, 20.0);
+    BRepAlgoAPI_Cut cut(box, tool);
+    cut.Build();
+    if (!cut.IsDone()) throw std::runtime_error("S28: cut failed");
+    TopoDS_Shape solid = positiveSolid(cut.Shape(), "S28");
+    const KindCount kinds = countKinds(solid);
+    logKinds("S28", kinds);
+    if (kinds.cylinder != 0) throw std::runtime_error("S28: a cylinder face was created");
+    if (kinds.bspline < 1 && kinds.other < 1 && kinds.cone != 0) {
+        throw std::runtime_error("S28: variable blend is not a freeform face");
+    }
+    if (kinds.bspline < 1 && kinds.other < 1) {
+        throw std::runtime_error("S28: no freeform blend face");
+    }
+    Sidecar sc;
+    tagFc(sc, kFcAng);
+    appendSolidPlanes(sc, solid);
+    sc.mustRemainFaceted = {
+        {"freeform", 1, "variable-radius plane-plane blend R2 to R4 along 60 mm; no cylinder"}};
+    sc.exactVolume = exactVolumeS28();
+    certifyExactVolume(solid, sc.exactVolume, "S28");
+    FixtureResult fx = emitShape(
+        "S28_varradius_negative",
+        "plane-plane blend, radius linear from 2 to 4 along a 60 mm edge; the blend stays faceted",
+        solid, kFcLin, kFcAng, sc);
+    requireWatertight(fx, "S28");
+    requireCurvedFold(fx, "S28", true);
+    requireChord(fx, solid, "S28");
+    return fx;
+}
+
+FixtureResult buildS29() {
+    const double hexR = 15.0 / std::sqrt(3.0);
+    TopoDS_Shape plate = BRepPrimAPI_MakeBox(80, 60, 5);
+    const gp_Pnt hexes[4] = {gp_Pnt(20, 18, 5), gp_Pnt(20, 42, 5), gp_Pnt(50, 18, 5),
+                             gp_Pnt(50, 42, 5)};
+    for (const gp_Pnt& c : hexes) {
+        plate = cutThroughNGon(plate, c, gp_Dir(0, 0, -1), hexR, 5.0, 6);
+    }
+    gp_Ax2 holeAx(gp_Pnt(68, 30, -1), gp_Dir(0, 0, 1));
+    plate = BRepAlgoAPI_Cut(plate, BRepPrimAPI_MakeCylinder(holeAx, 5.0, 7.0)).Shape();
+    BRepFilletAPI_MakeFillet fillet(plate);
+    int nEdge = 0;
+    int nCorner = 0;
+    const gp_Pnt corners[4] = {gp_Pnt(0, 0, 0), gp_Pnt(80, 0, 0), gp_Pnt(80, 60, 0),
+                               gp_Pnt(0, 60, 0)};
+    bool hitCorner[4] = {false, false, false, false};
+    std::set<const TopoDS_TShape*> seenEdge;
+    for (TopExp_Explorer ex(plate, TopAbs_EDGE); ex.More(); ex.Next()) {
+        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+        if (!seenEdge.insert(e.TShape().get()).second) continue;
+        TopoDS_Vertex v1, v2;
+        TopExp::Vertices(e, v1, v2);
+        const gp_Pnt p1 = BRep_Tool::Pnt(v1);
+        const gp_Pnt p2 = BRep_Tool::Pnt(v2);
+        if (std::fabs(p1.X() - p2.X()) > 1e-6 || std::fabs(p1.Y() - p2.Y()) > 1e-6) continue;
+        if (std::fabs(p1.Z() - p2.Z()) < 1.0) continue;
+        int corner = -1;
+        for (int i = 0; i < 4; ++i) {
+            if (std::fabs(p1.X() - corners[i].X()) < 1e-6 &&
+                std::fabs(p1.Y() - corners[i].Y()) < 1e-6)
+                corner = i;
+        }
+        if (corner < 0) continue;
+        fillet.Add(1.0, e);
+        ++nEdge;
+        if (!hitCorner[corner]) {
+            hitCorner[corner] = true;
+            ++nCorner;
+        }
+    }
+    std::cout << "S29 cornerEdges=" << nEdge << " corners=" << nCorner << "\n";
+    if (nCorner != 4) {
+        throw std::runtime_error("S29: expected 4 vertical corners, got " +
+                                 std::to_string(nCorner));
+    }
+    fillet.Build();
+    if (!fillet.IsDone()) throw std::runtime_error("S29: corner fillet failed");
+    TopoDS_Shape solid = positiveSolid(fillet.Shape(), "S29");
+    if (cylinderFaceCountNear(solid, hexR, 0.05) != 0) {
+        throw std::runtime_error("S29: cylinder at the hex circumradius");
+    }
+    const KindCount kinds = countKinds(solid);
+    logKinds("S29", kinds);
+    int hexPlanes = 0;
+    for (TopExp_Explorer ex(solid, TopAbs_FACE); ex.More(); ex.Next()) {
+        const TopoDS_Face face = TopoDS::Face(ex.Current());
+        BRepAdaptor_Surface s(face);
+        if (s.GetType() != GeomAbs_Plane) continue;
+        gp_Dir n = s.Plane().Axis().Direction();
+        if (std::fabs(n.Z()) > 1e-6) continue;
+        Standard_Real u1, u2, v1, v2;
+        BRepTools::UVBounds(face, u1, u2, v1, v2);
+        const gp_Pnt p = s.Value(0.5 * (u1 + u2), 0.5 * (v1 + v2));
+        const bool outerX = std::fabs(std::fabs(n.X()) - 1.0) < 1e-6 &&
+                            (std::fabs(p.X()) < 1e-6 || std::fabs(p.X() - 80.0) < 1e-6);
+        const bool outerY = std::fabs(std::fabs(n.Y()) - 1.0) < 1e-6 &&
+                            (std::fabs(p.Y()) < 1e-6 || std::fabs(p.Y() - 60.0) < 1e-6);
+        if (outerX || outerY) continue;
+        ++hexPlanes;
+    }
+    std::cout << "S29 hexWallPlanes=" << hexPlanes << "\n";
+    if (hexPlanes != 24) {
+        throw std::runtime_error("S29: hex wall planes " + std::to_string(hexPlanes) + " != 24");
+    }
+    Sidecar sc;
+    tagFc(sc, kFcAng64);
+    appendSolidPlanes(sc, solid);
+    sc.recoverable.push_back(cylRec(1.0, {1, 1, 0}, {0, 0, 1}, 1, 0, false));
+    sc.recoverable.push_back(cylRec(1.0, {79, 1, 0}, {0, 0, 1}, 1, 0, false));
+    sc.recoverable.push_back(cylRec(1.0, {79, 59, 0}, {0, 0, 1}, 1, 0, false));
+    sc.recoverable.push_back(cylRec(1.0, {1, 59, 0}, {0, 0, 1}, 1, 0, false));
+    sc.recoverable.push_back(cylRec(5.0, {68, 30, 0}, {0, 0, 1}, 1, 0, true));
+    sc.exactVolume = exactVolumeS29();
+    certifyExactVolume(solid, sc.exactVolume, "S29");
+    FixtureResult fx = emitShape(
+        "S29_hex_law",
+        "80x60x5 plate, four hex through-holes across-flats 15, R1 vertical corner rounds, one R5 hole at 64/turn",
+        solid, kFcLin, kFcAng64, sc);
+    requireWatertight(fx, "S29");
+    requireCurvedFold(fx, "S29", false);
+    requireChord(fx, solid, "S29");
+    for (const auto& r : fx.sidecar.recoverable) {
+        if (r.type != "cylinder") continue;
+        std::cout << "S29 cyl R=" << r.radius << " nSides=" << r.nSides << "\n";
+        if (std::fabs(r.radius - 5.0) < 1e-9 && r.nSides != 64) {
+            throw std::runtime_error("S29: R5 nSides " + std::to_string(r.nSides) + " != 64");
+        }
+        if (std::fabs(r.radius - 1.0) < 1e-9 && r.nSides < 48) {
+            throw std::runtime_error("S29: R1 nSides " + std::to_string(r.nSides) + " < 48");
+        }
+    }
+    return fx;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2001,6 +3366,13 @@ int main(int argc, char** argv) {
     run("cyl_meets_chamfer", [] { return buildCylMeetsChamfer(); });
     run("S20_cross_bore_union", [] { return buildS20CrossBoreUnion(); });
     run("S21_rim_offplane_vertex", [] { return buildS21RimOffplane(); });
+    run("S23_plane_fillet_lowfold", [] { return buildS23(); });
+    run("S24_hem_uturn", [] { return buildS24(); });
+    run("S25_peg_fillet", [] { return buildS25(); });
+    run("S26_funnel_rev", [] { return buildS26(); });
+    run("S27_sphere_corner_fine", [] { return buildS27(); });
+    run("S28_varradius_negative", [] { return buildS28(); });
+    run("S29_hex_law", [] { return buildS29(); });
 
     for (const auto& fx : fixtures) {
         if (isPinnedCorpusFixture(fx.sidecar.id)
