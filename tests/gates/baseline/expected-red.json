@@ -25,13 +25,21 @@
     "plate.sidecar-cross-bore": "D-140-8 U-R17 / G7 / D-130-17 addendum: owed since 1.3.0 and never registered. gates_full's SIDECAR row on test.stl -- mesh truth for the R=10 cross bore at (y,z)=(-20,-25) is 255 on-surface triangles (1992.4448 mm^2, 6 edge-pieces at tau=2q, q=1.321449896e-05) plus 24 off-surface triangles in the stars of 8 slot-window corner vertices at rho=9.99929, deviation 7.0579e-04..7.0768e-04 = 53.4..53.6 q = 0.036 sigma with sigma=0.019733911; the engine ships 214/279 in 2 faces. Registered by the fixture commit (union-fixture, D-140-8), removed by the build commit when 255/279 ship in ONE face with two inner wires. The sidecar is NOT edited: 255+24 is the geometry's truth (U-R18). MEASURED bore-domain-r1, withdrawn under D-train-boundary ruling 9: DIAG_LAWBDRY rid=866 tris=279 claim=255 absorbed=24 chi=-2 b=4 loops=4 halfEdges=275/275 caps=2 inners=2 winding=[0,0,1,-1]. DIAG_SEAM360FAIL absent. DIAG_130_LOOPS not printed (union diag gate closed). The analytic component reverted (smoothRevertedComponents=1); CYLINDRICAL_SURFACE did not ship. R3 closure did not join: DIAG_LAWSAMESURF only into=4 from=5 n=255 R=10 resid=2.1968e-06 q-scale tau=1.32145e-05, and into=6 from=7 n=180 R=30 resid=4.02454e-06; the four R3 feet stayed split (components of 28, not 44). | D-train-boundary-2 (1), 2026-09-22: on the wave-2 walk runs NO face was ever built -- buildTopologyD refuses at refit_chains.cpp:375 on triangle-ownership overlap (DIAG_OVERLAP t=718 already=33 new=43); DIAG_130_ALLREG/REG/LOOPS/CHAINSEW = 0 on that run; the single-owner certificate in claimLawBandsL is the ruled remedy.",
     "S20.union-not-built": "D-140-8 U-R15/U-R17: registered by the fixture commit (union-fixture, D-140-8), removed by the build commit if and when it lands. S20_cross_bore_union.stl's own pre-run census (S20-UNION, gen_corpus, on the welded float32 mesh, before any engine run) certifies the union bore at R=10.000000 sigma=0.0214118609 mm = 3240.66178 q, edgePieces=38, punctures=92, domainFaces=1, innerWires=2, windingPerWire=[0,0], pinchVertices=40, and the coaxial disjoint-span control bore at domainFaces=1 innerWires=0, axialOverlap=0 -- so the PRG multiset ceiling for R=10 on this fixture is exactly 2: over-segmentation fails (D-130-14) and over-merging fails (U-R3). src/ is untouched by this commit: the shipped engine has no domain-component emit, so the union bore ships as its edge-pieces. If union-build does not land in this wave, this row is the honest record. MEASURED bore-domain-r1, withdrawn under D-train-boundary ruling 9: the plate walk certified DIAG_LAWBDRY rid=866 tris=279 claim=255 absorbed=24 chi=-2 b=4 loops=4 halfEdges=275/275 caps=2 inners=2 winding=[0,0,1,-1], then the analytic component reverted (smoothRevertedComponents=1). DIAG_SEAM360FAIL absent. S20's pinchVertices=40 path was not closed. The row stays.",
     "union.canal-cylcyl-pieces": "D-140-8 U6/U7/U-R17: Handle pickup's R 100 / 92.5 / 72.5 walls, 2077.806 + 568.193 + 322.106 = 2968.105 mm^2, stay at 3 / 3 / 2 edge-pieces at 20000 q = 0.5286 mm = 17 sigma (sigma = 0.030815552 on R 100). Those separators are real bands, not punctures: the blend between them is blend.canal-cylcyl (D-140-6 sec 2), deferred to 1.5. The union must NOT merge them -- doing so is a FAILURE, not an XPASS.",
-    "plate.edge-fillet-r5-y-unbuilt": "D-train-residue D-R12: two plane x plane rounds, R = 4.9999992 at (x,z) = (53, -20) and R = 5.0000000 at (53, -30), both axis +Y, y in [-53.077, -7.009]; tau-sets 35 tris / 204.9622 mm^2 and 25 tris / 93.5218 mm^2; free-refit max vertex residual 0.115 q / 0.184 q over 45 / 42 distinct vertices. test.step ships no cylindrical surface about +/-Y. Retired by the commit that builds them.",
-    "plate.edge-round-r3-51-7-unbuilt": "D-train-residue D-R12 / D-train-grader (2): cylinder R = 3.000001, axis +Z, foot (51.0000, -7.0000), 28 tris / 62.7566 mm^2, free-refit 0.14 q over 51 distinct vertices, best plane through the same vertices refused at 41567 q. Engine region of R = 3.0693, 15 tris, 1260 q is the mis-segmented form of it. rid 44 cone disposition stays closed (D-train-cone).",
+    "S24.hem-deferred": "D-fc-2 / D-fc-1.14. Measured on fc/instr-patch: recoverable cylinders R=1 and R=3, axis +X at the origin, have no accepted region (dump planes 15, cylinders 0). Hem construction stays deferred.",
+    "S25.peg-and-torus-unbuilt": "D-fc-1.14. Measured: cylinder R=6 closed360 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region (361 planes).",
+    "S26.bore-and-torus-unbuilt": "D-fc-1.14. Measured: cylinders R=11 and R=8 (loc z=3) unmatched; torus Rmaj=14 Rmin=3 unmatched. Matched, not listed: cylinder R=9.5 and the three cones.",
+    "S27.two-fillets-and-sphereNYI": "D-fc-1.14. Measured: R=3 axis +X matches; R=3 axis +Y at (37,0,37) and R=3 axis +Z at (37,37,0) do not. expectedRejects sphereNYI is absent (rejected=[]).",
+    "S29.corner-rounds-unbuilt": "D-fc-1.14. Measured: cylinder R=5 matches. Four R=1 corner rounds at (1,1,0), (79,1,0), (79,59,0) and (1,59,0) unmatched. Planes normal +X (one) and +Y (two) unmatched.",
     "plate.edge-strip-nonquadric": "D-train-residue D-R13: after E1/E2/E3 leave it, 45 triangles / 208.9652 mm^2 of the x in [48,53] edge remain; a general 10-coefficient quadric fits its 66 vertices no better than 171191 q; 0 of 28 adjacent pairs coplanar within theta_q; not ruled under SPEC-grader 5.1. The mesh polyhedral sampling of a multi-facet chamfer. Permanent residue; not promised to 1.5.",
     "plate.slot-corner-residue": "D-train-residue D-R7/D-R13: 36 triangles / 89.4787 mm^2 in 8 components — 24 / 57.4077 mm^2 at 53.4-53.6 q from R = 10 (D-140-8 U1 punctures at 0.036 sigma; U-R5: they stay facets, tau is never widened) and 12 / 32.0710 mm^2 at 226.1 q from R = 3; quadric max 79710 q; 0 of 32 coplanar; not ruled. Footprint of the eight perpendicular intersecting R10xR3 pairs registered to 1.5 as blend.canal-cylcyl (D-140-6 sec 2). Rims stay tier-2 polylines (U-R10)."
   },
   "gates_full": {
-    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)"
+    "cyl_meets_chamfer": "D-130-23 / D-130-20 (B6 deferred)",
+    "S24_hem_uturn": "D-fc-2 / D-fc-1.14. Recoverable cylinders R=1 and R=3 axis +X have no accepted region. Hem-deferred.",
+    "S25_peg_fillet": "D-fc-1.14. Cylinder R=6 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region.",
+    "S26_funnel_rev": "D-fc-1.14. Cylinders R=11 and R=8 unmatched; torus Rmaj=14 Rmin=3 unmatched. Cylinder R=9.5 and three cones match.",
+    "S27_sphere_corner_fine": "D-fc-1.14. R=3 axis +Y and +Z unmatched; expectedReject sphereNYI absent (rejected=[]). R=3 axis +X matches.",
+    "S29_hex_law": "D-fc-1.14. Four R=1 corner rounds unmatched; planes normal +X (one) and +Y (two) unmatched. Cylinder R=5 matches."
   },
   "edge_class_gate": {
     "Body11": "D-130-23 / 082194b red lines not relaxed",
@@ -40,6 +48,11 @@
     "S03": "D-130-23 / 082194b red lines not relaxed",
     "S09": "D-130-23 / 082194b red lines not relaxed",
     "S19_mouth_round": "D-140-6 §4 first measure; overCap at seed while torus engine is not in this tree",
+    "S23_plane_fillet_lowfold": "D-fc-1.14 first measure on fc/instr-patch; overCap at seed (polylineTier2=14).",
+    "S25_peg_fillet": "D-fc-1.14 first measure on fc/instr-patch; overCap at seed (polylineTier2=1044).",
+    "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch; overCap at seed (polylineTier2=4186).",
+    "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch; overCap at seed (polylineTier2=1617).",
+    "S28_varradius_negative": "D-fc-1.14 first measure on fc/instr-patch; overCap at seed (polylineTier2=41).",
     "S16-R1-explode-success": "D-130-23 / 082194b red lines not relaxed",
     "handle-pickup": "D-130-23 / 082194b red lines not relaxed",
     "linkage_bores_chamfer": "D-130-23 / 082194b red lines not relaxed",
@@ -47,6 +60,16 @@
   },
   "gate_130": {
     "cyl_meets_chamfer": "D-130-23 (B6 deferred)"
+  },
+  "partial_recovery_gate": {
+    "d3f7.radiiMultiset": "USER 2026-10-15 01:50 approved exception: relational R3 fillet beside B1 slivers; cleared by W1.3 b1-reclaim"
+  },
+  "p1_compose_gate": {
+    "S24_hem_uturn": "D-fc-2 / D-fc-1.14. Recoverable cylinders R=1 and R=3 axis +X have no accepted region. Hem-deferred.",
+    "S25_peg_fillet": "D-fc-1.14. Cylinder R=6 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region.",
+    "S26_funnel_rev": "D-fc-1.14. Cylinders R=11 and R=8 unmatched; torus Rmaj=14 Rmin=3 unmatched. Cylinder R=9.5 and three cones match.",
+    "S27_sphere_corner_fine": "D-fc-1.14. R=3 axis +Y and +Z unmatched; expectedReject sphereNYI absent (rejected=[]). R=3 axis +X matches.",
+    "S29_hex_law": "D-fc-1.14. Four R=1 corner rounds unmatched; planes normal +X (one) and +Y (two) unmatched. Cylinder R=5 matches."
   },
   "grader": {
     "grade.cyl-emit-triangle-floor": "D-train-grader-4 (1)(b): |R| >= paramCount(Cylinder)+1 re-sited into certifies beside the section clause so one predicate governs tryGrow, the keep-S hatch and the section seed. D-140-1 sec 3 forbids a free-standing |R| >= n; retained because the five P4 alternatives all cost a ruled cell. Refused: rulings>=1 (plate planes 56 / 0.998727879, R 8.5 135/135); rulings>=2 (planes 58 / 0.998669717, R 8.5 135/135, walls 38/38/37/37); rulings>=3 (planes 58, R 8.5 135/135, walls 39/39/39/39); tau-closed rulings>=1 (S03 grade.cylinder 0.958919789, 10 cylinder oracles); tau-closed rulings>=2 and >=3 (plate 54 / 0.999371209 and R 8.5 139/139 but walls 38/38/37/37, residue 171 / 674.854443). Retirement instrument: rulings(V(R)) >= d_axis+1 with d_axis = paramCount(Cylinder)-d_section = 2, retired when that clause reproduces plate 54 / 39-39-39-39 / R 8.5 139-139 together with S04 torus 512 and S03 all-1. Cycle-4 measurement: requiring rulings>=3 in certifies, before the hold-gate deletion, dropped the four R=3 walls (156 triangles to residue) and moved planes 54 to 58 / 0.998669717. The eight R 8.5 triangles were not lost by the re-sited floor (R 8.5 stayed 139/139). The floor is not retired.",

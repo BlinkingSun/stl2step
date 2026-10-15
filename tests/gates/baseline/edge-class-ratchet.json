@@ -7,12 +7,13 @@
   "platforms": {
     "note": "D-130-24: every fixture whose edge-class census differs between macOS, Linux and Windows, with each platform's measured values. tier2Ceiling above is the MAXIMUM of these and expectedRed above is the UNION of the lines violated on any platform; nothing is set above a measured value. A platform that measures below the ceiling prints RATCHET-TIGHTEN on every run, which is how a later decrease stays visible. Measured at wip/1.3.0 c995151 by `edge_class_gate.py --measure` against each node's own Release build: macOS 15 / arm64 / Homebrew OCCT 7.9.3; Linux Ubuntu / x86_64 / g++-13 / conda-forge OCCT 7.9.3 (shop NUC); Windows 11 / x86_64 / MSVC 17.14 / vcpkg OCCT 7.9.3 (shop PC). Every other fixture is identical on all three.",
     "Body28": {
+      "note": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (macOS / Homebrew OCCT 7.9.3): analytic 449→409, polylineTier2 1442→1385, unhandled 25→0, overCap 676→567. linux/windows rows below stay at the pre-fillet measure (polylineTier2 1433) and are stale; the ceiling follows the healed macOS value (S04 precedent). expectedRed still lists unhandled; this run measured unhandled=0 and the admission is not widened.",
       "macos": {
-        "analytic": 449,
-        "polylineTier2": 1442,
-        "unhandled": 25,
+        "analytic": 409,
+        "polylineTier2": 1385,
+        "unhandled": 0,
         "overTol": 0,
-        "overCap": 676
+        "overCap": 567
       },
       "linux": {
         "analytic": 449,
@@ -69,9 +70,9 @@
     }
   },
   "tier2Ceiling": {
-    "Body11": 5218,
-    "Body244": 1417,
-    "Body28": 1442,
+    "Body11": 5204,
+    "Body244": 1224,
+    "Body28": 1385,
     "S01": 0,
     "S02": 0,
     "S03": 60,
@@ -96,6 +97,13 @@
     "S19_mouth_round": 492,
     "S20_cross_bore_union": 0,
     "S21_rim_offplane_vertex": 0,
+    "S23_plane_fillet_lowfold": 14,
+    "S24_hem_uturn": 0,
+    "S25_peg_fillet": 1044,
+    "S26_funnel_rev": 4186,
+    "S27_sphere_corner_fine": 1617,
+    "S28_varradius_negative": 41,
+    "S29_hex_law": 0,
     "boss_cone_chamfer": 0,
     "build_fixtures/counterbore": 0,
     "build_fixtures/fillet_strip_2tri": 0,
@@ -114,13 +122,23 @@
     "cyl_meets_chamfer": 0,
     "handle-lock": 0,
     "handle-pickup": 358,
-    "linkage_bores_chamfer": 138,
+    "linkage_bores_chamfer": 110,
     "nonprismatic-control": 0,
     "shelf_bracket": 52
   },
   "tier2CeilingNote": {
-    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN).",
-    "S21_rim_offplane_vertex": "D-S8 fixture added by this lane. edge_class_gate on be13e23: red lines clear, polylineTier2=0, and the gate's own line was 'no tier2Ceiling (a fixture the ratchet never saw is not measured); seed it'. Seeded at the measured 0. No expectedRed entry."
+    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN). D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (xguard-r1+bedge-r1): polylineTier2 138→110.",
+    "Body11": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 5218→5204.",
+    "Body244": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1417→1224. CLOSURES 2026-10-15 06:05: analytic 148→3, facet lines replaced by 2 true cones. overCap remains 241.",
+    "Body28": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385.",
+    "S21_rim_offplane_vertex": "D-S8 fixture added by this lane. edge_class_gate on be13e23: red lines clear, polylineTier2=0, and the gate's own line was 'no tier2Ceiling (a fixture the ratchet never saw is not measured); seed it'. Seeded at the measured 0. No expectedRed entry.",
+    "S23_plane_fillet_lowfold": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=14, overCap at seed.",
+    "S24_hem_uturn": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
+    "S25_peg_fillet": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1044, overCap at seed.",
+    "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=4186, overCap at seed.",
+    "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1617, overCap at seed.",
+    "S28_varradius_negative": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=41, overCap at seed.",
+    "S29_hex_law": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry."
   },
   "expectedRed": {
     "Body11": [
@@ -144,6 +162,21 @@
       "unhandled"
     ],
     "S19_mouth_round": [
+      "overCap"
+    ],
+    "S23_plane_fillet_lowfold": [
+      "overCap"
+    ],
+    "S25_peg_fillet": [
+      "overCap"
+    ],
+    "S26_funnel_rev": [
+      "overCap"
+    ],
+    "S27_sphere_corner_fine": [
+      "overCap"
+    ],
+    "S28_varradius_negative": [
       "overCap"
     ],
     "handle-pickup": [
