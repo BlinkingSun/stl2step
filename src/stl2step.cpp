@@ -1513,7 +1513,10 @@ std::string Result::toJson() const {
             radiusDriftMaxAbs, radiusDriftMaxRel);
     }
     const int absorbed = meshTJunctionsAbsorbedOf(input, output);
-    if (absorbed >= 0)
+    // Off-path RESULT stays character-identical to 1.0.0 (AGENTS.md §9).
+    // The absorb always runs; the key is a feature result, so emit it only
+    // when at least one triangle was absorbed.
+    if (absorbed > 0)
         jsonAppendFmt(o, ",\"meshTJunctionsAbsorbed\":%d", absorbed);
     o += '}';
     return o;
