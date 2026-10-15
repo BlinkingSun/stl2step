@@ -12,6 +12,7 @@
 #include "parallel.hpp"
 #include "refit_cone_bind.hpp"
 #include "refit_ellipse_bind.hpp"
+#include "refit_ellipse_math.hpp"
 #include "refit_cone_math.hpp"
 #include "refit_torus_math.hpp"
 #include "refit_internal.hpp"
@@ -8273,6 +8274,44 @@ double circleOnPlaneMax(const gp_Pln& pl, const gp_Circ& circ) {
     return off + R * std::sin(ang) + R * (1.0 - std::cos(ang));
 }
 
+// circleOnPlaneMax is the supremum over the WHOLE circle. An arc whose range
+// does not reach that extremal parameter never attains it (Body28's healed
+// partial-cylinder cap arcs: 0.000355 whole-circle, 0.000293 on the arc). With
+// the To2d circle pcurve, C(t) - S(P(t)) = W + A cos t + B sin t, the a = b case
+// of refit_ellipse_math's EXACT supremum over [f, l]. -1 on a full turn or any
+// other pcurve; the caller then keeps the whole-circle value.
+double circleOnPlaneArcSup(const gp_Pln& pl, const gp_Circ& circ, Standard_Real f,
+                           Standard_Real l, const Handle(Geom2d_Curve)& c2d) {
+    if (c2d.IsNull()) return -1.0;
+    if (!(l - f > Precision::PConfusion()) || l - f >= 2.0 * kPi - Precision::PConfusion())
+        return -1.0;
+    Handle(Geom2d_Curve) b2 = c2d;
+    Handle(Geom2d_TrimmedCurve) tr2 = Handle(Geom2d_TrimmedCurve)::DownCast(b2);
+    if (!tr2.IsNull() && !tr2->BasisCurve().IsNull()) b2 = tr2->BasisCurve();
+    Handle(Geom2d_Circle) c2 = Handle(Geom2d_Circle)::DownCast(b2);
+    if (c2.IsNull()) return -1.0;
+    try {
+        const gp_Ax3 pos = pl.Position();
+        const gp_Vec X(pos.XDirection()), Y(pos.YDirection());
+        const gp_Ax22d& f2 = c2->Position();
+        const gp_Pnt2d ctr = f2.Location();
+        const gp_Dir2d xd = f2.XDirection(), yd = f2.YDirection();
+        const gp_Pnt p0 = pos.Location().Translated(X * ctr.X() + Y * ctr.Y());
+        const gp_Vec u2v = X * xd.X() + Y * xd.Y();
+        const gp_Vec v2v = X * yd.X() + Y * yd.Y();
+        if (!(u2v.Magnitude() > gp::Resolution()) || !(v2v.Magnitude() > gp::Resolution()))
+            return -1.0;
+        const double R = circ.Radius(), R2 = c2->Radius();
+        EllipseDevClass cls = EllipseDevClass::Unhandled;
+        const double m = ellipseOnPlaneMax(pl, gp_Elips(circ.Position(), R, R), f, l, p0,
+                                           gp_Dir(u2v), gp_Dir(v2v), R2, R2, &cls);
+        if (!(m >= 0.0) || !std::isfinite(m) || cls != EllipseDevClass::OnPlane) return -1.0;
+        return m;
+    } catch (const Standard_Failure&) {
+        return -1.0;
+    }
+}
+
 // Circle on cylinder: constant radial offset |dist_to_axis − R| when the circle axis is
 // parallel to the cylinder axis; otherwise the radial span [d−r, d+r] vs R.
 double circleOnCylMax(const Handle(Geom_CylindricalSurface)& cyl, const gp_Circ& circ,
@@ -8354,7 +8393,9 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
                 gp_Pln pl = gpl->Pln();
                 if (!loc.IsIdentity()) pl.Transform(loc.Transformation());
                 if (clsOut) *clsOut = "circle-on-plane";
-                return circleOnPlaneMax(pl, gc->Circ());
+                const double whole = circleOnPlaneMax(pl, gc->Circ());
+                const double arc = circleOnPlaneArcSup(pl, gc->Circ(), f, l, c2d);
+                return (arc >= 0.0 && arc < whole) ? arc : whole;
             }
             if (!gcyl.IsNull()) {
                 if (clsOut) *clsOut = "circle-on-cylinder";
@@ -9022,6 +9063,26 @@ void birthMeshEdgePlanePCurves(const RegionSet& rs, const std::vector<TopoDS_Edg
     }
 }
 
+// Arc mid hint: the chain vertex nearest the cylinder's u-mid, taken among the
+// chain's INTERIOR vertices. An endpoint tells makeArc nothing (dm = 0 or
+// dm = df both take the forward arc), so a cap chain that spans only part of
+// its region's u-range -- a round whose end meets a corner blend -- came back
+// as the complement of its own arc. Every interior vertex lies on the arc the
+// chain walks. Callers guarantee at least three chain vertices.
+gp_Pnt arcMidNearestU(const Region& cyl, const BoundaryChain& ch, const MeshView& mv, gp_Pnt mid) {
+    const double um = 0.5 * (cyl.uMin + cyl.uMax);
+    double best = 1e300;
+    for (size_t k = 1; k + 1 < ch.meshVerts.size(); ++k) {
+        const gp_Pnt p = pntOf(mv, ch.meshVerts[k]);
+        const double du = std::fabs(regionU(cyl, p) - um);
+        if (du < best) {
+            best = du;
+            mid = p;
+        }
+    }
+    return mid;
+}
+
 gp_Pnt probeArcMid(const AnalyticCurve& curve, const BoundaryChain& ch, const MeshView& mv,
                    const Region* A, const Region* B, const std::vector<TopoDS_Vertex>& verts,
                    int ia, int ib) {
@@ -9048,15 +9109,7 @@ gp_Pnt probeArcMid(const AnalyticCurve& curve, const BoundaryChain& ch, const Me
         // chain split by pinch vertices came back as its own 72 deg complement.
         // The chain's own middle vertex is the honest hint there.
         if (cylHint && !(unionBuildOn() && cylHint->closed360)) {
-            const double um = 0.5 * (cylHint->uMin + cylHint->uMax);
-            double best = 1e300;
-            for (int lv : ch.meshVerts) {
-                double du = std::fabs(regionU(*cylHint, pntOf(mv, lv)) - um);
-                if (du < best) {
-                    best = du;
-                    mid = pntOf(mv, lv);
-                }
-            }
+            mid = arcMidNearestU(*cylHint, ch, mv, mid);
         }
         return mid;
     }
@@ -16455,15 +16508,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // A 288 deg rim chain came back as its own 72 deg
                     // complement. The chain's own middle vertex is the hint.
                     if (cylHint && !(unionBuildOn() && cylHint->closed360)) {
-                        const double um = 0.5 * (cylHint->uMin + cylHint->uMax);
-                        double best = 1e300;
-                        for (int lv : ch.meshVerts) {
-                            double du = std::fabs(regionU(*cylHint, pntOf(mv, lv)) - um);
-                            if (du < best) {
-                                best = du;
-                                mid = pntOf(mv, lv);
-                            }
-                        }
+                        mid = arcMidNearestU(*cylHint, ch, mv, mid);
                     }
                 } else if (!full && curve.kind == AnalyticCurve::Circ &&
                            ch.meshVerts.size() == 2) {
