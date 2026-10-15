@@ -9007,6 +9007,26 @@ void birthMeshEdgePlanePCurves(const RegionSet& rs, const std::vector<TopoDS_Edg
     }
 }
 
+// Arc mid hint: the chain vertex nearest the cylinder's u-mid, taken among the
+// chain's INTERIOR vertices. An endpoint tells makeArc nothing (dm = 0 or
+// dm = df both take the forward arc), so a cap chain that spans only part of
+// its region's u-range -- a round whose end meets a corner blend -- came back
+// as the complement of its own arc. Every interior vertex lies on the arc the
+// chain walks. Callers guarantee at least three chain vertices.
+gp_Pnt arcMidNearestU(const Region& cyl, const BoundaryChain& ch, const MeshView& mv, gp_Pnt mid) {
+    const double um = 0.5 * (cyl.uMin + cyl.uMax);
+    double best = 1e300;
+    for (size_t k = 1; k + 1 < ch.meshVerts.size(); ++k) {
+        const gp_Pnt p = pntOf(mv, ch.meshVerts[k]);
+        const double du = std::fabs(regionU(cyl, p) - um);
+        if (du < best) {
+            best = du;
+            mid = p;
+        }
+    }
+    return mid;
+}
+
 gp_Pnt probeArcMid(const AnalyticCurve& curve, const BoundaryChain& ch, const MeshView& mv,
                    const Region* A, const Region* B, const std::vector<TopoDS_Vertex>& verts,
                    int ia, int ib) {
@@ -9033,15 +9053,7 @@ gp_Pnt probeArcMid(const AnalyticCurve& curve, const BoundaryChain& ch, const Me
         // chain split by pinch vertices came back as its own 72 deg complement.
         // The chain's own middle vertex is the honest hint there.
         if (cylHint && !(unionBuildOn() && cylHint->closed360)) {
-            const double um = 0.5 * (cylHint->uMin + cylHint->uMax);
-            double best = 1e300;
-            for (int lv : ch.meshVerts) {
-                double du = std::fabs(regionU(*cylHint, pntOf(mv, lv)) - um);
-                if (du < best) {
-                    best = du;
-                    mid = pntOf(mv, lv);
-                }
-            }
+            mid = arcMidNearestU(*cylHint, ch, mv, mid);
         }
         return mid;
     }
@@ -16439,15 +16451,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // A 288 deg rim chain came back as its own 72 deg
                     // complement. The chain's own middle vertex is the hint.
                     if (cylHint && !(unionBuildOn() && cylHint->closed360)) {
-                        const double um = 0.5 * (cylHint->uMin + cylHint->uMax);
-                        double best = 1e300;
-                        for (int lv : ch.meshVerts) {
-                            double du = std::fabs(regionU(*cylHint, pntOf(mv, lv)) - um);
-                            if (du < best) {
-                                best = du;
-                                mid = pntOf(mv, lv);
-                            }
-                        }
+                        mid = arcMidNearestU(*cylHint, ch, mv, mid);
                     }
                 } else if (!full && curve.kind == AnalyticCurve::Circ &&
                            ch.meshVerts.size() == 2) {
