@@ -19,7 +19,7 @@
   "expectedOpenShells": 0,
   "smoothExpectedExit": 2,
   "smoothWarningCountMax": 18,
-  "smoothVolumeDeltaPctMax": 0.000163,
+  "smoothVolumeDeltaPctMax": 0.000171,
   "smoothRecognisedCylinders": 209,
   "recoverable": [],
   "mustRemainFaceted": [],

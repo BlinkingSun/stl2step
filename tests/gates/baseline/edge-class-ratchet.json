@@ -5,6 +5,8 @@
   "seededBy": "lane 130-BIND-2A, 2026-09-04, `edge_class_gate.py --measure --binary build-wip/stl2step --jobs 4`; D-130-24 cross-platform max by lane 130-XPLAT; 1.4.0 new-fixture ceilings + S11-b expectedRed shrink by lane seeds-140, 2026-09-06; S04 torus-healed tier2Ceiling + expectedRed shrink by lane seeds-140b, 2026-09-06, same writer against 140-seeds-b/build-wip (macOS / Homebrew OCCT 7.9.3, validated by round 2 — Linux/Windows pre-torus rows below are stale until remeasured)",
   "notes": "D-130-2 red lines and the tier-2 mesh-polyline ratchet, over tests/corpus/*.stl and tests/gates/build_fixtures/*/*.stl. tier2Ceiling is a NEVER-INCREASE ceiling per fixture: an edge that ships analytic today may not become a mesh polyline tomorrow. A decrease passes and the gate prints the instruction to re-baseline it with a note. expectedRed records, per fixture, the red lines the branch that seeded this file already violates -- an admission, not a waiver: the gate names each one on every run, a fixture that heals prints the instruction to delete its entry, and a violation on a fixture or a line not listed here is a hard FAIL. Widening expectedRed to make a run green is a defect. The causes are attributed in _team/reports/130-bind.md 4: 'unhandled' is ONE cause on every fixture that carries it -- exactMaxAtBind has no ellipse class, so an ellipse edge ships analytic with no closed-form supremum (D-130-2 admits Ellipse in tier 1); 'overTol' is a recorded tolerance below the certified supremum on 13 edges; 'overCap' is the recorded tolerance above meshTolCap, which is the 1.2.0 registered sliver-plate limitation plus the later tolerance writers. None of the three is relaxed by this file.",
   "platforms": {
+    "S26_funnel_rev": {"note": "D-130-24 2026-10-16: polylineTier2 only (hosted CI run 38806527484 logs); other classes not separately measured on linux/windows.", "macos": {"polylineTier2": 4186}, "linux": {"polylineTier2": 4353}, "windows": {"polylineTier2": 4353}},
+    "S27_sphere_corner_fine": {"note": "D-130-24 2026-10-16: polylineTier2 only (hosted CI run 38806527484 logs); other classes not separately measured on linux/windows.", "macos": {"polylineTier2": 1617}, "linux": {"polylineTier2": 1670}, "windows": {"polylineTier2": 1670}},
     "note": "D-130-24: every fixture whose edge-class census differs between macOS, Linux and Windows, with each platform's measured values. tier2Ceiling above is the MAXIMUM of these and expectedRed above is the UNION of the lines violated on any platform; nothing is set above a measured value. A platform that measures below the ceiling prints RATCHET-TIGHTEN on every run, which is how a later decrease stays visible. Measured at wip/1.3.0 c995151 by `edge_class_gate.py --measure` against each node's own Release build: macOS 15 / arm64 / Homebrew OCCT 7.9.3; Linux Ubuntu / x86_64 / g++-13 / conda-forge OCCT 7.9.3 (shop NUC); Windows 11 / x86_64 / MSVC 17.14 / vcpkg OCCT 7.9.3 (shop PC). Every other fixture is identical on all three.",
     "Body28": {
       "note": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (macOS / Homebrew OCCT 7.9.3): analytic 449→409, polylineTier2 1442→1385, unhandled 25→0, overCap 676→567. linux/windows rows below stay at the pre-fillet measure (polylineTier2 1433) and are stale; the ceiling follows the healed macOS value (S04 precedent). expectedRed still lists unhandled; this run measured unhandled=0 and the admission is not widened.",
@@ -100,8 +102,8 @@
     "S23_plane_fillet_lowfold": 14,
     "S24_hem_uturn": 0,
     "S25_peg_fillet": 1044,
-    "S26_funnel_rev": 4186,
-    "S27_sphere_corner_fine": 1617,
+    "S26_funnel_rev": 4353,
+    "S27_sphere_corner_fine": 1670,
     "S28_varradius_negative": 41,
     "S29_hex_law": 0,
     "boss_cone_chamfer": 0,
@@ -135,8 +137,8 @@
     "S23_plane_fillet_lowfold": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=14, overCap at seed.",
     "S24_hem_uturn": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
     "S25_peg_fillet": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1044, overCap at seed.",
-    "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=4186, overCap at seed.",
-    "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1617, overCap at seed.",
+    "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=4186 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 4353, Windows 4353; ceiling = max = 4353.",
+    "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1617 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 1670, Windows 1670; ceiling = max = 1670.",
     "S28_varradius_negative": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=41, overCap at seed.",
     "S29_hex_law": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry."
   },
