@@ -7011,6 +7011,21 @@ thread_local std::unordered_set<const void*> gTier2TShapes;
 // rewrites the tolerance down to the sampled gap; the census reads the
 // closed-form supremum, which is larger. Raised again after SameParameter.
 thread_local std::unordered_set<const void*> gConeIsoCapTShapes;
+// The TShape-address sets above (and gMeshTShapes) are refilled only at a
+// canon-clear transition, but every rebuild round inside one recoverPass
+// re-mints chain edges and frees the old ones. A freed address handed to a
+// later edge made it test positive -- the same alias edgeClassCensus documents
+// for gMeshTShapes. Measured: one binary, one input, --threads 1, four runs,
+// four distinct STEPs; up to 52 of the shell edges the forced SameParameter
+// skipped as tier-2 were not tier-2 splines at all. Each enrolment pins its
+// TShape until the sets are cleared together, so a recorded address cannot be
+// reissued and membership is a function of the component, not of malloc.
+thread_local std::vector<Handle(TopoDS_TShape)> gEnrolledTShapePins;
+const void* enrollTShape(std::unordered_set<const void*>& set, const TopoDS_Shape& s) {
+    const void* ts = diagTShapePtr(s);
+    if (ts && set.insert(ts).second) gEnrolledTShapePins.push_back(s.TShape());
+    return ts;
+}
 
 int countSeamEdgesOnWire(const TopoDS_Wire& w) {
     int n = 0;
@@ -8618,7 +8633,7 @@ void bindAllVariants(const TopoDS_Edge& e, const Region& R, const char* kind, co
     Standard_Real f = 0, l = 0;
     Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
     if (c3.IsNull() || l - f <= Precision::PConfusion()) return;
-    if (const void* ts = diagTShapePtr(e)) gSeamTShapes.insert(ts);
+    enrollTShape(gSeamTShapes, e);
     const TopLoc_Location loc;
     const double cap = meshTolCap(mv, &R);
     SurfVar vars[6];
@@ -15706,7 +15721,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 geom[ci].regB = B->id;
                 geom[ci].chainSnapCap = analyticSnapCap(mv, A, B);
                 geom[ci].tier2Polyline = true;
-                if (const void* ts2 = diagTShapePtr(ePoly)) gTier2TShapes.insert(ts2);
+                enrollTShape(gTier2TShapes, ePoly);
                 noteWirePop(ePoly, "rebuildCollapsed", (int)ci);
                 collapsed[ci] = 1;
                 if (diagP2Enabled() || diag130Enabled())
@@ -15789,8 +15804,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gMeshTShapes.clear();
                     gWirePopCi.clear();
                     gWirePopSite.clear();
+                    gEnrolledTShapePins.clear();
                     for (const auto& me : meshE) {
-                        if (!me.IsNull()) gMeshTShapes.insert(diagTShapePtr(me));
+                        enrollTShape(gMeshTShapes, me);
                     }
                     lastCanonClearPass = recoverPass;
                 }
@@ -15967,7 +15983,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         geom[ci].regB = B->id;
                         geom[ci].chainSnapCap = analyticSnapCap(mv, A, B);
                         geom[ci].tier2Polyline = true;
-                        if (const void* ts2 = diagTShapePtr(ePoly)) gTier2TShapes.insert(ts2);
+                        enrollTShape(gTier2TShapes, ePoly);
                         noteWirePop(ePoly, "rebuildCollapsed", (int)ci);
                         collapsed[ci] = 1;
                         nOk++;
@@ -17168,8 +17184,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                             if (!shifted.IsNull()) {
                                                 pc = shifted;
                                                 supRaise = sup;
-                                                if (const void* ts = diagTShapePtr(eCap))
-                                                    gConeIsoCapTShapes.insert(ts);
+                                                enrollTShape(gConeIsoCapTShapes, eCap);
                                                 if (diag130Enabled() || diagRelEnabled())
                                                     std::fprintf(
                                                         stderr,
