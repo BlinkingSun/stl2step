@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: MIT
 
 #include "refit_internal.hpp"
-#include "parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -425,15 +424,17 @@ void makeIntervals(const std::vector<double>& gens, std::vector<StripPair>& pair
     }
 }
 
-gp_XYZ nearestAtAngle(const std::vector<gp_XYZ>& pts, double ang, const gp_XYZ& origin,
-                      const gp_XYZ& axis, const gp_XYZ& u, const gp_XYZ& v) {
+// az[i] is azimuth(pts[i], ...) about the frame the caller already measured
+// the generators in; the scan reuses it instead of one atan2 per point per pair.
+gp_XYZ nearestAtAngle(const std::vector<gp_XYZ>& pts, const std::vector<double>& az,
+                      double ang) {
     gp_XYZ best = pts.front();
     double bd = 1e300;
-    for (const gp_XYZ& p : pts) {
-        const double d = std::abs(wrapPi(azimuth(p, origin, axis, u, v) - ang));
+    for (size_t i = 0; i < pts.size(); ++i) {
+        const double d = std::abs(wrapPi(az[i] - ang));
         if (d < bd) {
             bd = d;
-            best = p;
+            best = pts[i];
         }
     }
     return best;
@@ -687,8 +688,8 @@ bool extractChainVirtual(const MeshView& mv, const std::vector<int>& ids, const 
     std::vector<double> Ri;
     Ri.reserve(pairs.size());
     for (const StripPair& p : pairs) {
-        const gp_XYZ p0 = nearestAtAngle(gpts, p.a0, origin, axis, u, v);
-        const gp_XYZ p1 = nearestAtAngle(gpts, p.a1, origin, axis, u, v);
+        const gp_XYZ p0 = nearestAtAngle(gpts, angs, p.a0);
+        const gp_XYZ p1 = nearestAtAngle(gpts, angs, p.a1);
         const double rho = 0.5 * (rhoOf(p0, origin, axis) + rhoOf(p1, origin, axis));
         const double s = std::sin(0.5 * p.span);
         if (!(s > 1e-15)) continue;
@@ -785,15 +786,19 @@ bool extractChain(const MeshView& mv, const std::vector<int>& ids, const Derived
     {
         gp_XYZ acc(0, 0, 0);
         int np = 0;
-        for (const gp_XYZ& p : gens3) {
-            const double az = azimuth(p, origin, axis, u, v);
-            const double vax = (p - centroid).Dot(axis);
-            for (const gp_XYZ& q : gens3) {
-                if ((&q) == (&p)) continue;
-                if (std::abs(wrapPi(azimuth(q, origin, axis, u, v) - az)) > 5e-3) continue;
-                const double vbx = (q - centroid).Dot(axis);
-                if (std::abs(vbx - vax) < 1e-3) continue;
-                gp_XYZ d = q - p;
+        const size_t nG = gens3.size();
+        std::vector<double> az(nG), ax(nG);
+        for (size_t i = 0; i < nG; ++i) {
+            az[i] = azimuth(gens3[i], origin, axis, u, v);
+            ax[i] = (gens3[i] - centroid).Dot(axis);
+        }
+        for (size_t i = 0; i < nG; ++i) {
+            const gp_XYZ& p = gens3[i];
+            for (size_t j = 0; j < nG; ++j) {
+                if (j == i) continue;
+                if (std::abs(wrapPi(az[j] - az[i])) > 5e-3) continue;
+                if (std::abs(ax[j] - ax[i]) < 1e-3) continue;
+                gp_XYZ d = gens3[j] - p;
                 const double m = d.Modulus();
                 if (m < 1e-9) continue;
                 d.Divide(m);
@@ -838,8 +843,8 @@ bool extractChain(const MeshView& mv, const std::vector<int>& ids, const Derived
     std::vector<double> Ri;
     Ri.reserve(pairs.size());
     for (const StripPair& p : pairs) {
-        const gp_XYZ p0 = nearestAtAngle(gens3, p.a0, origin, axis, u, v);
-        const gp_XYZ p1 = nearestAtAngle(gens3, p.a1, origin, axis, u, v);
+        const gp_XYZ p0 = nearestAtAngle(gens3, angs, p.a0);
+        const gp_XYZ p1 = nearestAtAngle(gens3, angs, p.a1);
         const gp_XYZ d = p1 - p0;
         const double w3 = (d - axis * d.Dot(axis)).Modulus();
         const double rho = 0.5 * (rhoOf(p0, origin, axis) + rhoOf(p1, origin, axis));
@@ -873,27 +878,13 @@ bool extractChain(const MeshView& mv, const std::vector<int>& ids, const Derived
     out.axis = gp_Ax1(gp_Pnt(origin.X(), origin.Y(), origin.Z()),
                       gp_Dir(axis.X(), axis.Y(), axis.Z()));
 
-    const double tau = tauSurf(mv);
+    // One pass on the calling thread. A max is exact in any order, and stage L
+    // calls this tens of thousands of times from inside its own parallel loop,
+    // where a pool per call cost more in thread creation than the scan.
     double maxRes = 0.0;
-    const unsigned nV = static_cast<unsigned>(verts.size());
-    unsigned nTh = detail::resolveThreadCount(detail::currentRequestedThreads());
-    if (nV < 48) nTh = 1;
-    nTh = std::min(nTh, nV);
-    if (nTh <= 1) {
-        for (const gp_XYZ& p : verts)
-            maxRes = std::max(maxRes, std::abs(rhoOf(p, origin, axis) - out.R));
-    } else {
-        std::vector<double> part(nTh, 0.0);
-        detail::runPool(nTh, [&](unsigned t) {
-            double m = 0.0;
-            for (unsigned i = t; i < nV; i += nTh)
-                m = std::max(m, std::abs(rhoOf(verts[i], origin, axis) - out.R));
-            part[t] = m;
-        });
-        for (double m : part) maxRes = std::max(maxRes, m);
-    }
+    for (const gp_XYZ& p : verts)
+        maxRes = std::max(maxRes, std::abs(rhoOf(p, origin, axis) - out.R));
     out.maxVertResid = maxRes;
-    (void)tau;
     return true;
 }
 
@@ -925,9 +916,6 @@ bool testCommonAxis(const MeshView& mv, const std::vector<int>& ids, const LawBa
     const double lim = linTol(mv, tol);
     int nGen = 0;
     int nOk = 0;
-    std::vector<char> in(mv.nTri, 0);
-    for (int t : ids)
-        if (t >= 0 && static_cast<size_t>(t) < mv.nTri) in[static_cast<size_t>(t)] = 1;
     for (int t : ids) {
         if (t < 0 || static_cast<size_t>(t) >= mv.nTri) continue;
         for (int s = 0; s < 3; ++s) {

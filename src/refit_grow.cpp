@@ -17,6 +17,7 @@
 #include <mutex>
 #include <numeric>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -90,6 +91,69 @@ void lawParallelFor(size_t n, F&& fn) {
         for (size_t i = lo; i < hi; i++) fn(i);
     });
 }
+
+// lawChainAccept is a pure function of the sorted, de-duplicated triangle set:
+// it re-derives axis, chain and residuals from the mesh every time. Stage L
+// asks it the same question over and over -- overlapping seeds grow through
+// the same strip unions, and each growth step re-tries every neighbour that
+// failed the step before -- so it keeps each verdict, band included, and hands
+// back exactly what the call returned. It never answers for a set it has not
+// computed. With a law-band diag on it forwards every call, so each one still
+// prints its own line.
+class LawAcceptMemo {
+public:
+    LawAcceptMemo(const MeshView& mv, const DerivedTols& tol)
+        : mv_(mv), tol_(tol), on_(!lawbandDiagOn() && !lawVgenDiagOn()) {}
+
+    bool quiet() const { return on_; }
+
+    bool operator()(const std::vector<int>& tris, LawBand& out) {
+        if (!on_) return lawChainAccept(mv_, tris, tol_, out);
+        std::vector<int> key = tris;
+        std::sort(key.begin(), key.end());
+        key.erase(std::unique(key.begin(), key.end()), key.end());
+        {
+            std::lock_guard<std::mutex> g(mu_);
+            const auto it = seen_.find(key);
+            if (it != seen_.end()) {
+                out = it->second.band;
+                return it->second.ok;
+            }
+        }
+        Verdict v;
+        v.ok = lawChainAccept(mv_, key, tol_, v.band);
+        out = v.band;
+        const bool ok = v.ok;
+        std::lock_guard<std::mutex> g(mu_);
+        seen_.emplace(std::move(key), std::move(v));
+        return ok;
+    }
+
+private:
+    struct Verdict {
+        LawBand band;
+        bool ok = false;
+    };
+    struct KeyHash {
+        size_t operator()(const std::vector<int>& k) const {
+            std::uint64_t h = 1469598103934665603ull;
+            for (int x : k) {
+                h ^= static_cast<std::uint32_t>(x);
+                h *= 1099511628211ull;
+            }
+            return static_cast<size_t>(h ^ k.size());
+        }
+    };
+    static bool lawVgenDiagOn() {
+        const char* e = std::getenv("STL2STEP_LAWVGEN_DIAG");
+        return e && e[0] != '\0' && e[0] != '0';
+    }
+    const MeshView& mv_;
+    const DerivedTols& tol_;
+    const bool on_;
+    std::mutex mu_;
+    std::unordered_map<std::vector<int>, Verdict, KeyHash> seen_;
+};
 
 bool triInLawBand(const SegmentWork& work, int t) {
     for (const Region& r : work.accepted) {
@@ -2374,6 +2438,8 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
     }
     if (mv.nTri == 0 || !mv.triEdges) return true;
 
+    LawAcceptMemo accept(mv, tol);
+
     if (lawbandDiagOn()) {
         int nPlaneReg = 0;
         double planeMed = 0.0, planeP90 = 0.0;
@@ -2507,7 +2573,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
         std::vector<char> in(static_cast<size_t>(nS), 0);
         for (int m : members) in[static_cast<size_t>(m)] = 1;
         LawBand seedB;
-        if (!lawChainAccept(mv, unionStripTris(members), tol, seedB)) {
+        if (!accept(unionStripTris(members), seedB)) {
             if (ti < nTriples) return;
             // BOOTSTRAP (D-130-8), single-strip seeds only. A virtual-generator
             // chain needs three generators, i.e. FOUR facet planes; a LawStrip
@@ -2538,13 +2604,13 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 if (f2 <= folds) break;  // the strip added no fold: flat that way
                 folds = f2;
                 parallel = p2;
-                if (lawChainAccept(mv, unionStripTris(members), tol, seedB)) {
+                if (accept(unionStripTris(members), seedB)) {
                     got = true;
                     break;
                 }
             }
             if (!got && parallel >= 3)
-                got = lawChainAccept(mv, unionStripTris(members), tol, seedB);
+                got = accept(unionStripTris(members), seedB);
             if (!got) return;
         }
 
@@ -2567,7 +2633,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 std::vector<int> trial = members;
                 trial.push_back(nb);
                 LawBand tb;
-                if (!lawChainAccept(mv, unionStripTris(trial), tol, tb)) continue;
+                if (!accept(unionStripTris(trial), tb)) continue;
                 // A band grows by the SAME law it was certified under. The
                 // virtual chain exists to seed a staggered strip the mesh-edge
                 // chain cannot pair on; letting it also extend a band the
@@ -2601,7 +2667,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 std::vector<int> trial = members;
                 trial.push_back(nb);
                 LawBand tb;
-                const bool okc = lawChainAccept(mv, unionStripTris(trial), tol, tb);
+                const bool okc = accept(unionStripTris(trial), tb);
                 std::fprintf(stderr,
                              "  DIAG_LAWSTALLC rid=%d cand=%d candMinTri=%d candTri=%zu "
                              "trialN=%d trialR=%.6f cvT=%.3g resid=%.3g ok=%d\n",
@@ -2619,7 +2685,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
     for (const Provisional& p : work.provisionals) {
         if (p.claim != ProvClaim::Unclaimed || p.tris.size() < 3) continue;
         LawBand pb;
-        if (!lawChainAccept(mv, p.tris, tol, pb)) continue;
+        if (!accept(p.tris, pb)) continue;
         Grown g;
         g.band = std::move(pb);
         g.ok = true;
@@ -2722,8 +2788,19 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
         ltrip.erase(std::unique(ltrip.begin(), ltrip.end()), ltrip.end());
         for (const auto& tr : ltrip) {
             std::vector<int> mem = {tr[0], tr[1], tr[2]};
+            const std::vector<int> seedTris = unionLeft(mem);
+            // A band only ever grows from its seed, so a seed that already holds
+            // a taken triangle ends in the overlap refusal below whatever it
+            // grows into. Skip the grow (silent runs only: a diag run still
+            // prints every candidate).
+            if (accept.quiet() &&
+                std::any_of(seedTris.begin(), seedTris.end(), [&](int t) {
+                    return t >= 0 && static_cast<size_t>(t) < taken.size() &&
+                           taken[static_cast<size_t>(t)];
+                }))
+                continue;
             LawBand sb;
-            if (!lawChainAccept(mv, unionLeft(mem), tol, sb)) continue;
+            if (!accept(seedTris, sb)) continue;
             std::vector<char> in(static_cast<size_t>(nL), 0);
             in[static_cast<size_t>(tr[0])] = in[static_cast<size_t>(tr[1])] =
                 in[static_cast<size_t>(tr[2])] = 1;
@@ -2736,7 +2813,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                         std::vector<int> trial = mem;
                         trial.push_back(nb);
                         LawBand tb;
-                        if (!lawChainAccept(mv, unionLeft(trial), tol, tb)) continue;
+                        if (!accept(unionLeft(trial), tb)) continue;
                         if (tb.virtualGen != sb.virtualGen) continue;
                         mem.push_back(nb);
                         in[static_cast<size_t>(nb)] = 1;
@@ -2788,7 +2865,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                     std::vector<int> trial = b.tris;
                     trial.push_back(tAdd);
                     LawBand nb;
-                    if (!lawChainAccept(mv, trial, tol, nb)) continue;
+                    if (!accept(trial, nb)) continue;
                     if (nb.virtualGen != b.virtualGen) continue;
                     taken[static_cast<size_t>(tAdd)] = 1;
                     b = std::move(nb);
@@ -2836,7 +2913,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 std::vector<int> trial = b.tris;
                 trial.insert(trial.end(), extra.begin(), extra.end());
                 LawBand nb;
-                if (!lawChainAccept(mv, trial, tol, nb)) continue;
+                if (!accept(trial, nb)) continue;
                 if (nb.virtualGen != b.virtualGen) continue;
                 for (int t : extra) taken[static_cast<size_t>(t)] = 1;
                 b = std::move(nb);
@@ -2847,7 +2924,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
 
     if (!accepted.empty()) {
         LawBand meshPin;
-        (void)lawChainAccept(mv, accepted.front().tris, tol, meshPin);
+        (void)accept(accepted.front().tris, meshPin);
     }
 
     int nMerged = 0;
@@ -2863,7 +2940,7 @@ bool claimLawBandsL(const MeshView& mv, const SegmentParams&, const DerivedTols&
                 std::sort(mt.begin(), mt.end());
                 mt.erase(std::unique(mt.begin(), mt.end()), mt.end());
                 LawBand nb;
-                if (!lawChainAccept(mv, mt, tol, nb)) continue;
+                if (!accept(mt, nb)) continue;
                 accepted[i] = std::move(nb);
                 accepted.erase(accepted.begin() + static_cast<std::ptrdiff_t>(j));
                 ++nMerged;
