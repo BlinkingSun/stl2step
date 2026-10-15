@@ -332,6 +332,27 @@ void sumRecoverableCensus(const Sidecar& sc, int& planes, int& cylinders, int& c
     }
 }
 
+// CLOSURES 2026-10-15 23:00 (D-fc-1.14): new fc fixtures whose features do not
+// build yet ESCALATE in the live re-gate, the S20 mechanism. Only disposition
+// and escalateReason change; the census stays the recoverable census. The
+// unbuilt features are the expected-red.json reverts rows named in each reason.
+const char* fcUnbuiltReason(const std::string& id) {
+    if (id == "S24_hem_uturn")
+        return "D-fc-2 / D-fc-1.14 (CLOSURES 2026-10-15 23:00): hem not built; recoverable "
+               "cylinders R=1 and R=3 axis +X have no accepted region (S24.hem-deferred).";
+    if (id == "S25_peg_fillet")
+        return "D-fc-1.14 (CLOSURES 2026-10-15 23:00): peg cylinder R=6 at (25,25,8) and root "
+               "fillet torus Rmaj=8 Rmin=2 at (25,25,10) not built (S25.peg-and-torus-unbuilt).";
+    if (id == "S26_funnel_rev")
+        return "D-fc-1.14 (CLOSURES 2026-10-15 23:00): neck cylinders R=11 and R=8 (z=3) and "
+               "blend torus Rmaj=14 Rmin=3 not built (S26.bore-and-torus-unbuilt).";
+    if (id == "S27_sphere_corner_fine")
+        return "D-fc-1.14 (CLOSURES 2026-10-15 23:00): R=3 fillets axis +Y at (37,0,37) and "
+               "axis +Z at (37,37,0) not built; the sphere corner stays faceted, SphereNYI "
+               "(S27.two-fillets-and-sphereNYI).";
+    return nullptr;
+}
+
 void fillLiveExpectations(FixtureResult& out) {
     Sidecar& sc = out.sidecar;
     sc.live.clear();
@@ -405,6 +426,10 @@ void fillLiveExpectations(FixtureResult& out) {
                 live.surfaceCensus = {6, 0, 0};
                 live.faceCount = 6;
             }
+        }
+        if (const char* why = fcUnbuiltReason(sc.id)) {
+            live.disposition = "ESCALATE";
+            live.escalateReason = why;
         }
         sc.live.push_back(live);
     }

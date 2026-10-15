@@ -72,7 +72,7 @@
   "tier2Ceiling": {
     "Body11": 5204,
     "Body244": 1224,
-    "Body28": 1385,
+    "Body28": 1394,
     "S01": 0,
     "S02": 0,
     "S03": 60,
@@ -122,15 +122,15 @@
     "cyl_meets_chamfer": 0,
     "handle-lock": 0,
     "handle-pickup": 358,
-    "linkage_bores_chamfer": 110,
+    "linkage_bores_chamfer": 125,
     "nonprismatic-control": 0,
     "shelf_bracket": 52
   },
   "tier2CeilingNote": {
-    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN). D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (xguard-r1+bedge-r1): polylineTier2 138→110.",
+    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN). D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (xguard-r1+bedge-r1): polylineTier2 138→110. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 110→125, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 110 tightening was measured before E2. Still below the public ceiling 138.",
     "Body11": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 5218→5204.",
     "Body244": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1417→1224. CLOSURES 2026-10-15 06:05: analytic 148→3, facet lines replaced by 2 true cones. overCap remains 241.",
-    "Body28": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385.",
+    "Body28": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 1385→1394, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 1385 tightening was measured before E2. Still below the public ceiling 1442.",
     "S21_rim_offplane_vertex": "D-S8 fixture added by this lane. edge_class_gate on be13e23: red lines clear, polylineTier2=0, and the gate's own line was 'no tier2Ceiling (a fixture the ratchet never saw is not measured); seed it'. Seeded at the measured 0. No expectedRed entry.",
     "S23_plane_fillet_lowfold": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=14, overCap at seed.",
     "S24_hem_uturn": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
