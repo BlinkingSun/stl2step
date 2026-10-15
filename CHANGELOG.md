@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+TrueForm changes from the fillet/chamfer training phase (task `stl2step-fc`), first
+increment. Two user-visible results on the training files: the tray (`test copy`) no longer
+reverts to a faceted solid, and six-sided holes that the file's own tessellation shows to be
+real hexagons stay planar instead of being rebuilt as round cylinders.
+
+### Fixed
+- A zero-area T-junction triangle (a vertex lying exactly on its neighbour's edge) is absorbed before segmentation: the degenerate triangle is removed and the neighbour is split at that vertex in its own winding (threshold τ = 2·quantFloor; nothing is absorbed when quantFloor ≤ 0). One such triangle made an 11,168-triangle tray leave three one-sided edges, revert the whole analytic rebuild and re-read as an open shell; it now ships as a closed analytic solid (watertight, re-read 1 solid). RESULT gains `meshTJunctionsAbsorbed`, emitted only when a triangle was absorbed, so every other RESULT line is unchanged.
+- The faceted direct path no longer force-closes a shell that skipped a degenerate triangle; such a component is reported as an open shell instead of an invalid solid that ShapeFix silently rewrote.
+
+### Added
+- Tessellation-law refutation of N-gon walls: a six-sided "hole" is rebuilt as planar walls when the file's own equal-step boundary rails show it cannot be a tessellated circle (training tray: 56 hexagonal floor holes stay hexagons, volume back to the mesh within 0.02 %; Craftsman, Body28 and S16-R2 unchanged).
+- Relational stage contract for the fillet/chamfer work: declarations and hooks after the fillet stage (H0) and after the torus stage (H1), shared τ-derived thresholds in `refit_relational.hpp`, and the torus profile certificate moved verbatim into `refit_profile_cert`. The relational claim stages are no-ops in this increment.
+- Diagnostics (off unless requested): `STL2STEP_DIAG_ABSORB`, `STL2STEP_DIAG_TESSLAW`.
+
 ## [1.4.4] - 2026-09-24
 
 Two converter changes on
