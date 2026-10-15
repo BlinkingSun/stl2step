@@ -1464,7 +1464,8 @@ bool buildSeamedOuterWire(const Handle(Geom_Surface)& S,
                           double vHi,
                           double vLo,
                           double angTol,
-                          TopoDS_Wire& out) {
+                          TopoDS_Wire& out,
+                          bool* unwrapped = nullptr) {
     auto uAtPnt = [&](const gp_Pnt& p) -> double {
         if (S.IsNull()) return 0.0;
         try {
@@ -1787,26 +1788,40 @@ bool buildSeamedOuterWire(const Handle(Geom_Surface)& S,
     };
     double uCur = uSeam;
     bool bound = true;
-    for (int i = (int)pathHi.size() - 1; i >= 0 && bound; --i)
-        bound = bindChord(TopoDS::Edge(pathHi[(size_t)i].Reversed()), uCur);
-    const double uAfterHi = uCur;
-    if (bound) {
-        BRep_Builder Bs;
-        Standard_Real fs = 0, ls = 0;
-        Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
-        Handle(Geom2d_Line) pcS0 = new Geom2d_Line(gp_Pnt2d(uSeam, 0.0), gp_Dir2d(0.0, 1.0));
-        Handle(Geom2d_Line) pcS1 =
-            new Geom2d_Line(gp_Pnt2d(uAfterHi, 0.0), gp_Dir2d(0.0, 1.0));
-        Bs.UpdateEdge(eSeam, pcS0, pcS1, S, TopLoc_Location(), edgeTol);
-        if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
+    // Only a rim whose seam vertex is off the ruling needs the short-chord
+    // rewrite (Body244 dGen is hundreds of q; angTol = τ/ρ). A cone whose
+    // vertices already lie on the ruling keeps the projected pcurves — rewriting
+    // those shared chords drops a plate cone (3 → 2) and opens its neighbours.
+    const double uAtLo = uAtPnt(BRep_Tool::Pnt(seamLo));
+    const double uAtHi = uAtPnt(BRep_Tool::Pnt(seamHi));
+    const bool offRuling = angularDistance(uAtLo, uSeam) > angTol ||
+                           angularDistance(uAtHi, uSeam) > angTol;
+    if (unwrapped) *unwrapped = false;
+    if (offRuling) {
+        for (int i = (int)pathHi.size() - 1; i >= 0 && bound; --i)
+            bound = bindChord(TopoDS::Edge(pathHi[(size_t)i].Reversed()), uCur);
+        const double uAfterHi = uCur;
+        if (bound) {
+            BRep_Builder Bs;
+            Standard_Real fs = 0, ls = 0;
+            Handle(Geom_Curve) cs = BRep_Tool::Curve(eSeam, fs, ls);
+            Handle(Geom2d_Line) pcS0 = new Geom2d_Line(gp_Pnt2d(uSeam, 0.0), gp_Dir2d(0.0, 1.0));
+            Handle(Geom2d_Line) pcS1 =
+                new Geom2d_Line(gp_Pnt2d(uAfterHi, 0.0), gp_Dir2d(0.0, 1.0));
+            Bs.UpdateEdge(eSeam, pcS0, pcS1, S, TopLoc_Location(), edgeTol);
+            if (!cs.IsNull()) Bs.Range(eSeam, fs, ls);
+        }
+        for (int i = (int)pathLo.size() - 1; i >= 0 && bound; --i)
+            bound = bindChord(TopoDS::Edge(pathLo[(size_t)i].Reversed()), uCur);
+        if (diag130Enabled() || diagP2Enabled())
+            std::fprintf(stderr,
+                         "DIAG_CONEUNWRAP bound=%d off=1 uSeam=%.6f uAfterHi=%.6f uAfterLo=%.6f "
+                         "dHi=%.6f dLo=%.6f\n",
+                         bound ? 1 : 0, uSeam, uAfterHi, uCur, uAfterHi - uSeam, uCur - uSeam);
+        if (bound && unwrapped) *unwrapped = true;
+    } else if (diag130Enabled() || diagP2Enabled()) {
+        std::fprintf(stderr, "DIAG_CONEUNWRAP bound=1 off=0 uSeam=%.6f\n", uSeam);
     }
-    for (int i = (int)pathLo.size() - 1; i >= 0 && bound; --i)
-        bound = bindChord(TopoDS::Edge(pathLo[(size_t)i].Reversed()), uCur);
-    if (diag130Enabled() || diagP2Enabled())
-        std::fprintf(stderr,
-                     "DIAG_CONEUNWRAP bound=%d uSeam=%.6f uAfterHi=%.6f uAfterLo=%.6f "
-                     "dHi=%.6f dLo=%.6f\n",
-                     bound ? 1 : 0, uSeam, uAfterHi, uCur, uAfterHi - uSeam, uCur - uSeam);
     if (!bound) return false;
     out.Closed(Standard_True);
     if (diag130Enabled() || diagP2Enabled()) {
@@ -17021,12 +17036,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                 }
                                 TopoDS_Wire ow;
                                 Handle(Geom_Surface) seamSurf = csurf;
+                                bool unwrapped = false;
                                 if (buildSeamedOuterWire(seamSurf, pathHi, pathLo, seamHiV, seamLoV,
-                                                         uSeam, vHi, vLo, angTol, ow)) {
+                                                         uSeam, vHi, vLo, angTol, ow, &unwrapped)) {
                                     // Rim pcurves are already the continuous short-chord
                                     // unwrap. rebranchConeChart would fold the uSeam-2π
                                     // end back into the chart and reopen the 2π gap.
-                                    coneChart = false;
+                                    // On-ruling cones keep rebranch.
+                                    if (unwrapped) coneChart = false;
                                     TopoDS_Edge seamE;
                                     for (TopoDS_Iterator sit(ow); sit.More(); sit.Next()) {
                                         if (sit.Value().ShapeType() == TopAbs_EDGE) {
