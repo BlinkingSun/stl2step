@@ -1573,6 +1573,58 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         int vertTick = 0, triTick = 0;
 
         const double sideSign[4][2] = {{1.0, 1.0}, {1.0, -1.0}, {-1.0, 1.0}, {-1.0, -1.0}};
+        // FilletStrips accepted before this call. A strip this stage commits
+        // is not one of them (plate E1/E2 meet the fillet just claimed).
+        const int nPriorAcc = (int)work.accepted.size();
+        std::vector<int> priorFilTri((std::size_t)nTri, -1);
+        for (int ai = 0; ai < nPriorAcc; ++ai) {
+            const Region& acc = work.accepted[(std::size_t)ai];
+            if (acc.origin != Origin::FilletStrip) continue;
+            for (int t : acc.tris)
+                if (t >= 0 && t < nTri) priorFilTri[(std::size_t)t] = ai;
+        }
+        // 0 unknown, 1 own refit within τ, 2 own refit exceeds τ.
+        std::vector<char> priorFit((std::size_t)std::max(nPriorAcc, 0), 0);
+        // D-fc-1.6.10: corner triangles stay faceted. A boundary edge of C that
+        // is not a generator (edgeParallel, tanAngTol(τ, τ, len)) and that
+        // meets a prior FilletStrip is a corner. D-fc-1.6.5 keeps that corner
+        // when the strip's own cylinder refit is within τ. A strip that misses
+        // τ is not a blend partner, and the band is not-blend. Generator
+        // contact stays. Same-surface is the separate all-within-τ refusal.
+        auto priorCornerUncertified = [&](const std::vector<int>& C,
+                                           const std::vector<char>& inC,
+                                           const gp_XYZ& axis) -> bool {
+            for (int t : C) {
+                if (t < 0 || t >= nTri) continue;
+                for (int s = 0; s < 3; ++s) {
+                    const int ot = otherTri(mv.triEdges[t][s], t);
+                    if (ot < 0 || ot >= nTri || inC[ot]) continue;
+                    const int ai = priorFilTri[(std::size_t)ot];
+                    if (ai < 0) continue;
+                    const gp_XYZ pa = cornerPt(mv, t, s);
+                    const gp_XYZ pb = cornerPt(mv, t, (s + 1) % 3);
+                    gp_XYZ dir = pb - pa;
+                    const double len = dir.Modulus();
+                    if (!(len > tau)) continue;
+                    dir /= len;
+                    if (edgeParallel(dir, len, axis, tau)) continue;
+                    if (priorFit[(std::size_t)ai] == 0) {
+                        const Region& acc = work.accepted[(std::size_t)ai];
+                        gp_Dir axOut = acc.ax.Direction();
+                        gp_Pnt cOut = acc.ax.Location();
+                        double rOut = acc.radius;
+                        double mOut = acc.maxVertexDev;
+                        const bool fitOk = cylinderFitLS(
+                            mv, acc.tris, acc.ax.Direction(), axOut, cOut, rOut, mOut,
+                            std::max(1, p.maxRefineIters));
+                        const double dev = fitOk ? mOut : acc.maxVertexDev;
+                        priorFit[(std::size_t)ai] = (dev <= tau) ? 1 : 2;
+                    }
+                    if (priorFit[(std::size_t)ai] == 2) return true;
+                }
+            }
+            return false;
+        };
 
         for (std::size_t ia = 0; ia < arefs.size(); ++ia) {
             for (std::size_t ib = ia + 1; ib < arefs.size(); ++ib) {
@@ -2020,7 +2072,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         const bool blendVerts = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
                         const bool blendNorms = normalsSpanDihedral(normSep, dg.spanTolV);
                         const bool blend = blendVerts && blendNorms;
-                        if (!blend) {
+                        if (!blend || priorCornerUncertified(C, inC, axis)) {
                             finish("not-blend");
                             break;
                         }

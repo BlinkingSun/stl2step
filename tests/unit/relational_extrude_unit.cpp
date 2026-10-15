@@ -4,6 +4,8 @@
 
 #include "refit_relational.hpp"
 
+#include "../support/posix_compat.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -14,9 +16,25 @@
 #include <map>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 #include <utility>
 #include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+static int osDup(int fd) { return _dup(fd); }
+static int osDup2(int a, int b) { return _dup2(a, b); }
+static int osClose(int fd) { return _close(fd); }
+static int osFileno(std::FILE* f) { return _fileno(f); }
+#else
+extern "C" int dup(int);
+extern "C" int dup2(int, int);
+extern "C" int close(int);
+extern "C" int fileno(std::FILE*);
+static int osDup(int fd) { return dup(fd); }
+static int osDup2(int a, int b) { return dup2(a, b); }
+static int osClose(int fd) { return close(fd); }
+static int osFileno(std::FILE* f) { return fileno(f); }
+#endif
 
 static int gFail = 0;
 
@@ -33,25 +51,22 @@ static void expect(bool ok, const char* name) {
 
 static std::string captureStderr(const std::function<void()>& fn) {
     std::fflush(stderr);
-    const int saved = dup(fileno(stderr));
-    char path[] = "/tmp/rel-extrude-unit-XXXXXX";
-    const int fd = mkstemp(path);
-    dup2(fd, fileno(stderr));
+    std::FILE* tmp = std::tmpfile();
+    if (!tmp) {
+        fn();
+        return {};
+    }
+    const int saved = osDup(osFileno(stderr));
+    osDup2(osFileno(tmp), osFileno(stderr));
     fn();
     std::fflush(stderr);
-    dup2(saved, fileno(stderr));
-    close(saved);
+    osDup2(saved, osFileno(stderr));
+    osClose(saved);
+    std::rewind(tmp);
     std::string out;
-    FILE* f = fdopen(fd, "r");
-    if (f) {
-        std::rewind(f);
-        char buf[1024];
-        while (std::fgets(buf, sizeof buf, f)) out += buf;
-        std::fclose(f);
-    } else {
-        close(fd);
-    }
-    std::remove(path);
+    char buf[1024];
+    while (std::fgets(buf, sizeof buf, tmp)) out += buf;
+    std::fclose(tmp);
     return out;
 }
 
