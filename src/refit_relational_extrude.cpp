@@ -1097,27 +1097,166 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             double tolA = 0;
             double extent = 0;
             bool certified = false;
+            bool peeled = false;
+            std::vector<int> body;
+            std::vector<gp_XYZ> boundary;
         };
+        // Reloaded after every claim. A committed band rewrites provisionals.
+        int anchorEpoch = 1;
+        std::vector<int> anchorEpochSeen;
+        std::vector<LiveAnchor> anchorStored;
+        std::vector<char> anchorStoredOk;
+        int nInlierAnchors = 0;
+        std::vector<char> inlierCounted;
+
+        auto triOnPlane = [&](int t, const gp_XYZ& n, const gp_XYZ& p0) -> bool {
+            if (t < 0 || t >= nTri) return false;
+            for (int k = 0; k < 3; ++k) {
+                if (std::abs((cornerPt(mv, t, k) - p0).Dot(n)) > tau) return false;
+            }
+            return true;
+        };
+        auto measurePlaneDev = [&](const std::vector<int>& tris, const gp_XYZ& n,
+                                   const gp_XYZ& p0) -> double {
+            double mx = 0.0;
+            for (int t : tris) {
+                if (t < 0 || t >= nTri) continue;
+                for (int k = 0; k < 3; ++k)
+                    mx = std::max(mx, std::abs((cornerPt(mv, t, k) - p0).Dot(n)));
+            }
+            return mx;
+        };
+        auto fillBoundary = [&](LiveAnchor& A) {
+            A.boundary.clear();
+            if (A.body.empty()) return;
+            std::vector<char> inB(nTri, 0);
+            for (int t : A.body)
+                if (t >= 0 && t < nTri) inB[t] = 1;
+            std::vector<int> seen(nVtx, 0);
+            for (int t : A.body) {
+                if (t < 0 || t >= nTri) continue;
+                for (int s = 0; s < 3; ++s) {
+                    const int ot = otherTri(mv.triEdges[t][s], t);
+                    if (ot >= 0 && ot < nTri && inB[ot]) continue;
+                    for (int dk = 0; dk < 2; ++dk) {
+                        const int k = (s + dk) % 3;
+                        const int lv = cornerLocal(g2l, mv, t, k);
+                        if (lv < 0 || lv >= nVtx || seen[lv]) continue;
+                        seen[lv] = 1;
+                        const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                        A.boundary.push_back(mv.pts[g]);
+                    }
+                }
+            }
+        };
+        // REV ORCH-4. A flank whose stored maxVertexDev exceeds τ often still
+        // owns a wall: the extra is fillet facets. The anchor body is the
+        // τ-preimage of the plane, refit until that preimage is stable.
+        // anchorCertified is unchanged (body maxVertexDev ≤ τ). A provisional
+        // that is already entirely within τ keeps its stored deviation, so a
+        // caller-supplied uncertified plane is not promoted (case 9).
         auto loadAnchor = [&](int prov, LiveAnchor& A) -> bool {
             if (prov < 0 || prov >= (int)work.provisionals.size()) return false;
+            if ((int)anchorStored.size() <= prov) {
+                anchorStored.resize((std::size_t)prov + 1);
+                anchorStoredOk.resize((std::size_t)prov + 1, 0);
+                anchorEpochSeen.resize((std::size_t)prov + 1, 0);
+            }
+            if (anchorEpochSeen[(std::size_t)prov] == anchorEpoch) {
+                if (!anchorStoredOk[(std::size_t)prov]) return false;
+                A = anchorStored[(std::size_t)prov];
+                return true;
+            }
+            auto store = [&](bool ok) {
+                anchorEpochSeen[(std::size_t)prov] = anchorEpoch;
+                anchorStoredOk[(std::size_t)prov] = ok ? 1 : 0;
+                if (ok) anchorStored[(std::size_t)prov] = A;
+                return ok;
+            };
             const Provisional& pr = work.provisionals[prov];
-            if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return false;
-            if (!a3WouldCommit(mv, tol, pr, false)) return false;
+            if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return store(false);
+            if (!a3WouldCommit(mv, tol, pr, false)) return store(false);
+            A = LiveAnchor();
             A.prov = prov;
             A.minTri = minTriOf(pr.tris);
             A.n = pr.plane.Direction().XYZ();
             const double nm = A.n.Modulus();
-            if (!(nm > 1e-15)) return false;
+            if (!(nm > 1e-15)) return store(false);
             A.n.Divide(nm);
             A.p0 = pr.plane.Location().XYZ();
+            A.body = pr.tris;
             A.maxDev = pr.maxVertexDev;
             A.tolA = anchorTol(tau, pr.maxVertexDev);
             A.certified = anchorCertified(tau, pr.maxVertexDev);
+            if (!A.certified) {
+                std::vector<int> cur = pr.tris;
+                gp_XYZ n = A.n;
+                gp_XYZ p0 = A.p0;
+                bool peeled = false;
+                const int itCap = std::max(1, p.maxRefineIters);
+                for (int it = 0; it < itCap; ++it) {
+                    std::vector<int> in;
+                    in.reserve(cur.size());
+                    for (int t : cur)
+                        if (triOnPlane(t, n, p0)) in.push_back(t);
+                    if (in.empty()) {
+                        peeled = false;
+                        break;
+                    }
+                    if (in.size() == cur.size()) break;
+                    peeled = true;
+                    gp_Ax3 np;
+                    if (!pcaPlane(mv, in, np)) break;
+                    gp_XYZ nn = np.Direction().XYZ();
+                    const double nnm = nn.Modulus();
+                    if (!(nnm > 1e-15)) break;
+                    nn.Divide(nnm);
+                    if (nn.Dot(A.n) < 0.0) nn.Reverse();
+                    n = nn;
+                    p0 = np.Location().XYZ();
+                    cur.swap(in);
+                }
+                if (peeled) {
+                    const double dev = measurePlaneDev(cur, n, p0);
+                    Provisional body = pr;
+                    body.tris = cur;
+                    body.area = areaOfTris(mv, cur);
+                    body.maxVertexDev = dev;
+                    if (anchorCertified(tau, dev) && a3WouldCommit(mv, tol, body, false)) {
+                        A.n = n;
+                        A.p0 = p0;
+                        A.body.swap(cur);
+                        A.minTri = minTriOf(A.body);
+                        A.maxDev = dev;
+                        A.tolA = anchorTol(tau, dev);
+                        A.certified = true;
+                        A.peeled = true;
+                        if ((int)inlierCounted.size() <= prov)
+                            inlierCounted.resize((std::size_t)prov + 1, 0);
+                        if (!inlierCounted[(std::size_t)prov]) {
+                            inlierCounted[(std::size_t)prov] = 1;
+                            ++nInlierAnchors;
+                        }
+                        if (diagOn()) {
+                            std::fprintf(stderr,
+                                         "DIAG_REL_PEEL stage=extrude prov=%d minTri=%d nBody=%d "
+                                         "nAll=%d maxDevTau=%.9g n=%.6g,%.6g,%.6g\n",
+                                         prov, A.minTri, (int)A.body.size(), (int)pr.tris.size(),
+                                         (tau > 0.0 ? dev / tau : 0.0), A.n.X(), A.n.Y(), A.n.Z());
+                        }
+                    }
+                }
+            }
             std::vector<gp_XYZ> pts;
-            provPoints(mv, g2l, pr, pts);
+            pts.reserve(A.body.size() * 3);
+            for (int t : A.body) {
+                if (t < 0 || t >= nTri) continue;
+                for (int k = 0; k < 3; ++k) pts.push_back(cornerPt(mv, t, k));
+            }
             A.extent = sectionExtent(pts, A.n);
             if (!(A.extent > 0.0)) A.extent = tau;
-            return true;
+            fillBoundary(A);
+            return store(true);
         };
 
         WhyCount yc;
@@ -1299,6 +1438,8 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             emitDiag(dg);
             tallyWhy(yc, "accept");
             work.accepted.push_back(std::move(r));
+            // The claim rewrites provisionals. Later pairs reload anchors.
+            ++anchorEpoch;
         };
 
         auto emitAdj = [&](int seed, const gp_XYZ& axis, const gp_XYZ& center, double radius,
@@ -1325,16 +1466,19 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                   std::max(1, p.maxRefineIters));
                 const double dev = fitOk ? mOut : acc.maxVertexDev;
                 int within = 1;
+                double maxOff = 0.0;
                 std::vector<Vert> av;
                 uniqueVerts(mv, g2l, acc.tris, av);
                 for (const Vert& v : av) {
-                    if (std::abs(radialDist(v.p, center, axis) - radius) > tau) within = 0;
+                    const double off = std::abs(radialDist(v.p, center, axis) - radius);
+                    if (off > maxOff) maxOff = off;
+                    if (off > tau) within = 0;
                 }
                 std::fprintf(stderr,
                              "DIAG_REL_ADJ stage=extrude seed=%d adjIndex=%d origin=%s "
-                             "radius=%.9g refitDevTau=%.9g withinTau=%d nTri=%d\n",
+                             "radius=%.9g refitDevTau=%.9g withinTau=%d maxOffTau=%.9g nTri=%d\n",
                              seed, i, originName(acc.origin), acc.radius, dev / tau, within,
-                             (int)acc.tris.size());
+                             (tau > 0.0 ? maxOff / tau : 0.0), (int)acc.tris.size());
             }
         };
 
@@ -1385,6 +1529,49 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             return false;
         };
 
+        struct CandV {
+            int lv;
+            gp_XYZ p;
+        };
+        std::vector<CandV> candPts;
+        int candEpoch = -1;
+        // Rebuilt when a claim changes the candidate set. One vertex list per
+        // epoch, not one triangle scan per pair-side.
+        auto rebuildCand = [&]() {
+            candPts.clear();
+            std::vector<int> seen(nVtx, 0);
+            candPts.reserve((std::size_t)nTri);
+            for (int t = 0; t < nTri; ++t) {
+                if (!candidate(t)) continue;
+                for (int k = 0; k < 3; ++k) {
+                    const int lv = cornerLocal(g2l, mv, t, k);
+                    if (lv < 0 || lv >= nVtx || seen[lv]) continue;
+                    seen[lv] = 1;
+                    const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                    CandV cv;
+                    cv.lv = lv;
+                    cv.p = mv.pts[g];
+                    candPts.push_back(cv);
+                }
+            }
+            candEpoch = anchorEpoch;
+        };
+
+        // Triangle incidence of each local vertex. A τ-member triangle is
+        // incident to a vertex within τ, so an empty I is known without walking
+        // every triangle. The slab scan still runs when that set is non-empty,
+        // because coverage includes sector triangles that are not within τ.
+        std::vector<std::vector<int>> vertTris((std::size_t)nVtx);
+        for (int t = 0; t < nTri; ++t) {
+            for (int k = 0; k < 3; ++k) {
+                const int lv = cornerLocal(g2l, mv, t, k);
+                if (lv < 0 || lv >= nVtx) continue;
+                vertTris[(std::size_t)lv].push_back(t);
+            }
+        }
+        std::vector<int> vertGen((std::size_t)nVtx, 0), triGen((std::size_t)nTri, 0);
+        int vertTick = 0, triTick = 0;
+
         const double sideSign[4][2] = {{1.0, 1.0}, {1.0, -1.0}, {-1.0, 1.0}, {-1.0, -1.0}};
 
         for (std::size_t ia = 0; ia < arefs.size(); ++ia) {
@@ -1425,28 +1612,15 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n) + sA, B.p0.Dot(B.n) + sB, 0.0, c1))
                         continue;
                     const gp_XYZ cR = c1 - c0;
-                    // Boundary-window pruning is not lossless here. On the plate the
-                    // accepting E1/E2 sides have no shared 2τ root among the two anchors'
-                    // boundary vertices (the 140.7τ flank's contact vertex is not within
-                    // τ of the fillet circle), while the interior vertices still vote one
-                    // radius. Every solved side is evaluated. D-fc-3.2 requires the prune
-                    // to be lossless, so the lossy skip is not applied.
                     ++nEvalSides;
 
                     int guard = 0;
                     while (guard++ < nTri + 1) {
+                        if (candEpoch != anchorEpoch) rebuildCand();
                         std::vector<double> roots;
-                        std::vector<int> stamp(nVtx, 0);
-                        for (int t = 0; t < nTri; ++t) {
-                            if (!candidate(t)) continue;
-                            for (int k = 0; k < 3; ++k) {
-                                const int lv = cornerLocal(g2l, mv, t, k);
-                                if (lv < 0 || lv >= nVtx || stamp[lv]) continue;
-                                stamp[lv] = 1;
-                                const int g = mv.compVtx ? mv.compVtx[lv] : lv;
-                                pushCircleRoots(mv.pts[g], c0, cR, axis0, tau, roots);
-                            }
-                        }
+                        roots.reserve(candPts.size() * 2);
+                        for (const CandV& v : candPts)
+                            pushCircleRoots(v.p, c0, cR, axis0, tau, roots);
                         double rHyp = 0.0;
                         BandDiag dg;
                         dg.tau = tau;
@@ -1499,17 +1673,8 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                         : 0.5 * (pool[(std::size_t)mid - 1] + pool[(std::size_t)mid]);
                                 const gp_XYZ hc = c0 + cR * rmed;
                                 int nIn = 0;
-                                std::vector<int> seen(nVtx, 0);
-                                for (int t = 0; t < nTri; ++t) {
-                                    if (!candidate(t)) continue;
-                                    for (int k = 0; k < 3; ++k) {
-                                        const int lv = cornerLocal(g2l, mv, t, k);
-                                        if (lv < 0 || lv >= nVtx || seen[lv]) continue;
-                                        seen[lv] = 1;
-                                        const int g = mv.compVtx ? mv.compVtx[lv] : lv;
-                                        if (std::abs(radialDist(mv.pts[g], hc, axis0) - rmed) <= tau)
-                                            ++nIn;
-                                    }
+                                for (const CandV& v : candPts) {
+                                    if (std::abs(radialDist(v.p, hc, axis0) - rmed) <= tau) ++nIn;
                                 }
                                 if (!any || nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
                                     any = true;
@@ -1533,22 +1698,14 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         // misses the sector, so the slab is empty (case 6). The inliers
                         // are that section. A line residual within τ is a plane.
                         {
-                            std::vector<int> seen(nVtx, 0);
                             std::vector<Vert> inl;
-                            for (int t = 0; t < nTri; ++t) {
-                                if (!candidate(t)) continue;
-                                for (int k = 0; k < 3; ++k) {
-                                    const int lv = cornerLocal(g2l, mv, t, k);
-                                    if (lv < 0 || lv >= nVtx || seen[lv]) continue;
-                                    seen[lv] = 1;
-                                    const int g = mv.compVtx ? mv.compVtx[lv] : lv;
-                                    if (std::abs(radialDist(mv.pts[g], center, axis) - radius) > tau)
-                                        continue;
-                                    Vert vt;
-                                    vt.id = lv;
-                                    vt.p = mv.pts[g];
-                                    inl.push_back(vt);
-                                }
+                            inl.reserve(candPts.size());
+                            for (const CandV& v : candPts) {
+                                if (std::abs(radialDist(v.p, center, axis) - radius) > tau) continue;
+                                Vert vt;
+                                vt.id = v.lv;
+                                vt.p = v.p;
+                                inl.push_back(vt);
                             }
                             int st = 0, lv = 0;
                             double lr = 0;
@@ -1594,6 +1751,50 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                             start = wrap2pi(start - slack);
                             width += 2.0 * slack;
                             if (width > kTwoPi) width = kTwoPi;
+                            // Empty I needs no slab. Membership is the τ-preimage, so it is
+                            // enough to look at triangles incident to a vertex within τ.
+                            if (++vertTick > 2000000000) {
+                                std::fill(vertGen.begin(), vertGen.end(), 0);
+                                vertTick = 1;
+                            }
+                            if (++triTick > 2000000000) {
+                                std::fill(triGen.begin(), triGen.end(), 0);
+                                triTick = 1;
+                            }
+                            for (const CandV& cv : candPts) {
+                                if (std::abs(radialDist(cv.p, c, ax) - r) <= tau)
+                                    vertGen[(std::size_t)cv.lv] = vertTick;
+                            }
+                            bool hinted = false;
+                            for (const CandV& cv : candPts) {
+                                if (vertGen[(std::size_t)cv.lv] != vertTick) continue;
+                                for (int t : vertTris[(std::size_t)cv.lv]) {
+                                    if (t < 0 || t >= nTri || triGen[(std::size_t)t] == triTick ||
+                                        !candidate(t))
+                                        continue;
+                                    triGen[(std::size_t)t] = triTick;
+                                    bool inSecH = true, allTauH = true;
+                                    for (int k = 0; k < 3; ++k) {
+                                        const int lv = cornerLocal(g2l, mv, t, k);
+                                        if (lv < 0 || vertGen[(std::size_t)lv] != vertTick)
+                                            allTauH = false;
+                                        const gp_XYZ pnt = cornerPt(mv, t, k);
+                                        const gp_XYZ d = pnt - c;
+                                        const double az =
+                                            std::atan2((d - ax * d.Dot(ax)).Dot(v),
+                                                       (d - ax * d.Dot(ax)).Dot(u));
+                                        if (!(width >= kTwoPi - 1e-9) &&
+                                            wrap2pi(az - start) > width + 1e-9)
+                                            inSecH = false;
+                                    }
+                                    if (inSecH && allTauH && triLevelCount(t, ax) >= 2) {
+                                        hinted = true;
+                                        break;
+                                    }
+                                }
+                                if (hinted) break;
+                            }
+                            if (!hinted) return;
                             for (int t = 0; t < nTri; ++t) {
                                 if (!candidate(t)) continue;
                                 bool inSec = true;
@@ -2112,10 +2313,12 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                          "DIAG_REL_SUM stage=extrude bands=%d accept=%d line=%d "
                          "vertex-off=%d not-blend=%d same-surface=%d underdetermined=%d "
                          "degenerate=%d no-anchor=%d unstable=%d hem-deferred=%d "
-                         "anchor-in-band=%d pairs=%d evaluatedSides=%d seconds=%.6f\n",
+                         "anchor-in-band=%d pairs=%d evaluatedSides=%d inlierAnchors=%d "
+                         "seconds=%.6f\n",
                          yc.bands, yc.accept, yc.line, yc.vertexOff, yc.notBlend, yc.sameSurface,
                          yc.underdetermined, yc.degenerate, yc.noAnchor, yc.unstable,
-                         yc.hemDeferred, yc.anchorInBand, nPairs, nEvalSides, seconds);
+                         yc.hemDeferred, yc.anchorInBand, nPairs, nEvalSides, nInlierAnchors,
+                         seconds);
         }
         return true;
     } catch (...) {
