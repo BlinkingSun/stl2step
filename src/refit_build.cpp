@@ -18885,6 +18885,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             closureHealIter++;
                             closureHealPendingRid = h.rid;
                             closureHealPendingFree = freeBeforeHeal;
+                            // F6: the demoted attempt is discarded, so its fat
+                            // vertex tols must not reach the rebuild. Coarse
+                            // partials built after a narrow FilletStrip widen the
+                            // strip's shared corners past its own width; inherited,
+                            // the rebuilt strip is UnorientableShape and explodes.
+                            // Collapsed chains are rebuilt on the fresh verts by
+                            // rebuildCollapsed; nothing is uncollapsed.
+                            restoreShared();
                             goto try_rebuild;
                         }
                     }
