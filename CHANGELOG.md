@@ -11,14 +11,33 @@ increment. Two user-visible results on the training files: the tray (`test copy`
 reverts to a faceted solid, and six-sided holes that the file's own tessellation shows to be
 real hexagons stay planar instead of being rebuilt as round cylinders.
 
+Second increment: fillets and hole chamfers inferred from the planes and holes the engine
+has already identified. A fillet between two identified planes is a cylinder whose axis runs
+along their intersection; a chamfer or countersink around an identified hole is a cone on the
+hole's axis. Both are certified against the mesh at τ = 2q with no fold-angle floor, so finely
+tessellated rounds that the 5° cylinder-growth floor never seeded now ship as analytic faces.
+On the training files: the plate's three edge rounds (R5, R5, R3), the Craftsman drill
+holder's plate and L-bar edge rounds, Body28's R2 fillets, Body244's two funnel cones and the
+shelf bracket's four 45° countersinks; no training file or corpus fixture reverts.
+
 ### Fixed
 - A zero-area T-junction triangle (a vertex lying exactly on its neighbour's edge) is absorbed before segmentation: the degenerate triangle is removed and the neighbour is split at that vertex in its own winding (threshold τ = 2·quantFloor; nothing is absorbed when quantFloor ≤ 0). One such triangle made an 11,168-triangle tray leave three one-sided edges, revert the whole analytic rebuild and re-read as an open shell; it now ships as a closed analytic solid (watertight, re-read 1 solid). RESULT gains `meshTJunctionsAbsorbed`, emitted only when a triangle was absorbed, so every other RESULT line is unchanged.
 - The faceted direct path no longer force-closes a shell that skipped a degenerate triangle; such a component is reported as an open shell instead of an invalid solid that ShapeFix silently rewrote.
 
+- Cone cap pcurves are written from the cone's seam u-origin, so a reused rim circle whose parameter starts near 2π no longer lands a full period off the chart (`BRepCheck_NotClosed`).
+- A plane|plane fillet face whose cap arc runs against the circle's parameter now takes the arc through the chain's interior vertices instead of the 5.87 rad complement (the plate's second R5 edge round was claimed but exploded to facets).
+- The closure-heal rebuild restores shared vertices, so a narrow fillet strip no longer inherits a corner vertex's tolerance and fails to build (Craftsman edge rounds).
+- Edges recorded for tier-2 bookkeeping are pinned while referenced, so a freed edge can no longer alias a live one; output is identical run to run and across thread counts.
+- The over-tolerance edge class measures a circle-on-plane edge on its own arc, not the whole circle (removes false red lines; geometry unchanged).
+
 ### Added
 - Tessellation-law refutation of N-gon walls: a six-sided "hole" is rebuilt as planar walls when the file's own equal-step boundary rails show it cannot be a tessellated circle (training tray: 56 hexagonal floor holes stay hexagons, volume back to the mesh within 0.02 %; Craftsman, Body28 and S16-R2 unchanged).
-- Relational stage contract for the fillet/chamfer work: declarations and hooks after the fillet stage (H0) and after the torus stage (H1), shared τ-derived thresholds in `refit_relational.hpp`, and the torus profile certificate moved verbatim into `refit_profile_cert`. The relational claim stages are no-ops in this increment.
-- Diagnostics (off unless requested): `STL2STEP_DIAG_ABSORB`, `STL2STEP_DIAG_TESSLAW`.
+- Relational stage contract for the fillet/chamfer work: declarations and hooks after the fillet stage (H0) and after the torus stage (H1), shared τ-derived thresholds in `refit_relational.hpp`, and the torus profile certificate moved verbatim into `refit_profile_cert`. 
+- Relational extrusion stage: a band of unclaimed triangles between two identified planes is certified as a fillet cylinder (axis along the planes' intersection, one free parameter r, every vertex within τ, band normals spanning the dihedral) and shipped as one face per edge-connected piece; chamfers stay planes and a band that does not certify stays faceted.
+- Relational revolution stage: bands around a certified cylinder axis are mapped to a (ρ, z) profile; a straight profile between two rings certifies a closed cone (funnels, countersinks, counterbore chamfers).
+- Public synthetic fixtures S23–S29 (fine-tessellated plane|plane fillet, U-turn hem, peg with base fillet, funnel, sphere corner, variable-radius negative, hexagon law); features the engine does not build yet are registered expected-red.
+- Gates read `expected-red.json` for `partial_recovery_gate` (by check name) and `p1_compose_gate` (sidecar recoverable rows only); ratchet ceilings tightened where the new faces reduced mesh-polyline edges.
+- Diagnostics (off unless requested): `STL2STEP_DIAG_ABSORB`, `STL2STEP_DIAG_TESSLAW`., `STL2STEP_DIAG_REL`, `DIAG_RELFACE`.
 
 ## [1.4.4] - 2026-09-24
 
