@@ -35,6 +35,13 @@ add_test(NAME p1_compose_gate
 set_tests_properties(p1_compose_gate PROPERTIES
     LABELS "p1_compose"
     TIMEOUT 600)
+# Ruling 17:20 (G3): a listed fixture XFAILs only recoverable[] misses.
+add_test(NAME p1_compose_gate_selftest
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_run_compose_gate.py)
+set_tests_properties(p1_compose_gate_selftest PROPERTIES
+    LABELS "p1_compose"
+    TIMEOUT 60)
 
 # AC2-A1: ctest -E gates_full is the green suite; this guard asserts the
 # inherited gates_full G1 list has not grown.

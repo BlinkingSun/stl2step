@@ -3096,7 +3096,9 @@ FixtureResult buildS27() {
     sc.recoverable.push_back(edgeCyl({inset, 0, inset}, {0, 1, 0}));
     sc.recoverable.push_back(edgeCyl({inset, inset, 0}, {0, 0, 1}));
     sc.mustRemainFaceted = {{"sphere", 1, "SphereNYI vertex blend where the three R3 fillets meet"}};
-    sc.expectedRejects = {"sphereNYI"};
+    // CLOSURES 2026-10-15 21:10 (ruling F1(b)): no `expectedRejects: sphereNYI`.
+    // S27 is a new fixture and its sidecar is being calibrated: the engine files
+    // no reject for the octant (rejected=[]). The guard is mustRemainFaceted.
     sc.exactVolume = exactVolumeS27();
     certifyExactVolume(solid, sc.exactVolume, "S27");
     FixtureResult fx = emitShape(
