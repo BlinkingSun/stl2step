@@ -490,7 +490,7 @@ foreach(_fc_unit IN ITEMS relational_extrude relational_revolve tesslaw relation
         stl2step_adhoc_sign(${_fc_unit}_unit)
     endif()
     # posix_compat.hpp lives in tests/support (winfix 159e22a for tesslaw; portfix for the relational units).
-    if(_fc_unit STREQUAL "tesslaw" OR _fc_unit STREQUAL "relational_extrude" OR _fc_unit STREQUAL "relational_revolve")
+    if(_fc_unit STREQUAL "tesslaw" OR _fc_unit STREQUAL "relational_extrude" OR _fc_unit STREQUAL "relational_revolve" OR _fc_unit STREQUAL "relational_reclaim")
         target_include_directories(${_fc_unit}_unit PRIVATE
             "${_stl2step_root}/tests/support")
     endif()
