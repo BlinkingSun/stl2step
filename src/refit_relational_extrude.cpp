@@ -5,15 +5,20 @@
 
 #include "refit_relational.hpp"
 #include "refit_profile_cert.hpp"
+#include "parallel.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -24,10 +29,45 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846264338327950288;
 constexpr double kTwoPi = 2.0 * kPi;
+// Rounding bound of the forOnCircle superset test, in ulps of the coordinate
+// magnitude. Not a geometric tolerance.
+constexpr double kUlp = 256.0 * std::numeric_limits<double>::epsilon();
 
 bool diagOn() {
     const char* e = std::getenv("STL2STEP_DIAG_REL");
     return e && e[0] && e[0] != '0';
+}
+
+// A pair evaluated on a worker buffers its DIAG lines here. The pair walk
+// writes each buffer in pair order, so stderr is the serial walk's.
+thread_local std::string* tDiagSink = nullptr;
+
+struct DiagSinkScope {
+    std::string* prev;
+    explicit DiagSinkScope(std::string* s) : prev(tDiagSink) { tDiagSink = s; }
+    ~DiagSinkScope() { tDiagSink = prev; }
+    DiagSinkScope(const DiagSinkScope&) = delete;
+    DiagSinkScope& operator=(const DiagSinkScope&) = delete;
+};
+
+void diagPrintf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    if (tDiagSink) {
+        va_list ap2;
+        va_copy(ap2, ap);
+        const int n = std::vsnprintf(nullptr, 0, fmt, ap2);
+        va_end(ap2);
+        if (n > 0) {
+            const std::size_t old = tDiagSink->size();
+            tDiagSink->resize(old + (std::size_t)n + 1);
+            std::vsnprintf(&(*tDiagSink)[old], (std::size_t)n + 1, fmt, ap);
+            tDiagSink->resize(old + (std::size_t)n);
+        }
+    } else {
+        std::vfprintf(stderr, fmt, ap);
+    }
+    va_end(ap);
 }
 
 // REV ORCH-3. A wave-1 claim exists only when both plane anchors are
@@ -258,20 +298,19 @@ struct BandDiag {
 void emitDiag(const BandDiag& d) {
     if (!diagOn()) return;
     const double tau = d.tau > 0.0 ? d.tau : 1.0;
-    std::fprintf(stderr,
-                 "DIAG_REL_BAND stage=extrude mode=%s seed=%d nTri=%d nV=%d "
-                 "stations=%d levels=%d params=%d fit=%s radius=%.9g halfAngle=0 "
-                 "axis=%.9g,%.9g,%.9g maxDevMM=%.9g maxDevTau=%.9g lineResTau=%.9g "
-                 "span=%.9g dihedral=%.9g spanTol=%.9g tanDistA=%.9g tanDistB=%.9g "
-                 "tanAngA=%.9g tanAngB=%.9g straddle=%d "
-                 "nI=%d nCover=%d compsI=%d compsC=%d certDevTau=%.9g coverDevTau=%.9g "
-                 "sTau=%.9g anchorTolATau=%.9g anchorTolBTau=%.9g why=%s\n",
-                 d.mode, d.seed, d.nTri, d.nV, d.stations, d.levels, d.params, d.fit,
-                 d.radius, d.axis.X(), d.axis.Y(), d.axis.Z(), d.maxDev, d.maxDev / tau,
-                 d.lineRes / tau, d.span, d.dihedral, d.spanTolV, d.tanDistA, d.tanDistB,
-                 d.tanAngA, d.tanAngB, d.straddle, d.nI, d.nCover, d.compsI, d.compsC,
-                 d.certDev / tau, d.coverDev / tau, d.sDev / tau, d.anchorTolA / tau,
-                 d.anchorTolB / tau, d.why);
+    diagPrintf("DIAG_REL_BAND stage=extrude mode=%s seed=%d nTri=%d nV=%d "
+               "stations=%d levels=%d params=%d fit=%s radius=%.9g halfAngle=0 "
+               "axis=%.9g,%.9g,%.9g maxDevMM=%.9g maxDevTau=%.9g lineResTau=%.9g "
+               "span=%.9g dihedral=%.9g spanTol=%.9g tanDistA=%.9g tanDistB=%.9g "
+               "tanAngA=%.9g tanAngB=%.9g straddle=%d "
+               "nI=%d nCover=%d compsI=%d compsC=%d certDevTau=%.9g coverDevTau=%.9g "
+               "sTau=%.9g anchorTolATau=%.9g anchorTolBTau=%.9g why=%s\n",
+               d.mode, d.seed, d.nTri, d.nV, d.stations, d.levels, d.params, d.fit,
+               d.radius, d.axis.X(), d.axis.Y(), d.axis.Z(), d.maxDev, d.maxDev / tau,
+               d.lineRes / tau, d.span, d.dihedral, d.spanTolV, d.tanDistA, d.tanDistB,
+               d.tanAngA, d.tanAngB, d.straddle, d.nI, d.nCover, d.compsI, d.compsC,
+               d.certDev / tau, d.coverDev / tau, d.sDev / tau, d.anchorTolA / tau,
+               d.anchorTolB / tau, d.why);
 }
 
 struct WhyCount {
@@ -303,6 +342,21 @@ void tallyWhy(WhyCount& c, const char* why) {
     else if (std::strcmp(why, "hem-deferred") == 0) ++c.hemDeferred;
     else if (std::strcmp(why, "anchor-in-band") == 0) ++c.anchorInBand;
     else ++c.degenerate;
+}
+
+void addWhy(WhyCount& a, const WhyCount& b) {
+    a.bands += b.bands;
+    a.accept += b.accept;
+    a.line += b.line;
+    a.vertexOff += b.vertexOff;
+    a.notBlend += b.notBlend;
+    a.sameSurface += b.sameSurface;
+    a.underdetermined += b.underdetermined;
+    a.degenerate += b.degenerate;
+    a.noAnchor += b.noAnchor;
+    a.unstable += b.unstable;
+    a.hemDeferred += b.hemDeferred;
+    a.anchorInBand += b.anchorInBand;
 }
 
 bool edgeParallel(const gp_XYZ& dir, double len, const gp_XYZ& axis, double tau) {
@@ -960,6 +1014,38 @@ double wrap2pi(double a) {
     return (t < 0.0) ? t + kTwoPi : t;
 }
 
+// Ascending sort of positive finite doubles. Their IEEE-754 bit patterns order
+// as the values do, so this is std::sort's sequence, by LSD radix on bytes.
+void sortPositive(std::vector<double>& v, std::vector<std::uint64_t>& a,
+                  std::vector<std::uint64_t>& b) {
+    const std::size_t n = v.size();
+    if (n < 2) return;
+    a.resize(n);
+    b.resize(n);
+    std::memcpy(a.data(), v.data(), n * sizeof(double));
+    std::size_t cnt[8][256];
+    std::memset(cnt, 0, sizeof(cnt));
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::uint64_t k = a[i];
+        for (int d = 0; d < 8; ++d) ++cnt[d][(k >> (8 * d)) & 0xff];
+    }
+    for (int d = 0; d < 8; ++d) {
+        std::size_t* c = cnt[d];
+        bool trivial = false;  // every key has this byte: the pass is the identity
+        for (int x = 0; x < 256 && !trivial; ++x) trivial = c[x] == n;
+        if (trivial) continue;
+        std::size_t sum = 0;
+        for (int x = 0; x < 256; ++x) {
+            const std::size_t t = c[x];
+            c[x] = sum;
+            sum += t;
+        }
+        for (std::size_t i = 0; i < n; ++i) b[c[(a[i] >> (8 * d)) & 0xff]++] = a[i];
+        a.swap(b);
+    }
+    std::memcpy(v.data(), a.data(), n * sizeof(double));
+}
+
 void pushCircleRoots(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& cR, const gp_XYZ& axis,
                      double tau, std::vector<double>& roots) {
     const gp_XYZ w = (p - c0).Crossed(axis);
@@ -1098,6 +1184,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             double extent = 0;
             bool certified = false;
             bool peeled = false;
+            int nAll = 0;
             std::vector<int> body;
             std::vector<gp_XYZ> boundary;
         };
@@ -1155,33 +1242,20 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         // anchorCertified is unchanged (body maxVertexDev ≤ τ). A provisional
         // that is already entirely within τ keeps its stored deviation, so a
         // caller-supplied uncertified plane is not promoted (case 9).
-        auto loadAnchor = [&](int prov, LiveAnchor& A) -> bool {
+        // Pure in the current provisionals: no cache, tally or DIAG, so an
+        // epoch's anchors can be computed on worker threads. storeAnchor
+        // records a load in walk order.
+        auto computeAnchor = [&](int prov, LiveAnchor& A) -> bool {
             if (prov < 0 || prov >= (int)work.provisionals.size()) return false;
-            if ((int)anchorStored.size() <= prov) {
-                anchorStored.resize((std::size_t)prov + 1);
-                anchorStoredOk.resize((std::size_t)prov + 1, 0);
-                anchorEpochSeen.resize((std::size_t)prov + 1, 0);
-            }
-            if (anchorEpochSeen[(std::size_t)prov] == anchorEpoch) {
-                if (!anchorStoredOk[(std::size_t)prov]) return false;
-                A = anchorStored[(std::size_t)prov];
-                return true;
-            }
-            auto store = [&](bool ok) {
-                anchorEpochSeen[(std::size_t)prov] = anchorEpoch;
-                anchorStoredOk[(std::size_t)prov] = ok ? 1 : 0;
-                if (ok) anchorStored[(std::size_t)prov] = A;
-                return ok;
-            };
             const Provisional& pr = work.provisionals[prov];
-            if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return store(false);
-            if (!a3WouldCommit(mv, tol, pr, false)) return store(false);
+            if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return false;
+            if (!a3WouldCommit(mv, tol, pr, false)) return false;
             A = LiveAnchor();
             A.prov = prov;
             A.minTri = minTriOf(pr.tris);
             A.n = pr.plane.Direction().XYZ();
             const double nm = A.n.Modulus();
-            if (!(nm > 1e-15)) return store(false);
+            if (!(nm > 1e-15)) return false;
             A.n.Divide(nm);
             A.p0 = pr.plane.Location().XYZ();
             A.body = pr.tris;
@@ -1231,19 +1305,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         A.tolA = anchorTol(tau, dev);
                         A.certified = true;
                         A.peeled = true;
-                        if ((int)inlierCounted.size() <= prov)
-                            inlierCounted.resize((std::size_t)prov + 1, 0);
-                        if (!inlierCounted[(std::size_t)prov]) {
-                            inlierCounted[(std::size_t)prov] = 1;
-                            ++nInlierAnchors;
-                        }
-                        if (diagOn()) {
-                            std::fprintf(stderr,
-                                         "DIAG_REL_PEEL stage=extrude prov=%d minTri=%d nBody=%d "
-                                         "nAll=%d maxDevTau=%.9g n=%.6g,%.6g,%.6g\n",
-                                         prov, A.minTri, (int)A.body.size(), (int)pr.tris.size(),
-                                         (tau > 0.0 ? dev / tau : 0.0), A.n.X(), A.n.Y(), A.n.Z());
-                        }
+                        A.nAll = (int)pr.tris.size();
                     }
                 }
             }
@@ -1256,7 +1318,51 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             A.extent = sectionExtent(pts, A.n);
             if (!(A.extent > 0.0)) A.extent = tau;
             fillBoundary(A);
-            return store(true);
+            return true;
+        };
+        // The first load of prov in an epoch: cache it, count a peeled inlier
+        // body once, print DIAG_REL_PEEL.
+        auto storeAnchor = [&](int prov, bool ok, const LiveAnchor& A) -> bool {
+            anchorEpochSeen[(std::size_t)prov] = anchorEpoch;
+            anchorStoredOk[(std::size_t)prov] = ok ? 1 : 0;
+            if (!ok) return false;
+            anchorStored[(std::size_t)prov] = A;
+            if (A.peeled) {
+                if ((int)inlierCounted.size() <= prov)
+                    inlierCounted.resize((std::size_t)prov + 1, 0);
+                if (!inlierCounted[(std::size_t)prov]) {
+                    inlierCounted[(std::size_t)prov] = 1;
+                    ++nInlierAnchors;
+                }
+                if (diagOn()) {
+                    std::fprintf(stderr,
+                                 "DIAG_REL_PEEL stage=extrude prov=%d minTri=%d nBody=%d "
+                                 "nAll=%d maxDevTau=%.9g n=%.6g,%.6g,%.6g\n",
+                                 prov, A.minTri, (int)A.body.size(), A.nAll,
+                                 (tau > 0.0 ? A.maxDev / tau : 0.0), A.n.X(), A.n.Y(), A.n.Z());
+                }
+            }
+            return true;
+        };
+        // Cache slot for prov; false when prov is out of range.
+        auto anchorSlot = [&](int prov) -> bool {
+            if (prov < 0 || prov >= (int)work.provisionals.size()) return false;
+            if ((int)anchorStored.size() <= prov) {
+                anchorStored.resize((std::size_t)prov + 1);
+                anchorStoredOk.resize((std::size_t)prov + 1, 0);
+                anchorEpochSeen.resize((std::size_t)prov + 1, 0);
+            }
+            return true;
+        };
+        auto loadAnchor = [&](int prov, LiveAnchor& A) -> bool {
+            if (!anchorSlot(prov)) return false;
+            if (anchorEpochSeen[(std::size_t)prov] == anchorEpoch) {
+                if (!anchorStoredOk[(std::size_t)prov]) return false;
+                A = anchorStored[(std::size_t)prov];
+                return true;
+            }
+            const bool ok = computeAnchor(prov, A);
+            return storeAnchor(prov, ok, A);
         };
 
         WhyCount yc;
@@ -1474,11 +1580,10 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (off > maxOff) maxOff = off;
                     if (off > tau) within = 0;
                 }
-                std::fprintf(stderr,
-                             "DIAG_REL_ADJ stage=extrude seed=%d adjIndex=%d origin=%s "
-                             "radius=%.9g refitDevTau=%.9g withinTau=%d maxOffTau=%.9g nTri=%d\n",
-                             seed, i, originName(acc.origin), acc.radius, dev / tau, within,
-                             (tau > 0.0 ? maxOff / tau : 0.0), (int)acc.tris.size());
+                diagPrintf("DIAG_REL_ADJ stage=extrude seed=%d adjIndex=%d origin=%s "
+                           "radius=%.9g refitDevTau=%.9g withinTau=%d maxOffTau=%.9g nTri=%d\n",
+                           seed, i, originName(acc.origin), acc.radius, dev / tau, within,
+                           (tau > 0.0 ? maxOff / tau : 0.0), (int)acc.tris.size());
             }
         };
 
@@ -1534,11 +1639,13 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             gp_XYZ p;
         };
         std::vector<CandV> candPts;
+        double candMag = 0.0;
         int candEpoch = -1;
         // Rebuilt when a claim changes the candidate set. One vertex list per
         // epoch, not one triangle scan per pair-side.
         auto rebuildCand = [&]() {
             candPts.clear();
+            candMag = 0.0;
             std::vector<int> seen(nVtx, 0);
             candPts.reserve((std::size_t)nTri);
             for (int t = 0; t < nTri; ++t) {
@@ -1552,6 +1659,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     cv.lv = lv;
                     cv.p = mv.pts[g];
                     candPts.push_back(cv);
+                    candMag = std::max(candMag, cv.p.Modulus());
                 }
             }
             candEpoch = anchorEpoch;
@@ -1569,8 +1677,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 vertTris[(std::size_t)lv].push_back(t);
             }
         }
-        std::vector<int> vertGen((std::size_t)nVtx, 0), triGen((std::size_t)nTri, 0);
-        int vertTick = 0, triTick = 0;
 
         const double sideSign[4][2] = {{1.0, 1.0}, {1.0, -1.0}, {-1.0, 1.0}, {-1.0, -1.0}};
         // FilletStrips accepted before this call. A strip this stage commits
@@ -1583,8 +1689,12 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             for (int t : acc.tris)
                 if (t >= 0 && t < nTri) priorFilTri[(std::size_t)t] = ai;
         }
-        // 0 unknown, 1 own refit within τ, 2 own refit exceeds τ.
-        std::vector<char> priorFit((std::size_t)std::max(nPriorAcc, 0), 0);
+        // 0 unknown, 1 own refit within τ, 2 own refit exceeds τ. Workers share
+        // it; a racing pair computes the same value.
+        std::unique_ptr<std::atomic<signed char>[]> priorFit(
+            new std::atomic<signed char>[(std::size_t)std::max(nPriorAcc, 1)]);
+        for (int ai = 0; ai < std::max(nPriorAcc, 1); ++ai)
+            priorFit[(std::size_t)ai].store(0, std::memory_order_relaxed);
         // D-fc-1.6.10: corner triangles stay faceted. A boundary edge of C that
         // is not a generator (edgeParallel, tanAngTol(τ, τ, len)) and that
         // meets a prior FilletStrip is a corner. D-fc-1.6.5 keeps that corner
@@ -1608,7 +1718,8 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (!(len > tau)) continue;
                     dir /= len;
                     if (edgeParallel(dir, len, axis, tau)) continue;
-                    if (priorFit[(std::size_t)ai] == 0) {
+                    signed char fit = priorFit[(std::size_t)ai].load(std::memory_order_relaxed);
+                    if (fit == 0) {
                         const Region& acc = work.accepted[(std::size_t)ai];
                         gp_Dir axOut = acc.ax.Direction();
                         gp_Pnt cOut = acc.ax.Location();
@@ -1618,471 +1729,697 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                             mv, acc.tris, acc.ax.Direction(), axOut, cOut, rOut, mOut,
                             std::max(1, p.maxRefineIters));
                         const double dev = fitOk ? mOut : acc.maxVertexDev;
-                        priorFit[(std::size_t)ai] = (dev <= tau) ? 1 : 2;
+                        fit = (dev <= tau) ? 1 : 2;
+                        priorFit[(std::size_t)ai].store(fit, std::memory_order_relaxed);
                     }
-                    if (priorFit[(std::size_t)ai] == 2) return true;
+                    if (fit == 2) return true;
                 }
             }
             return false;
         };
 
-        for (std::size_t ia = 0; ia < arefs.size(); ++ia) {
-            for (std::size_t ib = ia + 1; ib < arefs.size(); ++ib) {
-                LiveAnchor A, B;
-                if (!loadAnchor(arefs[ia].prov, A) || !loadAnchor(arefs[ib].prov, B)) continue;
-                ++nPairs;
-                const int seed = std::min(arefs[ia].minTri, arefs[ib].minTri);
-                const double cross = A.n.Crossed(B.n).Modulus();
-                const double rhs = 2.0 * (A.tolA + tau) / A.extent + 2.0 * (B.tolA + tau) / B.extent;
-                if (cross <= rhs) {
+        // The pair walk. A pair's evaluation reads the claim state and writes
+        // only its PairOut, and it stops at a commit. Pairs are evaluated in
+        // blocks on worker threads; the walk then replays them in pair order:
+        // anchor loads, DIAG text, tallies, and the first commit. A commit
+        // changes the state, so the walk resumes that pair from (si, guard)
+        // with the anchors it started with, as the serial loop did, and
+        // re-evaluates every later pair. Output does not depend on the worker
+        // count; threads 1 runs it inline.
+        struct PairScratch {
+            std::vector<int> vertGen, triGen;
+            int vertTick = 0, triTick = 0;
+            std::vector<double> offA, offB, roots;
+            std::vector<std::uint64_t> keyA, keyB;
+            std::vector<std::size_t> hit;
+        };
+        struct PairOut {
+            std::string diag;
+            WhyCount yc;
+            int nPairs = 0;
+            int nEvalSides = 0;
+            bool commit = false;
+            int si = 0;
+            int guard = 0;
+            std::vector<int> C;
+            gp_XYZ axis, center;
+            double radius = 0;
+            int seed = -1;
+            BandDiag dg;
+        };
+        auto runPair = [&](std::size_t ia, std::size_t ib, const LiveAnchor& A,
+                           const LiveAnchor& B, bool resume, int startSi, int startGuard,
+                           PairScratch& sc, PairOut& out) {
+            std::vector<int>& vertGen = sc.vertGen;
+            std::vector<int>& triGen = sc.triGen;
+            int& vertTick = sc.vertTick;
+            int& triTick = sc.triTick;
+            if (!resume) ++out.nPairs;
+            const int seed = std::min(arefs[ia].minTri, arefs[ib].minTri);
+            const double cross = A.n.Crossed(B.n).Modulus();
+            const double rhs = 2.0 * (A.tolA + tau) / A.extent + 2.0 * (B.tolA + tau) / B.extent;
+            if (cross <= rhs) {
+                BandDiag dg;
+                dg.tau = tau;
+                dg.mode = "hem";
+                dg.fit = (A.certified && B.certified) ? "anchored" : "free";
+                dg.seed = seed;
+                dg.anchorTolA = A.tolA;
+                dg.anchorTolB = B.tolA;
+                dg.why = "hem-deferred";
+                emitDiag(dg);
+                tallyWhy(out.yc, "hem-deferred");
+                return;
+            }
+            gp_XYZ axis0 = A.n.Crossed(B.n);
+            const double am = axis0.Modulus();
+            if (!(am > 1e-12)) return;
+            axis0.Divide(am);
+            canonicalHemi(axis0);
+            const bool anchored = extrudeAnchoredPair(A.certified, B.certified);
+            // Free mode stays in the fit branch below and is not entered.
+            if (!anchored) return;
+
+            // Signed offsets of the candidate vertices from each anchor plane.
+            // A circle about axis0 lies within r of its centre along A.n and
+            // B.n (both normal to axis0), so a vertex within τ of it is within
+            // r + τ there. forOnCircle tests that first and the τ test still
+            // decides, in candPts order: a superset filter, not a tolerance.
+            // The extra τ covers rounding, which kUlp·mag/am bounds; when it
+            // does not, every vertex takes the τ test.
+            const double offA = A.p0.Dot(A.n);
+            const double offB = B.p0.Dot(B.n);
+            const std::size_t nCand = candPts.size();
+            sc.offA.resize(nCand);
+            sc.offB.resize(nCand);
+            for (std::size_t i = 0; i < nCand; ++i) {
+                sc.offA[i] = A.n.Dot(candPts[i].p) - offA;
+                sc.offB[i] = B.n.Dot(candPts[i].p) - offB;
+            }
+            auto forOnCircle = [&](const gp_XYZ& c, const gp_XYZ& ax, double r, auto&& fn) {
+                const double mag = std::max(
+                    {candMag, c.Modulus(), std::abs(offA), std::abs(offB), std::abs(r)});
+                const bool sup = ax.X() == axis0.X() && ax.Y() == axis0.Y() &&
+                                 ax.Z() == axis0.Z() &&
+                                 kUlp * mag <= tau * am;
+                const double hA = A.n.Dot(c) - offA;
+                const double hB = B.n.Dot(c) - offB;
+                const double lim = r + 2.0 * tau;
+                for (std::size_t i = 0; i < nCand; ++i) {
+                    if (sup && (std::abs(sc.offA[i] - hA) > lim || std::abs(sc.offB[i] - hB) > lim))
+                        continue;
+                    const CandV& cv = candPts[i];
+                    if (std::abs(radialDist(cv.p, c, ax) - r) <= tau) fn(i, cv);
+                }
+            };
+
+            for (int si = resume ? startSi : 0; si < 4; ++si) {
+                const double sA = sideSign[si][0];
+                const double sB = sideSign[si][1];
+                gp_XYZ c0, c1;
+                if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n), B.p0.Dot(B.n), 0.0, c0)) continue;
+                if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n) + sA, B.p0.Dot(B.n) + sB, 0.0, c1))
+                    continue;
+                const gp_XYZ cR = c1 - c0;
+                const bool resumed = resume && si == startSi;
+                if (!resumed) ++out.nEvalSides;
+
+                // pushCircleRoots keeps a root r of p only when p is within τ of
+                // the circle about c0 + cR·r, which is tangent to both anchors on
+                // this side, so p is then within τ of the side's quadrant. Every
+                // root is at most rMax: the centre runs off at |cR × axis0| > 1
+                // per unit r. When the solve3 residuals at rMax and the rounding
+                // (kUlp) stay within τ, a vertex more than 2τ outside the quadrant
+                // has no root and is not tried. Otherwise every vertex is tried.
+                bool quadSkip = false;
+                {
+                    const double D = cR.Crossed(axis0).Modulus();
+                    if (D > 1.0) {
+                        const double c0m = c0.Modulus();
+                        const double rMax = (candMag + c0m + 2.0 * tau) / (D - 1.0);
+                        const double mag = std::max({candMag, c0m + rMax * cR.Modulus(), rMax,
+                                                     std::abs(offA), std::abs(offB)});
+                        const double slack =
+                            kUlp * mag + 2.0 * mag *
+                                             std::max(std::abs(A.n.Dot(axis0)),
+                                                      std::abs(B.n.Dot(axis0)));
+                        const double errA = std::abs(A.n.Dot(c0) - offA) +
+                                            rMax * std::abs(A.n.Dot(cR) - sA) + slack;
+                        const double errB = std::abs(B.n.Dot(c0) - offB) +
+                                            rMax * std::abs(B.n.Dot(cR) - sB) + slack;
+                        quadSkip = std::isfinite(rMax) && std::isfinite(mag) && errA <= tau &&
+                                   errB <= tau;
+                    }
+                }
+
+                // candPts is current: the walk rebuilds it before every call.
+                int guard = resumed ? startGuard : 0;
+                while (guard++ < nTri + 1) {
+                    std::vector<double>& roots = sc.roots;
+                    roots.clear();
+                    for (std::size_t i = 0; i < nCand; ++i) {
+                        if (quadSkip &&
+                            (sA * sc.offA[i] < -2.0 * tau || sB * sc.offB[i] < -2.0 * tau))
+                            continue;
+                        pushCircleRoots(candPts[i].p, c0, cR, axis0, tau, roots);
+                    }
+                    const bool noRoots = roots.empty();
+                    double rHyp = 0.0;
                     BandDiag dg;
                     dg.tau = tau;
-                    dg.mode = "hem";
-                    dg.fit = (A.certified && B.certified) ? "anchored" : "free";
+                    dg.mode = "fillet";
+                    dg.fit = anchored ? "anchored" : "free";
+                    dg.params = anchored ? kParamsAnchored : (kParamsCircle + kParamsAxisDir);
                     dg.seed = seed;
+                    dg.axis = axis0;
                     dg.anchorTolA = A.tolA;
                     dg.anchorTolB = B.tolA;
-                    dg.why = "hem-deferred";
-                    emitDiag(dg);
-                    tallyWhy(yc, "hem-deferred");
-                    continue;
-                }
-                gp_XYZ axis0 = A.n.Crossed(B.n);
-                const double am = axis0.Modulus();
-                if (!(am > 1e-12)) continue;
-                axis0.Divide(am);
-                canonicalHemi(axis0);
-                const bool anchored = extrudeAnchoredPair(A.certified, B.certified);
-                // Free mode stays in the fit branch below and is not entered.
-                if (!anchored) continue;
-
-                for (int si = 0; si < 4; ++si) {
-                    const double sA = sideSign[si][0];
-                    const double sB = sideSign[si][1];
-                    gp_XYZ c0, c1;
-                    if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n), B.p0.Dot(B.n), 0.0, c0)) continue;
-                    if (!solve3(A.n, B.n, axis0, A.p0.Dot(A.n) + sA, B.p0.Dot(B.n) + sB, 0.0, c1))
-                        continue;
-                    const gp_XYZ cR = c1 - c0;
-                    ++nEvalSides;
-
-                    int guard = 0;
-                    while (guard++ < nTri + 1) {
-                        if (candEpoch != anchorEpoch) rebuildCand();
-                        std::vector<double> roots;
-                        roots.reserve(candPts.size() * 2);
-                        for (const CandV& v : candPts)
-                            pushCircleRoots(v.p, c0, cR, axis0, tau, roots);
-                        double rHyp = 0.0;
-                        BandDiag dg;
-                        dg.tau = tau;
-                        dg.mode = "fillet";
-                        dg.fit = anchored ? "anchored" : "free";
-                        dg.params = anchored ? kParamsAnchored : (kParamsCircle + kParamsAxisDir);
-                        dg.seed = seed;
-                        dg.axis = axis0;
-                        dg.anchorTolA = A.tolA;
-                        dg.anchorTolB = B.tolA;
-                        auto finish = [&](const char* why) {
-                            dg.why = why;
-                            emitDiag(dg);
-                            tallyWhy(yc, why);
-                        };
-                        // Hypothesis, one per pair-side (D-fc-3.2.3, prototype _vote_radius).
-                        // Admissible roots are clustered into 2τ windows. A window is scored
-                        // by how many candidate vertices lie within τ of its median circle.
-                        // The densest root cluster can be a spurious quadratic mode, so the
-                        // score is the geometric inlier count, not the root count. The
-                        // maximum score is the hypothesis. A later certificate refusal ends
-                        // the side: the window is not replaced.
-                        {
-                            std::vector<double> pool = roots;
-                            std::sort(pool.begin(), pool.end());
-                            bool any = false;
-                            int bestIn = -1;
-                            double bestR = 0.0;
-                            // Five residual modes, as _vote_radius. Not a geometric tolerance:
-                            // hypothesis selection only. A certificate refusal still ends the side.
-                            for (int mode = 0; mode < 5; ++mode) {
-                                const int n = (int)pool.size();
-                                if (n <= 0) break;
-                                int j = 0, bn = 0, bj = 0, bi = 0;
-                                for (int i = 0; i < n; ++i) {
-                                    while (pool[(std::size_t)i] - pool[(std::size_t)j] > 2.0 * tau)
-                                        ++j;
-                                    const int nw = i - j + 1;
-                                    if (nw > bn) {
-                                        bn = nw;
-                                        bj = j;
-                                        bi = i;
-                                    }
+                    auto finish = [&](const char* why) {
+                        dg.why = why;
+                        emitDiag(dg);
+                        tallyWhy(out.yc, why);
+                    };
+                    // Hypothesis, one per pair-side (D-fc-3.2.3, prototype _vote_radius).
+                    // Admissible roots are clustered into 2τ windows. A window is scored
+                    // by how many candidate vertices lie within τ of its median circle.
+                    // The densest root cluster can be a spurious quadratic mode, so the
+                    // score is the geometric inlier count, not the root count. The
+                    // maximum score is the hypothesis. A later certificate refusal ends
+                    // the side: the window is not replaced.
+                    {
+                        std::vector<double>& pool = roots;
+                        sortPositive(pool, sc.keyA, sc.keyB);
+                        bool any = false;
+                        int bestIn = -1;
+                        double bestR = 0.0;
+                        // Five residual modes, as _vote_radius. Not a geometric tolerance:
+                        // hypothesis selection only. A certificate refusal still ends the side.
+                        for (int mode = 0; mode < 5; ++mode) {
+                            const int n = (int)pool.size();
+                            if (n <= 0) break;
+                            int j = 0, bn = 0, bj = 0, bi = 0;
+                            for (int i = 0; i < n; ++i) {
+                                while (pool[(std::size_t)i] - pool[(std::size_t)j] > 2.0 * tau)
+                                    ++j;
+                                const int nw = i - j + 1;
+                                if (nw > bn) {
+                                    bn = nw;
+                                    bj = j;
+                                    bi = i;
                                 }
-                                if (bn <= 0) break;
-                                const int mid = bj + bn / 2;
-                                const double rmed =
-                                    (bn % 2) != 0
-                                        ? pool[(std::size_t)mid]
-                                        : 0.5 * (pool[(std::size_t)mid - 1] + pool[(std::size_t)mid]);
-                                const gp_XYZ hc = c0 + cR * rmed;
-                                int nIn = 0;
-                                for (const CandV& v : candPts) {
-                                    if (std::abs(radialDist(v.p, hc, axis0) - rmed) <= tau) ++nIn;
-                                }
-                                if (!any || nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
-                                    any = true;
-                                    bestIn = nIn;
-                                    bestR = rmed;
-                                }
-                                pool.erase(pool.begin() + bj, pool.begin() + bi + 1);
                             }
-                            if (!any || bestIn <= 0) {
-                                finish("degenerate");
-                                break;
+                            if (bn <= 0) break;
+                            const int mid = bj + bn / 2;
+                            const double rmed =
+                                (bn % 2) != 0
+                                    ? pool[(std::size_t)mid]
+                                    : 0.5 * (pool[(std::size_t)mid - 1] + pool[(std::size_t)mid]);
+                            const gp_XYZ hc = c0 + cR * rmed;
+                            int nIn = 0;
+                            forOnCircle(hc, axis0, rmed,
+                                        [&](std::size_t, const CandV&) { ++nIn; });
+                            if (!any || nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
+                                any = true;
+                                bestIn = nIn;
+                                bestR = rmed;
                             }
-                            rHyp = bestR;
+                            pool.erase(pool.begin() + bj, pool.begin() + bi + 1);
                         }
-                        dg.radius = rHyp;
-                        gp_XYZ axis = axis0;
-                        gp_XYZ center = c0 + cR * rHyp;
-                        double radius = rHyp;
-                        // Line first (D-fc-1.6.3) on the hypothesis inliers. A sagitta
-                        // within τ lies on two tangent radii; the smaller-r tie then
-                        // misses the sector, so the slab is empty (case 6). The inliers
-                        // are that section. A line residual within τ is a plane.
-                        {
-                            std::vector<Vert> inl;
-                            inl.reserve(candPts.size());
-                            for (const CandV& v : candPts) {
-                                if (std::abs(radialDist(v.p, center, axis) - radius) > tau) continue;
-                                Vert vt;
-                                vt.id = v.lv;
-                                vt.p = v.p;
-                                inl.push_back(vt);
-                            }
-                            int st = 0, lv = 0;
-                            double lr = 0;
-                            profileCounts(inl, axis, tau, st, lv, lr);
-                            if (st >= minStations(kParamsLine) && lr <= tau) {
-                                dg.stations = st;
-                                dg.levels = lv;
-                                dg.nV = (int)inl.size();
-                                dg.lineRes = lr;
-                                finish("line");
-                                break;
-                            }
-                        }
-                        const int itCap = std::max(1, p.maxRefineIters);
-                        bool stable = false;
-                        std::vector<int> Iset;
-                        auto collectI = [&](const gp_XYZ& ax, const gp_XYZ& c, double r,
-                                            std::vector<int>& slab, std::vector<int>& I) {
-                            slab.clear();
-                            I.clear();
-                            gp_XYZ u, v;
-                            if (!frameOf(ax, u, v) || !(r > 0.0)) return;
-                            gp_XYZ dA = A.n * (-sA);
-                            gp_XYZ dB = B.n * (-sB);
-                            dA -= ax * dA.Dot(ax);
-                            dB -= ax * dB.Dot(ax);
-                            if (!(dA.Modulus() > 1e-15) || !(dB.Modulus() > 1e-15)) return;
-                            const double azA = std::atan2(dA.Dot(v), dA.Dot(u));
-                            const double azB = std::atan2(dB.Dot(v), dB.Dot(u));
-                            const double wAB = wrap2pi(azB - azA);
-                            // D-fc-3.3. The sector is fixed by the two contact generators.
-                            // Of the two arcs, the fillet is the one nearer the anchor
-                            // dihedral. That dihedral is <= pi, and the shorter arc is
-                            // always the nearer one. A witness on a generator used to
-                            // keep the reflex (rw2b audit, case 1).
-                            double start = azA;
-                            double width = wAB;
-                            if (width > kPi) {
-                                start = azB;
-                                width = kTwoPi - width;
-                            }
-                            const double slack = tau / r;
-                            start = wrap2pi(start - slack);
-                            width += 2.0 * slack;
-                            if (width > kTwoPi) width = kTwoPi;
-                            // Empty I needs no slab. Membership is the τ-preimage, so it is
-                            // enough to look at triangles incident to a vertex within τ.
-                            if (++vertTick > 2000000000) {
-                                std::fill(vertGen.begin(), vertGen.end(), 0);
-                                vertTick = 1;
-                            }
-                            if (++triTick > 2000000000) {
-                                std::fill(triGen.begin(), triGen.end(), 0);
-                                triTick = 1;
-                            }
-                            for (const CandV& cv : candPts) {
-                                if (std::abs(radialDist(cv.p, c, ax) - r) <= tau)
-                                    vertGen[(std::size_t)cv.lv] = vertTick;
-                            }
-                            bool hinted = false;
-                            for (const CandV& cv : candPts) {
-                                if (vertGen[(std::size_t)cv.lv] != vertTick) continue;
-                                for (int t : vertTris[(std::size_t)cv.lv]) {
-                                    if (t < 0 || t >= nTri || triGen[(std::size_t)t] == triTick ||
-                                        !candidate(t))
-                                        continue;
-                                    triGen[(std::size_t)t] = triTick;
-                                    bool inSecH = true, allTauH = true;
-                                    for (int k = 0; k < 3; ++k) {
-                                        const int lv = cornerLocal(g2l, mv, t, k);
-                                        if (lv < 0 || vertGen[(std::size_t)lv] != vertTick)
-                                            allTauH = false;
-                                        const gp_XYZ pnt = cornerPt(mv, t, k);
-                                        const gp_XYZ d = pnt - c;
-                                        const double az =
-                                            std::atan2((d - ax * d.Dot(ax)).Dot(v),
-                                                       (d - ax * d.Dot(ax)).Dot(u));
-                                        if (!(width >= kTwoPi - 1e-9) &&
-                                            wrap2pi(az - start) > width + 1e-9)
-                                            inSecH = false;
-                                    }
-                                    if (inSecH && allTauH && triLevelCount(t, ax) >= 2) {
-                                        hinted = true;
-                                        break;
-                                    }
-                                }
-                                if (hinted) break;
-                            }
-                            if (!hinted) return;
-                            for (int t = 0; t < nTri; ++t) {
-                                if (!candidate(t)) continue;
-                                bool inSec = true;
-                                bool allTau = true;
-                                for (int k = 0; k < 3; ++k) {
-                                    const gp_XYZ pnt = cornerPt(mv, t, k);
-                                    const gp_XYZ d = pnt - c;
-                                    const double az = std::atan2((d - ax * d.Dot(ax)).Dot(v),
-                                                                 (d - ax * d.Dot(ax)).Dot(u));
-                                    if (!(width >= kTwoPi - 1e-9) &&
-                                        wrap2pi(az - start) > width + 1e-9)
-                                        inSec = false;
-                                    if (std::abs(radialDist(pnt, c, ax) - r) > tau) allTau = false;
-                                }
-                                if (!inSec) continue;
-                                slab.push_back(t);
-                                if (allTau && triLevelCount(t, ax) >= 2) I.push_back(t);
-                            }
-                            std::sort(I.begin(), I.end());
-                            std::sort(slab.begin(), slab.end());
-                        };
-
-                        std::vector<int> slab;
-                        collectI(axis, center, radius, slab, Iset);
-                        if (Iset.empty()) {
-                            finish(roots.empty() ? "degenerate" : "vertex-off");
+                        if (!any || bestIn <= 0) {
+                            finish("degenerate");
                             break;
                         }
-                        for (int it = 0; it < itCap; ++it) {
-                            std::vector<Vert> iv;
-                            uniqueVerts(mv, g2l, Iset, iv);
-                            bool ok = false;
-                            if (anchored) {
-                                gp_XYZ ax, c;
-                                double r = 0;
-                                ok = fitAnchored(A.n, A.p0, B.n, B.p0, iv, itCap, axis0, sA, sB,
-                                                 ax, c, r);
-                                if (ok) {
-                                    axis = ax;
-                                    center = c;
-                                    radius = r;
-                                }
-                            } else {
-                                if ((int)iv.size() < 6) {
-                                    finish("underdetermined");
-                                    ok = false;
-                                    Iset.clear();
-                                    break;
-                                }
-                                gp_Dir axOut;
-                                gp_Pnt cOut;
-                                double rOut = 0, mOut = 0;
-                                const gp_Dir seedDir(axis.X(), axis.Y(), axis.Z());
-                                ok = cylinderFitLS(mv, Iset, seedDir, axOut, cOut, rOut, mOut,
-                                                   itCap);
-                                if (ok && rOut > 0.0) {
-                                    axis = axOut.XYZ();
-                                    alignTo(axis, axis0);
-                                    center = cOut.XYZ();
-                                    radius = rOut;
-                                } else {
-                                    ok = false;
-                                }
-                            }
-                            if (!ok) {
-                                if (dg.why == nullptr || std::strcmp(dg.why, "degenerate") == 0)
-                                    finish(anchored ? "vertex-off" : "degenerate");
-                                Iset.clear();
-                                break;
-                            }
-                            std::vector<int> I2, slab2;
-                            collectI(axis, center, radius, slab2, I2);
-                            if (I2 == Iset) {
-                                slab.swap(slab2);
-                                stable = true;
-                                break;
-                            }
-                            Iset.swap(I2);
-                            slab.swap(slab2);
-                            if (Iset.empty()) break;
-                        }
-                        if (!Iset.empty() && dg.why != nullptr &&
-                            std::strcmp(dg.why, "degenerate") != 0 &&
-                            std::strcmp(dg.why, "underdetermined") != 0 &&
-                            std::strcmp(dg.why, "vertex-off") != 0) {
-                            break;
-                        }
-                        if (Iset.empty()) {
-                            if (dg.why == nullptr) finish(stable ? "unstable" : "vertex-off");
-                            break;
-                        }
-                        if (!stable) {
-                            finish("unstable");
-                            break;
-                        }
-                        std::vector<Vert> iv;
-                        uniqueVerts(mv, g2l, Iset, iv);
-                        profileCounts(iv, axis, tau, dg.stations, dg.levels, dg.lineRes);
-                        dg.nV = (int)iv.size();
-                        dg.radius = radius;
-                        dg.axis = axis;
-                        dg.nI = (int)Iset.size();
-                        dg.compsI = edgeComps(Iset);
-                        double iRms = 0;
-                        dg.certDev = devStats(iv, center, axis, radius, iRms);
-                        dg.maxDev = dg.certDev;
-                        if (dg.stations < minStations(dg.params) || (!anchored && dg.levels < 2)) {
-                            finish("underdetermined");
-                            break;
-                        }
-                        if (dg.lineRes <= tau) {
+                        rHyp = bestR;
+                    }
+                    dg.radius = rHyp;
+                    gp_XYZ axis = axis0;
+                    gp_XYZ center = c0 + cR * rHyp;
+                    double radius = rHyp;
+                    // Line first (D-fc-1.6.3) on the hypothesis inliers. A sagitta
+                    // within τ lies on two tangent radii; the smaller-r tie then
+                    // misses the sector, so the slab is empty (case 6). The inliers
+                    // are that section. A line residual within τ is a plane.
+                    {
+                        std::vector<Vert> inl;
+                        forOnCircle(center, axis, radius, [&](std::size_t, const CandV& v) {
+                            Vert vt;
+                            vt.id = v.lv;
+                            vt.p = v.p;
+                            inl.push_back(vt);
+                        });
+                        int st = 0, lv = 0;
+                        double lr = 0;
+                        profileCounts(inl, axis, tau, st, lv, lr);
+                        if (st >= minStations(kParamsLine) && lr <= tau) {
+                            dg.stations = st;
+                            dg.levels = lv;
+                            dg.nV = (int)inl.size();
+                            dg.lineRes = lr;
                             finish("line");
                             break;
                         }
-                        if (dg.certDev > tau) {
-                            finish("vertex-off");
-                            break;
+                    }
+                    const int itCap = std::max(1, p.maxRefineIters);
+                    bool stable = false;
+                    std::vector<int> Iset;
+                    auto collectI = [&](const gp_XYZ& ax, const gp_XYZ& c, double r,
+                                        std::vector<int>& slab, std::vector<int>& I) {
+                        slab.clear();
+                        I.clear();
+                        gp_XYZ u, v;
+                        if (!frameOf(ax, u, v) || !(r > 0.0)) return;
+                        gp_XYZ dA = A.n * (-sA);
+                        gp_XYZ dB = B.n * (-sB);
+                        dA -= ax * dA.Dot(ax);
+                        dB -= ax * dB.Dot(ax);
+                        if (!(dA.Modulus() > 1e-15) || !(dB.Modulus() > 1e-15)) return;
+                        const double azA = std::atan2(dA.Dot(v), dA.Dot(u));
+                        const double azB = std::atan2(dB.Dot(v), dB.Dot(u));
+                        const double wAB = wrap2pi(azB - azA);
+                        // D-fc-3.3. The sector is fixed by the two contact generators.
+                        // Of the two arcs, the fillet is the one nearer the anchor
+                        // dihedral. That dihedral is <= pi, and the shorter arc is
+                        // always the nearer one. A witness on a generator used to
+                        // keep the reflex (rw2b audit, case 1).
+                        double start = azA;
+                        double width = wAB;
+                        if (width > kPi) {
+                            start = azB;
+                            width = kTwoPi - width;
                         }
-                        double zlo = 1e300, zhi = -1e300;
-                        for (const Vert& v : iv) {
-                            const double z = v.p.Dot(axis);
-                            zlo = std::min(zlo, z);
-                            zhi = std::max(zhi, z);
+                        const double slack = tau / r;
+                        start = wrap2pi(start - slack);
+                        width += 2.0 * slack;
+                        if (width > kTwoPi) width = kTwoPi;
+                        // Empty I needs no slab. Membership is the τ-preimage, so it is
+                        // enough to look at triangles incident to a vertex within τ.
+                        if (++vertTick > 2000000000) {
+                            std::fill(vertGen.begin(), vertGen.end(), 0);
+                            vertTick = 1;
                         }
-                        const double L = std::max(zhi - zlo, tau);
-                        auto endDist = [&](const gp_XYZ& n, const gp_XYZ& p0, double z) {
-                            const gp_XYZ pt = center + axis * (z - center.Dot(axis));
-                            return std::abs((pt - p0).Dot(n));
-                        };
-                        const double dAlo = endDist(A.n, A.p0, zlo);
-                        const double dAhi = endDist(A.n, A.p0, zhi);
-                        const double dBlo = endDist(B.n, B.p0, zlo);
-                        const double dBhi = endDist(B.n, B.p0, zhi);
-                        const double dAmid = endDist(A.n, A.p0, 0.5 * (zlo + zhi));
-                        const double dBmid = endDist(B.n, B.p0, 0.5 * (zlo + zhi));
-                        dg.tanDistA = std::abs(dAmid - radius);
-                        dg.tanDistB = std::abs(dBmid - radius);
-                        dg.tanAngA = std::max(std::abs(dAlo - radius), std::abs(dAhi - radius));
-                        dg.tanAngB = std::max(std::abs(dBlo - radius), std::abs(dBhi - radius));
-                        dg.dihedral = std::acos(std::max(-1.0, std::min(1.0, A.n.Dot(B.n))));
-                        dg.spanTolV = (radius > 0.0) ? spanTol(A.tolA, B.tolA, radius) : 0.0;
-                        if (!anchored) {
-                            const bool tang =
-                                dg.tanDistA <= tanDistTol(A.tolA, tau) &&
-                                dg.tanDistB <= tanDistTol(B.tolA, tau) &&
-                                dg.tanAngA <= tanDistTol(A.tolA, tau) &&
-                                dg.tanAngB <= tanDistTol(B.tolA, tau);
-                            (void)L;
-                            if (!tang) {
-                                finish("not-blend");
-                                break;
+                        if (++triTick > 2000000000) {
+                            std::fill(triGen.begin(), triGen.end(), 0);
+                            triTick = 1;
+                        }
+                        sc.hit.clear();
+                        forOnCircle(c, ax, r, [&](std::size_t i, const CandV& cv) {
+                            vertGen[(std::size_t)cv.lv] = vertTick;
+                            sc.hit.push_back(i);
+                        });
+                        bool hinted = false;
+                        for (std::size_t hi : sc.hit) {
+                            const CandV& cv = candPts[hi];
+                            for (int t : vertTris[(std::size_t)cv.lv]) {
+                                if (t < 0 || t >= nTri || triGen[(std::size_t)t] == triTick ||
+                                    !candidate(t))
+                                    continue;
+                                triGen[(std::size_t)t] = triTick;
+                                bool inSecH = true, allTauH = true;
+                                for (int k = 0; k < 3; ++k) {
+                                    const int lv = cornerLocal(g2l, mv, t, k);
+                                    if (lv < 0 || vertGen[(std::size_t)lv] != vertTick)
+                                        allTauH = false;
+                                    const gp_XYZ pnt = cornerPt(mv, t, k);
+                                    const gp_XYZ d = pnt - c;
+                                    const double az =
+                                        std::atan2((d - ax * d.Dot(ax)).Dot(v),
+                                                   (d - ax * d.Dot(ax)).Dot(u));
+                                    if (!(width >= kTwoPi - 1e-9) &&
+                                        wrap2pi(az - start) > width + 1e-9)
+                                        inSecH = false;
+                                }
+                                if (inSecH && allTauH && triLevelCount(t, ax) >= 2) {
+                                    hinted = true;
+                                    break;
+                                }
                             }
+                            if (hinted) break;
                         }
-                        double sDev = 0.0;
-                        for (int t : Iset) {
-                            for (int e = 0; e < 3; ++e) {
-                                const gp_XYZ mid =
-                                    0.5 * (cornerPt(mv, t, e) + cornerPt(mv, t, (e + 1) % 3));
-                                sDev = std::max(sDev, std::abs(radialDist(mid, center, axis) - radius));
-                            }
-                        }
-                        dg.sDev = sDev;
-                        std::vector<char> inI(nTri, 0), inSlab(nTri, 0);
-                        for (int t : Iset)
-                            if (t >= 0 && t < nTri) inI[t] = 1;
-                        for (int t : slab)
-                            if (t >= 0 && t < nTri) inSlab[t] = 1;
-                        std::vector<int> cover;
-                        for (int t : slab) {
-                            if (t < 0 || t >= nTri || inI[t] || !candidate(t)) continue;
-                            bool one = false, allS = true, allZ = true;
+                        if (!hinted) return;
+                        for (int t = 0; t < nTri; ++t) {
+                            if (!candidate(t)) continue;
+                            bool inSec = true;
+                            bool allTau = true;
                             for (int k = 0; k < 3; ++k) {
                                 const gp_XYZ pnt = cornerPt(mv, t, k);
-                                const double dev = std::abs(radialDist(pnt, center, axis) - radius);
-                                const double z = pnt.Dot(axis);
-                                if (dev <= tau) one = true;
-                                if (dev > sDev) allS = false;
-                                if (z < zlo - tau || z > zhi + tau) allZ = false;
+                                const gp_XYZ d = pnt - c;
+                                const double az = std::atan2((d - ax * d.Dot(ax)).Dot(v),
+                                                             (d - ax * d.Dot(ax)).Dot(u));
+                                if (!(width >= kTwoPi - 1e-9) &&
+                                    wrap2pi(az - start) > width + 1e-9)
+                                    inSec = false;
+                                if (std::abs(radialDist(pnt, c, ax) - r) > tau) allTau = false;
                             }
-                            // D-fc-3.2 item 1: fewer than 2 axial levels is never a member
-                            // (section ear). Item 7's cover does not put it back.
-                            if (one && allS && allZ && triLevelCount(t, axis) >= 2)
-                                cover.push_back(t);
+                            if (!inSec) continue;
+                            slab.push_back(t);
+                            if (allTau && triLevelCount(t, ax) >= 2) I.push_back(t);
                         }
-                        std::sort(cover.begin(), cover.end());
-                        dg.nCover = (int)cover.size();
-                        std::vector<Vert> cv;
-                        uniqueVerts(mv, g2l, cover, cv);
-                        double cRms = 0;
-                        dg.coverDev = cv.empty() ? 0.0 : devStats(cv, center, axis, radius, cRms);
-                        std::vector<int> C = Iset;
-                        C.insert(C.end(), cover.begin(), cover.end());
-                        std::sort(C.begin(), C.end());
-                        dg.compsC = edgeComps(C);
-                        dg.nTri = (int)C.size();
-                        std::vector<char> inC(nTri, 0);
-                        for (int t : C)
-                            if (t >= 0 && t < nTri) inC[t] = 1;
-                        auto outside = [&](int prov) -> bool {
-                            if (prov < 0 || prov >= (int)work.provisionals.size()) return true;
-                            const auto& tris = work.provisionals[prov].tris;
-                            if (tris.empty()) return false;
-                            for (int t : tris)
-                                if (t < 0 || t >= nTri || !inC[t]) return true;
-                            return false;
-                        };
-                        if (!outside(A.prov) || !outside(B.prov)) {
-                            finish("anchor-in-band");
+                        std::sort(I.begin(), I.end());
+                        std::sort(slab.begin(), slab.end());
+                    };
+
+                    std::vector<int> slab;
+                    collectI(axis, center, radius, slab, Iset);
+                    if (Iset.empty()) {
+                        finish(noRoots ? "degenerate" : "vertex-off");
+                        break;
+                    }
+                    for (int it = 0; it < itCap; ++it) {
+                        std::vector<Vert> iv;
+                        uniqueVerts(mv, g2l, Iset, iv);
+                        bool ok = false;
+                        if (anchored) {
+                            gp_XYZ ax, c;
+                            double r = 0;
+                            ok = fitAnchored(A.n, A.p0, B.n, B.p0, iv, itCap, axis0, sA, sB,
+                                             ax, c, r);
+                            if (ok) {
+                                axis = ax;
+                                center = c;
+                                radius = r;
+                            }
+                        } else {
+                            if ((int)iv.size() < 6) {
+                                finish("underdetermined");
+                                ok = false;
+                                Iset.clear();
+                                break;
+                            }
+                            gp_Dir axOut;
+                            gp_Pnt cOut;
+                            double rOut = 0, mOut = 0;
+                            const gp_Dir seedDir(axis.X(), axis.Y(), axis.Z());
+                            ok = cylinderFitLS(mv, Iset, seedDir, axOut, cOut, rOut, mOut,
+                                               itCap);
+                            if (ok && rOut > 0.0) {
+                                axis = axOut.XYZ();
+                                alignTo(axis, axis0);
+                                center = cOut.XYZ();
+                                radius = rOut;
+                            } else {
+                                ok = false;
+                            }
+                        }
+                        if (!ok) {
+                            if (dg.why == nullptr || std::strcmp(dg.why, "degenerate") == 0)
+                                finish(anchored ? "vertex-off" : "degenerate");
+                            Iset.clear();
                             break;
                         }
-                        emitAdj(seed, axis, center, radius, inC);
-                        if (sameSurface(axis, center, radius, inC)) {
-                            finish("same-surface");
+                        std::vector<int> I2, slab2;
+                        collectI(axis, center, radius, slab2, I2);
+                        if (I2 == Iset) {
+                            slab.swap(slab2);
+                            stable = true;
                             break;
                         }
-                        std::vector<Vert> cvAll;
-                        uniqueVerts(mv, g2l, C, cvAll);
-                        const gp_XYZ xdir = lowestXDir(cvAll, center, axis);
-                        const SpanInfo sp =
-                            measureSpan(mv, g2l, C, cvAll, center, axis, xdir, tol.thetaBin);
-                        dg.span = sp.span;
-                        const double normSep = maxFacetNormalSep(mv, C);
-                        const bool blendVerts = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
-                        const bool blendNorms = normalsSpanDihedral(normSep, dg.spanTolV);
-                        const bool blend = blendVerts && blendNorms;
-                        if (!blend || priorCornerUncertified(C, inC, axis)) {
+                        Iset.swap(I2);
+                        slab.swap(slab2);
+                        if (Iset.empty()) break;
+                    }
+                    if (!Iset.empty() && dg.why != nullptr &&
+                        std::strcmp(dg.why, "degenerate") != 0 &&
+                        std::strcmp(dg.why, "underdetermined") != 0 &&
+                        std::strcmp(dg.why, "vertex-off") != 0) {
+                        break;
+                    }
+                    if (Iset.empty()) {
+                        if (dg.why == nullptr) finish(stable ? "unstable" : "vertex-off");
+                        break;
+                    }
+                    if (!stable) {
+                        finish("unstable");
+                        break;
+                    }
+                    std::vector<Vert> iv;
+                    uniqueVerts(mv, g2l, Iset, iv);
+                    profileCounts(iv, axis, tau, dg.stations, dg.levels, dg.lineRes);
+                    dg.nV = (int)iv.size();
+                    dg.radius = radius;
+                    dg.axis = axis;
+                    dg.nI = (int)Iset.size();
+                    dg.compsI = edgeComps(Iset);
+                    double iRms = 0;
+                    dg.certDev = devStats(iv, center, axis, radius, iRms);
+                    dg.maxDev = dg.certDev;
+                    if (dg.stations < minStations(dg.params) || (!anchored && dg.levels < 2)) {
+                        finish("underdetermined");
+                        break;
+                    }
+                    if (dg.lineRes <= tau) {
+                        finish("line");
+                        break;
+                    }
+                    if (dg.certDev > tau) {
+                        finish("vertex-off");
+                        break;
+                    }
+                    double zlo = 1e300, zhi = -1e300;
+                    for (const Vert& v : iv) {
+                        const double z = v.p.Dot(axis);
+                        zlo = std::min(zlo, z);
+                        zhi = std::max(zhi, z);
+                    }
+                    const double L = std::max(zhi - zlo, tau);
+                    auto endDist = [&](const gp_XYZ& n, const gp_XYZ& p0, double z) {
+                        const gp_XYZ pt = center + axis * (z - center.Dot(axis));
+                        return std::abs((pt - p0).Dot(n));
+                    };
+                    const double dAlo = endDist(A.n, A.p0, zlo);
+                    const double dAhi = endDist(A.n, A.p0, zhi);
+                    const double dBlo = endDist(B.n, B.p0, zlo);
+                    const double dBhi = endDist(B.n, B.p0, zhi);
+                    const double dAmid = endDist(A.n, A.p0, 0.5 * (zlo + zhi));
+                    const double dBmid = endDist(B.n, B.p0, 0.5 * (zlo + zhi));
+                    dg.tanDistA = std::abs(dAmid - radius);
+                    dg.tanDistB = std::abs(dBmid - radius);
+                    dg.tanAngA = std::max(std::abs(dAlo - radius), std::abs(dAhi - radius));
+                    dg.tanAngB = std::max(std::abs(dBlo - radius), std::abs(dBhi - radius));
+                    dg.dihedral = std::acos(std::max(-1.0, std::min(1.0, A.n.Dot(B.n))));
+                    dg.spanTolV = (radius > 0.0) ? spanTol(A.tolA, B.tolA, radius) : 0.0;
+                    if (!anchored) {
+                        const bool tang =
+                            dg.tanDistA <= tanDistTol(A.tolA, tau) &&
+                            dg.tanDistB <= tanDistTol(B.tolA, tau) &&
+                            dg.tanAngA <= tanDistTol(A.tolA, tau) &&
+                            dg.tanAngB <= tanDistTol(B.tolA, tau);
+                        (void)L;
+                        if (!tang) {
                             finish("not-blend");
                             break;
                         }
-                        const int before = (int)work.accepted.size();
-                        commitBand(C, axis, center, radius, true, A.prov, B.prov, seed, dg);
-                        if ((int)work.accepted.size() == before) break;
-                        // Certified claim: re-vote the remaining vertices on this side.
                     }
+                    double sDev = 0.0;
+                    for (int t : Iset) {
+                        for (int e = 0; e < 3; ++e) {
+                            const gp_XYZ mid =
+                                0.5 * (cornerPt(mv, t, e) + cornerPt(mv, t, (e + 1) % 3));
+                            sDev = std::max(sDev, std::abs(radialDist(mid, center, axis) - radius));
+                        }
+                    }
+                    dg.sDev = sDev;
+                    std::vector<char> inI(nTri, 0), inSlab(nTri, 0);
+                    for (int t : Iset)
+                        if (t >= 0 && t < nTri) inI[t] = 1;
+                    for (int t : slab)
+                        if (t >= 0 && t < nTri) inSlab[t] = 1;
+                    std::vector<int> cover;
+                    for (int t : slab) {
+                        if (t < 0 || t >= nTri || inI[t] || !candidate(t)) continue;
+                        bool one = false, allS = true, allZ = true;
+                        for (int k = 0; k < 3; ++k) {
+                            const gp_XYZ pnt = cornerPt(mv, t, k);
+                            const double dev = std::abs(radialDist(pnt, center, axis) - radius);
+                            const double z = pnt.Dot(axis);
+                            if (dev <= tau) one = true;
+                            if (dev > sDev) allS = false;
+                            if (z < zlo - tau || z > zhi + tau) allZ = false;
+                        }
+                        // D-fc-3.2 item 1: fewer than 2 axial levels is never a member
+                        // (section ear). Item 7's cover does not put it back.
+                        if (one && allS && allZ && triLevelCount(t, axis) >= 2)
+                            cover.push_back(t);
+                    }
+                    std::sort(cover.begin(), cover.end());
+                    dg.nCover = (int)cover.size();
+                    std::vector<Vert> cv;
+                    uniqueVerts(mv, g2l, cover, cv);
+                    double cRms = 0;
+                    dg.coverDev = cv.empty() ? 0.0 : devStats(cv, center, axis, radius, cRms);
+                    std::vector<int> C = Iset;
+                    C.insert(C.end(), cover.begin(), cover.end());
+                    std::sort(C.begin(), C.end());
+                    dg.compsC = edgeComps(C);
+                    dg.nTri = (int)C.size();
+                    std::vector<char> inC(nTri, 0);
+                    for (int t : C)
+                        if (t >= 0 && t < nTri) inC[t] = 1;
+                    auto outside = [&](int prov) -> bool {
+                        if (prov < 0 || prov >= (int)work.provisionals.size()) return true;
+                        const auto& tris = work.provisionals[prov].tris;
+                        if (tris.empty()) return false;
+                        for (int t : tris)
+                            if (t < 0 || t >= nTri || !inC[t]) return true;
+                        return false;
+                    };
+                    if (!outside(A.prov) || !outside(B.prov)) {
+                        finish("anchor-in-band");
+                        break;
+                    }
+                    emitAdj(seed, axis, center, radius, inC);
+                    if (sameSurface(axis, center, radius, inC)) {
+                        finish("same-surface");
+                        break;
+                    }
+                    std::vector<Vert> cvAll;
+                    uniqueVerts(mv, g2l, C, cvAll);
+                    const gp_XYZ xdir = lowestXDir(cvAll, center, axis);
+                    const SpanInfo sp =
+                        measureSpan(mv, g2l, C, cvAll, center, axis, xdir, tol.thetaBin);
+                    dg.span = sp.span;
+                    const double normSep = maxFacetNormalSep(mv, C);
+                    const bool blendVerts = std::abs(sp.span - dg.dihedral) <= dg.spanTolV;
+                    const bool blendNorms = normalsSpanDihedral(normSep, dg.spanTolV);
+                    const bool blend = blendVerts && blendNorms;
+                    if (!blend || priorCornerUncertified(C, inC, axis)) {
+                        finish("not-blend");
+                        break;
+                    }
+                    // Certified claim. The walk commits it, then resumes here to
+                    // re-vote the remaining vertices on this side.
+                    out.commit = true;
+                    out.si = si;
+                    out.guard = guard;
+                    out.C = std::move(C);
+                    out.axis = axis;
+                    out.center = center;
+                    out.radius = radius;
+                    out.seed = seed;
+                    out.dg = dg;
+                    return;
                 }
             }
+        };
+
+        const unsigned nWork =
+            std::max(1u, detail::resolveThreadCount(detail::currentRequestedThreads()));
+        std::vector<PairScratch> scratch(nWork);
+        for (PairScratch& sc : scratch) {
+            sc.vertGen.assign((std::size_t)nVtx, 0);
+            sc.triGen.assign((std::size_t)nTri, 0);
+        }
+        const std::size_t nA = arefs.size();
+        // This epoch's anchors, by aref index.
+        std::vector<LiveAnchor> anchorTab(nA);
+        std::vector<char> anchorTabOk(nA, 0);
+        int anchorTabEpoch = -1;
+        auto parallelEach = [&](std::size_t n, const auto& fn) {
+            const unsigned w = (unsigned)std::min<std::size_t>(nWork, std::max<std::size_t>(n, 1));
+            std::atomic<std::size_t> next{0};
+            detail::runPool(w, [&](unsigned wi) {
+                for (;;) {
+                    const std::size_t i = next.fetch_add(1);
+                    if (i >= n) break;
+                    if (!fn(i, wi)) break;
+                }
+            });
+        };
+        auto refreshAnchorTab = [&](std::size_t from) {
+            if (anchorTabEpoch == anchorEpoch) return;
+            parallelEach(nA - from, [&](std::size_t i, unsigned) {
+                const std::size_t k = from + i;
+                anchorTabOk[k] = computeAnchor(arefs[k].prov, anchorTab[k]) ? 1 : 0;
+                return true;
+            });
+            anchorTabEpoch = anchorEpoch;
+        };
+        // loadAnchor's walk-order effects for aref k, from the table.
+        auto touchAnchor = [&](std::size_t k) -> bool {
+            const int prov = arefs[k].prov;
+            if (!anchorSlot(prov)) return false;
+            if (anchorEpochSeen[(std::size_t)prov] == anchorEpoch)
+                return anchorStoredOk[(std::size_t)prov] != 0;
+            return storeAnchor(prov, anchorTabOk[k] != 0, anchorTab[k]);
+        };
+        auto flushOut = [&](const PairOut& o) {
+            if (!o.diag.empty()) std::fputs(o.diag.c_str(), stderr);
+            addWhy(yc, o.yc);
+            nPairs += o.nPairs;
+            nEvalSides += o.nEvalSides;
+        };
+        // Scheduling grain only: pairs per block per worker.
+        const std::size_t blockCap = (std::size_t)nWork * 1024;
+        std::vector<std::pair<std::size_t, std::size_t>> blockPairs;
+        std::vector<PairOut> outs;
+        std::size_t curA = 0, curB = 1;
+        auto advance = [&](std::size_t& a, std::size_t& b) {
+            if (++b >= nA) {
+                ++a;
+                b = a + 1;
+            }
+        };
+        while (curB < nA) {
+            if (candEpoch != anchorEpoch) rebuildCand();
+            refreshAnchorTab(curA);
+            blockPairs.clear();
+            {
+                std::size_t a = curA, b = curB;
+                while (b < nA && blockPairs.size() < blockCap) {
+                    blockPairs.emplace_back(a, b);
+                    advance(a, b);
+                }
+            }
+            const std::size_t nb = blockPairs.size();
+            outs.clear();
+            outs.resize(nb);
+            // Pairs past the first commit are stale; workers stop taking them.
+            std::atomic<std::size_t> stopAt{nb};
+            parallelEach(nb, [&](std::size_t k, unsigned wi) {
+                if (k > stopAt.load()) return false;
+                const std::size_t a = blockPairs[k].first, b = blockPairs[k].second;
+                if (!anchorTabOk[a] || !anchorTabOk[b]) return true;
+                DiagSinkScope sink(&outs[k].diag);
+                runPair(a, b, anchorTab[a], anchorTab[b], false, 0, 0, scratch[wi], outs[k]);
+                if (outs[k].commit) {
+                    std::size_t cur = stopAt.load();
+                    while (k < cur && !stopAt.compare_exchange_weak(cur, k)) {
+                    }
+                }
+                return true;
+            });
+            std::size_t k = 0;
+            for (; k < nb; ++k) {
+                const std::size_t a = blockPairs[k].first, b = blockPairs[k].second;
+                if (!touchAnchor(a) || !touchAnchor(b)) continue;
+                flushOut(outs[k]);
+                if (outs[k].commit) break;
+            }
+            if (k == nb) {
+                curA = blockPairs.back().first;
+                curB = blockPairs.back().second;
+                advance(curA, curB);
+                continue;
+            }
+            const std::size_t a = blockPairs[k].first, b = blockPairs[k].second;
+            const LiveAnchor A = anchorTab[a];
+            const LiveAnchor B = anchorTab[b];
+            PairOut cur = std::move(outs[k]);
+            // commitBand always appends the band, so the side always re-votes.
+            while (cur.commit) {
+                commitBand(std::move(cur.C), cur.axis, cur.center, cur.radius, true, A.prov,
+                           B.prov, cur.seed, cur.dg);
+                rebuildCand();
+                PairOut nxt;
+                {
+                    DiagSinkScope sink(&nxt.diag);
+                    runPair(a, b, A, B, true, cur.si, cur.guard, scratch[0], nxt);
+                }
+                flushOut(nxt);
+                cur = std::move(nxt);
+            }
+            curA = a;
+            curB = b;
+            advance(curA, curB);
         }
 
         // Pegs. Axis is the plane anchor normal. Certified anchors keep that axis;
