@@ -111,6 +111,28 @@ double triArea(const MeshView& mv, int t) {
     return triAreaNormal(mv, t, n);
 }
 
+// D-fc-4.1. The provisional's maximum-area facet, ties to the smallest local
+// id; -1 when no facet has positive area.
+int maxAreaFacet(const MeshView& mv, const std::vector<int>& tris, int nTri) {
+    int best = -1;
+    double bestA = 0.0;
+    for (int t : tris) {
+        if (t < 0 || t >= nTri) continue;
+        const double a = triArea(mv, t);
+        if (a > bestA || (a == bestA && best >= 0 && t < best)) {
+            bestA = a;
+            best = t;
+        }
+    }
+    return best;
+}
+
+// D-fc-4.3. An accepted CylGrow region whose own maxVertexDev exceeds τ does
+// not certify its surface (D-fc-1.4), so a certified relational band may rob it.
+bool uncertifiedCylGrow(const Region& r, double tau) {
+    return r.origin == Origin::CylGrow && r.maxVertexDev > tau;
+}
+
 bool frameOf(const gp_XYZ& aUnit, gp_XYZ& u, gp_XYZ& v) {
     const double nx = std::abs(aUnit.X());
     const double ny = std::abs(aUnit.Y());
@@ -1087,6 +1109,29 @@ void pushCircleRoots(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& cR, const 
     consider((-B - s) / (2.0 * A));
 }
 
+// D-fc-3.2.2. The radii r > 0 of the side's circle family (centre c0 + cR·r,
+// radius r, about axis) whose circle, inflated by τ, contains p:
+// |(p − c(r)) × axis| <= r + τ. Every r whose circle passes within τ of p is
+// in it. Aq = |cR × axis|² − 1 > 0. The discriminant carries kUlp of its terms'
+// magnitude and the ends kUlp of theirs, so the window is a superset of the
+// exact one (a tangent double root included). False when it is empty.
+bool radiusWindow(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& dax, double Aq,
+                  const gp_XYZ& axis, double tau, double& lo, double& hi) {
+    const gp_XYZ w = (p - c0).Crossed(axis);
+    const double b = w.Dot(dax) + tau;
+    const double C = w.Dot(w) - tau * tau;
+    const double mag = std::max({b * b, std::abs(Aq * C), w.Dot(w) * (Aq + 1.0)});
+    const double disc = b * b - Aq * C + kUlp * mag;
+    if (!(disc >= 0.0)) return false;
+    const double s = std::sqrt(disc);
+    lo = (b - s) / Aq;
+    hi = (b + s) / Aq;
+    const double pad = kUlp * (std::abs(lo) + std::abs(hi));
+    lo -= pad;
+    hi += pad;
+    return hi > 0.0;
+}
+
 }  // namespace
 
 bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -1153,9 +1198,26 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 if (t >= 0 && t < nTri) taken[t] = 1;
             }
         }
+        // D-fc-4.3. A CylGrow region whose own maxVertexDev exceeds τ is not a
+        // certified surface. Its triangles are candidates of the vote, and a
+        // certified band takes those that are I or Cover of its own surface
+        // (D-fc-3.2.7). The robbed region dissolves at commit. A region within
+        // τ is never touched.
+        std::vector<int> uncertOwner((std::size_t)nTri, -1);
+        std::vector<int> dissolved;
+        for (int ri = 0; ri < (int)work.accepted.size(); ++ri) {
+            const Region& acc = work.accepted[(std::size_t)ri];
+            if (!uncertifiedCylGrow(acc, tau)) continue;
+            for (int t : acc.tris) {
+                if (t < 0 || t >= nTri) continue;
+                uncertOwner[(std::size_t)t] = ri;
+                taken[t] = 0;
+            }
+        }
 
         auto candidate = [&](int t) -> bool {
             if (t < 0 || t >= nTri || taken[t]) return false;
+            if (uncertOwner[(std::size_t)t] >= 0) return true;
             const int pi = triProv[t];
             if (pi < 0 || pi >= (int)work.provisionals.size()) return false;
             return work.provisionals[pi].claim == ProvClaim::Unclaimed;
@@ -1278,6 +1340,19 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 std::vector<int> cur = pr.tris;
                 gp_XYZ n = A.n;
                 gp_XYZ p0 = A.p0;
+                // D-fc-4.1. The peel starts from the plane of the provisional's
+                // own maximum-area facet (ties: smallest local id), not the A2
+                // running-PCA plane, which absorbed the band's facets (tray
+                // walls: 1.7-3.7 τ off it, 0 τ off their own facet). One seed;
+                // the certificate below is unchanged.
+                const int seedT = maxAreaFacet(mv, pr.tris, nTri);
+                if (seedT >= 0) {
+                    gp_XYZ sn;
+                    triAreaNormal(mv, seedT, sn);
+                    if (sn.Dot(A.n) < 0.0) sn.Reverse();
+                    n = sn;
+                    p0 = cornerPt(mv, seedT, 0);
+                }
                 bool peeled = false;
                 const int itCap = std::max(1, p.maxRefineIters);
                 for (int it = 0; it < itCap; ++it) {
@@ -1380,6 +1455,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         WhyCount yc;
         int nPairs = 0;
         int nEvalSides = 0;
+        int nPrunedSides = 0;
 
         auto edgeComps = [&](const std::vector<int>& tris) -> int {
             std::vector<char> in(nTri, 0);
@@ -1486,6 +1562,49 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
 
             const ProvClaim stamp =
                 asFillet ? ProvClaim::ConsumedFillet : ProvClaim::ConsumedCylinder;
+            // D-fc-4.3. Every uncertified region the band robbed dissolves. Its
+            // own provisionals return to Unclaimed (the rewrite below then
+            // drops the band's triangles from them), and its other triangles
+            // leave it.
+            std::vector<int> robbed;
+            for (int t : band)
+                if (t >= 0 && t < nTri && uncertOwner[(std::size_t)t] >= 0)
+                    robbed.push_back(uncertOwner[(std::size_t)t]);
+            std::sort(robbed.begin(), robbed.end());
+            robbed.erase(std::unique(robbed.begin(), robbed.end()), robbed.end());
+            for (int ri : robbed) {
+                Region& rr = work.accepted[(std::size_t)ri];
+                std::vector<char> inR(nTri, 0);
+                int nStolen = 0;
+                for (int t : rr.tris) {
+                    if (t < 0 || t >= nTri) continue;
+                    inR[t] = 1;
+                    if (inBand[t]) ++nStolen;
+                }
+                for (Provisional& pr : work.provisionals) {
+                    if (pr.claim != ProvClaim::ConsumedCylinder || pr.tris.empty()) continue;
+                    bool own = true;
+                    for (int t : pr.tris) {
+                        if (t < 0 || t >= nTri || !inR[t]) {
+                            own = false;
+                            break;
+                        }
+                    }
+                    if (own) pr.claim = ProvClaim::Unclaimed;
+                }
+                for (int t : rr.tris) {
+                    if (t < 0 || t >= nTri) continue;
+                    uncertOwner[(std::size_t)t] = -1;
+                    if (!inBand[t]) taken[t] = 0;
+                }
+                if (diagOn())
+                    diagPrintf("DIAG_REL_ROB stage=extrude seed=%d region=%d radius=%.9g "
+                               "devTau=%.9g nTri=%d stolen=%d released=%d\n",
+                               seed, ri, rr.radius, rr.maxVertexDev / tau,
+                               (int)rr.tris.size(), nStolen, (int)rr.tris.size() - nStolen);
+                rr.tris.clear();
+                dissolved.push_back(ri);
+            }
             for (int pi = 0; pi < nProvNow; ++pi) {
                 Provisional& pr = work.provisionals[pi];
                 std::vector<int> keep, drop;
@@ -1764,12 +1883,15 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             std::vector<double> offA, offB, roots;
             std::vector<std::uint64_t> keyA, keyB;
             std::vector<std::size_t> hit;
+            std::vector<std::pair<double, double>> winA, winB;
+            std::vector<std::size_t> onA, onB;
         };
         struct PairOut {
             std::string diag;
             WhyCount yc;
             int nPairs = 0;
             int nEvalSides = 0;
+            int nPrunedSides = 0;
             bool commit = false;
             int si = 0;
             int guard = 0;
@@ -1778,6 +1900,49 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             double radius = 0;
             int seed = -1;
             BandDiag dg;
+        };
+        // D-fc-3.2.2 lossless prune. A committed band is tangent to A and B,
+        // and its contact vertices lie on both anchor planes: boundary
+        // vertices of the anchor bodies (watertight), or, when the band meets
+        // another piece of the same wall, candidate vertices within
+        // tanDistTol of the anchor's plane. Either is within τ of the band's
+        // circle. Every radius of this side that brings such a vertex of A
+        // within τ lies in the union of A's radiusWindow; likewise B. When the
+        // two unions do not meet, no radius of this side can be a claim: the
+        // side is skipped. Superset windows only.
+        auto sideMeetsAnchors = [&](const LiveAnchor& A, const LiveAnchor& B, const gp_XYZ& c0,
+                                    const gp_XYZ& cR, const gp_XYZ& axis,
+                                    PairScratch& sc) -> bool {
+            const gp_XYZ dax = cR.Crossed(axis);
+            const double Aq = dax.Dot(dax) - 1.0;
+            if (!(Aq > 0.0) || !std::isfinite(Aq)) return true;
+            auto windows = [&](const LiveAnchor& X, const std::vector<std::size_t>& onX,
+                               std::vector<std::pair<double, double>>& win) {
+                win.clear();
+                double lo = 0, hi = 0;
+                for (const gp_XYZ& p : X.boundary)
+                    if (radiusWindow(p, c0, dax, Aq, axis, tau, lo, hi)) win.emplace_back(lo, hi);
+                for (std::size_t i : onX)
+                    if (radiusWindow(candPts[i].p, c0, dax, Aq, axis, tau, lo, hi))
+                        win.emplace_back(lo, hi);
+                std::sort(win.begin(), win.end());
+            };
+            windows(A, sc.onA, sc.winA);
+            if (sc.winA.empty()) return false;
+            windows(B, sc.onB, sc.winB);
+            std::size_t i = 0, j = 0;
+            while (i < sc.winA.size() && j < sc.winB.size()) {
+                const auto& a = sc.winA[i];
+                const auto& b = sc.winB[j];
+                if (a.second < b.first) {
+                    ++i;
+                } else if (b.second < a.first) {
+                    ++j;
+                } else {
+                    return true;
+                }
+            }
+            return false;
         };
         auto runPair = [&](std::size_t ia, std::size_t ib, const LiveAnchor& A,
                            const LiveAnchor& B, bool resume, int startSi, int startGuard,
@@ -1824,9 +1989,15 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             const std::size_t nCand = candPts.size();
             sc.offA.resize(nCand);
             sc.offB.resize(nCand);
+            const double onTolA = tanDistTol(A.tolA, tau);
+            const double onTolB = tanDistTol(B.tolA, tau);
+            sc.onA.clear();
+            sc.onB.clear();
             for (std::size_t i = 0; i < nCand; ++i) {
                 sc.offA[i] = A.n.Dot(candPts[i].p) - offA;
                 sc.offB[i] = B.n.Dot(candPts[i].p) - offB;
+                if (std::abs(sc.offA[i]) <= onTolA) sc.onA.push_back(i);
+                if (std::abs(sc.offB[i]) <= onTolB) sc.onB.push_back(i);
             }
             auto forOnCircle = [&](const gp_XYZ& c, const gp_XYZ& ax, double r, auto&& fn) {
                 const double mag = std::max(
@@ -1854,6 +2025,10 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     continue;
                 const gp_XYZ cR = c1 - c0;
                 const bool resumed = resume && si == startSi;
+                if (!resumed && !sideMeetsAnchors(A, B, c0, cR, axis0, sc)) {
+                    ++out.nPrunedSides;
+                    continue;
+                }
                 if (!resumed) ++out.nEvalSides;
 
                 // pushCircleRoots keeps a root r of p only when p is within τ of
@@ -2015,13 +2190,22 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         // keep the reflex (rw2b audit, case 1).
                         double start = azA;
                         double width = wAB;
+                        bool startB = false;
                         if (width > kPi) {
                             start = azB;
                             width = kTwoPi - width;
+                            startB = true;
                         }
-                        const double slack = tau / r;
-                        start = wrap2pi(start - slack);
-                        width += 2.0 * slack;
+                        // D-fc-4.2. Each contact generator's slack is its
+                        // propagated position bound: the contact on X moves
+                        // along X by the other anchor's offset bound plus the
+                        // radius bound, over sin(dihedral). cross > 0 here:
+                        // hem-deferred took every pair with cross <= rhs.
+                        const double slackA = contactSlack(B.tolA, tau, r, cross);
+                        const double slackB = contactSlack(A.tolA, tau, r, cross);
+                        const double slackStart = startB ? slackB : slackA;
+                        start = wrap2pi(start - slackStart);
+                        width += slackA + slackB;
                         if (width > kTwoPi) width = kTwoPi;
                         // Empty I needs no slab. Membership is the τ-preimage, so it is
                         // enough to look at triangles incident to a vertex within τ.
@@ -2358,6 +2542,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             addWhy(yc, o.yc);
             nPairs += o.nPairs;
             nEvalSides += o.nEvalSides;
+            nPrunedSides += o.nPrunedSides;
         };
         // Scheduling grain only: pairs per block per worker.
         const std::size_t blockCap = (std::size_t)nWork * 1024;
@@ -2715,11 +2900,35 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                          "vertex-off=%d not-blend=%d same-surface=%d underdetermined=%d "
                          "degenerate=%d no-anchor=%d unstable=%d hem-deferred=%d "
                          "anchor-in-band=%d pairs=%d evaluatedSides=%d inlierAnchors=%d "
-                         "seconds=%.6f\n",
+                         "seconds=%.6f prunedSides=%d\n",
                          yc.bands, yc.accept, yc.line, yc.vertexOff, yc.notBlend, yc.sameSurface,
                          yc.underdetermined, yc.degenerate, yc.noAnchor, yc.unstable,
                          yc.hemDeferred, yc.anchorInBand, nPairs, nEvalSides, nInlierAnchors,
-                         seconds);
+                         seconds, nPrunedSides);
+        }
+
+        // D-fc-4.3. A dissolved region leaves the accepted list. A chamfer
+        // cone names its cylinder by accepted index (pre-D), so that index
+        // follows the region, or becomes -1 when its cylinder dissolved.
+        if (!dissolved.empty()) {
+            const int nAcc = (int)work.accepted.size();
+            std::vector<char> gone((std::size_t)nAcc, 0);
+            for (int ri : dissolved)
+                if (ri >= 0 && ri < nAcc) gone[(std::size_t)ri] = 1;
+            std::vector<int> newIdx((std::size_t)nAcc, -1);
+            std::vector<Region> keep;
+            keep.reserve((std::size_t)nAcc);
+            for (int i = 0; i < nAcc; ++i) {
+                if (gone[(std::size_t)i]) continue;
+                newIdx[(std::size_t)i] = (int)keep.size();
+                keep.push_back(std::move(work.accepted[(std::size_t)i]));
+            }
+            for (Region& r : keep) {
+                if (r.origin != Origin::ChamferCone || r.filletNbrA < 0 || r.filletNbrA >= nAcc)
+                    continue;
+                r.filletNbrA = newIdx[(std::size_t)r.filletNbrA];
+            }
+            work.accepted.swap(keep);
         }
         return true;
     } catch (...) {

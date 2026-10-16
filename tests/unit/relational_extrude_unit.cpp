@@ -280,6 +280,12 @@ static void pins() {
     expect(s1 == 6.0, "spanTol(2, 8, 1) = 6");
     expect(s2 == 2.0, "spanTol(0.5, 0.5, 1) = 2");
 
+    const double k1 = contactSlack(1.0, 1.0, 2.0, 0.5);
+    const double k2 = contactSlack(3.0, 1.0, 4.0, 1.0);
+    std::fprintf(stderr, "contactSlack(1,1,2,0.5)=%.17g contactSlack(3,1,4,1)=%.17g\n", k1, k2);
+    expect(k1 == 2.0, "contactSlack(1, 1, 2, 0.5) = 2");
+    expect(k2 == 1.0, "contactSlack(3, 1, 4, 1) = 1");
+
     MeshView mv{};
     mv.diag = 8.0;
     DerivedTols tol;
@@ -982,6 +988,282 @@ static void case18() {
     expect(ok, "case18 chord-plane anchors do not accept");
 }
 
+static void case19() {
+    using namespace stl2step::refit;
+    const double q = 1e-4;
+    const double tau = 2.0 * q;
+    auto built = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
+    auto& provs = built.work.provisionals;
+    const int ia = (int)provs.size() - 2;
+    for (int k = 0; k < 2; ++k) {
+        for (int t : provs[(std::size_t)k].tris) provs[(std::size_t)ia].tris.push_back(t);
+        provs[(std::size_t)k].tris.clear();
+    }
+    // D-fc-4.1. The stored plane is tilted the way absorbed band facets pull
+    // an A2 running-PCA plane: no triangle of the provisional lies within τ
+    // of it, so a peel seeded there keeps nothing. The provisional's own
+    // maximum-area facet is the wall, exact, and seeds the peel.
+    gp_XYZ tilted(-1.0, 0.0, 0.01);
+    tilted.Normalize();
+    provs[(std::size_t)ia].plane =
+        gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(tilted.X(), tilted.Y(), tilted.Z()));
+    provs[(std::size_t)ia].maxVertexDev = 140.0 * tau;
+    Run r = runClaim(built.synth, std::move(built.work), q, 1);
+    const std::string peel = [&] {
+        std::istringstream is(r.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_PEEL", 0) == 0) return line;
+        return std::string();
+    }();
+    bool ok = r.work.accepted.size() == 1 && !peel.empty() &&
+              fieldNum(peel, "nBody") == 1.0 && fieldNum(peel, "maxDevTau") <= 1.0;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        ok = a.origin == Origin::FilletStrip && nearRadius(a, 3.0, r.tau) &&
+             a.tris.size() == built.bandTris.size();
+        std::fprintf(stderr, "case19 r=%.9g tris=%d peel=%s\n", a.radius, (int)a.tris.size(),
+                     peel.c_str());
+    }
+    ok = ok && lineWithWhy(r.diag, "accept").find("fit=anchored") != std::string::npos;
+    if (!ok) dumpFail("case19", r);
+    expect(ok, "case19 peel seeded by the maximum-area facet certifies the wall");
+}
+
+static void case20() {
+    using namespace stl2step::refit;
+    const double q = 1e-4;
+    const double tau = 2.0 * q;
+    const double R = 3.0;
+    // D-fc-4.2. The band runs 1.5 τ of arc past the anchored contact on x = 0,
+    // as the tray's quantized lip walls do. τ/r would cut the end strip off
+    // the slab (span one strip short: not-blend). The contact's propagated
+    // bound (τ + τ) / (r sin 90°) keeps it.
+    const double eps = 1.5 * tau / R;
+    auto built = makeFillet(R, 0.0, 8.0, -eps, 0.5 * kPi, 24, 0.0);
+    Run r = runClaim(built.synth, std::move(built.work), q, 1);
+    bool ok = r.work.accepted.size() == 1;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        ok = a.origin == Origin::FilletStrip && nearRadius(a, R, r.tau) &&
+             a.tris.size() == built.bandTris.size();
+        std::fprintf(stderr, "case20 r=%.9g tris=%d band=%d span=%.9f\n", a.radius,
+                     (int)a.tris.size(), (int)built.bandTris.size(), a.uMax - a.uMin);
+    }
+    if (!ok) dumpFail("case20", r);
+    expect(ok, "case20 end strip within the propagated contact bound is claimed");
+}
+
+// One accepted CylGrow region holding band strips 10 and 11 plus a stray
+// triangle, a certified CylGrow region and a chamfer cone that names the
+// certified one by accepted index.
+struct RobFixture {
+    FilletMesh m;
+    std::vector<int> stolen;
+    int strayRob = -1;
+    int strayRobProv = -1;
+    int strayKeep = -1;
+    int strayCone = -1;
+};
+
+static RobFixture makeRob(double robDevTau) {
+    using namespace stl2step::refit;
+    RobFixture f;
+    f.m = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
+    const double tau = 2.0 * 1e-4;
+    auto& provs = f.m.work.provisionals;
+    for (int k = 10; k <= 11; ++k) {
+        provs[(std::size_t)k].claim = ProvClaim::ConsumedCylinder;
+        for (int t : provs[(std::size_t)k].tris) f.stolen.push_back(t);
+    }
+    auto stray = [&](double x) {
+        const int a = f.m.synth.addV(gp_XYZ(x, 0, 50));
+        const int b = f.m.synth.addV(gp_XYZ(x + 1, 0, 50));
+        const int c = f.m.synth.addV(gp_XYZ(x, 1, 51));
+        const int t = f.m.synth.tri(a, b, c);
+        addStrip(f.m.work, {t});
+        provs.back().claim = ProvClaim::ConsumedCylinder;
+        return t;
+    };
+    f.strayRob = stray(50.0);
+    f.strayRobProv = (int)provs.size() - 1;
+    f.strayKeep = stray(60.0);
+    f.strayCone = stray(70.0);
+    auto region = [&](Origin o, std::vector<int> tris, double dev) {
+        Region r;
+        r.id = 0;
+        r.type = o == Origin::ChamferCone ? SurfType::Cone : SurfType::Cylinder;
+        r.origin = o;
+        r.radius = 7.0;
+        r.tris = std::move(tris);
+        r.maxVertexDev = dev;
+        return r;
+    };
+    std::vector<int> robTris = f.stolen;
+    robTris.push_back(f.strayRob);
+    f.m.work.accepted.push_back(region(Origin::CylGrow, robTris, robDevTau * tau));
+    f.m.work.accepted.push_back(region(Origin::CylGrow, {f.strayKeep}, 0.5 * tau));
+    Region cone = region(Origin::ChamferCone, {f.strayCone}, 0.0);
+    cone.filletNbrA = 1;
+    f.m.work.accepted.push_back(std::move(cone));
+    return f;
+}
+
+static void case21() {
+    using namespace stl2step::refit;
+    RobFixture f = makeRob(100.0);
+    const std::vector<int> band = f.m.bandTris;
+    Run r = runClaim(f.m.synth, std::move(f.m.work), 1e-4, 1);
+    // D-fc-4.3. The 100 τ region is robbed and dissolves: the band is whole,
+    // the stray triangle's provisional is Unclaimed again, the region leaves
+    // the list and the cone's accepted index follows its cylinder.
+    const Region* fil = nullptr;
+    int nCyl = 0;
+    const Region* cone = nullptr;
+    for (const Region& a : r.work.accepted) {
+        if (a.origin == Origin::FilletStrip) fil = &a;
+        if (a.origin == Origin::CylGrow) ++nCyl;
+        if (a.origin == Origin::ChamferCone) cone = &a;
+    }
+    const std::string rob = [&] {
+        std::istringstream is(r.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_ROB", 0) == 0) return line;
+        return std::string();
+    }();
+    bool ok = fil != nullptr && fil->tris.size() == band.size() && nCyl == 1 && cone != nullptr &&
+              r.work.accepted.size() == 3 &&
+              r.work.provisionals[(std::size_t)f.strayRobProv].claim == ProvClaim::Unclaimed &&
+              fieldNum(rob, "stolen") == 4.0 && fieldNum(rob, "released") == 1.0;
+    if (ok) {
+        const int ci = cone->filletNbrA;
+        ok = ci >= 0 && ci < (int)r.work.accepted.size() &&
+             r.work.accepted[(std::size_t)ci].origin == Origin::CylGrow &&
+             regionHas(r.work.accepted[(std::size_t)ci], f.strayKeep);
+        std::fprintf(stderr, "case21 filTris=%d coneNbr=%d %s\n", (int)fil->tris.size(), ci,
+                     rob.c_str());
+    }
+    if (!ok) dumpFail("case21", r);
+    expect(ok, "case21 uncertified CylGrow robbed by a certified band dissolves");
+}
+
+static void case22() {
+    using namespace stl2step::refit;
+    RobFixture f = makeRob(0.5);
+    Run r = runClaim(f.m.synth, std::move(f.m.work), 1e-4, 1);
+    // A region within τ is never touched: it keeps its triangles and no
+    // FilletStrip holds one of them.
+    bool kept = false, leaked = false;
+    for (const Region& a : r.work.accepted) {
+        if (a.origin == Origin::CylGrow && a.tris.size() == f.stolen.size() + 1) kept = true;
+        if (a.origin != Origin::FilletStrip) continue;
+        for (int t : f.stolen)
+            if (regionHas(a, t)) leaked = true;
+    }
+    const bool ok = kept && !leaked && r.diag.find("DIAG_REL_ROB") == std::string::npos;
+    std::fprintf(stderr, "case22 kept=%d leaked=%d accepted=%d\n", kept ? 1 : 0, leaked ? 1 : 0,
+                 (int)r.work.accepted.size());
+    if (!ok) dumpFail("case22", r);
+    expect(ok, "case22 certified CylGrow region is not robbed");
+}
+
+static void case23() {
+    using namespace stl2step::refit;
+    // D-fc-3.2.2. Walls x = 0 and z = 0 whose bodies lie far from each other's
+    // contact: every boundary vertex of A sits at z >= 50, every one of B at
+    // x <= 33, so no circle tangent to both brings a vertex of each within τ.
+    // Every side is skipped and prints no band line. A strip of candidates sits
+    // between them so the vote would have roots.
+    Synth s;
+    SegmentWork w;
+    std::vector<int> strip;
+    const int s0 = s.addV(gp_XYZ(10, 0, 10));
+    const int s1 = s.addV(gp_XYZ(10, 8, 10));
+    const int s2 = s.addV(gp_XYZ(12, 0, 11));
+    const int s3 = s.addV(gp_XYZ(12, 8, 11));
+    s.addQuad(s0, s1, s2, s3, strip);
+    addStrip(w, strip);
+    const int wa = s.tri(s.addV(gp_XYZ(0, 0, 50)), s.addV(gp_XYZ(0, 8, 50)), s.addV(gp_XYZ(0, 4, 80)));
+    const int wb = s.tri(s.addV(gp_XYZ(3, 0, 0)), s.addV(gp_XYZ(3, 8, 0)), s.addV(gp_XYZ(33, 4, 0)));
+    addAnchor(w, {wa}, gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(w, {wb}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    std::string sum;
+    {
+        std::istringstream is(r.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_SUM stage=extrude", 0) == 0) sum = line;
+    }
+    const bool ok = r.work.accepted.empty() && fieldNum(sum, "prunedSides") == 4.0 &&
+                    fieldNum(sum, "evaluatedSides") == 0.0 &&
+                    r.diag.find("DIAG_REL_BAND") == std::string::npos;
+    std::fprintf(stderr, "case23 %s\n", sum.c_str());
+    if (!ok) dumpFail("case23", r);
+    expect(ok, "case23 anchors whose contacts cannot meet are pruned");
+
+    // The fillet's own side is never pruned: its contact vertices are the
+    // walls' boundary vertices.
+    auto built = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
+    Run f = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    std::string fsum;
+    {
+        std::istringstream is(f.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_SUM stage=extrude", 0) == 0) fsum = line;
+    }
+    const bool fok = f.work.accepted.size() == 1 && fieldNum(fsum, "evaluatedSides") >= 1.0 &&
+                     fieldNum(fsum, "prunedSides") <= 3.0;
+    std::fprintf(stderr, "case23 fillet %s\n", fsum.c_str());
+    if (!fok) dumpFail("case23-fillet", f);
+    expect(fok, "case23 the fillet's side is evaluated");
+}
+
+static void case24() {
+    using namespace stl2step::refit;
+    // D-fc-3.2.2. The band meets a small piece of the x = 0 wall that is not an
+    // anchor (shatter-class); the x = 0 anchor is another piece of the same
+    // plane, far from the band. Its body boundary gives no radius near the
+    // band's, but the band's contact vertices are candidates on its plane, so
+    // the side is evaluated and the band is claimed through that pair.
+    Synth s;
+    SegmentWork w;
+    const double R = 3.0;
+    const int nStrips = 24;
+    std::vector<int> lo((std::size_t)nStrips + 1), hi((std::size_t)nStrips + 1), band;
+    for (int i = 0; i <= nStrips; ++i) {
+        const double th = 0.5 * kPi * (double)i / (double)nStrips;
+        lo[(std::size_t)i] = s.addV(gp_XYZ(R * (1.0 - std::cos(th)), 0.0, R * (1.0 - std::sin(th))));
+        hi[(std::size_t)i] = s.addV(gp_XYZ(R * (1.0 - std::cos(th)), 8.0, R * (1.0 - std::sin(th))));
+    }
+    for (int i = 0; i < nStrips; ++i) {
+        std::vector<int> tris;
+        s.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                  hi[(std::size_t)i + 1], tris);
+        for (int t : tris) band.push_back(t);
+        addStrip(w, tris);
+    }
+    const int piece = s.tri(lo.front(), hi.front(), s.addV(gp_XYZ(0.0, 4.0, R + 0.5)));
+    addStrip(w, {piece});
+    w.provisionals.back().plane = gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 0));
+    const int farA = s.tri(s.addV(gp_XYZ(0, 0, 60)), s.addV(gp_XYZ(0, 8, 60)), s.addV(gp_XYZ(0, 4, 90)));
+    const int wb = s.tri(lo.back(), hi.back(), s.addV(gp_XYZ(R + 30.0, 4.0, 0.0)));
+    addAnchor(w, {farA}, gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(w, {wb}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    bool ok = r.work.accepted.size() == 1;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        ok = a.origin == Origin::FilletStrip && nearRadius(a, R, r.tau) &&
+             a.tris.size() == band.size();
+        std::fprintf(stderr, "case24 r=%.9g tris=%d\n", a.radius, (int)a.tris.size());
+    }
+    if (!ok) dumpFail("case24", r);
+    expect(ok, "case24 a far piece of the wall still claims the band");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -1003,6 +1285,12 @@ int main() {
     case16();
     case17();
     case18();
+    case19();
+    case20();
+    case21();
+    case22();
+    case23();
+    case24();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
