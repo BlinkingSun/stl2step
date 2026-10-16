@@ -1015,7 +1015,9 @@ double wrap2pi(double a) {
 }
 
 // Ascending sort of positive finite doubles. Their IEEE-754 bit patterns order
-// as the values do, so this is std::sort's sequence, by LSD radix on bytes.
+// as the values do, so this is std::sort's sequence: LSD radix on the top four
+// bytes, then an insertion pass that orders each run of equal top bytes by the
+// full pattern.
 void sortPositive(std::vector<double>& v, std::vector<std::uint64_t>& a,
                   std::vector<std::uint64_t>& b) {
     const std::size_t n = v.size();
@@ -1023,13 +1025,13 @@ void sortPositive(std::vector<double>& v, std::vector<std::uint64_t>& a,
     a.resize(n);
     b.resize(n);
     std::memcpy(a.data(), v.data(), n * sizeof(double));
-    std::size_t cnt[8][256];
+    std::size_t cnt[4][256];
     std::memset(cnt, 0, sizeof(cnt));
     for (std::size_t i = 0; i < n; ++i) {
         const std::uint64_t k = a[i];
-        for (int d = 0; d < 8; ++d) ++cnt[d][(k >> (8 * d)) & 0xff];
+        for (int d = 0; d < 4; ++d) ++cnt[d][(k >> (32 + 8 * d)) & 0xff];
     }
-    for (int d = 0; d < 8; ++d) {
+    for (int d = 0; d < 4; ++d) {
         std::size_t* c = cnt[d];
         bool trivial = false;  // every key has this byte: the pass is the identity
         for (int x = 0; x < 256 && !trivial; ++x) trivial = c[x] == n;
@@ -1040,8 +1042,18 @@ void sortPositive(std::vector<double>& v, std::vector<std::uint64_t>& a,
             c[x] = sum;
             sum += t;
         }
-        for (std::size_t i = 0; i < n; ++i) b[c[(a[i] >> (8 * d)) & 0xff]++] = a[i];
+        const int sh = 32 + 8 * d;
+        for (std::size_t i = 0; i < n; ++i) b[c[(a[i] >> sh) & 0xff]++] = a[i];
         a.swap(b);
+    }
+    for (std::size_t i = 1; i < n; ++i) {
+        const std::uint64_t k = a[i];
+        std::size_t j = i;
+        while (j > 0 && a[j - 1] > k) {
+            a[j] = a[j - 1];
+            --j;
+        }
+        a[j] = k;
     }
     std::memcpy(v.data(), a.data(), n * sizeof(double));
 }
