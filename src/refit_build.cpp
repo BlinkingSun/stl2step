@@ -16,6 +16,7 @@
 #include "refit_cone_math.hpp"
 #include "refit_torus_math.hpp"
 #include "refit_internal.hpp"
+#include "refit_axis_seam.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -1141,6 +1142,7 @@ struct ChainGeom {
     int regA = -1, regB = -1;
     double chainSnapCap = 0;
     bool tier2Polyline = false;       // D-130-2 tier 2: ONE degree-1 B-spline through the mesh vertices
+    bool axisSeam = false;            // D-fc-4.8: ia is its torus family's seam vertex
 };
 
 double curveResidual(const AnalyticCurve& c, const gp_Pnt& p) {
@@ -3260,6 +3262,218 @@ bool triangleOnExplodedOrIsland(const RegionSet& rs, const std::vector<char>& ex
 
 bool regionExploded(const std::vector<char>& exploded, int id) {
     return id >= 0 && (size_t)id < exploded.size() && exploded[(size_t)id] != 0;
+}
+
+// D-fc-4.8: one seam azimuth per revolution axis. A closed TorusBlend shares
+// closed rims with coaxial cylinders, cones, tori and plane disks. Each face
+// stands its seam on its own rim vertices; rims whose mesh columns do not
+// align leave seam corners only a vertex tolerance can close, and a STEP round
+// trip does not carry that tolerance. Every closed-360 revolution face coaxial
+// within tau with a closed torus takes ONE frame XDirection (the lowest-id
+// closed torus's), so u = 0 names one half-plane for the whole family, and
+// every closed rim of the family starts at that half-plane's exact circle point.
+struct TorusSeamFamily {
+    gp_Ax1 axis;               // the seed torus's axis line
+    gp_Dir refX;               // the seam half-plane (first-built member's XDirection)
+    std::vector<int> members;  // region ids, ascending
+};
+
+bool torusFamilyCandidate(const Region& r) {
+    if (!isAnalytic(&r) || !r.closed360) return false;
+    return r.type == SurfType::Cylinder || isChamferConeR(r) || isTorusBlendR(r);
+}
+
+// Coaxial within tau at r's own boundary: the lever is the farthest rim vertex
+// of r from the family's axis point.
+bool coaxialAtRims(const MeshView& mv, const RegionSet& rs, const Region& r, const gp_Ax1& axis,
+                   double tau) {
+    double lever = 0.0;
+    for (const BoundaryChain& ch : rs.chains) {
+        if (ch.regA != r.id && ch.regB != r.id) continue;
+        for (int lv : ch.meshVerts)
+            lever = std::max(lever, pntOf(mv, lv).Distance(axis.Location()));
+    }
+    return axisOnFamilyAxis(gp_Ax1(r.ax.Location(), r.ax.Direction()), axis, lever, tau);
+}
+
+// The largest radius a region's own rims reach (cylinder R, cone R_hi, torus
+// R + r): the arm a frame rotation acts on.
+double revolutionArm(const Region& r) {
+    if (isChamferConeR(r)) return std::max(r.radius, chamferRhiOf(r));
+    if (r.type == SurfType::Torus) return r.radius + r.radius2;
+    return r.radius;
+}
+
+// Families are formed once per buildFaces call. The half-plane is the u = 0 of
+// the member built first (closed-360 cylinders, then region id), whose rims
+// later faces reuse. A family whose every closed rim already has a mesh vertex
+// within tau of that half-plane is left as built today; otherwise members whose
+// own u = 0 stands more than tau (at their arm) off it are turned onto it.
+std::vector<TorusSeamFamily> shareTorusSeamFrames(const MeshView& mv, RegionSet& rs) {
+    std::vector<TorusSeamFamily> fams;
+    const double tau = 2.0 * std::max(mv.quantFloor, 0.0);
+    if (!(tau > 0.0)) return fams;
+    std::vector<int> ids;
+    for (const Region& r : rs.regions)
+        if (torusFamilyCandidate(r)) ids.push_back(r.id);
+    std::sort(ids.begin(), ids.end());
+    std::vector<char> taken(ids.size(), 0);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const Region* seed = regionById(rs, ids[i]);
+        if (taken[i] || !seed || !isTorusBlendR(*seed)) continue;
+        TorusSeamFamily fam;
+        fam.axis = gp_Ax1(seed->ax.Location(), seed->ax.Direction());
+        for (size_t j = 0; j < ids.size(); ++j) {
+            const Region* m = regionById(rs, ids[j]);
+            if (taken[j] || !m) continue;
+            if (j != i && !coaxialAtRims(mv, rs, *m, fam.axis, tau)) continue;
+            taken[j] = 1;
+            fam.members.push_back(m->id);
+        }
+        const Region* first = nullptr;
+        for (int id : fam.members) {
+            const Region* m = regionById(rs, id);
+            const bool cyl = m->type == SurfType::Cylinder;
+            if (!first || (cyl && first->type != SurfType::Cylinder)) first = m;
+        }
+        fam.refX = first->ax.XDirection();
+        double worst = 0.0;
+        for (const BoundaryChain& ch : rs.chains) {
+            if (!ch.closedLoop) continue;
+            if (!std::binary_search(fam.members.begin(), fam.members.end(), ch.regA) &&
+                !std::binary_search(fam.members.begin(), fam.members.end(), ch.regB))
+                continue;
+            std::vector<gp_Pnt> pts;
+            for (int lv : ch.meshVerts) pts.push_back(pntOf(mv, lv));
+            worst = std::max(worst, rimSeamOffset(fam.axis, fam.refX, pts));
+        }
+        if (diagRelEnabled())
+            std::fprintf(stderr,
+                         "DIAG_AXISSEAM_FAMILY seed=%d ref=%d members=%zu worstRimOff=%.6g "
+                         "active=%d\n",
+                         seed->id, first->id, fam.members.size(), worst, worst > tau ? 1 : 0);
+        if (!(worst > tau)) continue;
+        for (int id : fam.members) {
+            Region* m = regionByIdMut(rs, id);
+            gp_Ax3 turned;
+            if (!m || !frameOnRefX(m->ax, fam.refX, turned)) continue;
+            const double dAng = m->ax.XDirection().Angle(turned.XDirection());
+            const bool turn = frameNeedsTurn(m->ax, turned, revolutionArm(*m), tau);
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_AXISSEAM_FRAME seed=%d rid=%d type=%d dAng=%.6g arm=%.6g "
+                             "turn=%d\n",
+                             seed->id, id, (int)m->type, dAng, revolutionArm(*m), turn ? 1 : 0);
+            if (turn) m->ax = turned;
+        }
+        fams.push_back(std::move(fam));
+    }
+    return fams;
+}
+
+// The family a region belongs to, or nullptr.
+const TorusSeamFamily* torusSeamFamilyOf(const std::vector<TorusSeamFamily>& fams, int rid) {
+    for (const TorusSeamFamily& f : fams)
+        if (std::binary_search(f.members.begin(), f.members.end(), rid)) return &f;
+    return nullptr;
+}
+
+// Every closed rim of an active family starts at the family half-plane. The
+// chain's terminal is its mesh vertex nearest that half-plane, placed on the
+// exact circle point there; the rim circle's parameter origin is that point. A
+// rim whose two faces are not both built analytically keeps its mesh vertex --
+// facets and polylines run through mesh points -- and a vertex an earlier
+// round placed goes back to its mesh point. placed[lv] marks the vertices this
+// pass has moved.
+int alignTorusSeamRims(const MeshView& mv, const RegionSet& rs,
+                       const std::vector<TorusSeamFamily>& fams, std::vector<ChainGeom>& geom,
+                       const std::vector<TopoDS_Vertex>& verts, const std::vector<char>& exploded,
+                       const std::vector<char>& eprimeFill, std::vector<char>& placed) {
+    const double tau = 2.0 * std::max(mv.quantFloor, 0.0);
+    if (fams.empty() || !(tau > 0.0)) return 0;
+    if (placed.size() < verts.size()) placed.resize(verts.size(), 0);
+    std::vector<int> onChains(verts.size(), 0);
+    for (const BoundaryChain& ch : rs.chains)
+        for (int lv : ch.meshVerts)
+            if (lv >= 0 && (size_t)lv < onChains.size()) onChains[(size_t)lv]++;
+    std::vector<char> keep(verts.size(), 0);
+    int nPlaced = 0;
+    for (size_t ci = 0; ci < rs.chains.size() && ci < geom.size(); ++ci) {
+        ChainGeom& g = geom[ci];
+        const BoundaryChain& ch = rs.chains[ci];
+        if (!ch.closedLoop || g.curve.kind != AnalyticCurve::Circ || g.ia < 0 || g.ia != g.ib)
+            continue;
+        const Region* A = regionById(rs, ch.regA);
+        const Region* B = regionById(rs, ch.regB);
+        if (!isAnalytic(A) || !isAnalytic(B)) continue;
+        if (regionExploded(exploded, A->id) || regionExploded(exploded, B->id) ||
+            regionExploded(eprimeFill, A->id) || regionExploded(eprimeFill, B->id))
+            continue;
+        const TorusSeamFamily* fam = torusSeamFamilyOf(fams, A->id);
+        if (!fam) fam = torusSeamFamilyOf(fams, B->id);
+        if (!fam) continue;
+        const gp_Circ& C = g.curve.circ;
+        SeamHalfPlane hp;
+        if (!circleOnFamilyAxis(C, fam->axis, tau) || !seamHalfPlaneOn(C, fam->refX, hp)) continue;
+        std::vector<int> ids;
+        std::vector<gp_Pnt> pts;
+        for (int m : ch.meshVerts) {
+            if (m < 0 || (size_t)m >= verts.size()) continue;
+            ids.push_back(m);
+            pts.push_back(pntOf(mv, m));
+        }
+        const int k = nearestToSeamHalfPlane(C, hp, pts);
+        const int lv = k >= 0 ? ids[(size_t)k] : -1;
+        // A vertex another chain also runs through is a pinch; it stays.
+        if (lv < 0 || verts[(size_t)lv].IsNull() || onChains[(size_t)lv] != 1) continue;
+        // The rim circle's parameter origin is the half-plane, so the rim edge is
+        // [0, 2pi] from the exact point P = circle(0).
+        const gp_Pnt P = hp.p;
+        const double off = pntOf(mv, lv).Distance(P);
+        g.curve.circ =
+            gp_Circ(gp_Ax2(C.Location(), C.Axis().Direction(), gp_Dir(hp.x)), C.Radius());
+        g.ia = g.ib = lv;
+        g.axisSeam = true;
+        BRep_Builder Bv;
+        Bv.UpdateVertex(verts[(size_t)lv], P, BRep_Tool::Tolerance(verts[(size_t)lv]));
+        placed[(size_t)lv] = 1;
+        keep[(size_t)lv] = 1;
+        ++nPlaced;
+        if (diagRelEnabled())
+            std::fprintf(stderr,
+                         "DIAG_AXISSEAM_RIM ci=%d regA=%d regB=%d lv=%d R=%.6f off=%.6g\n",
+                         (int)ci, A->id, B->id, lv, C.Radius(), off);
+    }
+    for (size_t lv = 0; lv < placed.size() && lv < verts.size(); ++lv) {
+        if (!placed[lv] || keep[lv] || verts[lv].IsNull()) continue;
+        BRep_Builder Bv;
+        Bv.UpdateVertex(verts[lv], pntOf(mv, (int)lv), BRep_Tool::Tolerance(verts[lv]));
+        placed[lv] = 0;
+    }
+    return nPlaced;
+}
+
+// A family rim edge: the whole circle from parameter 0, where its vertex stands.
+TopoDS_Edge makeAxisSeamCircle(const gp_Circ& circ, const TopoDS_Vertex& V) {
+    try {
+        BRepBuilderAPI_MakeEdge me(Handle(Geom_Circle)(new Geom_Circle(circ)), V, V, 0.0,
+                                   2.0 * kPi);
+        if (me.IsDone()) {
+            TopoDS_Edge e = me.Edge();
+            e.Closed(Standard_True);
+            return e;
+        }
+    } catch (const Standard_Failure&) {
+    }
+    return TopoDS_Edge();
+}
+
+// A cap loop that is one family rim names the family seam vertex (else -1).
+int axisSeamVertexOf(const Loop* lp, const std::vector<ChainGeom>& geom) {
+    if (!lp || lp->chainIdx.size() != 1) return -1;
+    const int ci = lp->chainIdx.front();
+    if (ci < 0 || (size_t)ci >= geom.size() || !geom[(size_t)ci].axisSeam) return -1;
+    return geom[(size_t)ci].ia;
 }
 
 bool collapseDiagEnabled();
@@ -9172,7 +9386,8 @@ TopoDS_Edge probeCollapsedMakeEdge(const ChainGeom& g, const BoundaryChain& ch, 
     const gp_Pnt mid = probeArcMid(curve, ch, mv, A, B, verts, ia, ib);
     TopoDS_Edge e;
     if (full && curve.kind == AnalyticCurve::Circ) {
-        e = makeFullCircle(curve.circ, verts[(size_t)ia]);
+        if (g.axisSeam) e = makeAxisSeamCircle(curve.circ, verts[(size_t)ia]);
+        if (e.IsNull()) e = makeFullCircle(curve.circ, verts[(size_t)ia]);
         if (e.IsNull()) e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
     } else if (!full && curve.kind == AnalyticCurve::Circ && ch.meshVerts.size() >= 3) {
         e = makeArc(curve.circ, verts[(size_t)ia], verts[(size_t)ib], mid);
@@ -12689,6 +12904,12 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         }
         if (bh >= 0) vH = bh;
     }
+    // D-fc-4.8: a cap that is a torus-family rim starts at the family seam vertex.
+    if (innerU.empty()) {
+        const int aL = axisSeamVertexOf(capL, geom), aH = axisSeamVertexOf(capH, geom);
+        if (aL >= 0) vL = aL;
+        if (aH >= 0) vH = aH;
+    }
     if (diagP2Enabled() && !innerU.empty())
         std::fprintf(stderr,
                      "DIAG_SEAMPICK rid=%d seamU=%.5f vL=%d uL=%.5f vH=%d uH=%.5f "
@@ -13159,8 +13380,11 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
 
     TopoDS_Edge eSeam;
     TopoDS_Vertex seamVL = verts[(size_t)vL];
+    // D-fc-4.8: a family seam vertex stands on its exact circle point.
+    const bool onAxisSeam = axisSeamVertexOf(capL, geom) == vL;
     try {
-        gp_Lin lin(pntOf(mv, vL), r.ax.Direction());
+        gp_Lin lin(onAxisSeam ? BRep_Tool::Pnt(verts[(size_t)vL]) : pntOf(mv, vL),
+                   r.ax.Direction());
         AnalyticCurve acs;
         acs.kind = AnalyticCurve::Lin;
         acs.lin = lin;
@@ -13209,7 +13433,11 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // which need not be the shared seam vertex (D-130-16). Mint both rims
     // onto verts[vL]/verts[vH] so the generator meets them; publish then
     // lets the torus (and the plate) reuse those TShapes.
-    if (keepSharedCaps && simple) {
+    // D-fc-4.8: torus-family rims were birthed on the family seam vertex; they
+    // are the shared seam's own circles and are not re-minted.
+    const bool capsOnAxisSeam =
+        axisSeamVertexOf(capL, geom) == vL && axisSeamVertexOf(capH, geom) == vH;
+    if (keepSharedCaps && simple && !capsOnAxisSeam) {
         eL = makeFullCircle(circL, verts[(size_t)vL]);
         eH = makeFullCircle(circH, verts[(size_t)vH]);
         if (eL.IsNull() || eH.IsNull()) {
@@ -13220,7 +13448,9 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
 
     try {
         if (simple) {
-            const double u0 = azimuthOf(r, BRep_Tool::Pnt(verts[(size_t)vL]));
+            // D-fc-4.8: the family seam vertex stands at u = 0 by construction.
+            const double u0 =
+                onAxisSeam ? 0.0 : azimuthOf(r, BRep_Tool::Pnt(verts[(size_t)vL]));
             if (!inners.empty() && seamCrossesInner(u0)) {
                 emit(warn, "seamed360: seam crosses an inner wire -- no generator clear of every window");
                 return false;
@@ -15596,6 +15826,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         }
 
         const bool wasClosed = meshComponentClosed(mv);
+        // D-fc-4.8: each closed torus's coaxial family stands on one seam half-plane.
+        const std::vector<TorusSeamFamily> seamFams = shareTorusSeamFrames(mv, rs);
+        std::vector<char> seamPlaced;
 
         struct VSnap {
             gp_Pnt p;
@@ -16310,6 +16543,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 continue;
             }
+            alignTorusSeamRims(mv, rs, seamFams, geom, verts, exploded, eprimeFill, seamPlaced);
             std::unordered_set<int> seamLocked;
             gSeamFailFirst = 0;
             snapSeamVertices(rs, mv, geom, verts, seamLocked);
@@ -16572,7 +16806,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                  0.5 * (pa.Z() + pb.Z()));
                 }
                 if (full && curve.kind == AnalyticCurve::Circ) {
-                    e = makeFullCircle(curve.circ, verts[(size_t)ia]);
+                    // D-fc-4.8: a torus-family rim is the circle from its exact seam point.
+                    if (geom[ci].axisSeam) e = makeAxisSeamCircle(curve.circ, verts[(size_t)ia]);
+                    if (e.IsNull()) e = makeFullCircle(curve.circ, verts[(size_t)ia]);
                     if (e.IsNull())
                         e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
                 } else {
@@ -17040,6 +17276,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
                     int vL = vertexClosestToUOnLoop(mv, r, *loopLo, rs, 0.0);
                     int vH = vertexClosestToUOnLoop(mv, r, *loopHi, rs, 0.0);
+                    // D-fc-4.8: torus-family rims start at the family seam vertex.
+                    if (const int a = axisSeamVertexOf(loopLo, geom); a >= 0) vL = a;
+                    if (const int a = axisSeamVertexOf(loopHi, geom); a >= 0) vH = a;
                     if (vL < 0 || vH < 0 || (size_t)vL >= verts.size() ||
                         (size_t)vH >= verts.size())
                         return coneFail("no-seam-vertex", (double)vL, (double)vH);
@@ -18150,6 +18389,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             ciH0 = capH->chainIdx.front();
                             vL = vertexClosestToUOnLoop(mv, r, *capL, rs, 0.0);
                             vH = vertexClosestToUOnLoop(mv, r, *capH, rs, 0.0);
+                            // D-fc-4.8: family rims start at the family seam vertex.
+                            if (const int a = axisSeamVertexOf(capL, geom); a >= 0) vL = a;
+                            if (const int a = axisSeamVertexOf(capH, geom); a >= 0) vH = a;
                         } else {
                             vL = vertexClosestOnTorusUV(mv, r, tsurf, 0.0, r.vMin);
                             vH = vertexClosestOnTorusUV(mv, r, tsurf, 0.0, r.vMax);
@@ -18223,7 +18465,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             snapVertexToCurve(VH, acH, snapCap);
                         }
 
-                        const double u0 = azimuthOf(r, BRep_Tool::Pnt(VL));
+                        // D-fc-4.8: the family seam vertex stands at u = 0 by construction.
+                        const bool vlOnAxisSeam =
+                            vL == axisSeamVertexOf(capL, geom) && VL.IsSame(verts[(size_t)vL]);
+                        const double u0 = vlOnAxisSeam ? 0.0 : azimuthOf(r, BRep_Tool::Pnt(VL));
                         // D-130-16: both rims share one generator. A reused
                         // high-cap circle whose vertex sits at another azimuth
                         // cannot join UIso(u0); mint that rim (plane 8 is still
@@ -18240,7 +18485,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                    P->builtAs == BuiltAs::Single ||
                                    P->builtAs == BuiltAs::TwoHalves;
                         };
-                        if (reusedH &&
+                        // D-fc-4.8: two family rims already stand on one meridian.
+                        const bool rimsOnAxisSeam = vL == axisSeamVertexOf(capL, geom) &&
+                                                    vH == axisSeamVertexOf(capH, geom);
+                        if (reusedH && !rimsOnAxisSeam &&
                             angularDistance(u0, azimuthOf(r, BRep_Tool::Pnt(VH))) >
                                 Precision::Angular() &&
                             !builtBefore(ciH0)) {
