@@ -76,6 +76,12 @@ struct SegmentParams {
     // D-142-1: 0 = all cores (same as Options.threads). Thread construction
     // goes through detail::runPool; this field is the budget segment() installs.
     int    requestedThreads = 0;
+    // --- U-3 per torus (D-fc-4.11 (a)) -----------------------------------
+    // Local triangles of torus faces a previous buildFaces of this component
+    // could not ship. A relational torus band that holds one of them is
+    // withheld: it is gathered as a claim but not emitted, so its triangles and
+    // the atoms it would absorb keep their pre-T state. Empty = no withholding.
+    std::vector<int> torusWithheldTris;
 };
 
 enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus };
@@ -277,6 +283,10 @@ struct RegionSet {                  // exactly one per CLEAN component
     bool torusRevertValid = false;
     bool torusRevertApplied = false;
     TorusTopologySnapshot torusRevert;
+    // Filled by buildFaces when it returns false for U-3: the local triangles of
+    // every torus region that failed to ship (D-fc-4.11 (a)). The driver retries
+    // segment() with them withheld before it takes the pre-T snapshot.
+    std::vector<int> torusFailedTris;
 };
 
 // P1 entry point. Pure math. Links no OCCT topology: gp_ value types and math_ solvers

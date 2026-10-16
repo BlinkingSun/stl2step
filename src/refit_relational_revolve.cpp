@@ -525,6 +525,11 @@ struct WorkMesh {
     std::vector<int> g2l;
     std::vector<int> triProv;
     std::vector<char> freeTri;
+    // U-3 per torus (D-fc-4.11 (a)): triangles of torus faces the builder could
+    // not ship (SegmentParams::torusWithheldTris), and the atoms a withheld band
+    // would have absorbed (they stay accepted, in their pre-T state).
+    std::vector<char> withheldTri;
+    std::vector<char> atomHeld;
     double tau = 0, q = 0;
     double thetaBin = 0;
     int maxIter = 8;
@@ -2271,6 +2276,25 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 refuse("same-surface", &cert);
                 continue;
             }
+            // D-fc-4.11 (a): a band that holds a triangle of a torus face the
+            // builder could not ship is withheld. It is gathered as this claim
+            // (its edges, triangles and atoms leave later windows, as they would
+            // after the claim) but nothing is emitted, trimmed or updated: its
+            // triangles and atoms keep their pre-T state.
+            if (torusWindowOverlapsRefused(band.tris, wm.withheldTri)) {
+                for (int a : atoms) {
+                    atomDead[(std::size_t)a] = 1;
+                    wm.atomHeld[(std::size_t)a] = 1;
+                }
+                for (int t : band.tris) wm.freeTri[(std::size_t)t] = 0;
+                if (diagOn())
+                    std::fprintf(stderr,
+                                 "DIAG_REL_TORUS_HELD seed=%d nTri=%zu atoms=%zu chainRings=%zu "
+                                 "donor=%d maxDevTau=%.4f radii=%.6f/%.6f\n",
+                                 band.seed, band.tris.size(), atoms.size(), chain.size(),
+                                 donor.idx, cert.maxDev / tau, cert.Rmaj, cert.Rmin);
+                continue;
+            }
             int straddle = countStraddle(work, band.tris, nTri);
             if (!emitTorus(wm, work, cdonor, band, cert, cl, straddle)) {
                 refuse("degenerate", &cert);
@@ -2483,6 +2507,10 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (t >= 0 && t < nTri) atomOf[(std::size_t)t] = i;
             }
             std::vector<char> atomDead(work.accepted.size(), 0);
+            wm.atomHeld.assign(work.accepted.size(), 0);
+            wm.withheldTri.assign((std::size_t)nTri, 0);
+            for (int t : p.torusWithheldTris)
+                if (t >= 0 && t < nTri) wm.withheldTri[(std::size_t)t] = 1;
             std::vector<std::size_t> order(donors.size());
             for (std::size_t i = 0; i < donors.size(); ++i) order[i] = i;
             std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
@@ -2542,6 +2570,9 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 if (atomDead[(std::size_t)donor.idx]) continue;
                 gatherTori(wm, work, donor, axisScans, atomOf, atomDead, claimed, refused);
             }
+            // An atom a withheld band would have absorbed stays (D-fc-4.11 (a)).
+            for (std::size_t i = 0; i < atomDead.size() && i < wm.atomHeld.size(); ++i)
+                if (wm.atomHeld[i]) atomDead[i] = 0;
             int nDead = 0;
             for (char c : atomDead) nDead += c ? 1 : 0;
             if (nDead > 0) {

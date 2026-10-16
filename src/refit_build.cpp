@@ -1388,7 +1388,14 @@ void commitTorusPendingReclaim(RegionSet& rs, int torId) {
     TorusPendingReclaim& pack = rs.torusPending[(std::size_t)torp->torusPending];
     if (pack.committed) return;
     pack.committed = true;
-    rs.torusRevertValid = false;
+    // D-fc-4.11 (a): committing one torus keeps the pre-T snapshot. A torus that
+    // fails later in this component is named in rs.torusFailedTris and the
+    // driver withholds it alone (per-torus U-3), the shipped tori stay.
+}
+
+// U-3 per torus (D-fc-4.11 (a)): name a torus region that failed to ship.
+void noteTorusFailed(RegionSet& rs, const Region& tor) {
+    rs.torusFailedTris.insert(rs.torusFailedTris.end(), tor.tris.begin(), tor.tris.end());
 }
 
 void revertTorusPendingReclaim(RegionSet& /*rs*/, Region& /*tor*/) {}
@@ -15794,6 +15801,7 @@ bool tryStageP(const MeshView& mv, RegionSet& rs, std::vector<TopoDS_Face>& out)
 bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vertex>& verts,
                 std::vector<TopoDS_Face>& out, WarnFn warn) {
     out.clear();
+    rs.torusFailedTris.clear();
     try {
         gCompNTri = (int)mv.nTri;
         gReconnectFires = 0;
@@ -18194,6 +18202,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                 Br.UpdateVertex(sv.first, sv.second);
                         }
                         revertTorusTopology();
+                        if (torusSnapshot) noteTorusFailed(rs, r);
                         if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
                             std::fprintf(stderr,
                                          "DIAG_TORUSFAIL rid=%d site=%d step=%s closed360=%d "
@@ -18948,7 +18957,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (id < 0 || (size_t)id >= exploded.size() || exploded[(size_t)id]) return;
             exploded[(size_t)id] = 1;
             Region* rr = regionByIdMut(rs, id);
-            if (torusSnapshot && rr && isTorusBlendR(*rr)) torusExplodedU3 = true;
+            if (torusSnapshot && rr && isTorusBlendR(*rr)) {
+                torusExplodedU3 = true;
+                noteTorusFailed(rs, *rr);
+            }
             if (rr) {
                 rr->builtAs = BuiltAs::ExplodedToFacets;
                 rr->reject = Reject::FaceBuildFailed;
@@ -19060,6 +19072,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         const Region* o = regionById(rs, ch.regA == id ? ch.regB : ch.regA);
                         if (o && o->origin == Origin::TorusBlend && o->closed360 &&
                             o->builtAs == BuiltAs::Seamed360) {
+                            noteTorusFailed(rs, *o);
                             if (diagRelEnabled())
                                 std::fprintf(stderr,
                                              "DIAG_TORUS_U3 partner=%d of torus=%d failed: pre-T\n",

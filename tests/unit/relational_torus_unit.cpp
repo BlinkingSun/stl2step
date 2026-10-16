@@ -606,7 +606,44 @@ static void caseWindowOverlap() {
     expect(!torusWindowOverlapsRefused({0, 12}, failed), "F1: out-of-range ids are ignored");
 }
 
+// D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
+// its triangles and its atom keep their pre-T state.
+static void caseWithheld() {
+    for (int variant = 0; variant < 2; ++variant) {
+        Part p = ringTorus(24, 6);
+        Provisional pr;
+        for (int j = 0; j < 4; ++j)
+            pr.tris.insert(pr.tris.end(), p.rows[(std::size_t)j].begin(),
+                           p.rows[(std::size_t)j].end());
+        std::sort(pr.tris.begin(), pr.tris.end());
+        p.work.provisionals.push_back(pr);
+        std::vector<int> at;
+        for (int j = 4; j < 6; ++j)
+            at.insert(at.end(), p.rows[(std::size_t)j].begin(), p.rows[(std::size_t)j].end());
+        p.work.accepted.push_back(atomOf(at));
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol);
+        // variant 0: a triangle of the band; variant 1: a donor triangle (not a band).
+        sp.torusWithheldTris = {variant == 0 ? p.rows[2][5] : p.donorTris[3]};
+        expect(claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Torus), "withheld call");
+        if (variant == 0) {
+            expect(torusOf(p.work) == nullptr, "withheld: the band is not emitted");
+            expect(countOrigin(p.work, Origin::CylGrow, false) == 1,
+                   "withheld: its atom stays accepted");
+            expect(p.work.provisionals[0].claim == ProvClaim::Unclaimed,
+                   "withheld: its free triangles stay unclaimed (pre-T)");
+            expect(!p.work.torusAdmitted && p.work.torusPending.empty(),
+                   "withheld: no torus admitted, no pending pack");
+        } else {
+            expect(torusOf(p.work) != nullptr, "withheld: a band without the triangle still ships");
+        }
+    }
+}
+
 int main() {
+    caseWithheld();
     caseWindowOverlap();
     caseJointTorus();
     caseProfileAbout();
