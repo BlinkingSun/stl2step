@@ -463,5 +463,237 @@ bool reclaimRelational(const MeshView& mv, const SegmentParams&, const DerivedTo
     }
 }
 
+JointAxisFit jointAxisAbout(const std::vector<std::vector<gp_XYZ>>& groups, const gp_XYZ& origin,
+                            const gp_XYZ& axis) {
+    JointAxisFit f;
+    f.origin = origin;
+    f.axis = axis;
+    const double am = axis.Modulus();
+    if (am > gp::Resolution()) f.axis /= am;
+    for (const std::vector<gp_XYZ>& g : groups) {
+        double sum = 0;
+        std::vector<double> rho;
+        rho.reserve(g.size());
+        for (const gp_XYZ& p : g) {
+            const gp_XYZ d = p - f.origin;
+            rho.push_back((d - f.axis * d.Dot(f.axis)).Modulus());
+            sum += rho.back();
+        }
+        const double R = g.empty() ? 0.0 : sum / (double)g.size();
+        double dev = 0;
+        for (double r : rho) dev = std::max(dev, std::fabs(r - R));
+        f.radius.push_back(R);
+        f.maxDev.push_back(dev);
+    }
+    return f;
+}
+
+bool jointAxisCertifies(const JointAxisFit& f, double tau) {
+    if (!(tau > 0.0) || f.maxDev.empty()) return false;
+    for (std::size_t g = 0; g < f.maxDev.size(); ++g)
+        if (!(f.maxDev[g] <= tau) || !(f.radius[g] > tau)) return false;
+    return true;
+}
+
+// Levenberg-Marquardt on (axis tilt along U, V; axis point along U, V), each
+// donor's radius projected out as the mean of its own rho (variable projection,
+// the same step cylinderFitLS takes for one radius).
+bool jointAxisFit(const std::vector<std::vector<gp_XYZ>>& groups, const gp_XYZ& originSeed,
+                  const gp_XYZ& axisSeed, int maxIters, JointAxisFit& out) {
+    std::vector<gp_XYZ> P;
+    std::vector<int> gOf;
+    for (int g = 0; g < (int)groups.size(); ++g)
+        for (const gp_XYZ& p : groups[(std::size_t)g]) {
+            if (!std::isfinite(p.X()) || !std::isfinite(p.Y()) || !std::isfinite(p.Z()))
+                return false;
+            P.push_back(p);
+            gOf.push_back(g);
+        }
+    const int nG = (int)groups.size();
+    if (nG == 0 || P.size() < 6) return false;
+    gp_XYZ mean(0, 0, 0);
+    for (const gp_XYZ& p : P) mean += p;
+    mean /= (double)P.size();
+    gp_XYZ W = axisSeed;
+    if (!(W.Modulus() > gp::Resolution())) return false;
+    W /= W.Modulus();
+    const gp_XYZ Wseed = W;
+    gp_XYZ C = originSeed;
+    std::vector<double> rho(P.size()), Rg((std::size_t)nG), cnt((std::size_t)nG, 0.0);
+    for (int g : gOf) cnt[(std::size_t)g] += 1.0;
+    auto evaluate = [&](const gp_XYZ& Wc, const gp_XYZ& Cc, double& E) {
+        std::fill(Rg.begin(), Rg.end(), 0.0);
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const gp_XYZ d = P[i] - Cc;
+            const double m = (d - Wc * d.Dot(Wc)).Modulus();
+            if (!std::isfinite(m) || m <= gp::Resolution()) return false;
+            rho[i] = m;
+            Rg[(std::size_t)gOf[i]] += m;
+        }
+        for (int g = 0; g < nG; ++g)
+            if (cnt[(std::size_t)g] > 0) Rg[(std::size_t)g] /= cnt[(std::size_t)g];
+        E = 0;
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const double f = rho[i] - Rg[(std::size_t)gOf[i]];
+            E += f * f;
+        }
+        return std::isfinite(E);
+    };
+    double E = 0;
+    if (!evaluate(W, C, E)) return false;
+    double lambda = 1e-6;
+    const int iterCap = maxIters > 0 ? maxIters : 16;
+    for (int it = 0; it < iterCap; ++it) {
+        const gp_XYZ tmp = (std::fabs(W.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+        gp_XYZ U = W.Crossed(tmp);
+        U /= U.Modulus();
+        const gp_XYZ V = W.Crossed(U);
+        std::vector<std::array<double, 4>> J(P.size());
+        std::vector<std::array<double, 4>> colMean((std::size_t)nG, {{0, 0, 0, 0}});
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const gp_XYZ d = P[i] - C;
+            const double wd = d.Dot(W);
+            const gp_XYZ rhat = (d - W * wd) / rho[i];
+            J[i] = {{-wd * d.Dot(U) / rho[i], -wd * d.Dot(V) / rho[i], -rhat.Dot(U), -rhat.Dot(V)}};
+            std::array<double, 4>& cm = colMean[(std::size_t)gOf[i]];
+            for (int k = 0; k < 4; ++k) cm[(std::size_t)k] += J[i][(std::size_t)k];
+        }
+        for (int g = 0; g < nG; ++g)
+            for (int k = 0; k < 4; ++k)
+                if (cnt[(std::size_t)g] > 0)
+                    colMean[(std::size_t)g][(std::size_t)k] /= cnt[(std::size_t)g];
+        double A[4][4] = {{0}};
+        double b[4] = {0, 0, 0, 0};
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            double gr[4];
+            const std::array<double, 4>& cm = colMean[(std::size_t)gOf[i]];
+            for (int k = 0; k < 4; ++k) gr[k] = J[i][(std::size_t)k] - cm[(std::size_t)k];
+            const double f = rho[i] - Rg[(std::size_t)gOf[i]];
+            for (int k = 0; k < 4; ++k) {
+                b[k] -= gr[k] * f;
+                for (int l = 0; l < 4; ++l) A[k][l] += gr[k] * gr[l];
+            }
+        }
+        bool stepped = false;
+        for (int trial = 0; trial < 8 && !stepped; ++trial) {
+            double M[4][5];
+            for (int k = 0; k < 4; ++k) {
+                for (int l = 0; l < 4; ++l) M[k][l] = A[k][l];
+                M[k][k] = M[k][k] * (1.0 + lambda) + lambda;
+                M[k][4] = b[k];
+            }
+            bool singular = false;
+            for (int col = 0; col < 4 && !singular; ++col) {
+                int piv = col;
+                for (int row = col + 1; row < 4; ++row)
+                    if (std::fabs(M[row][col]) > std::fabs(M[piv][col])) piv = row;
+                if (!(std::fabs(M[piv][col]) > gp::Resolution())) {
+                    singular = true;
+                    break;
+                }
+                if (piv != col)
+                    for (int l = 0; l < 5; ++l) std::swap(M[piv][l], M[col][l]);
+                for (int row = col + 1; row < 4; ++row) {
+                    const double fac = M[row][col] / M[col][col];
+                    for (int l = col; l < 5; ++l) M[row][l] -= fac * M[col][l];
+                }
+            }
+            if (singular) break;
+            double dx[4];
+            for (int row = 3; row >= 0; --row) {
+                double acc = M[row][4];
+                for (int l = row + 1; l < 4; ++l) acc -= M[row][l] * dx[l];
+                dx[row] = acc / M[row][row];
+            }
+            if (!std::isfinite(dx[0]) || !std::isfinite(dx[1]) || !std::isfinite(dx[2]) ||
+                !std::isfinite(dx[3]))
+                break;
+            gp_XYZ Wn = W + U * dx[0] + V * dx[1];
+            if (!(Wn.Modulus() > gp::Resolution())) break;
+            Wn /= Wn.Modulus();
+            const gp_XYZ Cn = C + U * dx[2] + V * dx[3];
+            double En = 0;
+            const std::vector<double> rhoKeep = rho, RgKeep = Rg;
+            if (evaluate(Wn, Cn, En) && En <= E) {
+                W = Wn;
+                C = Cn;
+                E = En;
+                lambda = std::max(1e-12, lambda / 3.0);
+                stepped = true;
+            } else {
+                rho = rhoKeep;
+                Rg = RgKeep;
+                lambda *= 5.0;
+                if (lambda > 1e6) break;
+            }
+        }
+        if (!stepped) break;
+    }
+    if (W.Dot(Wseed) < 0.0) W.Reverse();
+    C = C + W * ((mean - C).Dot(W));
+    out = jointAxisAbout(groups, C, W);
+    return std::isfinite(C.X()) && std::isfinite(C.Y()) && std::isfinite(C.Z());
+}
+
+std::vector<CoaxialFamily> coaxialFamilies(const std::vector<AxisDonor>& donors,
+                                           const std::vector<int>& order, double tau,
+                                           int maxIters) {
+    std::vector<CoaxialFamily> fams;
+    if (!(tau > 0.0)) return fams;
+    std::vector<char> taken(donors.size(), 0);
+    for (std::size_t oi = 0; oi < order.size(); ++oi) {
+        const int i = order[oi];
+        if (i < 0 || (std::size_t)i >= donors.size() || taken[(std::size_t)i]) continue;
+        taken[(std::size_t)i] = 1;
+        const AxisDonor& lead = donors[(std::size_t)i];
+        CoaxialFamily fam;
+        fam.members.push_back(i);
+        std::vector<std::vector<gp_XYZ>> groups{lead.pts};
+        fam.fit = jointAxisAbout(groups, lead.origin, lead.axis);
+        double famLen = lead.length, famRmax = lead.radius;
+        for (std::size_t oj = oi + 1; oj < order.size(); ++oj) {
+            const int j = order[oj];
+            if (j < 0 || (std::size_t)j >= donors.size() || taken[(std::size_t)j]) continue;
+            const AxisDonor& e = donors[(std::size_t)j];
+            gp_XYZ ea = e.axis;
+            if (!(ea.Modulus() > gp::Resolution())) continue;
+            ea /= ea.Modulus();
+            const double sinA = ea.Crossed(fam.fit.axis).Modulus();
+            if (sinA > tanAngTol(tau, tau, std::max(std::min(e.length, famLen), tau))) continue;
+            const gp_XYZ d = e.origin - fam.fit.origin;
+            const double lineDist = (d - fam.fit.axis * d.Dot(fam.fit.axis)).Modulus();
+            if (lineDist > e.radius + famRmax) continue;
+            groups.push_back(e.pts);
+            JointAxisFit f = jointAxisAbout(groups, fam.fit.origin, fam.fit.axis);
+            bool refit = false;
+            if (!jointAxisCertifies(f, tau)) {
+                JointAxisFit g;
+                if (jointAxisFit(groups, fam.fit.origin, fam.fit.axis, maxIters, g) &&
+                    jointAxisCertifies(g, tau)) {
+                    f = g;
+                    refit = true;
+                } else {
+                    groups.pop_back();
+                    continue;
+                }
+            }
+            fam.fit = f;
+            fam.refit = fam.refit || refit;
+            fam.members.push_back(j);
+            taken[(std::size_t)j] = 1;
+            famLen = std::max(famLen, e.length);
+            famRmax = std::max(famRmax, e.radius);
+        }
+        fams.push_back(std::move(fam));
+    }
+    return fams;
+}
+
+bool torusChainSupersetFails(const std::vector<ProfPt>& candidatePts, std::size_t nCandidates,
+                             std::size_t nBand, double tau) {
+    if (nBand >= nCandidates) return false;
+    return !certifyTorus(candidatePts, tau).ok;
+}
+
 }  // namespace refit
 }  // namespace stl2step

@@ -18940,10 +18940,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             return false;
         };
 
+        // D-fc-4.8: U-3 covers a torus that is itself exploded after its face was
+        // built and committed (a later round's shell did not close): the
+        // component takes the pre-T snapshot it arrived with, never verbatim.
+        bool torusExplodedU3 = false;
         auto explodeRegion = [&](int id) {
             if (id < 0 || (size_t)id >= exploded.size() || exploded[(size_t)id]) return;
             exploded[(size_t)id] = 1;
             Region* rr = regionByIdMut(rs, id);
+            if (torusSnapshot && rr && isTorusBlendR(*rr)) torusExplodedU3 = true;
             if (rr) {
                 rr->builtAs = BuiltAs::ExplodedToFacets;
                 rr->reject = Reject::FaceBuildFailed;
@@ -18989,6 +18994,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         int closureHealPendingFree = -1;
         bool closureHealStop = false;
     try_rebuild:
+        if (torusExplodedU3) {
+            if (diagRelEnabled()) std::fprintf(stderr, "DIAG_TORUS_U3 torus exploded: pre-T\n");
+            out.clear();
+            return false;
+        }
         rounds = 0;
         unstable = false;
         built.clear();
@@ -19176,6 +19186,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
 
         if (unstable) {
         unstable_fallback:
+            // D-fc-4.8: a torus probe never falls back to the whole-component
+            // facet baseline; U-3 takes the pre-T snapshot it arrived with.
+            if (torusSnapshot) {
+                if (diagRelEnabled())
+                    std::fprintf(stderr, "DIAG_TORUS_U3 unstable fallback: pre-T\n");
+                out.clear();
+                return false;
+            }
             mintRefusedFacetTried = true;
             for (Region& r : rs.regions) {
                 if (r.reject == Reject::FaceBuildFailed) r.reject = Reject::ChainUnstable;

@@ -398,7 +398,117 @@ static void casePredicates() {
     expect(std::fabs(torusSurfaceDev(t, gp_XYZ(12.5, 0, 0)) - 0.5) < 1e-12, "dev: 0.5 out");
 }
 
+// D-fc-4.8 (b): points of a partial cylinder of radius R about (origin, axis),
+// azimuth [u0, u1], heights [h0, h1], each pushed radially by a deterministic
+// +-amp pattern (amp < tau keeps it certified).
+static std::vector<gp_XYZ> cylPts(const gp_XYZ& o, const gp_XYZ& axisIn, double R, double u0,
+                                  double u1, double h0, double h1, double amp) {
+    gp_XYZ a = axisIn / axisIn.Modulus();
+    const gp_XYZ tmp = std::fabs(a.X()) < 0.9 ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+    gp_XYZ x = a.Crossed(tmp);
+    x /= x.Modulus();
+    const gp_XYZ y = a.Crossed(x);
+    std::vector<gp_XYZ> out;
+    int k = 0;
+    for (int i = 0; i <= 8; ++i)
+        for (int j = 0; j <= 2; ++j, ++k) {
+            const double u = u0 + (u1 - u0) * i / 8.0, h = h0 + (h1 - h0) * j / 2.0;
+            const double r = R + ((k % 2) ? amp : -amp);
+            out.push_back(o + a * h + x * (r * std::cos(u)) + y * (r * std::sin(u)));
+        }
+    return out;
+}
+
+static void caseJointAxis() {
+    const double tau = 1e-4;
+    const gp_XYZ o(10, -5, 3), ax(0, 1, 0);
+    std::vector<std::vector<gp_XYZ>> g = {cylPts(o, ax, 92.5, 0.2, 0.9, -3, 0, 0.3 * tau),
+                                          cylPts(o, ax, 72.5, 1.0, 1.6, -1, 2, 0.3 * tau),
+                                          cylPts(o, ax, 25.0, 0.0, 6.0, 0, 3, 0.3 * tau)};
+    const JointAxisFit about = jointAxisAbout(g, o, ax);
+    expect(about.radius.size() == 3 && std::fabs(about.radius[0] - 92.5) < 0.3 * tau &&
+               std::fabs(about.radius[2] - 25.0) < 0.3 * tau,
+           "joint about: one radius per donor");
+    expect(jointAxisCertifies(about, tau), "joint about: true axis certifies");
+    // A seed off by 2 tau in position and 1e-5 rad in tilt: the joint fit recovers it.
+    JointAxisFit fit;
+    const bool ok = jointAxisFit(g, o + gp_XYZ(2 * tau, 0, 0), gp_XYZ(1e-5, 1, 0), 16, fit);
+    const JointAxisFit seed = jointAxisAbout(g, o + gp_XYZ(2 * tau, 0, 0), gp_XYZ(1e-5, 1, 0));
+    expect(!jointAxisCertifies(seed, tau), "joint fit: the perturbed seed does not certify");
+    expect(ok && jointAxisCertifies(fit, tau), "joint fit: refit certifies every donor");
+    expect(ok && fit.axis.Y() > 0.0 && std::fabs(fit.axis.X()) < 1e-6, "joint fit: axis recovered");
+    // One donor off the axis by 5 tau cannot certify jointly.
+    std::vector<std::vector<gp_XYZ>> bad = g;
+    bad.push_back(cylPts(o + gp_XYZ(5 * tau, 0, 0), ax, 40.0, 0.0, 6.2, 0, 3, 0.0));
+    JointAxisFit fb;
+    jointAxisFit(bad, o, ax, 16, fb);
+    expect(!jointAxisCertifies(fb, tau), "joint fit: an off-axis donor breaks the certificate");
+    expect(!jointAxisCertifies(about, 0.0), "joint certificate: tau 0 admits nothing");
+}
+
+static void caseCoaxialFamilies() {
+    const double tau = 1e-4;
+    const gp_XYZ o(0, 0, 0), ax(0, 1, 0);
+    std::vector<AxisDonor> d(4);
+    auto setD = [&](int i, const gp_XYZ& oi, const gp_XYZ& ai, double R, double u0, double u1) {
+        d[(std::size_t)i].pts = cylPts(oi, ai, R, u0, u1, 0, 3, 0.2 * tau);
+        d[(std::size_t)i].origin = oi;
+        d[(std::size_t)i].axis = ai / ai.Modulus();
+        d[(std::size_t)i].radius = R;
+        d[(std::size_t)i].length = 3.0;
+    };
+    // Donor 0 leads with its own frame 1.5 tau off (its short arc still certifies
+    // on it); donor 1's half circle does not, the joint LS does. Donor 2 is a
+    // parallel bore elsewhere. Donor 3 is coaxial.
+    setD(0, o + gp_XYZ(1.5 * tau, 0, 0), ax, 92.5, 0.2, 0.9);
+    d[0].pts = cylPts(o, ax, 92.5, 0.2, 0.9, 0, 3, 0.2 * tau);
+    setD(1, o, ax, 72.5, 0.0, 3.0);
+    setD(2, o + gp_XYZ(30, 0, 0), ax, 5.0, 0.0, 6.2);
+    setD(3, o, ax, 100.0, 4.0, 4.5);
+    const std::vector<CoaxialFamily> f = coaxialFamilies(d, {0, 1, 2, 3}, tau, 16);
+    expect(f.size() == 2, "families: coaxial three and one bore");
+    expect(f.size() == 2 && f[0].members == std::vector<int>({0, 1, 3}) && f[0].refit,
+           "families: leader 0 takes 1 and 3 by joint refit");
+    expect(f.size() == 2 && f[1].members == std::vector<int>({2}) && !f[1].refit,
+           "families: the parallel bore stays alone");
+    expect(f.size() == 2 && jointAxisCertifies(f[0].fit, tau),
+           "families: the family axis certifies");
+    // A leader whose own frame certifies everyone keeps it (no refit).
+    std::vector<AxisDonor> e = {d[1], d[3]};
+    const std::vector<CoaxialFamily> g = coaxialFamilies(e, {0, 1}, tau, 16);
+    expect(g.size() == 1 && !g[0].refit && g[0].members.size() == 2,
+           "families: a certifying leader frame is kept");
+    expect(coaxialFamilies(d, {0, 1, 2, 3}, 0.0, 16).empty(), "families: tau 0 forms none");
+}
+
+static void caseChainSuperset() {
+    const double tau = 1e-4;
+    // Profile points of a torus Rmaj 20, r 3 over 7 stations.
+    std::vector<ProfPt> good;
+    for (int i = 0; i < 7; ++i) {
+        const double v = 0.2 + 0.2 * i;
+        for (int k = 0; k < 3; ++k) {
+            ProfPt p;
+            p.rho = 20.0 + 3.0 * std::cos(v);
+            p.z = 3.0 * std::sin(v);
+            p.psi = 0.3 * k;
+            good.push_back(p);
+        }
+    }
+    std::vector<ProfPt> bad = good;
+    bad[4].rho += 5.0 * tau;
+    expect(!torusChainSupersetFails(good, 60, 30, tau),
+           "superset: a certified chain set keeps the band");
+    expect(torusChainSupersetFails(bad, 60, 30, tau),
+           "superset: a refused chain set refuses its subset");
+    expect(!torusChainSupersetFails(bad, 30, 30, tau),
+           "superset: the band that is the whole set is not a subset");
+}
+
 int main() {
+    caseJointAxis();
+    caseCoaxialFamilies();
+    caseChainSuperset();
     casePredicates();
     caseLeaveOneOutPure();
     caseRails();

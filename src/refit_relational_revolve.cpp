@@ -433,6 +433,8 @@ struct Donor {
     double length = 0;
     int minTri = 0;
     bool updated = false;
+    std::vector<int> gids;     // its own certified vertices (global ids)
+    std::vector<int> members;  // D-fc-4.8 (b): accepted indices of its coaxial family
 };
 
 bool regionIsDonorClass(const Region& r) {
@@ -533,49 +535,6 @@ std::vector<int> frontierOf(const WorkMesh& wm, const Band& b) {
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
-}
-
-// Maximal same-sheet free component. Returns false when it is the band itself.
-bool largerSheet(const WorkMesh& wm, const Frame& fr, const Band& band, Band& ext) {
-    const int nTri = (int)wm.mv->nTri;
-    std::vector<char> seen((std::size_t)std::max(nTri, 0), 0);
-    std::vector<int> stack;
-    int nBand = 0;
-    for (int t : band.tris) {
-        if (t < 0 || t >= nTri || seen[(std::size_t)t]) continue;
-        seen[(std::size_t)t] = 1;
-        stack.push_back(t);
-        ++nBand;
-    }
-    std::vector<int> comp;
-    while (!stack.empty()) {
-        const int t = stack.back();
-        stack.pop_back();
-        comp.push_back(t);
-        for (int n : wm.adj.nbr[(std::size_t)t]) {
-            if (n < 0 || n >= nTri || seen[(std::size_t)n]) continue;
-            if (!wm.freeTri[(std::size_t)n]) continue;
-            if (sheetOf(*wm.mv, n, fr) != band.sheet) continue;
-            seen[(std::size_t)n] = 1;
-            stack.push_back(n);
-        }
-    }
-    if ((int)comp.size() <= nBand) return false;
-    ext = Band();
-    ext.in.assign((std::size_t)std::max(nTri, 0), 0);
-    ext.tris = std::move(comp);
-    for (int t : ext.tris)
-        if (t >= 0 && t < nTri) ext.in[(std::size_t)t] = 1;
-    collectBand(*wm.mv, fr, wm.g2l, ext);
-    return true;
-}
-
-// A torus band that is a strict subset of a sheet certifyTorus refuses is
-// the plate-mouth window (D-fc-1.6.9). The sheet that is the band is kept.
-bool torusIsFailingSubset(const WorkMesh& wm, const Frame& fr, const Band& band, double tau) {
-    Band ext;
-    if (!largerSheet(wm, fr, band, ext)) return false;
-    return !certifyTorus(ext.pts, tau).ok;
 }
 
 void endTangency(const WorkMesh& wm, const Frame& fr, const Band& band, const SurfaceFit& fit,
@@ -1786,7 +1745,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         if (t < 0 || t >= nTri) return false;
         if (wm.freeTri[(std::size_t)t]) return true;
         const int a = atomOf[(std::size_t)t];
-        return a >= 0 && a != donor.idx && !atomDead[(std::size_t)a];
+        if (a < 0 || a == donor.idx || atomDead[(std::size_t)a]) return false;
+        return std::find(donor.members.begin(), donor.members.end(), a) == donor.members.end();
     };
     int maxV = 0;
     for (int t = 0; t < nTri; ++t)
@@ -2059,6 +2019,9 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             if (inside) bandTris.push_back(c.t);
         }
         if (bandTris.empty()) continue;
+        // D-fc-4.8 (a): the chain's candidate set is the band's superset.
+        const std::vector<int> chainCands = bandTris;
+        int chainSupersetOk = -1;  // -1 unknown, 0 refused by certifyTorus, 1 certified
         // An atom joins only whole: one that is not wholly on the chain leaves it.
         {
             std::map<int, int> hit;
@@ -2215,9 +2178,23 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                     continue;
                 }
             }
-            if (torusIsFailingSubset(wm, fr, band, tau)) {
-                refuse("vertex-off", &cert);
-                continue;
+            if (band.tris.size() < chainCands.size()) {
+                if (chainSupersetOk < 0) {
+                    Band sup;
+                    sup.in.assign((std::size_t)nTri, 0);
+                    sup.tris = chainCands;
+                    sup.sheet = sheet;
+                    for (int t : chainCands) sup.in[(std::size_t)t] = 1;
+                    collectBand(mv, fr, wm.g2l, sup);
+                    chainSupersetOk = torusChainSupersetFails(sup.pts, chainCands.size(),
+                                                              band.tris.size(), tau)
+                                          ? 0
+                                          : 1;
+                }
+                if (chainSupersetOk == 0) {
+                    refuse("vertex-off", &cert);
+                    continue;
+                }
             }
             if (sameSurfaceTorus(wm, work, fr, band, fit, atomDead)) {
                 refuse("same-surface", &cert);
@@ -2411,6 +2388,7 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
             d.rms = nv ? std::sqrt(sum2 / nv) : 0;
             d.length = (zMax > zMin) ? (zMax - zMin) : tau;
             d.minTri = minTriOf(r.tris);
+            d.gids = gids;
             donors.push_back(d);
         }
         std::sort(donors.begin(), donors.end(), [](const Donor& a, const Donor& b) {
@@ -2443,8 +2421,52 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 const bool cb = work.accepted[(std::size_t)donors[b].idx].closed360;
                 return ca && !cb;
             });
-            for (std::size_t oi : order) {
-                Donor& donor = donors[oi];
+            // D-fc-4.8 (b): coaxial donors whose certified vertices jointly certify
+            // one axis at tau are one family, scanned once on that axis.
+            std::vector<AxisDonor> ad(donors.size());
+            std::vector<int> scanOrder;
+            for (std::size_t i = 0; i < donors.size(); ++i) {
+                const Donor& d = donors[i];
+                ad[i].origin = d.fr.origin;
+                ad[i].axis = d.fr.axis;
+                ad[i].radius = d.radius;
+                ad[i].length = d.length;
+                for (int g : d.gids) ad[i].pts.push_back(mv.pts[g]);
+            }
+            for (std::size_t oi : order) scanOrder.push_back((int)oi);
+            const std::vector<CoaxialFamily> fams =
+                coaxialFamilies(ad, scanOrder, tau, wm.maxIter);
+            for (const CoaxialFamily& fam : fams) {
+                Donor donor = donors[(std::size_t)fam.members.front()];
+                for (int m : fam.members) donor.members.push_back(donors[(std::size_t)m].idx);
+                if (fam.members.size() > 1) {
+                    donor.fr = makeFrame(fam.fit.origin, fam.fit.axis, donor.fr.e1);
+                    donor.radius = fam.fit.radius.front();
+                    donor.maxDev = fam.fit.maxDev.front();
+                    double zMin = 1e300, zMax = -1e300, devMax = 0;
+                    for (std::size_t k = 0; k < fam.members.size(); ++k) {
+                        devMax = std::max(devMax, fam.fit.maxDev[k]);
+                        for (const gp_XYZ& pt : ad[(std::size_t)fam.members[k]].pts) {
+                            const double z = (pt - donor.fr.origin).Dot(donor.fr.axis);
+                            zMin = std::min(zMin, z);
+                            zMax = std::max(zMax, z);
+                        }
+                    }
+                    donor.length = (zMax > zMin) ? (zMax - zMin) : tau;
+                    if (diagOn()) {
+                        std::fprintf(stderr,
+                                     "DIAG_REL_TORUS_FAMILY lead=%d members=%zu refit=%d "
+                                     "maxDevTau=%.4f axis=%.9g,%.9g,%.9g ids=",
+                                     donor.idx, fam.members.size(), fam.refit ? 1 : 0,
+                                     devMax / tau, donor.fr.axis.X(), donor.fr.axis.Y(),
+                                     donor.fr.axis.Z());
+                        for (std::size_t k = 0; k < fam.members.size(); ++k)
+                            std::fprintf(stderr, "%s%d(R%.4f)", k ? "," : "",
+                                         donors[(std::size_t)fam.members[k]].idx,
+                                         fam.fit.radius[k]);
+                        std::fprintf(stderr, "\n");
+                    }
+                }
                 if (atomDead[(std::size_t)donor.idx]) continue;
                 gatherTori(wm, work, donor, axisScans, atomOf, atomDead, claimed, refused);
             }
