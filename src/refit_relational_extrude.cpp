@@ -1109,6 +1109,29 @@ void pushCircleRoots(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& cR, const 
     consider((-B - s) / (2.0 * A));
 }
 
+// D-fc-3.2.2. The radii r > 0 of the side's circle family (centre c0 + cR·r,
+// radius r, about axis) whose circle, inflated by τ, contains p:
+// |(p − c(r)) × axis| <= r + τ. Every r whose circle passes within τ of p is
+// in it. Aq = |cR × axis|² − 1 > 0. The discriminant carries kUlp of its terms'
+// magnitude and the ends kUlp of theirs, so the window is a superset of the
+// exact one (a tangent double root included). False when it is empty.
+bool radiusWindow(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& dax, double Aq,
+                  const gp_XYZ& axis, double tau, double& lo, double& hi) {
+    const gp_XYZ w = (p - c0).Crossed(axis);
+    const double b = w.Dot(dax) + tau;
+    const double C = w.Dot(w) - tau * tau;
+    const double mag = std::max({b * b, std::abs(Aq * C), w.Dot(w) * (Aq + 1.0)});
+    const double disc = b * b - Aq * C + kUlp * mag;
+    if (!(disc >= 0.0)) return false;
+    const double s = std::sqrt(disc);
+    lo = (b - s) / Aq;
+    hi = (b + s) / Aq;
+    const double pad = kUlp * (std::abs(lo) + std::abs(hi));
+    lo -= pad;
+    hi += pad;
+    return hi > 0.0;
+}
+
 }  // namespace
 
 bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -1432,6 +1455,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         WhyCount yc;
         int nPairs = 0;
         int nEvalSides = 0;
+        int nPrunedSides = 0;
 
         auto edgeComps = [&](const std::vector<int>& tris) -> int {
             std::vector<char> in(nTri, 0);
@@ -1859,12 +1883,14 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             std::vector<double> offA, offB, roots;
             std::vector<std::uint64_t> keyA, keyB;
             std::vector<std::size_t> hit;
+            std::vector<std::pair<double, double>> winA, winB;
         };
         struct PairOut {
             std::string diag;
             WhyCount yc;
             int nPairs = 0;
             int nEvalSides = 0;
+            int nPrunedSides = 0;
             bool commit = false;
             int si = 0;
             int guard = 0;
@@ -1873,6 +1899,45 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             double radius = 0;
             int seed = -1;
             BandDiag dg;
+        };
+        // D-fc-3.2.2 lossless prune. A committed band is tangent to A and B,
+        // and its contact vertices are boundary vertices of the anchor bodies
+        // (watertight), within τ of the band's circle. Every radius of this
+        // side that brings a boundary vertex of A within τ lies in the union
+        // of A's radiusWindow; likewise B. When the two unions do not meet, no
+        // radius of this side can be a claim: the side is skipped. Superset
+        // windows only, so a side that could claim is never skipped.
+        auto sideMeetsAnchors = [&](const LiveAnchor& A, const LiveAnchor& B, const gp_XYZ& c0,
+                                    const gp_XYZ& cR, const gp_XYZ& axis,
+                                    PairScratch& sc) -> bool {
+            const gp_XYZ dax = cR.Crossed(axis);
+            const double Aq = dax.Dot(dax) - 1.0;
+            if (!(Aq > 0.0) || !std::isfinite(Aq)) return true;
+            auto windows = [&](const LiveAnchor& X, std::vector<std::pair<double, double>>& win) {
+                win.clear();
+                for (const gp_XYZ& p : X.boundary) {
+                    double lo = 0, hi = 0;
+                    if (radiusWindow(p, c0, dax, Aq, axis, tau, lo, hi))
+                        win.emplace_back(lo, hi);
+                }
+                std::sort(win.begin(), win.end());
+            };
+            windows(A, sc.winA);
+            if (sc.winA.empty()) return false;
+            windows(B, sc.winB);
+            std::size_t i = 0, j = 0;
+            while (i < sc.winA.size() && j < sc.winB.size()) {
+                const auto& a = sc.winA[i];
+                const auto& b = sc.winB[j];
+                if (a.second < b.first) {
+                    ++i;
+                } else if (b.second < a.first) {
+                    ++j;
+                } else {
+                    return true;
+                }
+            }
+            return false;
         };
         auto runPair = [&](std::size_t ia, std::size_t ib, const LiveAnchor& A,
                            const LiveAnchor& B, bool resume, int startSi, int startGuard,
@@ -1949,6 +2014,10 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     continue;
                 const gp_XYZ cR = c1 - c0;
                 const bool resumed = resume && si == startSi;
+                if (!resumed && !sideMeetsAnchors(A, B, c0, cR, axis0, sc)) {
+                    ++out.nPrunedSides;
+                    continue;
+                }
                 if (!resumed) ++out.nEvalSides;
 
                 // pushCircleRoots keeps a root r of p only when p is within τ of
@@ -2462,6 +2531,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             addWhy(yc, o.yc);
             nPairs += o.nPairs;
             nEvalSides += o.nEvalSides;
+            nPrunedSides += o.nPrunedSides;
         };
         // Scheduling grain only: pairs per block per worker.
         const std::size_t blockCap = (std::size_t)nWork * 1024;
@@ -2819,11 +2889,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                          "vertex-off=%d not-blend=%d same-surface=%d underdetermined=%d "
                          "degenerate=%d no-anchor=%d unstable=%d hem-deferred=%d "
                          "anchor-in-band=%d pairs=%d evaluatedSides=%d inlierAnchors=%d "
-                         "seconds=%.6f\n",
+                         "seconds=%.6f prunedSides=%d\n",
                          yc.bands, yc.accept, yc.line, yc.vertexOff, yc.notBlend, yc.sameSurface,
                          yc.underdetermined, yc.degenerate, yc.noAnchor, yc.unstable,
                          yc.hemDeferred, yc.anchorInBand, nPairs, nEvalSides, nInlierAnchors,
-                         seconds);
+                         seconds, nPrunedSides);
         }
 
         // D-fc-4.3. A dissolved region leaves the accepted list. A chamfer

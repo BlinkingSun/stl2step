@@ -1168,6 +1168,59 @@ static void case22() {
     expect(ok, "case22 certified CylGrow region is not robbed");
 }
 
+static void case23() {
+    using namespace stl2step::refit;
+    // D-fc-3.2.2. Walls x = 0 and z = 0 whose bodies lie far from each other's
+    // contact: every boundary vertex of A sits at z >= 50, every one of B at
+    // x <= 33, so no circle tangent to both brings a vertex of each within τ.
+    // Every side is skipped and prints no band line. A strip of candidates sits
+    // between them so the vote would have roots.
+    Synth s;
+    SegmentWork w;
+    std::vector<int> strip;
+    const int s0 = s.addV(gp_XYZ(10, 0, 10));
+    const int s1 = s.addV(gp_XYZ(10, 8, 10));
+    const int s2 = s.addV(gp_XYZ(12, 0, 11));
+    const int s3 = s.addV(gp_XYZ(12, 8, 11));
+    s.addQuad(s0, s1, s2, s3, strip);
+    addStrip(w, strip);
+    const int wa = s.tri(s.addV(gp_XYZ(0, 0, 50)), s.addV(gp_XYZ(0, 8, 50)), s.addV(gp_XYZ(0, 4, 80)));
+    const int wb = s.tri(s.addV(gp_XYZ(3, 0, 0)), s.addV(gp_XYZ(3, 8, 0)), s.addV(gp_XYZ(33, 4, 0)));
+    addAnchor(w, {wa}, gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(w, {wb}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    std::string sum;
+    {
+        std::istringstream is(r.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_SUM stage=extrude", 0) == 0) sum = line;
+    }
+    const bool ok = r.work.accepted.empty() && fieldNum(sum, "prunedSides") == 4.0 &&
+                    fieldNum(sum, "evaluatedSides") == 0.0 &&
+                    r.diag.find("DIAG_REL_BAND") == std::string::npos;
+    std::fprintf(stderr, "case23 %s\n", sum.c_str());
+    if (!ok) dumpFail("case23", r);
+    expect(ok, "case23 anchors whose contacts cannot meet are pruned");
+
+    // The fillet's own side is never pruned: its contact vertices are the
+    // walls' boundary vertices.
+    auto built = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
+    Run f = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    std::string fsum;
+    {
+        std::istringstream is(f.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_SUM stage=extrude", 0) == 0) fsum = line;
+    }
+    const bool fok = f.work.accepted.size() == 1 && fieldNum(fsum, "evaluatedSides") >= 1.0 &&
+                     fieldNum(fsum, "prunedSides") <= 3.0;
+    std::fprintf(stderr, "case23 fillet %s\n", fsum.c_str());
+    if (!fok) dumpFail("case23-fillet", f);
+    expect(fok, "case23 the fillet's side is evaluated");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -1193,6 +1246,7 @@ int main() {
     case20();
     case21();
     case22();
+    case23();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
