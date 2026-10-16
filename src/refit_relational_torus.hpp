@@ -97,6 +97,12 @@ bool torusChainSupersetFails(const std::vector<ProfPt>& candidatePts, std::size_
 bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
                                 const std::vector<char>& failedTri);
 
+// The full-turn side count of a torus band's azimuthal tessellation, for its
+// chord sagitta and dVolPredicted: a closed band's cols columns cover the whole
+// turn; a partial band's cols columns are cols - 1 steps over its own azimuth
+// span (the rule partial cylinders use, 2 pi nBands / span).
+int torusSidesOf(int cols, double span, bool closed);
+
 // The profile (rho, z, psi) of each point about the frame (origin, axis, xHint):
 // the Torus scan's frame, psi measured from xHint projected off the axis.
 std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& origin,

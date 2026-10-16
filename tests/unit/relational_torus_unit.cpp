@@ -588,6 +588,14 @@ static void caseProfileAbout() {
            "profileAbout: rho, z, psi in the scan frame");
 }
 
+static void caseTorusSides() {
+    expect(torusSidesOf(48, 2.0 * kPi, true) == 48, "torusSides: a closed band keeps its cols");
+    expect(torusSidesOf(21, 1.0, false) == (int)std::lround(2.0 * kPi * 20.0),
+           "torusSides: a partial band's steps over its own span");
+    expect(torusSidesOf(1, 0.5, false) == 1, "torusSides: one column is one side");
+    expect(torusSidesOf(9, 0.0, false) == 9, "torusSides: no span keeps cols");
+}
+
 static void caseWindowOverlap() {
     std::vector<char> failed(10, 0);
     failed[4] = failed[5] = 1;
@@ -602,6 +610,7 @@ int main() {
     caseWindowOverlap();
     caseJointTorus();
     caseProfileAbout();
+    caseTorusSides();
     caseJointAxis();
     caseCoaxialFamilies();
     caseChainSuperset();

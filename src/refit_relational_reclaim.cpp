@@ -1723,6 +1723,12 @@ bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
     return false;
 }
 
+int torusSidesOf(int cols, double span, bool closed) {
+    if (closed || cols < 2 || !(span > 0.0) || !(span < kTwoPi)) return std::max(cols, 1);
+    const double n = std::round(kTwoPi * (double)(cols - 1) / span);
+    return std::isfinite(n) ? std::max(1, (int)n) : std::max(cols, 1);
+}
+
 std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& origin,
                                  const gp_XYZ& axis, const gp_XYZ& xHint) {
     gp_XYZ a = axis;

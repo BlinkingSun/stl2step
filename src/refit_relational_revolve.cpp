@@ -850,7 +850,7 @@ bool emitTorus(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const 
     if (vHi < vLo) vHi += kTwoPi;
     const bool closed = cl.closed;
     double sigma = 0;
-    const int nSides = std::max(cert.cols, 1);
+    const int nSides = torusSidesOf(cert.cols, uHi - uLo, closed);
     const double gamma = kTwoPi / (double)nSides;
     const double sHalf = std::sin(0.5 * gamma);
     const double kSeg = (sHalf > gp::Resolution()) ? (gamma - std::sin(gamma)) / (4.0 * sHalf) : 0.0;
