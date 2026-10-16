@@ -52,6 +52,12 @@ inline double spanTol(double tolA, double tolB, double r) {
     return std::sqrt(2 * tolA / r) + std::sqrt(2 * tolB / r);
 }
 
+// D-fc-4.2. Slab slack at the contact generator on anchor X, as an angle:
+// (anchorTol(other) + τ) / (r · |n_A × n_B|).
+inline double contactSlack(double tolOther, double tau, double r, double sinDihedral) {
+    return (tolOther + tau) / (r * sinDihedral);
+}
+
 // D-fc-1.6(7). |dist(axis, A) − r| <= anchorTol(A) + τ.
 inline double tanDistTol(double tolA, double tau) { return tolA + tau; }
 
