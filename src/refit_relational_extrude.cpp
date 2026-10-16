@@ -1884,6 +1884,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             std::vector<std::uint64_t> keyA, keyB;
             std::vector<std::size_t> hit;
             std::vector<std::pair<double, double>> winA, winB;
+            std::vector<std::size_t> onA, onB;
         };
         struct PairOut {
             std::string diag;
@@ -1901,30 +1902,34 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             BandDiag dg;
         };
         // D-fc-3.2.2 lossless prune. A committed band is tangent to A and B,
-        // and its contact vertices are boundary vertices of the anchor bodies
-        // (watertight), within τ of the band's circle. Every radius of this
-        // side that brings a boundary vertex of A within τ lies in the union
-        // of A's radiusWindow; likewise B. When the two unions do not meet, no
-        // radius of this side can be a claim: the side is skipped. Superset
-        // windows only, so a side that could claim is never skipped.
+        // and its contact vertices lie on both anchor planes: boundary
+        // vertices of the anchor bodies (watertight), or, when the band meets
+        // another piece of the same wall, candidate vertices within
+        // tanDistTol of the anchor's plane. Either is within τ of the band's
+        // circle. Every radius of this side that brings such a vertex of A
+        // within τ lies in the union of A's radiusWindow; likewise B. When the
+        // two unions do not meet, no radius of this side can be a claim: the
+        // side is skipped. Superset windows only.
         auto sideMeetsAnchors = [&](const LiveAnchor& A, const LiveAnchor& B, const gp_XYZ& c0,
                                     const gp_XYZ& cR, const gp_XYZ& axis,
                                     PairScratch& sc) -> bool {
             const gp_XYZ dax = cR.Crossed(axis);
             const double Aq = dax.Dot(dax) - 1.0;
             if (!(Aq > 0.0) || !std::isfinite(Aq)) return true;
-            auto windows = [&](const LiveAnchor& X, std::vector<std::pair<double, double>>& win) {
+            auto windows = [&](const LiveAnchor& X, const std::vector<std::size_t>& onX,
+                               std::vector<std::pair<double, double>>& win) {
                 win.clear();
-                for (const gp_XYZ& p : X.boundary) {
-                    double lo = 0, hi = 0;
-                    if (radiusWindow(p, c0, dax, Aq, axis, tau, lo, hi))
+                double lo = 0, hi = 0;
+                for (const gp_XYZ& p : X.boundary)
+                    if (radiusWindow(p, c0, dax, Aq, axis, tau, lo, hi)) win.emplace_back(lo, hi);
+                for (std::size_t i : onX)
+                    if (radiusWindow(candPts[i].p, c0, dax, Aq, axis, tau, lo, hi))
                         win.emplace_back(lo, hi);
-                }
                 std::sort(win.begin(), win.end());
             };
-            windows(A, sc.winA);
+            windows(A, sc.onA, sc.winA);
             if (sc.winA.empty()) return false;
-            windows(B, sc.winB);
+            windows(B, sc.onB, sc.winB);
             std::size_t i = 0, j = 0;
             while (i < sc.winA.size() && j < sc.winB.size()) {
                 const auto& a = sc.winA[i];
@@ -1984,9 +1989,15 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             const std::size_t nCand = candPts.size();
             sc.offA.resize(nCand);
             sc.offB.resize(nCand);
+            const double onTolA = tanDistTol(A.tolA, tau);
+            const double onTolB = tanDistTol(B.tolA, tau);
+            sc.onA.clear();
+            sc.onB.clear();
             for (std::size_t i = 0; i < nCand; ++i) {
                 sc.offA[i] = A.n.Dot(candPts[i].p) - offA;
                 sc.offB[i] = B.n.Dot(candPts[i].p) - offB;
+                if (std::abs(sc.offA[i]) <= onTolA) sc.onA.push_back(i);
+                if (std::abs(sc.offB[i]) <= onTolB) sc.onB.push_back(i);
             }
             auto forOnCircle = [&](const gp_XYZ& c, const gp_XYZ& ax, double r, auto&& fn) {
                 const double mag = std::max(

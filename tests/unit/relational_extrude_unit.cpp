@@ -1221,6 +1221,49 @@ static void case23() {
     expect(fok, "case23 the fillet's side is evaluated");
 }
 
+static void case24() {
+    using namespace stl2step::refit;
+    // D-fc-3.2.2. The band meets a small piece of the x = 0 wall that is not an
+    // anchor (shatter-class); the x = 0 anchor is another piece of the same
+    // plane, far from the band. Its body boundary gives no radius near the
+    // band's, but the band's contact vertices are candidates on its plane, so
+    // the side is evaluated and the band is claimed through that pair.
+    Synth s;
+    SegmentWork w;
+    const double R = 3.0;
+    const int nStrips = 24;
+    std::vector<int> lo((std::size_t)nStrips + 1), hi((std::size_t)nStrips + 1), band;
+    for (int i = 0; i <= nStrips; ++i) {
+        const double th = 0.5 * kPi * (double)i / (double)nStrips;
+        lo[(std::size_t)i] = s.addV(gp_XYZ(R * (1.0 - std::cos(th)), 0.0, R * (1.0 - std::sin(th))));
+        hi[(std::size_t)i] = s.addV(gp_XYZ(R * (1.0 - std::cos(th)), 8.0, R * (1.0 - std::sin(th))));
+    }
+    for (int i = 0; i < nStrips; ++i) {
+        std::vector<int> tris;
+        s.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                  hi[(std::size_t)i + 1], tris);
+        for (int t : tris) band.push_back(t);
+        addStrip(w, tris);
+    }
+    const int piece = s.tri(lo.front(), hi.front(), s.addV(gp_XYZ(0.0, 4.0, R + 0.5)));
+    addStrip(w, {piece});
+    w.provisionals.back().plane = gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(-1, 0, 0));
+    const int farA = s.tri(s.addV(gp_XYZ(0, 0, 60)), s.addV(gp_XYZ(0, 8, 60)), s.addV(gp_XYZ(0, 4, 90)));
+    const int wb = s.tri(lo.back(), hi.back(), s.addV(gp_XYZ(R + 30.0, 4.0, 0.0)));
+    addAnchor(w, {farA}, gp_XYZ(-1, 0, 0), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(w, {wb}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    bool ok = r.work.accepted.size() == 1;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        ok = a.origin == Origin::FilletStrip && nearRadius(a, R, r.tau) &&
+             a.tris.size() == band.size();
+        std::fprintf(stderr, "case24 r=%.9g tris=%d\n", a.radius, (int)a.tris.size());
+    }
+    if (!ok) dumpFail("case24", r);
+    expect(ok, "case24 a far piece of the wall still claims the band");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -1247,6 +1290,7 @@ int main() {
     case21();
     case22();
     case23();
+    case24();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
