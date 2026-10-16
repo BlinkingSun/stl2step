@@ -19048,6 +19048,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
             if (torusU3Failed) {
+                // D-fc-4.11 (a): this round also decides every closed torus whose
+                // cap partner failed (the partner rule below); they are named with
+                // the tori that failed, so one withholding pass covers the round.
+                for (int id : failedIds)
+                    for (const BoundaryChain& ch : rs.chains) {
+                        if (ch.regA != id && ch.regB != id) continue;
+                        const Region* o = regionById(rs, ch.regA == id ? ch.regB : ch.regA);
+                        if (o && o->origin == Origin::TorusBlend && o->closed360 &&
+                            o->builtAs == BuiltAs::Seamed360)
+                            noteTorusFailed(rs, *o);
+                    }
                 out.clear();
                 return false;
             }

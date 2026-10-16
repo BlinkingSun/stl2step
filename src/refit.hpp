@@ -10,6 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -269,6 +270,8 @@ struct TorusTopologySnapshot {
     RefitStats                 stats;
 };
 
+struct SegmentWork;  // refit_internal.hpp; opaque here (RegionSet::preTorusWork)
+
 struct RegionSet {                  // exactly one per CLEAN component
     int compRoot = -1;
     std::vector<Region>        regions;   // accepted only (reject == None)
@@ -285,8 +288,11 @@ struct RegionSet {                  // exactly one per CLEAN component
     TorusTopologySnapshot torusRevert;
     // Filled by buildFaces when it returns false for U-3: the local triangles of
     // every torus region that failed to ship (D-fc-4.11 (a)). The driver retries
-    // segment() with them withheld before it takes the pre-T snapshot.
+    // with them withheld (resegmentTorus) before it takes the pre-T snapshot.
     std::vector<int> torusFailedTris;
+    // Opaque: segment()'s working state just before stage T, kept when a torus was
+    // admitted, so resegmentTorus() re-runs only the stages from T on.
+    std::shared_ptr<const SegmentWork> preTorusWork;
 };
 
 // P1 entry point. Pure math. Links no OCCT topology: gp_ value types and math_ solvers
@@ -295,6 +301,14 @@ struct RegionSet {                  // exactly one per CLEAN component
 // GeomAPI_*, GeomConvert_*, GProp_*, Poly_*, STEPControl_*. PCA/Jacobi and both circle
 // fits are written in-TU; no Eigen. P0 greps the include list against this rule.
 bool segment(const MeshView& mv, const SegmentParams& p, RegionSet& out, WarnFn warn);
+
+// U-3 per torus (D-fc-4.11 (a)): the stages from T on (stage T, H1, A3, topology)
+// re-run on `from`'s pre-T working state with p.torusWithheldTris; the pre-T
+// snapshot is `from`'s own. The result equals segment(mv, p, out) exactly: the
+// stages before T do not read torusWithheldTris. False when `from` kept no pre-T
+// state (no torus was admitted).
+bool resegmentTorus(const MeshView& mv, const SegmentParams& p, const RegionSet& from,
+                    RegionSet& out, WarnFn warn);
 
 // P2 entry point. Consumes RegionSet, produces the SAME vector<TopoDS_Face> the
 // per-triangle loop produces today. Returns false => caller falls back to R2 (§5).

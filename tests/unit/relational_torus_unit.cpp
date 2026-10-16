@@ -1,6 +1,8 @@
 // Synthetic torus-relation cases (D-fc-4.6 F1/F2/F4). No training mesh.
 // SPDX-License-Identifier: MIT
 
+#include "mesh_harness.hpp"
+#include "mesh_harness_refit.hpp"
 #include "posix_compat.hpp"
 #include "refit_relational.hpp"
 #include "refit_relational_torus.hpp"
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -731,7 +734,84 @@ static void caseWithheld() {
     }
 }
 
-int main() {
+static bool sameRegionSet(const RegionSet& a, const RegionSet& b) {
+    if (a.regions.size() != b.regions.size() || a.chains.size() != b.chains.size() ||
+        a.triRegion != b.triRegion || a.triIsland != b.triIsland ||
+        a.torusRevertValid != b.torusRevertValid ||
+        a.torusRevert.regions.size() != b.torusRevert.regions.size() ||
+        a.torusRevert.triRegion != b.torusRevert.triRegion)
+        return false;
+    for (std::size_t i = 0; i < a.regions.size(); ++i) {
+        const Region& x = a.regions[i];
+        const Region& y = b.regions[i];
+        if (x.type != y.type || x.origin != y.origin || x.tris != y.tris || x.radius != y.radius ||
+            x.radius2 != y.radius2 || x.closed360 != y.closed360 ||
+            x.dVolPredicted != y.dVolPredicted)
+            return false;
+        // Bit-for-bit (gp_Dir::IsEqual measures an angle, never exactly 0).
+        const gp_XYZ lx = x.ax.Location().XYZ(), ly = y.ax.Location().XYZ();
+        const gp_XYZ dx = x.ax.Direction().XYZ(), dy = y.ax.Direction().XYZ();
+        if (lx.X() != ly.X() || lx.Y() != ly.Y() || lx.Z() != ly.Z() || dx.X() != dy.X() ||
+            dx.Y() != dy.Y() || dx.Z() != dy.Z())
+            return false;
+    }
+    for (std::size_t i = 0; i < a.chains.size(); ++i)
+        if (a.chains[i].regA != b.chains[i].regA || a.chains[i].regB != b.chains[i].regB ||
+            a.chains[i].meshVerts != b.chains[i].meshVerts)
+            return false;
+    return true;
+}
+
+// D-fc-4.11 (a): resegmentTorus (the stages from T on, from segment()'s pre-T
+// state) equals a full segment() with the same withheld triangles. On the corpus
+// pickup the two R12 hub tori are withheld; the two R89.5 arc tori stay.
+static void caseResegment(const char* stl) {
+    stl2step::harness::HarnessMesh mesh;
+    std::string err;
+    if (!stl2step::harness::loadMesh(stl, 1.0, 0.0, 0.0, mesh, err) || mesh.comps.empty()) {
+        expect(false, "reseg: corpus mesh loads");
+        return;
+    }
+    MeshView mv{};
+    stl2step::harness::toMeshView(mesh, mesh.comps[0], mv);
+    SegmentParams sp;
+    RegionSet probe;
+    expect(segment(mv, sp, probe, nullptr), "reseg: segment");
+    expect(probe.torusRevertValid && probe.preTorusWork != nullptr,
+           "reseg: a torus was admitted and the pre-T state is kept");
+    std::vector<int> held;
+    int nArc = 0;
+    for (const Region& r : probe.regions) {
+        if (r.origin != Origin::TorusBlend) continue;
+        if (r.radius < 20.0) held.insert(held.end(), r.tris.begin(), r.tris.end());
+        else ++nArc;
+    }
+    std::sort(held.begin(), held.end());
+    expect(!held.empty() && nArc == 2, "reseg: hub and arc tori claimed");
+    SegmentParams hp = sp;
+    hp.torusWithheldTris = held;
+    RegionSet full, tail;
+    expect(segment(mv, hp, full, nullptr), "reseg: segment with withheld tori");
+    expect(resegmentTorus(mv, hp, probe, tail, nullptr), "reseg: resegmentTorus");
+    expect(sameRegionSet(full, tail), "reseg: resegmentTorus == segment, region by region");
+    int nTorus = 0, nHeldTorus = 0;
+    for (const Region& r : tail.regions) {
+        if (r.origin != Origin::TorusBlend) continue;
+        ++nTorus;
+        for (int t : r.tris)
+            if (std::binary_search(held.begin(), held.end(), t)) {
+                ++nHeldTorus;
+                break;
+            }
+    }
+    expect(nTorus == 2 && nHeldTorus == 0, "reseg: only the withheld tori are gone");
+    RegionSet none;
+    expect(!resegmentTorus(mv, hp, RegionSet{}, none, nullptr),
+           "reseg: no pre-T state, no resegment");
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1) caseResegment(argv[1]);
     caseRefusalGeometric();
     caseChainFailsGeometric();
     caseWithheld();

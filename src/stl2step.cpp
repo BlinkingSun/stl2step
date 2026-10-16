@@ -880,29 +880,39 @@ Result Converter::run() {
                     shellChecked = true;
                 }
                 // U-3 per torus (D-fc-4.11 (a)): the tori the probe could not ship
-                // are withheld -- segment() gathers them but leaves their triangles
-                // and atoms in their pre-T state -- and the component is built
-                // again with every other torus. Each pass withholds at least one
-                // more torus; when none is left, or a failed torus cannot be
+                // are withheld -- the stages from T on gather them but leave their
+                // triangles and atoms in their pre-T state -- and the component is
+                // built again with every other torus. Each pass withholds at least
+                // one more torus; when none is left, or a failed torus cannot be
                 // withheld, the pre-T snapshot below decides as before.
                 std::vector<int> withheld;
+                auto heldTorus = [&](const refit::Region& reg) {
+                    for (int t : reg.tris)
+                        if (std::binary_search(withheld.begin(), withheld.end(), t)) return true;
+                    return false;
+                };
                 while (!ok && torusProbe && !rs.torusFailedTris.empty()) {
                     withheld.insert(withheld.end(), rs.torusFailedTris.begin(),
                                     rs.torusFailedTris.end());
                     std::sort(withheld.begin(), withheld.end());
                     withheld.erase(std::unique(withheld.begin(), withheld.end()),
                                    withheld.end());
+                    // Lossless prune: a pass that withholds every torus of this set
+                    // leaves none (or keeps one it cannot withhold), so it ends here.
+                    bool anyFree = false;
+                    for (const auto& reg : rs.regions)
+                        if (reg.origin == refit::Origin::TorusBlend && !heldTorus(reg))
+                            anyFree = true;
+                    if (!anyFree) break;
                     refit::SegmentParams heldp = segp;
                     heldp.torusWithheldTris = withheld;
                     refit::RegionSet held;
-                    if (!refit::segment(mv, heldp, held, nullptr)) break;
+                    if (!refit::resegmentTorus(mv, heldp, rs, held, nullptr)) break;
                     bool anyTorus = false, stillHeld = false;
                     for (const auto& reg : held.regions) {
                         if (reg.origin != refit::Origin::TorusBlend) continue;
                         anyTorus = true;
-                        for (int t : reg.tris)
-                            if (std::binary_search(withheld.begin(), withheld.end(), t))
-                                stillHeld = true;
+                        if (heldTorus(reg)) stillHeld = true;
                     }
                     if (!anyTorus || stillHeld || !held.torusRevertValid) break;
                     parallelFor(subThreads, nV, [&](size_t i) {
