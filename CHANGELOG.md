@@ -25,11 +25,13 @@ fillet whose wall plane had absorbed some of the fillet's own facets is now foun
 the wall from its largest facet; a loose cylinder fit that is not within τ of its own mesh gives
 its triangles to a certified fillet running through it instead of shipping as a phantom; two
 certified pieces of the same cylinder are joined into one face when the triangles between them
-lie on it; and a hole wall split at a T-junction seam is re-certified on its own τ-inliers. On
+lie on it; and a hole wall split at a T-junction seam is re-certified on its own τ-inliers and grown over
+the free triangles of its wall (the hole still ships open; closed holes are pending). On
 the training files: the tray's corner and floor-outline rounds, the Craftsman holder's R2 edge
 rounds without its 13 phantom large-radius cylinders (volume error 0.007 % → 0.0001 %), the
 plate's four R3 slot ends as one face each (27 → 22 cylinder faces, 191 → 112 faces) and the
-shelf bracket's R2.5 cross holes as one face each; no training file or corpus fixture reverts.
+shelf bracket's R2.5 cross holes as one face each (still open where they exit); no training
+file or corpus fixture reverts.
 
 ### Fixed
 - A wall plane that absorbed part of an adjacent fillet no longer hides that fillet: the relational anchor is seeded from the provisional's own largest facet and certified at τ as before (tray corner and floor rounds).
@@ -44,7 +46,7 @@ shelf bracket's R2.5 cross holes as one face each; no training file or corpus fi
 - The over-tolerance edge class measures a circle-on-plane edge on its own arc, not the whole circle (removes false red lines; geometry unchanged).
 
 ### Added
-- Relational reclaim (Line mode): certified partial cylinders that are one surface at τ are merged into one face, filling the on-surface triangles between them, only when the result is one disk (a closure that would need an inner loop is left as it was); a hole wall the revolve donor test refused is re-certified on its τ-inliers and grown over the rest of its wall.
+- Relational reclaim (Line mode): certified partial cylinders that are one surface at τ are merged into one face, filling the on-surface triangles between them, only when the result is one disk (a closure that would need an inner loop is left as it was); a hole wall the revolve donor test refused is re-certified on its τ-inliers and grown over the free triangles of its wall (the hole stays open; closed holes are pending).
 - Relational extrusion: the slab sector around a fillet uses the contact line's propagated position bound, (anchor tolerance + τ) / (r·sin dihedral), instead of τ/r; pair sides are pruned losslessly by anchor contact windows.
 - Tessellation-law refutation of N-gon walls: a six-sided "hole" is rebuilt as planar walls when the file's own equal-step boundary rails show it cannot be a tessellated circle (training tray: 56 hexagonal floor holes stay hexagons, volume back to the mesh within 0.02 %; Craftsman, Body28 and S16-R2 unchanged).
 - Relational stage contract for the fillet/chamfer work: declarations and hooks after the fillet stage (H0) and after the torus stage (H1), shared τ-derived thresholds in `refit_relational.hpp`, and the torus profile certificate moved verbatim into `refit_profile_cert`. 
