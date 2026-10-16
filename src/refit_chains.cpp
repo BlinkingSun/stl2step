@@ -862,13 +862,20 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                     const gp_Pnt loc = gt.Location();
                     const gp_Dir za = gt.Axis().Direction();
                     const double Rmaj = gt.MajorRadius();
+                    // A window that crosses v = ±π (a cone-to-neck blend ending at
+                    // v = π) reads its far rim near -π. Unwrap about the window's
+                    // own centre so CapLow / CapHigh follow v, not the branch cut.
+                    const double vMid = 0.5 * (reg.vMin + reg.vMax);
                     for (int lv : vs) {
                         const gp_Pnt p(localPnt(mv, lv).X(), localPnt(mv, lv).Y(),
                                        localPnt(mv, lv).Z());
                         const gp_Vec d(loc, p);
                         const double z = d.Dot(za);
                         const double rho = (d - gp_Vec(za) * z).Magnitude();
-                        sum += std::atan2(z, rho - Rmaj);
+                        double v = std::atan2(z, rho - Rmaj);
+                        if (v - vMid > M_PI) v -= 2.0 * M_PI;
+                        else if (v - vMid <= -M_PI) v += 2.0 * M_PI;
+                        sum += v;
                         ++n;
                     }
                 } else {

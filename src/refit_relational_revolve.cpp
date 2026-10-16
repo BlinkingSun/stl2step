@@ -1,13 +1,15 @@
 // Relational revolve (D-fc-1.3 … 1.7, D-fc-1.10, D-fc-3.5). Line mode gathers
 // rings about a certified donor axis and claims closed cones. A 2-station
 // chain whose next rings are a profile circle is why=profile-row. Torus mode
-// is the r4 adjacency growth, unchanged. Axis comes from a donor refit and is
-// not re-fit on the band. Certificate is τ = tauOf(mv). Never throws.
+// gathers by axis too (D-fc-4.6): a chain of concyclic rings, atoms joining
+// whole. Axis comes from a donor refit and is not re-fit on the band.
+// Certificate is τ = tauOf(mv). Never throws.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational.hpp"
 #include "refit_profile_cert.hpp"
 #include "refit_cone_math.hpp"
+#include "refit_relational_torus.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +19,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <set>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -218,8 +221,6 @@ double radialMiss(const SurfaceFit& f, const ProfPt& p) {
     return std::fabs(p.z - (f.a + f.b * p.rho));
 }
 
-double extrapOf(double q, double l1) { return q * l1; }
-
 // Perpendicular profile distance from the regression line, so growth and the
 // τ certificate speak about the same surface distance.
 double linePerp(const SurfaceFit& f, const ProfPt& p) {
@@ -227,62 +228,6 @@ double linePerp(const SurfaceFit& f, const ProfPt& p) {
     if (!std::isfinite(miss)) return miss;
     const double scale = std::sqrt(1.0 + f.b * f.b);
     return miss / scale;
-}
-
-bool solve3(const double m[3][3], const double rhs[3], double x[3]) {
-    double a[3][4];
-    for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) a[i][j] = m[i][j];
-        a[i][3] = rhs[i];
-    }
-    for (int col = 0; col < 3; ++col) {
-        int piv = col;
-        for (int row = col + 1; row < 3; ++row)
-            if (std::abs(a[row][col]) > std::abs(a[piv][col])) piv = row;
-        if (!(std::abs(a[piv][col]) > gp::Resolution())) return false;
-        if (piv != col)
-            for (int j = col; j < 4; ++j) std::swap(a[piv][j], a[col][j]);
-        const double div = a[col][col];
-        for (int j = col; j < 4; ++j) a[col][j] /= div;
-        for (int row = 0; row < 3; ++row) {
-            if (row == col) continue;
-            const double w = a[row][col];
-            for (int j = col; j < 4; ++j) a[row][j] -= w * a[col][j];
-        }
-    }
-    for (int i = 0; i < 3; ++i) x[i] = a[i][3];
-    return true;
-}
-
-// Geometric-circle hat row. Residual is already the profile distance.
-double circleHatL1(const std::vector<ProfPt>& samples, double Rmaj, double z0, double Rmin,
-                   const ProfPt& q) {
-    if (samples.size() < 3) return std::numeric_limits<double>::infinity();
-    double G[3][3] = {};
-    std::vector<std::array<double, 3>> J;
-    J.reserve(samples.size());
-    for (const ProfPt& s : samples) {
-        const double dx = s.rho - Rmaj, dy = s.z - z0;
-        const double d = std::hypot(dx, dy);
-        if (!(d > gp::Resolution())) return std::numeric_limits<double>::infinity();
-        std::array<double, 3> j{{-(dx / d), -(dy / d), -1.0}};
-        J.push_back(j);
-        for (int a = 0; a < 3; ++a)
-            for (int b = 0; b < 3; ++b) G[a][b] += j[a] * j[b];
-    }
-    const double dx = q.rho - Rmaj, dy = q.z - z0;
-    const double d = std::hypot(dx, dy);
-    if (!(d > gp::Resolution())) return std::numeric_limits<double>::infinity();
-    const double jq[3] = {-(dx / d), -(dy / d), -1.0};
-    double l1 = 0.0;
-    for (const auto& j : J) {
-        double rhs[3] = {j[0], j[1], j[2]};
-        double col[3];
-        if (!solve3(G, rhs, col)) return std::numeric_limits<double>::infinity();
-        const double h = jq[0] * col[0] + jq[1] * col[1] + jq[2] * col[2];
-        l1 += std::abs(h);
-    }
-    return l1;
 }
 
 double circDist(const SurfaceFit& f, const ProfPt& p) {
@@ -633,67 +578,6 @@ bool torusIsFailingSubset(const WorkMesh& wm, const Frame& fr, const Band& band,
     return !certifyTorus(ext.pts, tau).ok;
 }
 
-// Torus growth. While the circle fit cannot yet resolve τ (extrapBound > τ),
-// or the profile is still a line, take the next same-sheet layer. After the
-// fit tightens, admit only vertices inside growTol. The caller certifies the
-// whole grown band once (D-fc-1.6.6, D-fc-1.6.9).
-void growTorusDrain(WorkMesh& wm, const Frame& fr, Band& band, const std::vector<int>& stamp) {
-    const int nTri = (int)wm.mv->nTri;
-    for (int guard = 0; guard < nTri; ++guard) {
-        collectBand(*wm.mv, fr, wm.g2l, band);
-        const double lineRes = profileLineMaxResid(band.pts);
-        const bool line = lineRes <= wm.tau;
-        const SurfaceFit fit = fitSurface(band.pts, wm.tau);
-        const bool circ = fit.circle && fit.circMax <= wm.tau && !line;
-        double probeL1 = std::numeric_limits<double>::infinity();
-        int probe = -1;
-        for (int t : band.tris) {
-            if (t < 0 || t >= nTri) continue;
-            for (int n : wm.adj.nbr[(std::size_t)t]) {
-                if (n < 0 || n >= nTri || band.in[(std::size_t)n]) continue;
-                if (!wm.freeTri[(std::size_t)n] || stamp[(std::size_t)n] != 0) continue;
-                if (sheetOf(*wm.mv, n, fr) != band.sheet) continue;
-                probe = n;
-                break;
-            }
-            if (probe >= 0) break;
-        }
-        if (probe >= 0 && circ) {
-            const ProfPt pp = profOfPoint(triVert(*wm.mv, probe, 0), fr, 0);
-            probeL1 = circleHatL1(band.pts, fit.Rmaj, fit.z0, fit.Rmin, pp);
-        }
-        const double extra = extrapOf(wm.q, probeL1);
-        const bool loose = !circ || !std::isfinite(extra) || extra > wm.tau;
-        std::vector<int> add;
-        for (int t : band.tris) {
-            if (t < 0 || t >= nTri) continue;
-            for (int n : wm.adj.nbr[(std::size_t)t]) {
-                if (n < 0 || n >= nTri || band.in[(std::size_t)n]) continue;
-                if (!wm.freeTri[(std::size_t)n] || stamp[(std::size_t)n] != 0) continue;
-                if (sheetOf(*wm.mv, n, fr) != band.sheet) continue;
-                if (!loose) {
-                    bool ok = true;
-                    for (int k = 0; k < 3 && ok; ++k) {
-                        const ProfPt pp = profOfPoint(triVert(*wm.mv, n, k), fr, 0);
-                        const double l1 = circleHatL1(band.pts, fit.Rmaj, fit.z0, fit.Rmin, pp);
-                        if (circDist(fit, pp) > wm.tau + extrapOf(wm.q, l1)) ok = false;
-                    }
-                    if (!ok) continue;
-                }
-                add.push_back(n);
-            }
-        }
-        std::sort(add.begin(), add.end());
-        add.erase(std::unique(add.begin(), add.end()), add.end());
-        if (add.empty()) break;
-        for (int n : add) {
-            band.in[(std::size_t)n] = 1;
-            band.tris.push_back(n);
-        }
-    }
-    collectBand(*wm.mv, fr, wm.g2l, band);
-}
-
 void endTangency(const WorkMesh& wm, const Frame& fr, const Band& band, const SurfaceFit& fit,
                  double& ang0, double& ang1) {
     ang0 = ang1 = 0;
@@ -967,20 +851,10 @@ bool emitTorus(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const 
                const TorusCert& cert, const ClosedM& cl, int& straddle) {
     const MeshView& mv = *wm.mv;
     const Frame& fr = donor.fr;
-    int lvMin = std::numeric_limits<int>::max();
-    gp_XYZ pMin(0, 0, 0);
-    bool have = false;
-    for (const Vtx& v : band.verts) {
-        if (!have || v.lv < lvMin) {
-            lvMin = v.lv;
-            pMin = v.p;
-            have = true;
-        }
-    }
-    gp_XYZ xdir = pMin - fr.origin;
-    xdir -= fr.axis * xdir.Dot(fr.axis);
-    if (!(xdir.Modulus() > gp::Resolution())) xdir = fr.e1;
-    else xdir /= xdir.Modulus();
+    // D-fc-4.6 F8: one seam azimuth per revolution axis. The torus takes the
+    // donor frame's XDirection, the frame its band azimuths are measured in and
+    // the one shareSeamFrame gives the coaxial cones and cylinders.
+    const gp_XYZ xdir = fr.e1;
     const gp_XYZ centre = fr.origin + fr.axis * cert.z0;
     std::vector<double> psis, vs;
     for (const ProfPt& p : band.pts) {
@@ -1848,6 +1722,564 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
     scans.push_back(scan);
 }
 
+// D-fc-4.6 F2: a free-band variant of sameSurfaceFr that does not count atoms.
+// An atom is a candidate unit of the band, not a neighbour surface: inside the
+// band it joins or leaves whole, beside it reclaimRelational(Torus) offers it
+// the same test against the torus the band becomes.
+bool sameSurfaceTorus(const WorkMesh& wm, const SegmentWork& work, const Frame& fr,
+                      const Band& band, const SurfaceFit& fit, const std::vector<char>& atomDead) {
+    const int nTri = (int)wm.mv->nTri;
+    std::vector<char> bandTri((std::size_t)nTri, 0);
+    for (int t : band.tris)
+        if (t >= 0 && t < nTri) bandTri[(std::size_t)t] = 1;
+    for (int i = 0; i < (int)work.accepted.size(); ++i) {
+        const Region& r = work.accepted[(std::size_t)i];
+        if (r.tris.empty() || torusAtom(r)) continue;
+        if (i < (int)atomDead.size() && atomDead[(std::size_t)i]) continue;
+        bool touch = false;
+        for (int t : r.tris) {
+            if (t < 0 || t >= nTri) continue;
+            for (int n : wm.adj.nbr[(std::size_t)t])
+                if (n >= 0 && n < nTri && bandTri[(std::size_t)n]) touch = true;
+            if (touch) break;
+        }
+        if (!touch) continue;
+        bool all = true;
+        for (int t : r.tris) {
+            if (t < 0 || t >= nTri) continue;
+            for (int k = 0; k < 3 && all; ++k)
+                if (!(circDist(fit, profOfPoint(triVert(*wm.mv, t, k), fr, 0)) <= wm.tau)) all = false;
+            if (!all) break;
+        }
+        if (all) return true;
+    }
+    return false;
+}
+
+// D-fc-4.6 F1/F2. Torus mode gathers by axis like Line mode (D-fc-3.5.1).
+// Rings are vertices at equal (rho, z) within tau about the donor axis, >= 3
+// (kParamsLine + 1). Candidates are triangles with all three vertices on rings
+// that are free or belong to an atom. A band is a chain of consecutive rings
+// whose stations stay concyclic within tau (three stations fix a circle,
+// kParamsCircle), split into edge-connected components; each component is
+// certified by certifyTorus itself. An atom joins only whole and only with
+// every vertex within tau of the band's torus, and over-determination is
+// counted leave-one-region-out. Adjacency to the donor is not required.
+void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisScan>& scans,
+                const std::vector<int>& atomOf, std::vector<char>& atomDead, int& claimed,
+                int& refused) {
+    const MeshView& mv = *wm.mv;
+    const int nTri = (int)mv.nTri;
+    const double tau = wm.tau;
+    if (!(tau > 0.0) || nTri <= 0) return;
+    const double axisLen = std::max(donor.length, tau);
+    const double reach = std::max(mv.diag, axisLen);
+    for (const AxisScan& s : scans) {
+        const double L = std::max(reach, std::max(s.length, tau));
+        if (s.scanned && sameAxis(s.fr, donor.fr, tau, L)) return;
+    }
+    AxisScan scan;
+    scan.fr = donor.fr;
+    scan.length = donor.length;
+    const Frame& fr = donor.fr;
+    auto liveTri = [&](int t) {
+        if (t < 0 || t >= nTri) return false;
+        if (wm.freeTri[(std::size_t)t]) return true;
+        const int a = atomOf[(std::size_t)t];
+        return a >= 0 && a != donor.idx && !atomDead[(std::size_t)a];
+    };
+    int maxV = 0;
+    for (int t = 0; t < nTri; ++t)
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            maxV = std::max(maxV, mv.tris[gt][k]);
+        }
+    std::vector<double> rhoOf((std::size_t)maxV + 1, 0.0), zOf((std::size_t)maxV + 1, 0.0);
+    std::vector<char> seenV((std::size_t)maxV + 1, 0);
+    std::vector<int> allV;
+    allV.reserve((std::size_t)nTri);
+    for (int t = 0; t < nTri; ++t) {
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            const int v = mv.tris[gt][k];
+            if (v < 0 || v > maxV || seenV[(std::size_t)v]) continue;
+            const ProfPt p = profOfPoint(mv.pts[v], fr, 0);
+            if (!std::isfinite(p.rho) || !std::isfinite(p.z)) continue;
+            seenV[(std::size_t)v] = 1;
+            rhoOf[(std::size_t)v] = p.rho;
+            zOf[(std::size_t)v] = p.z;
+            allV.push_back(v);
+        }
+    }
+    // Rings: the Line-mode cell rule (tau buckets, united while the union stays
+    // within tau in rho and in z).
+    struct Cell {
+        int parent = 0;
+        long long kr = 0, kz = 0;
+        double rMin = 0, rMax = 0, zMin = 0, zMax = 0;
+        std::vector<int> verts;
+    };
+    std::vector<Cell> cells;
+    std::map<std::pair<long long, long long>, int> buckets;
+    for (int v : allV) {
+        const double rho = rhoOf[(std::size_t)v];
+        const double z = zOf[(std::size_t)v];
+        const auto key = std::make_pair((long long)std::llround(rho / tau), (long long)std::llround(z / tau));
+        auto it = buckets.find(key);
+        if (it == buckets.end()) {
+            Cell c;
+            c.parent = (int)cells.size();
+            c.kr = key.first;
+            c.kz = key.second;
+            c.rMin = c.rMax = rho;
+            c.zMin = c.zMax = z;
+            c.verts.push_back(v);
+            buckets.emplace(key, (int)cells.size());
+            cells.push_back(std::move(c));
+        } else {
+            Cell& c = cells[(std::size_t)it->second];
+            c.verts.push_back(v);
+            c.rMin = std::min(c.rMin, rho);
+            c.rMax = std::max(c.rMax, rho);
+            c.zMin = std::min(c.zMin, z);
+            c.zMax = std::max(c.zMax, z);
+        }
+    }
+    auto findCell = [&](int x) {
+        while (cells[(std::size_t)x].parent != x) {
+            cells[(std::size_t)x].parent = cells[(std::size_t)cells[(std::size_t)x].parent].parent;
+            x = cells[(std::size_t)x].parent;
+        }
+        return x;
+    };
+    auto uniteCell = [&](int a, int b) {
+        a = findCell(a);
+        b = findCell(b);
+        if (a == b) return false;
+        const double rMin = std::min(cells[(std::size_t)a].rMin, cells[(std::size_t)b].rMin);
+        const double rMax = std::max(cells[(std::size_t)a].rMax, cells[(std::size_t)b].rMax);
+        const double zMin = std::min(cells[(std::size_t)a].zMin, cells[(std::size_t)b].zMin);
+        const double zMax = std::max(cells[(std::size_t)a].zMax, cells[(std::size_t)b].zMax);
+        if (rMax - rMin > tau || zMax - zMin > tau) return false;
+        cells[(std::size_t)b].parent = a;
+        cells[(std::size_t)a].rMin = rMin;
+        cells[(std::size_t)a].rMax = rMax;
+        cells[(std::size_t)a].zMin = zMin;
+        cells[(std::size_t)a].zMax = zMax;
+        return true;
+    };
+    {
+        bool changed = !cells.empty();
+        for (int guard = 0; changed && guard < (int)cells.size() + 2; ++guard) {
+            changed = false;
+            for (int i = 0; i < (int)cells.size(); ++i)
+                for (int dr = -1; dr <= 1; ++dr)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dr == 0 && dz == 0) continue;
+                        const auto it = buckets.find(std::make_pair(cells[(std::size_t)i].kr + dr,
+                                                                    cells[(std::size_t)i].kz + dz));
+                        if (it != buckets.end() && uniteCell(i, it->second)) changed = true;
+                    }
+        }
+    }
+    struct Ring {
+        double rho = 0, z = 0;
+        int minV = 0;
+    };
+    std::vector<Ring> rings;
+    std::vector<int> ringOf((std::size_t)maxV + 1, -1);
+    {
+        std::vector<std::vector<int>> groups(cells.size());
+        for (int i = 0; i < (int)cells.size(); ++i) {
+            auto& g = groups[(std::size_t)findCell(i)];
+            g.insert(g.end(), cells[(std::size_t)i].verts.begin(), cells[(std::size_t)i].verts.end());
+        }
+        std::vector<std::pair<Ring, std::vector<int>>> made;
+        for (auto& g : groups) {
+            if ((int)g.size() < minStations(kParamsLine)) continue;
+            Ring ring;
+            ring.minV = g.front();
+            double sr = 0, sz = 0;
+            for (int v : g) {
+                sr += rhoOf[(std::size_t)v];
+                sz += zOf[(std::size_t)v];
+                ring.minV = std::min(ring.minV, v);
+            }
+            ring.rho = sr / (double)g.size();
+            ring.z = sz / (double)g.size();
+            made.emplace_back(ring, std::move(g));
+        }
+        std::sort(made.begin(), made.end(), [](const auto& a, const auto& b) {
+            if (a.first.z != b.first.z) return a.first.z < b.first.z;
+            if (a.first.rho != b.first.rho) return a.first.rho < b.first.rho;
+            return a.first.minV < b.first.minV;
+        });
+        for (int i = 0; i < (int)made.size(); ++i) {
+            rings.push_back(made[(std::size_t)i].first);
+            for (int v : made[(std::size_t)i].second) ringOf[(std::size_t)v] = i;
+        }
+    }
+    const int nRings = (int)rings.size();
+    struct Cand {
+        int t = -1;
+        int sheet = 0;
+        int nR = 0;
+        int ids[3] = {-1, -1, -1};
+    };
+    std::vector<Cand> cands;
+    for (int t = 0; t < nTri; ++t) {
+        if (!liveTri(t)) continue;
+        Cand c;
+        c.t = t;
+        bool onAll = true;
+        for (int k = 0; k < 3; ++k) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            const int v = mv.tris[gt][k];
+            const int r = (v >= 0 && v <= maxV) ? ringOf[(std::size_t)v] : -1;
+            if (r < 0) {
+                onAll = false;
+                break;
+            }
+            bool dup = false;
+            for (int i = 0; i < c.nR; ++i)
+                if (c.ids[i] == r) dup = true;
+            if (!dup) c.ids[c.nR++] = r;
+        }
+        if (!onAll || c.nR < 2) continue;
+        c.sheet = sheetOf(mv, t, fr);
+        if (c.sheet == 0) continue;
+        cands.push_back(c);
+    }
+    if (cands.empty()) {
+        scan.scanned = true;
+        scans.push_back(scan);
+        return;
+    }
+    struct Edge {
+        int u = 0, v = 0, sheet = 0, minTri = 0;
+        bool used = false;
+    };
+    std::vector<Edge> edges;
+    std::map<std::tuple<int, int, int>, int> edgeKey;
+    for (const Cand& c : cands)
+        for (int a = 0; a < c.nR; ++a)
+            for (int b = a + 1; b < c.nR; ++b) {
+                const int u = std::min(c.ids[a], c.ids[b]), v = std::max(c.ids[a], c.ids[b]);
+                const auto key = std::make_tuple(c.sheet, u, v);
+                auto it = edgeKey.find(key);
+                if (it == edgeKey.end()) {
+                    Edge e;
+                    e.u = u;
+                    e.v = v;
+                    e.sheet = c.sheet;
+                    e.minTri = c.t;
+                    edgeKey.emplace(key, (int)edges.size());
+                    edges.push_back(e);
+                } else if (c.t < edges[(std::size_t)it->second].minTri) {
+                    edges[(std::size_t)it->second].minTri = c.t;
+                }
+            }
+    std::vector<std::vector<int>> edgeAt((std::size_t)nRings);
+    for (int i = 0; i < (int)edges.size(); ++i) {
+        edgeAt[(std::size_t)edges[(std::size_t)i].u].push_back(i);
+        edgeAt[(std::size_t)edges[(std::size_t)i].v].push_back(i);
+    }
+    auto concyclic = [&](const std::vector<int>& ids) {
+        if ((int)ids.size() <= kParamsCircle) return true;
+        std::vector<ProfPt> pts;
+        pts.reserve(ids.size());
+        for (int id : ids) {
+            ProfPt p;
+            p.rho = rings[(std::size_t)id].rho;
+            p.z = rings[(std::size_t)id].z;
+            pts.push_back(p);
+        }
+        double Rmaj = 0, z0 = 0, Rmin = 0;
+        if (!fitProfileCircle(pts, tau, Rmaj, z0, Rmin) || !std::isfinite(Rmin)) return false;
+        for (const ProfPt& p : pts)
+            if (!(std::fabs(std::hypot(p.rho - Rmaj, p.z - z0) - Rmin) <= tau)) return false;
+        return true;
+    };
+    std::vector<int> edgeOrder(edges.size());
+    for (int i = 0; i < (int)edges.size(); ++i) edgeOrder[(std::size_t)i] = i;
+    std::sort(edgeOrder.begin(), edgeOrder.end(), [&](int a, int b) {
+        const Edge& A = edges[(std::size_t)a];
+        const Edge& B = edges[(std::size_t)b];
+        if (A.minTri != B.minTri) return A.minTri < B.minTri;
+        if (A.u != B.u) return A.u < B.u;
+        if (A.v != B.v) return A.v < B.v;
+        return A.sheet < B.sheet;
+    });
+    std::set<std::vector<int>> tried;
+    for (int ei0 : edgeOrder) {
+        if (edges[(std::size_t)ei0].used) continue;
+        const int sheet = edges[(std::size_t)ei0].sheet;
+        std::vector<int> chain{edges[(std::size_t)ei0].u, edges[(std::size_t)ei0].v};
+        std::vector<char> inChain((std::size_t)nRings, 0);
+        inChain[(std::size_t)chain[0]] = inChain[(std::size_t)chain[1]] = 1;
+        auto grow = [&](bool front) {
+            while (true) {
+                const int cur = front ? chain.front() : chain.back();
+                int bestE = -1, bestN = -1, bestMin = std::numeric_limits<int>::max();
+                for (int ei : edgeAt[(std::size_t)cur]) {
+                    const Edge& e = edges[(std::size_t)ei];
+                    if (e.used || e.sheet != sheet) continue;
+                    const int nxt = (e.u == cur) ? e.v : e.u;
+                    if (inChain[(std::size_t)nxt]) continue;
+                    std::vector<int> trial = chain;
+                    if (front) trial.insert(trial.begin(), nxt);
+                    else trial.push_back(nxt);
+                    if (!concyclic(trial)) continue;
+                    if (e.minTri < bestMin || (e.minTri == bestMin && nxt < bestN)) {
+                        bestMin = e.minTri;
+                        bestE = ei;
+                        bestN = nxt;
+                    }
+                }
+                if (bestE < 0) break;
+                inChain[(std::size_t)bestN] = 1;
+                if (front) chain.insert(chain.begin(), bestN);
+                else chain.push_back(bestN);
+            }
+        };
+        grow(false);
+        grow(true);
+        {
+            std::vector<int> key = chain;
+            std::sort(key.begin(), key.end());
+            key.push_back(sheet);
+            if (!tried.insert(key).second) continue;
+        }
+        std::vector<int> bandTris;
+        for (const Cand& c : cands) {
+            if (c.sheet != sheet || !liveTri(c.t)) continue;
+            bool inside = true;
+            for (int i = 0; i < c.nR && inside; ++i)
+                if (!inChain[(std::size_t)c.ids[i]]) inside = false;
+            if (inside) bandTris.push_back(c.t);
+        }
+        if (bandTris.empty()) continue;
+        // An atom joins only whole: one that is not wholly on the chain leaves it.
+        {
+            std::map<int, int> hit;
+            for (int t : bandTris)
+                if (atomOf[(std::size_t)t] >= 0) ++hit[atomOf[(std::size_t)t]];
+            std::vector<char> drop(work.accepted.size(), 0);
+            bool any = false;
+            for (const auto& h : hit)
+                if (h.second != (int)work.accepted[(std::size_t)h.first].tris.size()) {
+                    drop[(std::size_t)h.first] = 1;
+                    any = true;
+                }
+            if (any) {
+                std::vector<int> keep;
+                for (int t : bandTris) {
+                    const int a = atomOf[(std::size_t)t];
+                    if (a < 0 || !drop[(std::size_t)a]) keep.push_back(t);
+                }
+                bandTris.swap(keep);
+            }
+        }
+        // Each edge-connected component is one band.
+        auto components = [&](const std::vector<int>& tris) {
+            std::vector<char> in((std::size_t)nTri, 0), seen((std::size_t)nTri, 0);
+            for (int t : tris) in[(std::size_t)t] = 1;
+            std::vector<std::vector<int>> comps;
+            for (int t : tris) {
+                if (seen[(std::size_t)t]) continue;
+                std::vector<int> comp, stack{t};
+                seen[(std::size_t)t] = 1;
+                while (!stack.empty()) {
+                    const int c = stack.back();
+                    stack.pop_back();
+                    comp.push_back(c);
+                    for (int n : wm.adj.nbr[(std::size_t)c])
+                        if (n >= 0 && n < nTri && in[(std::size_t)n] && !seen[(std::size_t)n]) {
+                            seen[(std::size_t)n] = 1;
+                            stack.push_back(n);
+                        }
+                }
+                std::sort(comp.begin(), comp.end());
+                comps.push_back(std::move(comp));
+            }
+            return comps;
+        };
+        std::vector<std::vector<int>> queue = components(bandTris);
+        std::sort(queue.begin(), queue.end(),
+                  [](const std::vector<int>& a, const std::vector<int>& b) { return a.front() < b.front(); });
+        bool claimedChain = false;
+        for (std::size_t wi = 0; wi < queue.size(); ++wi) {
+            std::vector<int> comp = queue[wi];
+            Band band;
+            band.in.assign((std::size_t)nTri, 0);
+            band.tris = comp;
+            band.sheet = sheet;
+            band.seed = comp.front();
+            for (int t : comp) band.in[(std::size_t)t] = 1;
+            collectBand(mv, fr, wm.g2l, band);
+            if (band.pts.empty()) continue;
+            const SurfaceFit fit = fitSurface(band.pts, tau);
+            const ClosedM cl = closedOf(mv, fr, band.tris, band.verts, wm.thetaBin);
+            std::vector<double> zs, psis, rhos;
+            for (const ProfPt& pp : band.pts) {
+                zs.push_back(pp.z);
+                psis.push_back(pp.psi);
+                rhos.push_back(pp.rho);
+            }
+            const int levels = countLevels(zs, tau);
+            const int stations = countProfPts(band.pts, tau);
+            std::vector<int> atoms;
+            for (int t : comp)
+                if (atomOf[(std::size_t)t] >= 0) atoms.push_back(atomOf[(std::size_t)t]);
+            std::sort(atoms.begin(), atoms.end());
+            atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
+            auto refuse = [&](const char* why, const TorusCert* c) {
+                ++refused;
+                DiagRec d = baseDiag("torus", donor, band, tau);
+                d.stations = stations;
+                d.levels = levels;
+                d.params = kParamsCircle;
+                d.maxDev = (c && c->determinate) ? c->maxDev : fit.circMax;
+                d.maxDevTau = tau > 0 ? d.maxDev / tau : 0;
+                d.lineResTau = tau > 0 ? fit.orthMax / tau : 0;
+                d.span = cl.span;
+                d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
+                d.r0 = (c && c->Rmaj > 0) ? c->Rmaj : fit.Rmaj;
+                d.r1 = (c && c->Rmin > 0) ? c->Rmin : fit.Rmin;
+                d.why = why;
+                printBand(d);
+            };
+            if (fit.line && fit.orthMax <= tau) {
+                refuse("line", nullptr);
+                continue;
+            }
+            const TorusCert cert = certifyTorus(band.pts, tau);
+            if (!cert.ok) {
+                // An atom with a vertex off the band's circle leaves whole; what
+                // remains is certified again as its own components.
+                bool dropped = false;
+                if (cert.determinate && cert.Rmin > 0.0 &&
+                    std::strcmp(cert.why, "vertex-off-surface") == 0 && !atoms.empty()) {
+                    std::vector<char> off(work.accepted.size(), 0);
+                    for (int t : comp) {
+                        const int a = atomOf[(std::size_t)t];
+                        if (a < 0 || off[(std::size_t)a]) continue;
+                        for (int k = 0; k < 3; ++k) {
+                            const ProfPt p = profOfPoint(triVert(mv, t, k), fr, 0);
+                            if (std::fabs(std::hypot(p.rho - cert.Rmaj, p.z - cert.z0) - cert.Rmin) > tau) {
+                                off[(std::size_t)a] = 1;
+                                break;
+                            }
+                        }
+                    }
+                    std::vector<int> keep;
+                    for (int t : comp) {
+                        const int a = atomOf[(std::size_t)t];
+                        if (a >= 0 && off[(std::size_t)a]) {
+                            dropped = true;
+                            continue;
+                        }
+                        keep.push_back(t);
+                    }
+                    if (dropped) {
+                        std::vector<std::vector<int>> sub = components(keep);
+                        std::sort(sub.begin(), sub.end(), [](const std::vector<int>& a,
+                                                             const std::vector<int>& b) {
+                            return a.front() < b.front();
+                        });
+                        for (auto& s : sub) queue.push_back(std::move(s));
+                    }
+                }
+                if (!dropped) refuse(torusWhy(cert), &cert);
+                continue;
+            }
+            // Leave-one-region-out: the band without any one atom still meets
+            // certifyTorus's own counts.
+            {
+                std::vector<std::array<ProfPt, 3>> triPts;
+                std::vector<int> triAtom;
+                triPts.reserve(comp.size());
+                triAtom.reserve(comp.size());
+                for (int t : comp) {
+                    std::array<ProfPt, 3> tp;
+                    for (int k = 0; k < 3; ++k) tp[(std::size_t)k] = profOfPoint(triVert(mv, t, k), fr, localId(wm, t, k));
+                    triPts.push_back(tp);
+                    const int a = atomOf[(std::size_t)t];
+                    int slot = -1;
+                    if (a >= 0)
+                        slot = (int)(std::lower_bound(atoms.begin(), atoms.end(), a) - atoms.begin());
+                    triAtom.push_back(slot);
+                }
+                if (!leaveOneOutDeterminate(triPts, triAtom, (int)atoms.size(), tau)) {
+                    refuse("underdetermined", &cert);
+                    continue;
+                }
+            }
+            if (torusIsFailingSubset(wm, fr, band, tau)) {
+                refuse("vertex-off", &cert);
+                continue;
+            }
+            if (sameSurfaceTorus(wm, work, fr, band, fit, atomDead)) {
+                refuse("same-surface", &cert);
+                continue;
+            }
+            int straddle = countStraddle(work, band.tris, nTri);
+            if (!emitTorus(wm, work, donor, band, cert, cl, straddle)) {
+                refuse("degenerate", &cert);
+                continue;
+            }
+            {
+                Region& tor = work.accepted.back();
+                if (tor.torusPending >= 0 && (std::size_t)tor.torusPending < work.torusPending.size()) {
+                    TorusPendingReclaim& pack = work.torusPending[(std::size_t)tor.torusPending];
+                    for (int a : atoms) {
+                        pack.stashedCylinders.push_back(work.accepted[(std::size_t)a]);
+                        pack.reclaimAccIdx.push_back(a);
+                    }
+                }
+            }
+            for (int a : atoms) atomDead[(std::size_t)a] = 1;
+            for (int t : band.tris) wm.freeTri[(std::size_t)t] = 0;
+            // F8: one seam azimuth per revolution axis. The coaxial cylinders the
+            // torus touches take the donor frame it took.
+            shareSeamFrame(wm, work, donor, band);
+            updateDonor(work, donor);
+            claimedChain = true;
+            ++claimed;
+            DiagRec d = baseDiag("torus", donor, band, tau);
+            d.stations = cert.profPts;
+            d.levels = cert.levels;
+            d.params = kParamsCircle;
+            d.maxDev = cert.maxDev;
+            d.maxDevTau = cert.maxDev / tau;
+            d.lineResTau = cert.lineRes / tau;
+            d.span = cl.span;
+            d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
+            d.r0 = cert.Rmaj;
+            d.r1 = cert.Rmin;
+            double ang0 = 0, ang1 = 0;
+            endTangency(wm, fr, band, fit, ang0, ang1);
+            d.tan0 = ang0;
+            d.tan1 = ang1;
+            d.straddle = straddle;
+            d.why = "accept";
+            printBand(d);
+            if (diagOn())
+                std::fprintf(stderr,
+                             "DIAG_REL_TORUS_BAND seed=%d nTri=%zu atoms=%zu chainRings=%zu donor=%d "
+                             "donorR=%.6f donorClosed=%d\n",
+                             band.seed, band.tris.size(), atoms.size(), chain.size(), donor.idx,
+                             donor.radius, work.accepted[(std::size_t)donor.idx].closed360 ? 1 : 0);
+        }
+        if (claimedChain) {
+            for (Edge& e : edges)
+                if (e.sheet == sheet && inChain[(std::size_t)e.u] && inChain[(std::size_t)e.v]) e.used = true;
+        }
+    }
+    scan.scanned = true;
+    scans.push_back(scan);
+}
+
 }  // namespace
 
 bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -1970,178 +2402,51 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
         });
 
         int claimed = 0, refused = 0;
-        std::vector<int> stamp(nTri, 0);
-        std::vector<char> hold((std::size_t)std::max(nTri, 0), 0);
-        int stampGen = 0;
         std::vector<AxisScan> axisScans;
 
-        for (Donor& donor : donors) {
-            if (mode != RelRevolveMode::Torus) {
-                gatherLines(wm, work, donor, axisScans, claimed, refused);
-                continue;
+        if (mode != RelRevolveMode::Torus) {
+            for (Donor& donor : donors) gatherLines(wm, work, donor, axisScans, claimed, refused);
+        } else {
+            // D-fc-4.6 F2/F3. Atoms are candidate units of every scan but their
+            // own; an atom a band absorbed leaves later scans and stops donating.
+            // Certified closed donors (closed-360 cylinders, closed cones) scan
+            // first, so their axes meet the atoms before the atoms' own axes do.
+            std::vector<int> atomOf((std::size_t)nTri, -1);
+            for (int i = 0; i < (int)work.accepted.size(); ++i) {
+                const Region& r = work.accepted[(std::size_t)i];
+                if (!torusAtom(r)) continue;
+                for (int t : r.tris)
+                    if (t >= 0 && t < nTri) atomOf[(std::size_t)t] = i;
             }
-            // A failed band on one donor is not a refusal on another axis.
-            // Held triangles are rows of a blend already refused as cones.
-            for (int t = 0; t < nTri; ++t)
-                stamp[(std::size_t)t] = hold[(std::size_t)t] ? 1 : 0;
-            stampGen = 1;
-            // The candidate set is every free triangle reachable from the
-            // donor without crossing an accepted triangle. A cone that meets
-            // the donor only through an unclaimed blend is in this set; growth
-            // at growTol then keeps the blend and the cone as separate bands.
-            std::vector<char> pool((std::size_t)nTri, 0);
-            std::vector<int> stack;
-            auto seedBoundary = [&](const std::vector<int>& tris) {
-                for (int t : tris) {
-                    if (t < 0 || t >= nTri) continue;
-                    for (int n : wm.adj.nbr[(std::size_t)t]) {
-                        if (n < 0 || n >= nTri || !wm.freeTri[(std::size_t)n] || pool[(std::size_t)n])
-                            continue;
-                        pool[(std::size_t)n] = 1;
-                        stack.push_back(n);
-                    }
-                }
-            };
-            if (donor.idx >= 0 && donor.idx < (int)work.accepted.size())
-                seedBoundary(work.accepted[(std::size_t)donor.idx].tris);
-            for (const Region& r : work.accepted) {
-                if (r.origin != Origin::ChamferCone && r.origin != Origin::TorusBlend) continue;
-                Frame rf = makeFrame(r.ax.Location().XYZ(), r.ax.Direction().XYZ(),
-                                     r.ax.XDirection().XYZ());
-                if (!sameAxis(donor.fr, rf, tau, std::max(donor.length, tau))) continue;
-                seedBoundary(r.tris);
+            std::vector<char> atomDead(work.accepted.size(), 0);
+            std::vector<std::size_t> order(donors.size());
+            for (std::size_t i = 0; i < donors.size(); ++i) order[i] = i;
+            std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+                const bool ca = work.accepted[(std::size_t)donors[a].idx].closed360;
+                const bool cb = work.accepted[(std::size_t)donors[b].idx].closed360;
+                return ca && !cb;
+            });
+            for (std::size_t oi : order) {
+                Donor& donor = donors[oi];
+                if (atomDead[(std::size_t)donor.idx]) continue;
+                gatherTori(wm, work, donor, axisScans, atomOf, atomDead, claimed, refused);
             }
-            while (!stack.empty()) {
-                const int t = stack.back();
-                stack.pop_back();
-                for (int n : wm.adj.nbr[(std::size_t)t]) {
-                    if (n < 0 || n >= nTri || !wm.freeTri[(std::size_t)n] || pool[(std::size_t)n])
-                        continue;
-                    pool[(std::size_t)n] = 1;
-                    stack.push_back(n);
+            int nDead = 0;
+            for (char c : atomDead) nDead += c ? 1 : 0;
+            if (nDead > 0) {
+                const int nAcc = (int)work.accepted.size();
+                std::vector<int> remap((std::size_t)nAcc, -1);
+                std::vector<Region> kept;
+                kept.reserve((std::size_t)(nAcc - nDead));
+                for (int i = 0; i < nAcc; ++i) {
+                    if (i < (int)atomDead.size() && atomDead[(std::size_t)i]) continue;
+                    remap[(std::size_t)i] = (int)kept.size();
+                    kept.push_back(std::move(work.accepted[(std::size_t)i]));
                 }
-            }
-            int scan = 0;
-            while (true) {
-                int seed = -1;
-                for (int t = scan; t < nTri; ++t) {
-                    if (!pool[(std::size_t)t] || !wm.freeTri[(std::size_t)t] || stamp[(std::size_t)t] != 0)
-                        continue;
-                    if (sheetOf(mv, t, donor.fr) == 0) continue;
-                    seed = t;
-                    scan = t + 1;
-                    break;
-                }
-                if (seed < 0) break;
-                const int sh = sheetOf(mv, seed, donor.fr);
-                if (sh == 0) continue;
-
-                Band band;
-                band.in.assign((std::size_t)nTri, 0);
-                band.sheet = sh;
-                band.seed = seed;
-                band.tris.push_back(seed);
-                band.in[(std::size_t)seed] = 1;
-                collectBand(mv, donor.fr, wm.g2l, band);
-
-                growTorusDrain(wm, donor.fr, band, stamp);
-
-                collectBand(mv, donor.fr, wm.g2l, band);
-                if (band.tris.empty()) continue;
-                // Subset of an already-refused band: do not accept.
-                const int g0 = stamp[(std::size_t)band.tris.front()];
-                bool subset = g0 != 0;
-                if (subset) {
-                    for (int t : band.tris)
-                        if (stamp[(std::size_t)t] != g0) subset = false;
-                }
-                if (subset) continue;
-
-                const SurfaceFit fit = fitSurface(band.pts, tau);
-                const ClosedM cl = closedOf(mv, donor.fr, band.tris, band.verts, wm.thetaBin);
-                std::vector<double> zs, psis, rhos;
-                for (const ProfPt& pp : band.pts) {
-                    zs.push_back(pp.z);
-                    psis.push_back(pp.psi);
-                    rhos.push_back(pp.rho);
-                }
-                const int levels = countLevels(zs, tau);
-                const int cols = countColumns(psis, rhos, tau);
-                const int stations = countProfPts(band.pts, tau);
-
-                auto stampFail = [&](const char* why) {
-                    ++refused;
-                    const int g = ++stampGen;
-                    for (int t : band.tris)
-                        if (t >= 0 && t < nTri && stamp[(std::size_t)t] == 0) stamp[(std::size_t)t] = g;
-                    DiagRec d = baseDiag(modeName, donor, band, tau);
-                    d.stations = stations;
-                    d.levels = levels;
-                    d.params = kParamsCircle;
-                    d.maxDev = fit.circMax;
-                    d.maxDevTau = tau > 0 ? d.maxDev / tau : 0;
-                    d.lineResTau = tau > 0 ? fit.orthMax / tau : 0;
-                    d.span = cl.span;
-                    d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
-                    d.halfAng = std::atan(std::abs(fit.b)) * 180.0 / kPi;
-                    d.r0 = fit.regressRho ? fit.a : 0;
-                    d.why = why;
-                    if (fit.circle) {
-                        d.r0 = fit.Rmaj;
-                        d.r1 = fit.Rmin;
-                    }
-                    printBand(d);
-                };
-
-                // Torus mode. Line class was claimed, or refused, in Line mode.
-                if (fit.line && fit.orthMax <= tau) {
-                    stampFail("line");
-                    continue;
-                }
-                const TorusCert cert = certifyTorus(band.pts, tau);
-                if (!cert.ok) {
-                    stampFail(torusWhy(cert));
-                    continue;
-                }
-                if (torusIsFailingSubset(wm, donor.fr, band, tau)) {
-                    stampFail("vertex-off");
-                    continue;
-                }
-                if (sameSurfaceFr(wm, work, donor.fr, band, fit, true)) {
-                    stampFail("same-surface");
-                    continue;
-                }
-                int straddle = countStraddle(work, band.tris, nTri);
-                if (!emitTorus(wm, work, donor, band, cert, cl, straddle)) {
-                    stampFail("degenerate");
-                    continue;
-                }
-                // emitTorus trims before its own straddle recount; keep the
-                // pre-trim count captured above.
-                updateDonor(work, donor);
-                for (int t : band.tris)
-                    if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
-                ++claimed;
-                DiagRec d = baseDiag(modeName, donor, band, tau);
-                d.stations = cert.profPts;
-                d.levels = cert.levels;
-                d.params = kParamsCircle;
-                d.maxDev = cert.maxDev;
-                d.maxDevTau = cert.maxDev / tau;
-                d.lineResTau = cert.lineRes / tau;
-                d.span = cl.span;
-                d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
-                d.r0 = cert.Rmaj;
-                d.r1 = cert.Rmin;
-                d.halfAng = 0;
-                double ang0 = 0, ang1 = 0;
-                endTangency(wm, donor.fr, band, fit, ang0, ang1);
-                d.tan0 = ang0;
-                d.tan1 = ang1;
-                d.straddle = straddle;
-                d.why = "accept";
-                d.nV = (int)band.pts.size();
-                printBand(d);
+                for (Region& r : kept)
+                    if (r.origin == Origin::TorusBlend && r.filletNbrA >= 0 && r.filletNbrA < nAcc)
+                        r.filletNbrA = remap[(std::size_t)r.filletNbrA];
+                work.accepted.swap(kept);
             }
         }
         printSum(modeName, (int)donors.size(), claimed, refused + refusedDonors);

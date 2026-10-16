@@ -501,6 +501,30 @@ foreach(_fc_unit IN ITEMS relational_extrude relational_revolve tesslaw relation
 endforeach()
 unset(_fc_unit)
 
+# fc/fx-tori (D-fc-4.6): torus-relation predicates (atoms, leave-one-out, rails).
+add_executable(relational_torus_unit relational_torus_unit.cpp)
+target_compile_features(relational_torus_unit PRIVATE cxx_std_17)
+set_target_properties(relational_torus_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_torus_unit PRIVATE stl2step::core)
+target_include_directories(relational_torus_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(relational_torus_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_torus_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_torus_unit)
+endif()
+add_test(NAME relational_torus_unit COMMAND relational_torus_unit)
+set_tests_properties(relational_torus_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)
