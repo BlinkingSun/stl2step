@@ -2367,6 +2367,23 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
             }
             std::sort(gids.begin(), gids.end());
             gids.erase(std::unique(gids.begin(), gids.end()), gids.end());
+            // D-fc-4.6 F8: a cylinder donor whose stored frame already certifies its
+            // own vertices within tau (the frame H0 refit and wrote, which its
+            // coaxial cones carry) keeps it, so a torus on it is exactly coaxial
+            // with them. Line mode is unchanged.
+            if (mode == RelRevolveMode::Torus && r.type == SurfType::Cylinder) {
+                const Frame sf = makeFrame(r.ax.Location().XYZ(), r.ax.Direction().XYZ(),
+                                           r.ax.XDirection().XYZ());
+                double sMax = 0;
+                for (int g : gids) {
+                    sMax = std::max(sMax, std::fabs(profOfPoint(mv.pts[g], sf, 0).rho - r.radius));
+                    if (!(sMax <= tau)) break;
+                }
+                if (sMax <= tau && r.radius > tau) {
+                    fr = sf;
+                    radius = r.radius;
+                }
+            }
             for (int g : gids) {
                 const ProfPt pp = profOfPoint(mv.pts[g], fr, 0);
                 const double d = std::fabs(pp.rho - radius);

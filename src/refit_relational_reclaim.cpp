@@ -242,6 +242,91 @@ bool reclaimTorusMode(const MeshView& mv, SegmentWork& work) {
         r.uMax = kTwoPi;
     }
 
+    // F8: one axis per revolution axis. A closed torus touching a ChamferCone (the
+    // H0 donor frame) takes that cone's axis line, and the closed cylinders it
+    // touches follow; each only while its own vertices stay within tau. Circle-
+    // on-torus certifies exactly coaxial rims only (D-140-6 §3(4)).
+    {
+        std::vector<int> own((std::size_t)nTri, -1);
+        for (int i = 0; i < nAcc; ++i)
+            if (!dead[(std::size_t)i])
+                for (int t : work.accepted[(std::size_t)i].tris)
+                    if (t >= 0 && t < nTri) own[(std::size_t)t] = i;
+        auto touching = [&](int s) {
+            std::vector<int> out;
+            for (int t : work.accepted[(std::size_t)s].tris) {
+                if (t < 0 || t >= nTri) continue;
+                for (int k = 0; k < 3; ++k) {
+                    const int e = mv.triEdges[t][k];
+                    if (e < 0 || e >= nEdge) continue;
+                    const int o = edgeTris[(std::size_t)e][0] == t ? edgeTris[(std::size_t)e][1]
+                                                                    : edgeTris[(std::size_t)e][0];
+                    if (o >= 0 && own[(std::size_t)o] >= 0 && own[(std::size_t)o] != s)
+                        out.push_back(own[(std::size_t)o]);
+                }
+            }
+            std::sort(out.begin(), out.end());
+            out.erase(std::unique(out.begin(), out.end()), out.end());
+            return out;
+        };
+        auto onLine = [](const gp_Ax3& a, const gp_XYZ& lineP, const gp_XYZ& lineD) {
+            gp_XYZ d = a.Direction().XYZ();
+            gp_XYZ nd = lineD;
+            if (d.Dot(nd) < 0.0) nd.Reverse();
+            const gp_XYZ q = a.Location().XYZ();
+            const gp_XYZ loc = lineP + nd * (q - lineP).Dot(nd);
+            gp_XYZ x = a.XDirection().XYZ();
+            x -= nd * x.Dot(nd);
+            if (!(x.Modulus() > gp::Resolution())) return a;
+            return gp_Ax3(gp_Pnt(loc), gp_Dir(nd), gp_Dir(x));
+        };
+        auto cylDev = [&](const Region& c, const gp_Ax3& ax) {
+            double mx = 0.0;
+            const gp_XYZ o = ax.Location().XYZ(), d = ax.Direction().XYZ();
+            for (int t : c.tris)
+                for (int k = 0; k < 3; ++k) {
+                    const gp_XYZ v = cornerOf(mv, t, k) - o;
+                    mx = std::max(mx, std::fabs((v - d * v.Dot(d)).Modulus() - c.radius));
+                }
+            return mx;
+        };
+        for (int s = 0; s < nAcc; ++s) {
+            Region& T = work.accepted[(std::size_t)s];
+            if (dead[(std::size_t)s] || T.origin != Origin::TorusBlend || !T.closed360) continue;
+            const std::vector<int> nb = touching(s);
+            int cone = -1;
+            for (int i : nb) {
+                const Region& c = work.accepted[(std::size_t)i];
+                if (c.origin != Origin::ChamferCone) continue;
+                const gp_XYZ cd = c.ax.Direction().XYZ();
+                const gp_XYZ dd = T.ax.Location().XYZ() - c.ax.Location().XYZ();
+                const double off = (dd - cd * dd.Dot(cd)).Modulus();
+                const double ang = cd.Crossed(T.ax.Direction().XYZ()).Modulus();
+                if (off <= tau && ang * (T.radius + T.radius2) <= tau) {
+                    cone = i;
+                    break;
+                }
+            }
+            if (cone < 0) continue;
+            const gp_XYZ lp = work.accepted[(std::size_t)cone].ax.Location().XYZ();
+            const gp_XYZ ld = work.accepted[(std::size_t)cone].ax.Direction().XYZ();
+            Region moved = T;
+            moved.ax = onLine(T.ax, lp, ld);
+            if (!(regionTorusDev(mv, moved, moved) <= tau)) continue;
+            const bool changed = !(moved.ax.Location().IsEqual(T.ax.Location(), 0.0) &&
+                                   moved.ax.Direction().IsEqual(T.ax.Direction(), 0.0));
+            T.ax = moved.ax;
+            for (int i : nb) {
+                Region& c = work.accepted[(std::size_t)i];
+                if (c.type != SurfType::Cylinder || !c.closed360) continue;
+                const gp_Ax3 ca = onLine(c.ax, lp, ld);
+                if (cylDev(c, ca) <= tau) c.ax = ca;
+            }
+            if (diag && changed)
+                std::fprintf(stderr, "DIAG_REL_TORUS_AXIS acc=%d cone=%d\n", s, cone);
+        }
+    }
+
     if (nDead > 0) {
         std::vector<int> remap((std::size_t)nAcc, -1);
         std::vector<Region> kept;

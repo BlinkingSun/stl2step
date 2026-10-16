@@ -13,6 +13,9 @@
 #include <utility>
 #include <vector>
 
+#include <gp_Ax1.hxx>
+#include <gp_Lin.hxx>
+
 using namespace stl2step::refit;
 
 static int gFail = 0;
@@ -342,6 +345,40 @@ static void caseReclaimAbsorb() {
     expect(tr && tr->maxVertexDev <= tauOf(mv), "reclaim: union within tau");
 }
 
+// F8 axis line: a closed torus touching a ChamferCone whose axis differs by
+// rounding takes the cone's line (circle-on-torus is exactly coaxial only).
+static void caseAxisLine() {
+    Part p = ringTorus(24, 6);
+    p.work.accepted[0].origin = Origin::ChamferCone;
+    p.work.accepted[0].type = SurfType::Cone;
+    p.work.accepted[0].ax = gp_Ax3(gp_Pnt(1e-9, 0, 5.0), gp_Dir(1e-12, 0, 1), gp_Dir(1, 0, 0));
+    Region t;
+    t.type = SurfType::Torus;
+    t.origin = Origin::TorusBlend;
+    t.ax = gp_Ax3(gp_Pnt(0, 0, 8.0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    t.radius = 12.0;
+    t.radius2 = 2.0;
+    t.closed360 = true;
+    t.uMax = 2.0 * kPi;
+    for (const auto& rw : p.rows) t.tris.insert(t.tris.end(), rw.begin(), rw.end());
+    std::sort(t.tris.begin(), t.tris.end());
+    p.work.accepted.push_back(t);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol);
+    reclaimRelational(mv, sp, tol, p.work, RelRevolveMode::Torus);
+    const Region* tr = torusOf(p.work);
+    expect(tr != nullptr, "axis: torus kept");
+    if (!tr) return;
+    const gp_Ax1 ca(p.work.accepted[0].ax.Location(), p.work.accepted[0].ax.Direction());
+    const gp_Lin cl(ca);
+    expect(cl.Distance(tr->ax.Location()) < 1e-12 &&
+               tr->ax.Direction().IsParallel(ca.Direction(), 1e-15),
+           "axis: torus on the cone's line");
+    expect(std::fabs(tr->ax.Location().Z() - 8.0) < 1e-9, "axis: centre height kept");
+}
+
 static void casePredicates() {
     Region a = atomOf({0, 1});
     expect(torusAtom(a), "atom predicate: non-closed CylGrow");
@@ -366,6 +403,7 @@ int main() {
     caseLeaveOneOutPure();
     caseRails();
     caseReclaimAbsorb();
+    caseAxisLine();
     caseAtomJoins();
     caseAtomOffSurface();
     caseLeaveOneOut();
