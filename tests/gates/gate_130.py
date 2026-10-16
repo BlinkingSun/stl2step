@@ -660,8 +660,16 @@ def evaluate_one(
         row["fails"].append(
             f"cones={cone_got}/{gt_cone} ({row.get('coneSource', 'STEP CONICAL_SURFACE')})"
         )
-    if row["volPct"] < 0 or row["volPct"] > 0.01 + 1e-12:
-        row["fails"].append(f"volumeDelta={row['volPct']}% > 0.01% (or unmeasured)")
+    # A mesh-referenced cell (no exactVolume) may carry its own measured
+    # ceiling, meshVolumeDeltaPctMax: a correct analytic recovery of a real
+    # export moves away from the inscribed mesh by the sagitta volume
+    # (D-130-15(1)), and a real export has no generator exact volume. Never
+    # applies to an exactVolume cell; the default stays 0.01 %.
+    vol_max = 0.01
+    if row.get("volRef") == "mesh" and float(sc.get("exactVolume") or 0.0) <= 0.0:
+        vol_max = float(sc.get("meshVolumeDeltaPctMax") or 0.01)
+    if row["volPct"] < 0 or row["volPct"] > vol_max + 1e-12:
+        row["fails"].append(f"volumeDelta={row['volPct']}% > {vol_max}% (or unmeasured)")
 
     intersections = sc.get("intersections") or []
     if intersections and step_text:

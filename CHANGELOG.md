@@ -20,7 +20,20 @@ On the training files: the plate's three edge rounds (R5, R5, R3), the Craftsman
 holder's plate and L-bar edge rounds, Body28's R2 fillets, Body244's two funnel cones and the
 shelf bracket's four 45° countersinks; no training file or corpus fixture reverts.
 
+Third increment: reclaiming geometry that earlier stages split or mis-fitted. A plane|plane
+fillet whose wall plane had absorbed some of the fillet's own facets is now found by seeding
+the wall from its largest facet; a loose cylinder fit that is not within τ of its own mesh gives
+its triangles to a certified fillet running through it instead of shipping as a phantom; two
+certified pieces of the same cylinder are joined into one face when the triangles between them
+lie on it; and a hole wall split at a T-junction seam is re-certified on its own τ-inliers. On
+the training files: the tray's corner and floor-outline rounds, the Craftsman holder's R2 edge
+rounds without its 13 phantom large-radius cylinders (volume error 0.007 % → 0.0001 %), the
+plate's four R3 slot ends as one face each (27 → 22 cylinder faces, 191 → 112 faces) and the
+shelf bracket's R2.5 cross holes as one face each; no training file or corpus fixture reverts.
+
 ### Fixed
+- A wall plane that absorbed part of an adjacent fillet no longer hides that fillet: the relational anchor is seeded from the provisional's own largest facet and certified at τ as before (tray corner and floor rounds).
+- A cylinder region whose own fit is more than τ off its mesh no longer survives as a phantom large-radius face when a certified fillet passes through it; its triangles go to the fillet and the rest return to the plane stages (Craftsman: 13 phantom cylinders removed).
 - A zero-area T-junction triangle (a vertex lying exactly on its neighbour's edge) is absorbed before segmentation: the degenerate triangle is removed and the neighbour is split at that vertex in its own winding (threshold τ = 2·quantFloor; nothing is absorbed when quantFloor ≤ 0). One such triangle made an 11,168-triangle tray leave three one-sided edges, revert the whole analytic rebuild and re-read as an open shell; it now ships as a closed analytic solid (watertight, re-read 1 solid). RESULT gains `meshTJunctionsAbsorbed`, emitted only when a triangle was absorbed, so every other RESULT line is unchanged.
 - The faceted direct path no longer force-closes a shell that skipped a degenerate triangle; such a component is reported as an open shell instead of an invalid solid that ShapeFix silently rewrote.
 
@@ -31,6 +44,8 @@ shelf bracket's four 45° countersinks; no training file or corpus fixture rever
 - The over-tolerance edge class measures a circle-on-plane edge on its own arc, not the whole circle (removes false red lines; geometry unchanged).
 
 ### Added
+- Relational reclaim (Line mode): certified partial cylinders that are one surface at τ are merged into one face, filling the on-surface triangles between them, only when the result is one disk (a closure that would need an inner loop is left as it was); a hole wall the revolve donor test refused is re-certified on its τ-inliers and grown over the rest of its wall.
+- Relational extrusion: the slab sector around a fillet uses the contact line's propagated position bound, (anchor tolerance + τ) / (r·sin dihedral), instead of τ/r; pair sides are pruned losslessly by anchor contact windows.
 - Tessellation-law refutation of N-gon walls: a six-sided "hole" is rebuilt as planar walls when the file's own equal-step boundary rails show it cannot be a tessellated circle (training tray: 56 hexagonal floor holes stay hexagons, volume back to the mesh within 0.02 %; Craftsman, Body28 and S16-R2 unchanged).
 - Relational stage contract for the fillet/chamfer work: declarations and hooks after the fillet stage (H0) and after the torus stage (H1), shared τ-derived thresholds in `refit_relational.hpp`, and the torus profile certificate moved verbatim into `refit_profile_cert`. 
 - Relational extrusion stage: a band of unclaimed triangles between two identified planes is certified as a fillet cylinder (axis along the planes' intersection, one free parameter r, every vertex within τ, band normals spanning the dihedral) and shipped as one face per edge-connected piece; chamfers stay planes and a band that does not certify stays faceted.

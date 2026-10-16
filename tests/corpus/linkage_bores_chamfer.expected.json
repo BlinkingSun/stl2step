@@ -17,6 +17,8 @@
   "expectedSolids": 1,
   "expectedOpenShells": 0,
   "battery": "130",
+  "meshVolumeDeltaPctMax": 0.0100255,
+  "meshVolumeDeltaPctMaxNote": "D-130-15(1) / fc-3 ORCHESTRATOR RULING CLOSURES 2026-10-16 01:15: this real export has no exactVolume, so gate_130 compares against the inscribed mesh; the four R3 slot ends now ship analytic (D-fc-4.4) and their sagitta volume (+2 mm3) lifts the mesh-referenced delta to 0.010025 % (macOS, fc3-int a7d2776). Ceiling = measured max over macOS/Linux/Windows (D-130-24).",
   "smoothExpectedExit": -1,
   "recoverable": [
     {"type": "cylinder", "radius": 12.625, "axis": {"loc": [80.0, -40.0, 0.0], "dir": [0, 0, 1]}, "count": 2, "nSides": 56, "closed360": true, "note": "hole A through-hole wall, one per plate; 112 tris each, maxVertexDev 1.70e-6"},

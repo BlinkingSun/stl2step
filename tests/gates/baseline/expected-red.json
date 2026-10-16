@@ -28,7 +28,7 @@
     "S24.hem-deferred": "D-fc-2 / D-fc-1.14. Measured on fc/instr-patch: recoverable cylinders R=1 and R=3, axis +X at the origin, have no accepted region (dump planes 15, cylinders 0). Hem construction stays deferred.",
     "S25.peg-and-torus-unbuilt": "D-fc-1.14. Measured: cylinder R=6 closed360 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region (361 planes).",
     "S26.bore-and-torus-unbuilt": "D-fc-1.14. Measured: cylinders R=11 and R=8 (loc z=3) unmatched; torus Rmaj=14 Rmin=3 unmatched. Matched, not listed: cylinder R=9.5 and the three cones.",
-    "S27.two-fillets-and-sphereNYI": "D-fc-1.14. Measured: R=3 axis +X matches; R=3 axis +Y at (37,0,37) and R=3 axis +Z at (37,37,0) do not. The sphere corner stays faceted (mustRemainFaceted sphere); the S27 sidecar expects rejected=[] and carries no expectedRejects sphereNYI (ruling CLOSURES 2026-10-15 21:10 F1(b) / 22:20 (C)).",
+    "S27.two-fillets-and-sphereNYI": "D-fc-1.14. fc-3 (D-fc-4.1/4.2, fc3-int a7d2776): all three R=3 fillets (axis +X, +Y, +Z) now match and the gates_full / p1_compose_gate S27 rows are retired (XPASS). The sphere corner stays faceted (mustRemainFaceted sphere, sphereNYI).",
     "S29.corner-rounds-unbuilt": "D-fc-1.14. Measured: cylinder R=5 matches. Four R=1 corner rounds at (1,1,0), (79,1,0), (79,59,0) and (1,59,0) unmatched. Planes normal +X (one) and +Y (two) unmatched.",
     "plate.edge-strip-nonquadric": "D-train-residue D-R13: after E1/E2/E3 leave it, 45 triangles / 208.9652 mm^2 of the x in [48,53] edge remain; a general 10-coefficient quadric fits its 66 vertices no better than 171191 q; 0 of 28 adjacent pairs coplanar within theta_q; not ruled under SPEC-grader 5.1. The mesh polyhedral sampling of a multi-facet chamfer. Permanent residue; not promised to 1.5.",
     "plate.slot-corner-residue": "D-train-residue D-R7/D-R13: 36 triangles / 89.4787 mm^2 in 8 components — 24 / 57.4077 mm^2 at 53.4-53.6 q from R = 10 (D-140-8 U1 punctures at 0.036 sigma; U-R5: they stay facets, tau is never widened) and 12 / 32.0710 mm^2 at 226.1 q from R = 3; quadric max 79710 q; 0 of 32 coplanar; not ruled. Footprint of the eight perpendicular intersecting R10xR3 pairs registered to 1.5 as blend.canal-cylcyl (D-140-6 sec 2). Rims stay tier-2 polylines (U-R10)."
@@ -38,7 +38,6 @@
     "S24_hem_uturn": "D-fc-2 / D-fc-1.14. Recoverable cylinders R=1 and R=3 axis +X have no accepted region. Hem-deferred.",
     "S25_peg_fillet": "D-fc-1.14. Cylinder R=6 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region.",
     "S26_funnel_rev": "D-fc-1.14. Cylinders R=11 and R=8 unmatched; torus Rmaj=14 Rmin=3 unmatched. Cylinder R=9.5 and three cones match.",
-    "S27_sphere_corner_fine": "D-fc-1.14. R=3 axis +Y and +Z unmatched; the S27 sidecar expects rejected=[] (ruling CLOSURES 2026-10-15 21:10 F1(b) / 22:20 (C)). R=3 axis +X matches.",
     "S29_hex_law": "D-fc-1.14. Four R=1 corner rounds unmatched; planes normal +X (one) and +Y (two) unmatched. Cylinder R=5 matches."
   },
   "edge_class_gate": {
@@ -68,7 +67,6 @@
     "S24_hem_uturn": "D-fc-2 / D-fc-1.14. Recoverable cylinders R=1 and R=3 axis +X have no accepted region. Hem-deferred.",
     "S25_peg_fillet": "D-fc-1.14. Cylinder R=6 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region.",
     "S26_funnel_rev": "D-fc-1.14. Cylinders R=11 and R=8 unmatched; torus Rmaj=14 Rmin=3 unmatched. Cylinder R=9.5 and three cones match.",
-    "S27_sphere_corner_fine": "D-fc-1.14. R=3 axis +Y and +Z unmatched; the S27 sidecar expects rejected=[] (ruling CLOSURES 2026-10-15 21:10 F1(b) / 22:20 (C)). R=3 axis +X matches.",
     "S29_hex_law": "D-fc-1.14. Four R=1 corner rounds unmatched; planes normal +X (one) and +Y (two) unmatched. Cylinder R=5 matches."
   },
   "grader": {

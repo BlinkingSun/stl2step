@@ -31,7 +31,8 @@
     {
       "component": 0,
       "disposition": "BUILT",
-      "builtCylindersFloor": 20,
+      "builtCylindersFloor": 18,
+      "builtCylindersFloorNote": "fc-3 (D-fc-4.5, ORCHESTRATOR RULING CLOSURES 2026-10-16 01:15): 20→18 — each R2.5 cross hole now ships as ONE certified cylinder face instead of two (authorised target); the floor counts faces.",
       "builtPlanesFloor": 32,
       "faceCount": 636,
       "surfaceCensus": {"plane": 616, "cylinder": 20, "cone": 0, "planar_facets": 0},
