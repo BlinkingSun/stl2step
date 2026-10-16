@@ -97,6 +97,13 @@ bool torusChainSupersetFails(const std::vector<ProfPt>& candidatePts, std::size_
 bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
                                 const std::vector<char>& failedTri);
 
+// D-fc-4.11 (F1 refined): a certifyTorus refusal is GEOMETRIC when its evidence
+// was determinate (certifyTorus's own counts met) and a geometric test failed:
+// line-first, sphere, degenerate, spindle, or a vertex off tau. A refusal for
+// over-determination (profile-underdetermined: levels / cols / profPts) or a
+// singular circle fit is not.
+bool torusRefusalGeometric(const TorusCert& c);
+
 // The full-turn side count of a torus band's azimuthal tessellation, for its
 // chord sagitta and dVolPredicted: a closed band's cols columns cover the whole
 // turn; a partial band's cols columns are cols - 1 steps over its own azimuth
@@ -127,6 +134,14 @@ JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
                                  const std::vector<gp_XYZ>& chain, const gp_XYZ& originSeed,
                                  const gp_XYZ& axisSeed, const gp_XYZ& xHint, double tau,
                                  int maxIters);
+
+// D-fc-4.11 (F1 refined): a Torus-mode ring chain's candidate set fails the
+// GEOMETRIC certificate. When the joint family certificate ran on a finite axis
+// it decides: on a chain that certifyTorus finds determinate about the joint
+// axis, a donor vertex off tau of its donor's radius or a geometric refusal of
+// certifyTorus. Otherwise the family-axis certificate decides. A chain refused
+// only for over-determination (or that certifies) does not fail it.
+bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* joint, double tau);
 
 }  // namespace refit
 }  // namespace stl2step

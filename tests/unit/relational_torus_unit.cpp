@@ -606,6 +606,95 @@ static void caseWindowOverlap() {
     expect(!torusWindowOverlapsRefused({0, 12}, failed), "F1: out-of-range ids are ignored");
 }
 
+// D-fc-4.11 (F1 refined): which certifyTorus refusals are geometric.
+static void caseRefusalGeometric() {
+    const double tau = 1e-4;
+    const gp_XYZ o(0, 0, 0), ax(0, 0, 1), xHint(1, 0, 0);
+    const std::vector<gp_XYZ> good =
+        torusPts(o, ax, 20.0, 3.0, 0.0, 1.0, 12, 0.5 * kPi, kPi, 6, 0.0);
+    const TorusCert ok = certifyTorus(profileAbout(good, o, ax, xHint), tau);
+    expect(ok.ok && !torusRefusalGeometric(ok), "F1 refined: a certified band is not a refusal");
+    // Two tube stations: below certifyTorus's levels / profPts -> over-determination.
+    const std::vector<gp_XYZ> thin =
+        torusPts(o, ax, 20.0, 3.0, 0.0, 1.0, 12, 0.5 * kPi, 0.6 * kPi, 1, 0.0);
+    const TorusCert under = certifyTorus(profileAbout(thin, o, ax, xHint), tau);
+    expect(!under.ok && !under.determinate && !torusRefusalGeometric(under),
+           "F1 refined: an under-determined band is not a geometric refusal");
+    // One vertex 10 tau off the tube: vertex-off on determinate evidence.
+    std::vector<gp_XYZ> off = good;
+    off[off.size() / 2] += gp_XYZ(0, 0, 10.0 * tau);
+    const TorusCert voff = certifyTorus(profileAbout(off, o, ax, xHint), tau);
+    expect(!voff.ok && voff.determinate && torusRefusalGeometric(voff),
+           "F1 refined: a vertex off tau is a geometric refusal");
+    // A cone frustum's profile is a line: line-first on determinate evidence.
+    std::vector<gp_XYZ> cone;
+    for (int i = 0; i <= 12; ++i)
+        for (int j = 0; j <= 6; ++j) {
+            const double u = (double)i / 12.0, rr = 10.0 + 0.5 * j;
+            cone.emplace_back(rr * std::cos(u), rr * std::sin(u), 0.5 * j);
+        }
+    const TorusCert line = certifyTorus(profileAbout(cone, o, ax, xHint), tau);
+    expect(!line.ok && line.determinate && torusRefusalGeometric(line),
+           "F1 refined: line-first on determinate evidence is a geometric refusal");
+    TorusCert sing;
+    sing.determinate = true;
+    sing.why = "fit-singular";
+    expect(!torusRefusalGeometric(sing),
+           "F1 refined: a singular circle fit is not a geometric refusal");
+}
+
+// D-fc-4.11 (F1 refined): the chain-level verdict -- the joint certificate decides
+// when it ran on a finite axis, the family certificate otherwise.
+static void caseChainFailsGeometric() {
+    const double tau = 1e-4;
+    const gp_XYZ o(10, -5, 3), ax(0, 1, 0), xHint(1, 0, 0);
+    const std::vector<std::vector<gp_XYZ>> donors = {
+        cylPts(o, ax, 92.5, 0.2, 0.25, 0, 3, 0.3 * tau),
+        cylPts(o, ax, 72.5, 1.0, 1.05, -1, 2, 0.3 * tau)};
+    const std::vector<gp_XYZ> chain =
+        torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, kPi, 6, 0.3 * tau);
+    const gp_XYZ seedAx(4e-6, 1, 0);
+    const TorusCert onSeed = certifyTorus(profileAbout(chain, o, seedAx, xHint), tau);
+    const TorusCert onTrue = certifyTorus(profileAbout(chain, o, ax, xHint), tau);
+    expect(onTrue.ok && !torusChainFailsGeometric(onTrue, nullptr, tau),
+           "F1 refined: a chain the family axis certifies does not fail");
+    expect(!onSeed.ok && onSeed.determinate && torusChainFailsGeometric(onSeed, nullptr, tau),
+           "F1 refined: vertex-off on the family axis fails when no joint fit ran");
+    const JointTorusCert jc = jointTorusCertify(donors, chain, o, seedAx, xHint, tau, 16);
+    expect(jc.ok && !torusChainFailsGeometric(onSeed, &jc, tau),
+           "F1 refined: a chain that certifies jointly does not fail (it may still be "
+           "refused for over-determination, and then consumes nothing)");
+    // Under-determined on the joint axis: the deviations of the donors about an
+    // axis the chain cannot determine refuse nothing.
+    JointTorusCert und = jc;
+    und.ok = false;
+    und.chain = certifyTorus(
+        profileAbout(torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, 0.6 * kPi, 1, 0.0), o, ax,
+                     xHint),
+        tau);
+    for (double& m : und.family.maxDev) m = 1e3 * tau;
+    expect(!und.chain.determinate && !torusChainFailsGeometric(onSeed, &und, tau),
+           "F1 refined: a chain under-determined on the joint axis does not fail");
+    // Determinate on the joint axis but a donor vertex off tau: geometric.
+    JointTorusCert don = jc;
+    don.ok = false;
+    don.family.maxDev.front() = 2.0 * tau;
+    expect(torusChainFailsGeometric(onSeed, &don, tau),
+           "F1 refined: a donor vertex off tau under the joint axis fails");
+    // A tube radius drifting by 4 tau is vertex-off on the joint axis: geometric.
+    std::vector<gp_XYZ> drift = torusPts(o, ax, 89.5, 3.0, 0.1, 0.6, 10, 0.5 * kPi, kPi, 6, 0.0);
+    const std::vector<gp_XYZ> drift2 =
+        torusPts(o, ax, 89.5, 3.0 + 4 * tau, 0.6, 1.1, 10, 0.5 * kPi, kPi, 6, 0.0);
+    drift.insert(drift.end(), drift2.begin(), drift2.end());
+    const JointTorusCert jd = jointTorusCertify(donors, drift, o, seedAx, xHint, tau, 16);
+    const TorusCert dSeed = certifyTorus(profileAbout(drift, o, seedAx, xHint), tau);
+    expect(jd.fitted && !jd.ok && jd.chain.determinate && torusChainFailsGeometric(dSeed, &jd, tau),
+           "F1 refined: a variable-radius chain fails geometrically on the joint axis");
+    JointTorusCert unfit;
+    expect(torusChainFailsGeometric(onSeed, &unfit, tau),
+           "F1 refined: without a finite joint axis the family verdict decides");
+}
+
 // D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
 // its triangles and its atom keep their pre-T state.
 static void caseWithheld() {
@@ -643,6 +732,8 @@ static void caseWithheld() {
 }
 
 int main() {
+    caseRefusalGeometric();
+    caseChainFailsGeometric();
     caseWithheld();
     caseWindowOverlap();
     caseJointTorus();

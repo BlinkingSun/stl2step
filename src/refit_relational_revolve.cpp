@@ -855,7 +855,18 @@ bool emitTorus(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const 
     if (vHi < vLo) vHi += kTwoPi;
     const bool closed = cl.closed;
     double sigma = 0;
-    const int nSides = torusSidesOf(cert.cols, uHi - uLo, closed);
+    // The side count takes the closure the torus ships with: closed by its
+    // bands, or a full ring by the F4 rail rule reclaimTorusMode applies.
+    bool fullRing = closed;
+    if (!fullRing) {
+        Region probe;
+        probe.ax = gp_Ax3(gp_Pnt(centre.X(), centre.Y(), centre.Z()),
+                          gp_Dir(fr.axis.X(), fr.axis.Y(), fr.axis.Z()),
+                          gp_Dir(xdir.X(), xdir.Y(), xdir.Z()));
+        probe.tris = band.tris;
+        fullRing = torusRails(mv, probe).full;
+    }
+    const int nSides = torusSidesOf(cert.cols, uHi - uLo, fullRing);
     const double gamma = kTwoPi / (double)nSides;
     const double sHalf = std::sin(0.5 * gamma);
     const double kSeg = (sHalf > gp::Resolution()) ? (gamma - std::sin(gamma)) / (4.0 * sHalf) : 0.0;
@@ -1994,8 +2005,9 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         return A.sheet < B.sheet;
     });
     std::set<std::vector<int>> tried;
-    // D-fc-4.10 F1: the candidate sets of refused chains; no later band that
-    // overlaps one may pass (a passing subset of a failing band is a refusal).
+    // D-fc-4.10 F1, refined by D-fc-4.11: the candidate sets of chains, and the
+    // bands, that failed the GEOMETRIC certificate; no later band that overlaps
+    // one may pass (a passing subset of a failing band is a refusal).
     std::vector<char> failedTri((std::size_t)nTri, 0);
     for (int ei0 : edgeOrder) {
         if (edges[(std::size_t)ei0].used) continue;
@@ -2081,7 +2093,10 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         Frame cfr = fr;
         Donor jointDonor;
         bool joint = false;
-        bool chainFailed = false;  // a determinate certificate refused the candidate set
+        bool chainGeomFail = false;  // D-fc-4.11: the candidate set failed geometrically
+        TorusCert onFamilyCert;
+        JointTorusCert jointCert;
+        bool jointRan = false;
         {
             Band sup;
             sup.in.assign((std::size_t)nTri, 0);
@@ -2090,6 +2105,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             for (int t : chainCands) sup.in[(std::size_t)t] = 1;
             collectBand(mv, fr, wm.g2l, sup);
             const TorusCert onFamily = certifyTorus(sup.pts, tau);
+            onFamilyCert = onFamily;
             chainOk = onFamily.ok;
             // certifyTorus needs kTorusProfPts distinct profile points on any axis:
             // a chain with fewer distinct vertices cannot certify jointly either.
@@ -2098,6 +2114,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 bandPoints(sup, cpts);
                 const JointTorusCert jc = jointTorusCertify(donor.famPts, cpts, fr.origin, fr.axis,
                                                             fr.e1, tau, wm.maxIter);
+                jointCert = jc;
+                jointRan = true;
                 if (diagOn()) {
                     double dMax = 0;
                     for (double m : jc.family.maxDev) dMax = std::max(dMax, m);
@@ -2123,13 +2141,18 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                     jointDonor.maxDev = jc.family.maxDev.front();
                 }
             }
-            chainFailed = !chainOk && onFamily.determinate;
+            chainGeomFail = !chainOk && torusChainFailsGeometric(
+                                            onFamily, jointRan ? &jointCert : nullptr, tau);
         }
         Donor& cdonor = joint ? jointDonor : donor;
-        // D-fc-4.10 F1: an evaluated chain, claimed or refused, consumes its
-        // ring-graph edges (Line mode's partition).
-        for (Edge& e : edges)
-            if (e.sheet == sheet && inChain[(std::size_t)e.u] && inChain[(std::size_t)e.v]) e.used = true;
+        // D-fc-4.11 (F1 refined): the chain consumes its ring-graph edges after its
+        // bands, when one of them was claimed (Line mode's partition) or when its
+        // candidate set or one of its bands failed the geometric certificate. A
+        // chain refused only for over-determination leaves its edges to later,
+        // larger windows, which must themselves pass every check.
+        bool claimedChain = false;
+        bool bandGeomFail = false;
+        int nBandClaimed = 0, nBandGeom = 0, nBandOverdet = 0, nBandOther = 0;
         // Each edge-connected component is one band.
         auto components = [&](const std::vector<int>& tris) {
             std::vector<char> in((std::size_t)nTri, 0), seen((std::size_t)nTri, 0);
@@ -2182,8 +2205,21 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 if (atomOf[(std::size_t)t] >= 0) atoms.push_back(atomOf[(std::size_t)t]);
             std::sort(atoms.begin(), atoms.end());
             atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
-            auto refuse = [&](const char* why, const TorusCert* c) {
+            // geom: the band itself failed the geometric certificate (D-fc-4.11);
+            // its triangles become a failing band. overdet: refused only for
+            // over-determination.
+            auto refuse = [&](const char* why, const TorusCert* c, bool geom = false,
+                              bool overdet = false) {
                 ++refused;
+                if (geom) {
+                    bandGeomFail = true;
+                    ++nBandGeom;
+                    for (int t : band.tris) failedTri[(std::size_t)t] = 1;
+                } else if (overdet) {
+                    ++nBandOverdet;
+                } else {
+                    ++nBandOther;
+                }
                 DiagRec d = baseDiag("torus", cdonor, band, tau);
                 d.stations = stations;
                 d.levels = levels;
@@ -2198,11 +2234,14 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 d.why = why;
                 printBand(d);
             };
+            const TorusCert cert = certifyTorus(band.pts, tau);
+            // Line-first is a geometric refusal only on determinate evidence: a
+            // band below certifyTorus's own counts is under-determined first
+            // (D-fc-1.6.2 certificate order).
             if (fit.line && fit.orthMax <= tau) {
-                refuse("line", nullptr);
+                refuse("line", nullptr, cert.determinate, !cert.determinate);
                 continue;
             }
-            const TorusCert cert = certifyTorus(band.pts, tau);
             if (!cert.ok) {
                 // An atom with a vertex off the band's circle leaves whole; what
                 // remains is certified again as its own components.
@@ -2239,7 +2278,9 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                         for (auto& s : sub) queue.push_back(std::move(s));
                     }
                 }
-                if (!dropped) refuse(torusWhy(cert), &cert);
+                if (!dropped)
+                    refuse(torusWhy(cert), &cert, torusRefusalGeometric(cert),
+                           !torusRefusalGeometric(cert));
                 continue;
             }
             // Leave-one-region-out: the band without any one atom still meets
@@ -2260,12 +2301,12 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                     triAtom.push_back(slot);
                 }
                 if (!leaveOneOutDeterminate(triPts, triAtom, (int)atoms.size(), tau)) {
-                    refuse("underdetermined", &cert);
+                    refuse("underdetermined", &cert, false, true);
                     continue;
                 }
             }
             if (band.tris.size() < chainCands.size() && !chainOk) {
-                refuse("vertex-off", &cert);
+                refuse("vertex-off", &cert, false, !chainGeomFail);
                 continue;
             }
             if (torusWindowOverlapsRefused(band.tris, failedTri)) {
@@ -2287,6 +2328,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                     wm.atomHeld[(std::size_t)a] = 1;
                 }
                 for (int t : band.tris) wm.freeTri[(std::size_t)t] = 0;
+                claimedChain = true;
+                ++nBandOther;
                 if (diagOn())
                     std::fprintf(stderr,
                                  "DIAG_REL_TORUS_HELD seed=%d nTri=%zu atoms=%zu chainRings=%zu "
@@ -2312,6 +2355,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             }
             for (int a : atoms) atomDead[(std::size_t)a] = 1;
             for (int t : band.tris) wm.freeTri[(std::size_t)t] = 0;
+            claimedChain = true;
+            ++nBandClaimed;
             // F8: one seam azimuth per revolution axis. The coaxial cylinders the
             // torus touches take the donor frame it took.
             shareSeamFrame(wm, work, cdonor, band);
@@ -2343,8 +2388,31 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                              band.seed, band.tris.size(), atoms.size(), chain.size(), donor.idx,
                              donor.radius, work.accepted[(std::size_t)donor.idx].closed360 ? 1 : 0);
         }
-        if (chainFailed)
+        const bool consumes = claimedChain || chainGeomFail || bandGeomFail;
+        if (consumes)
+            for (Edge& e : edges)
+                if (e.sheet == sheet && inChain[(std::size_t)e.u] && inChain[(std::size_t)e.v])
+                    e.used = true;
+        if (chainGeomFail)
             for (int t : chainCands) failedTri[(std::size_t)t] = 1;
+        if (diagOn()) {
+            double donorDev = 0;
+            for (double m : jointCert.family.maxDev) donorDev = std::max(donorDev, m);
+            std::fprintf(stderr,
+                         "DIAG_REL_TORUS_CHAIN seed=%d nCand=%zu rings=%zu donor=%d familyWhy=%s "
+                         "familyDevTau=%.4f joint=%d jointOk=%d donorDevTau=%.4f chainDevTau=%.4f "
+                         "jointWhy=%s chainOk=%d chainGeomFail=%d bands=%zu claimed=%d geom=%d "
+                         "overdet=%d other=%d consumed=%d failingSuperset=%d\n",
+                         minTriOf(chainCands), chainCands.size(), chain.size(), donor.idx,
+                         torusWhy(onFamilyCert),
+                         onFamilyCert.determinate ? onFamilyCert.maxDev / tau : -1.0,
+                         jointRan ? 1 : 0, jointCert.ok ? 1 : 0, jointRan ? donorDev / tau : -1.0,
+                         (jointRan && jointCert.chain.determinate) ? jointCert.chain.maxDev / tau
+                                                                   : -1.0,
+                         jointRan ? torusWhy(jointCert.chain) : "-", chainOk ? 1 : 0,
+                         chainGeomFail ? 1 : 0, queue.size(), nBandClaimed, nBandGeom,
+                         nBandOverdet, nBandOther, consumes ? 1 : 0, chainGeomFail ? 1 : 0);
+        }
     }
     scan.scanned = true;
     scans.push_back(scan);

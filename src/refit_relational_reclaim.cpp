@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -1721,6 +1722,23 @@ bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
     for (int t : bandTris)
         if (t >= 0 && (std::size_t)t < failedTri.size() && failedTri[(std::size_t)t]) return true;
     return false;
+}
+
+bool torusRefusalGeometric(const TorusCert& c) {
+    if (c.ok || !c.determinate) return false;
+    return !(c.why && std::strcmp(c.why, "fit-singular") == 0);
+}
+
+bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* joint, double tau) {
+    if (onFamily.ok) return false;
+    if (joint && joint->fitted) {
+        // An under-determined chain does not determine the joint axis either:
+        // its donors' deviations about that axis refuse nothing.
+        if (joint->ok || !joint->chain.determinate) return false;
+        if (!jointAxisCertifies(joint->family, tau)) return true;
+        return torusRefusalGeometric(joint->chain);
+    }
+    return torusRefusalGeometric(onFamily);
 }
 
 int torusSidesOf(int cols, double span, bool closed) {
