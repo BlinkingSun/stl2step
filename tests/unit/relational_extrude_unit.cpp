@@ -1264,6 +1264,158 @@ static void case24() {
     expect(ok, "case24 a far piece of the wall still claims the band");
 }
 
+// D-fc-4.9. One-sided blend along +Y: tangent to T (z = 0) at x = 0, centre
+// (0, y, R), arc theta in [0, phi]. trim 1: X' = the plane x = R sin(phi)
+// holds the end generator and is crossed. trim 2: X' = the plane z = 2R
+// (phi = pi), tangent at the far end: a hem. trim 0: no plane holds the far
+// end. trims 0 and 2 add a certified x-normal plane far from the band as the
+// axis source (n_T x n_X = Y).
+struct OsbMesh {
+    Synth synth;
+    stl2step::refit::SegmentWork work;
+    std::vector<int> bandTris;
+};
+
+static OsbMesh makeOneSided(double R, double L, double phi, int nStrips, int trim) {
+    OsbMesh m;
+    std::vector<int> lo((std::size_t)nStrips + 1), hi((std::size_t)nStrips + 1);
+    for (int i = 0; i <= nStrips; ++i) {
+        const double th = phi * (double)i / (double)nStrips;
+        const gp_XYZ p(R * std::sin(th), 0.0, R * (1.0 - std::cos(th)));
+        lo[(std::size_t)i] = m.synth.addV(p);
+        hi[(std::size_t)i] = m.synth.addV(gp_XYZ(p.X(), L, p.Z()));
+    }
+    for (int i = 0; i < nStrips; ++i) {
+        std::vector<int> tris;
+        m.synth.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                        hi[(std::size_t)i + 1], tris);
+        for (int t : tris) m.bandTris.push_back(t);
+        addStrip(m.work, tris);
+    }
+    const int wt = m.synth.tri(lo.front(), hi.front(), m.synth.addV(gp_XYZ(-30.0, 0.5 * L, 0.0)));
+    addAnchor(m.work, {wt}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    const double xe = R * std::sin(phi), ze = R * (1.0 - std::cos(phi));
+    if (trim == 1) {
+        const int wx = m.synth.tri(lo.back(), hi.back(), m.synth.addV(gp_XYZ(xe, 0.5 * L, ze + 30.0)));
+        addAnchor(m.work, {wx}, gp_XYZ(1, 0, 0), gp_XYZ(xe, 0, 0), 0.0);
+    } else {
+        if (trim == 2) {
+            const int wx = m.synth.tri(lo.back(), hi.back(), m.synth.addV(gp_XYZ(-30.0, 0.5 * L, ze)));
+            addAnchor(m.work, {wx}, gp_XYZ(0, 0, 1), gp_XYZ(0, 0, ze), 0.0);
+        }
+        const int wf = m.synth.tri(m.synth.addV(gp_XYZ(-40.0, 0.0, -50.0)),
+                                   m.synth.addV(gp_XYZ(-40.0, L, -50.0)),
+                                   m.synth.addV(gp_XYZ(-40.0, 0.5 * L, -80.0)));
+        addAnchor(m.work, {wf}, gp_XYZ(1, 0, 0), gp_XYZ(-40.0, 0, 0), 0.0);
+    }
+    return m;
+}
+
+static std::string osbLine(const std::string& diag, const char* why) {
+    const std::string key = std::string("why=") + why;
+    std::istringstream in(diag);
+    std::string line, last;
+    while (std::getline(in, line)) {
+        if (line.find("DIAG_REL_BAND") != std::string::npos &&
+            line.find("mode=onesided") != std::string::npos && line.find(key) != std::string::npos)
+            last = line;
+    }
+    return last;
+}
+
+static void case25() {
+    using namespace stl2step::refit;
+    // D-fc-4.9 accept: R10 arc of 57 deg on 12 strips, tangent to T, crossed by
+    // X' (|dist(axis, X') - r| = R(1 - sin 57) >> tanDistTol). Two free
+    // parameters; the vertex span equals the fitted contact->X' arc.
+    std::fprintf(stderr, "kParamsOneSided=%d minStations=%d\n", kParamsOneSided,
+                 minStations(kParamsOneSided));
+    expect(kParamsOneSided == 2 && minStations(kParamsOneSided) == 3,
+           "case25 kParamsOneSided = 2, minStations = 3");
+    const double R = 10.0, phi = 57.0 * kPi / 180.0;
+    auto built = makeOneSided(R, 8.0, phi, 12, 1);
+    const std::size_t nBand = built.bandTris.size();
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    const std::string acc = osbLine(r.diag, "accept");
+    bool ok = r.work.accepted.size() == 1 && !acc.empty() &&
+              acc.find("params=2") != std::string::npos &&
+              acc.find("fit=anchored") != std::string::npos;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        const double span = a.uMax - a.uMin;
+        ok = a.origin == Origin::FilletStrip && nearRadius(a, R, r.tau) &&
+             std::abs(span - phi) <= fieldNum(acc, "spanTol") && a.tris.size() == nBand &&
+             std::abs(fieldNum(acc, "tanDistB") - R * (1.0 - std::sin(phi))) <= r.tau;
+        std::fprintf(stderr, "case25 r=%.9g span=%.6f tris=%d %s\n", a.radius, span,
+                     (int)a.tris.size(), acc.c_str());
+    }
+    if (!ok) dumpFail("case25", r);
+    expect(ok, "case25 one-sided R10 blend tangent to T, crossed by X'");
+
+    // Thread count does not change the claim.
+    auto again = makeOneSided(R, 8.0, phi, 12, 1);
+    Run r4 = runClaim(again.synth, std::move(again.work), 1e-4, 4);
+    const bool same = r4.work.accepted.size() == 1 && r.work.accepted.size() == 1 &&
+                      r4.work.accepted[0].radius == r.work.accepted[0].radius &&
+                      r4.work.accepted[0].tris == r.work.accepted[0].tris;
+    expect(same, "case25 threads 4 == threads 1");
+}
+
+static void case26() {
+    using namespace stl2step::refit;
+    // D-fc-3.1 / D-fc-4.9: a half circle between antiparallel T and X' is
+    // tangent to X' at its far end. The one-sided relation refuses it as a hem.
+    auto built = makeOneSided(3.0, 8.0, kPi, 24, 2);
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    const bool ok = r.work.accepted.empty() && !osbLine(r.diag, "hem-deferred").empty() &&
+                    osbLine(r.diag, "accept").empty();
+    if (!ok) dumpFail("case26", r);
+    expect(ok, "case26 one-sided hem (tangent X') deferred");
+}
+
+static void case27() {
+    using namespace stl2step::refit;
+    // D-fc-4.9: no certified plane holds the far end generator.
+    auto built = makeOneSided(10.0, 8.0, 57.0 * kPi / 180.0, 12, 0);
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    const bool ok = r.work.accepted.empty() && !osbLine(r.diag, "no-anchor").empty();
+    if (!ok) dumpFail("case27", r);
+    expect(ok, "case27 one-sided blend without a trim plane is no-anchor");
+}
+
+static void case28() {
+    using namespace stl2step::refit;
+    // D-fc-4.9: a planar 45 deg chamfer from T's contact to the crossing plane
+    // x = 4, four collinear strips. A circle tangent to T meets at most two of
+    // its stations, so it never certifies.
+    Synth s;
+    SegmentWork w;
+    const double L = 8.0, d = 4.0;
+    const int n = 4;
+    std::vector<int> lo((std::size_t)n + 1), hi((std::size_t)n + 1);
+    for (int i = 0; i <= n; ++i) {
+        const double u = d * (double)i / (double)n;
+        lo[(std::size_t)i] = s.addV(gp_XYZ(u, 0.0, u));
+        hi[(std::size_t)i] = s.addV(gp_XYZ(u, L, u));
+    }
+    for (int i = 0; i < n; ++i) {
+        std::vector<int> tris;
+        s.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                  hi[(std::size_t)i + 1], tris);
+        addStrip(w, tris);
+    }
+    const int wt = s.tri(lo.front(), hi.front(), s.addV(gp_XYZ(-30.0, 0.5 * L, 0.0)));
+    const int wx = s.tri(lo.back(), hi.back(), s.addV(gp_XYZ(d, 0.5 * L, d + 30.0)));
+    addAnchor(w, {wt}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(w, {wx}, gp_XYZ(1, 0, 0), gp_XYZ(d, 0, 0), 0.0);
+    Run r = runClaim(s, std::move(w), 1e-4, 1);
+    const bool refused = !osbLine(r.diag, "underdetermined").empty() ||
+                         !osbLine(r.diag, "line").empty() || !osbLine(r.diag, "vertex-off").empty();
+    const bool ok = r.work.accepted.empty() && osbLine(r.diag, "accept").empty() && refused;
+    if (!ok) dumpFail("case28", r);
+    expect(ok, "case28 planar chamfer is not a one-sided blend");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -1291,6 +1443,10 @@ int main() {
     case22();
     case23();
     case24();
+    case25();
+    case26();
+    case27();
+    case28();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;

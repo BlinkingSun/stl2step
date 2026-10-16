@@ -1132,6 +1132,56 @@ bool radiusWindow(const gp_XYZ& p, const gp_XYZ& c0, const gp_XYZ& dax, double A
     return hi > 0.0;
 }
 
+// D-fc-4.9. Least squares of the one-sided blend's circle in section: centre
+// b + g·t + nT·(s·r), tangent to the line through b along g (the anchor T),
+// kParamsOneSided = 2 free (t, r). Gauss-Newton from the caller's (t, r),
+// capped by maxIter; a step that raises the residual ends it.
+bool fitOneSided(const std::vector<Vert>& verts, const gp_XYZ& axis, const gp_XYZ& b,
+                 const gp_XYZ& g, const gp_XYZ& nT, double s, int maxIter, double& t,
+                 double& r) {
+    if (verts.empty() || !(r > 0.0)) return false;
+    auto sse = [&](double tp, double rr) {
+        const gp_XYZ c = b + g * tp + nT * (s * rr);
+        double e = 0.0;
+        for (const Vert& v : verts) {
+            const double f = radialDist(v.p, c, axis) - rr;
+            e += f * f;
+        }
+        return e;
+    };
+    double bestE = sse(t, r);
+    const int itCap = std::max(1, maxIter);
+    for (int it = 0; it < itCap; ++it) {
+        double JtJ00 = 0, JtJ01 = 0, JtJ11 = 0, Jte0 = 0, Jte1 = 0;
+        const gp_XYZ c = b + g * t + nT * (s * r);
+        for (const Vert& v : verts) {
+            gp_XYZ d = v.p - c;
+            d -= axis * d.Dot(axis);
+            const double rho = d.Modulus();
+            if (!(rho > 0.0)) continue;
+            const double e = rho - r;
+            const double j0 = -d.Dot(g) / rho;
+            const double j1 = -s * d.Dot(nT) / rho - 1.0;
+            JtJ00 += j0 * j0;
+            JtJ01 += j0 * j1;
+            JtJ11 += j1 * j1;
+            Jte0 += j0 * e;
+            Jte1 += j1 * e;
+        }
+        const double det = JtJ00 * JtJ11 - JtJ01 * JtJ01;
+        if (!(det > 0.0)) break;
+        const double dt = -(JtJ11 * Jte0 - JtJ01 * Jte1) / det;
+        const double dr = -(JtJ00 * Jte1 - JtJ01 * Jte0) / det;
+        if (!std::isfinite(dt) || !std::isfinite(dr) || !(r + dr > 0.0)) break;
+        const double e2 = sse(t + dt, r + dr);
+        if (!(e2 <= bestE)) break;
+        t += dt;
+        r += dr;
+        bestE = e2;
+    }
+    return r > 0.0 && std::isfinite(r) && std::isfinite(t);
+}
+
 }  // namespace
 
 bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -2617,6 +2667,625 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             curA = a;
             curB = b;
             advance(curA, curB);
+        }
+
+        // D-fc-4.9. One-sided extrusion blend (spike-fc3-onesided §1). A
+        // cylinder tangent to a certified plane T along a contact generator,
+        // with axis ∥ n_T × n_X for a certified X, whose far end generator lies
+        // on a certified plane X' parallel to the axis that it CROSSES. The
+        // station is a boundary edge of T's body parallel to that axis whose
+        // other triangle is a candidate off T: it supplies the position only.
+        // Free after the anchors: kParamsOneSided (contact position, r). One
+        // vote per station (D-fc-3.2.3 style); the side comes from the data.
+        // Certificate: τ fixed point on I, stations >= minStations, levels >= 2,
+        // line first, contact on T within tanDistTol, coverage D-fc-3.2.7,
+        // anchor-in-band, trim X' (holds the far vertex and >= 2 levels within
+        // tanDistTol, all of C on one side, parallel, crossed; tangent ⇒
+        // hem-deferred, D-fc-3.1), vertex span == the fitted contact→X' arc
+        // within spanTol and facet normals span it, same-surface refused.
+        //
+        // T walks arefs order and its stations follow its edges, one serial
+        // walk that restarts T after a commit. A station's evaluation reads the
+        // claim state and writes only its OsbOut, so an epoch's stations are
+        // evaluated on worker threads and replayed in walk order (DIAG text,
+        // tallies, the first commit), as the pair walk does. Output does not
+        // depend on the worker count; threads 1 runs it inline.
+        {
+            const auto tOsb = std::chrono::steady_clock::now();
+            int osbEdges = 0, osbStations = 0, osbHyp = 0, osbAcc = 0;
+            // The pair walk refreshes its table from curA on; load every row.
+            anchorTabEpoch = -1;
+            std::vector<int> osbInBody((std::size_t)nTri, 0);
+            int osbBodyTick = 0;
+            struct OsbEdge {
+                gp_XYZ pa, pb;
+                int ot;
+                int far;
+            };
+            struct OsbSt {
+                std::size_t it;
+                int ot;
+                gp_XYZ axis, b, nTs, g;
+                double sg;
+            };
+            struct OsbT {
+                std::size_t it;
+                int nEdges;
+                std::size_t first, last;
+            };
+            struct OsbOut {
+                std::string diag;
+                WhyCount yc;
+                int hyp = 0;
+                bool commit = false;
+                std::vector<int> C;
+                gp_XYZ axis, center;
+                double radius = 0;
+                int provT = -1, provX = -1;
+                BandDiag dg;
+            };
+            // Stations of T = arefs[it] in the current epoch, appended to out.
+            // False when T is not a certified anchor.
+            auto osbStationsOf = [&](std::size_t it, int& nEdges, std::vector<OsbSt>& out) -> bool {
+                nEdges = 0;
+                if (!touchAnchor(it) || !anchorTab[it].certified) return false;
+                const LiveAnchor& TA = anchorTab[it];
+                // Contact edges: boundary edges of T's body whose other
+                // triangle is a candidate with a corner off T's plane. far is
+                // that triangle's corner off the edge: the band side.
+                std::vector<OsbEdge> ce;
+                if (++osbBodyTick > 2000000000) {
+                    std::fill(osbInBody.begin(), osbInBody.end(), 0);
+                    osbBodyTick = 1;
+                }
+                for (int t : TA.body)
+                    if (t >= 0 && t < nTri) osbInBody[(std::size_t)t] = osbBodyTick;
+                for (int t : TA.body) {
+                    if (t < 0 || t >= nTri) continue;
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (ot < 0 || ot >= nTri || osbInBody[(std::size_t)ot] == osbBodyTick ||
+                            !candidate(ot))
+                            continue;
+                        if (triOnPlane(ot, TA.n, TA.p0)) continue;
+                        const int la = cornerLocal(g2l, mv, t, s);
+                        const int lb = cornerLocal(g2l, mv, t, (s + 1) % 3);
+                        int far = -1;
+                        for (int k = 0; k < 3; ++k) {
+                            const int lk = cornerLocal(g2l, mv, ot, k);
+                            if (lk != la && lk != lb) far = k;
+                        }
+                        if (far < 0) continue;
+                        ce.push_back(OsbEdge{cornerPt(mv, t, s), cornerPt(mv, t, (s + 1) % 3), ot, far});
+                    }
+                }
+                std::stable_sort(ce.begin(), ce.end(),
+                                 [](const OsbEdge& x, const OsbEdge& y) { return x.ot < y.ot; });
+                nEdges = (int)ce.size();
+                if (ce.empty()) return true;
+                // Axis sources: certified X in arefs order, not parallel to T
+                // by the hem test.
+                std::vector<gp_XYZ> axes;
+                for (std::size_t ix = 0; ix < nA; ++ix) {
+                    if (ix == it || !touchAnchor(ix) || !anchorTab[ix].certified) continue;
+                    const LiveAnchor& XA = anchorTab[ix];
+                    const double cross = TA.n.Crossed(XA.n).Modulus();
+                    const double rhs =
+                        2.0 * (TA.tolA + tau) / TA.extent + 2.0 * (XA.tolA + tau) / XA.extent;
+                    if (cross <= rhs) continue;
+                    gp_XYZ a = TA.n.Crossed(XA.n);
+                    a.Divide(cross);
+                    canonicalHemi(a);
+                    axes.push_back(a);
+                }
+                if (axes.empty()) return true;
+                // (axis, section point, band side) already listed: collinear
+                // contact edges are one station.
+                const std::size_t first = out.size();
+                for (const OsbEdge& e : ce) {
+                    gp_XYZ dir = e.pb - e.pa;
+                    const double len = dir.Modulus();
+                    if (!(len > tau)) continue;
+                    dir /= len;
+                    std::size_t axk = axes.size();
+                    for (std::size_t k = 0; k < axes.size(); ++k) {
+                        if (edgeParallel(dir, len, axes[k], tau)) {
+                            axk = k;
+                            break;
+                        }
+                    }
+                    if (axk == axes.size()) continue;
+                    OsbSt st;
+                    st.it = it;
+                    st.ot = e.ot;
+                    st.axis = axes[axk];
+                    st.nTs = TA.n - st.axis * TA.n.Dot(st.axis);
+                    const double nTm = st.nTs.Modulus();
+                    if (!(nTm > 0.0)) continue;
+                    st.nTs /= nTm;
+                    st.g = st.axis.Crossed(st.nTs);
+                    // Section point of the station on T's plane (axial coordinate 0).
+                    st.b = e.pa - st.axis * e.pa.Dot(st.axis);
+                    st.b -= st.nTs * (st.b - TA.p0).Dot(st.nTs);
+                    // The band leaves the contact on the side of its own
+                    // triangle. A triangle normal to T there is no tangent strip.
+                    gp_XYZ w = cornerPt(mv, e.ot, e.far) - st.b;
+                    w -= st.axis * w.Dot(st.axis);
+                    const double gw = st.g.Dot(w);
+                    if (std::abs(gw) <= tau) continue;
+                    st.sg = gw > 0.0 ? 1.0 : -1.0;
+                    bool dup = false;
+                    for (std::size_t k = first; k < out.size(); ++k) {
+                        const OsbSt& d = out[k];
+                        if (d.axis.X() == st.axis.X() && d.axis.Y() == st.axis.Y() &&
+                            d.axis.Z() == st.axis.Z() && d.sg == st.sg &&
+                            (d.b - st.b).Modulus() <= tau) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) out.push_back(st);
+                }
+                return true;
+            };
+            // One station: the vote, the fixed point and the certificate.
+            // Reads the claim state only; a certified band is returned in out.
+            auto evalStation = [&](const OsbSt& st, PairScratch& sc, OsbOut& out) {
+                const LiveAnchor& TA = anchorTab[st.it];
+                const gp_XYZ& axis = st.axis;
+                const gp_XYZ& b = st.b;
+                const gp_XYZ& nTs = st.nTs;
+                const gp_XYZ& g = st.g;
+                const double sg = st.sg;
+                // Vote r per side s = sign(n_T · w): the circle tangent to T
+                // at b through each candidate vertex past the contact.
+                std::vector<double> pool[2];
+                for (const CandV& cv : candPts) {
+                    gp_XYZ w = cv.p - b;
+                    w -= axis * w.Dot(axis);
+                    const double h = nTs.Dot(w);
+                    if (std::abs(h) <= tau) continue;
+                    if (sg * g.Dot(w) < -tau) continue;
+                    const double r = w.Dot(w) / (2.0 * std::abs(h));
+                    if (!(r > 0.0) || !std::isfinite(r)) continue;
+                    pool[h > 0.0 ? 0 : 1].push_back(r);
+                }
+                int bestIn = -1, bestS = 0;
+                double bestR = 0.0;
+                for (int si = 0; si < 2; ++si) {
+                    std::vector<double>& pl = pool[si];
+                    if (pl.empty()) continue;
+                    std::sort(pl.begin(), pl.end());
+                    const int n = (int)pl.size();
+                    int j = 0, bn = 0, bj = 0;
+                    for (int i = 0; i < n; ++i) {
+                        while (pl[(std::size_t)i] - pl[(std::size_t)j] > 2.0 * tau) ++j;
+                        if (i - j + 1 > bn) {
+                            bn = i - j + 1;
+                            bj = j;
+                        }
+                    }
+                    const int mid = bj + bn / 2;
+                    const double rmed =
+                        (bn % 2) != 0
+                            ? pl[(std::size_t)mid]
+                            : 0.5 * (pl[(std::size_t)mid - 1] + pl[(std::size_t)mid]);
+                    const double s = si == 0 ? 1.0 : -1.0;
+                    const gp_XYZ c = b + nTs * (s * rmed);
+                    int nIn = 0;
+                    for (const CandV& cv : candPts) {
+                        gp_XYZ w = cv.p - b;
+                        w -= axis * w.Dot(axis);
+                        if (sg * g.Dot(w) < -tau || s * nTs.Dot(w) < -tau) continue;
+                        if (std::abs(radialDist(cv.p, c, axis) - rmed) <= tau) ++nIn;
+                    }
+                    if (nIn > bestIn || (nIn == bestIn && rmed < bestR)) {
+                        bestIn = nIn;
+                        bestR = rmed;
+                        bestS = si;
+                    }
+                }
+                // Fewer inlier vertices than minStations cannot certify (lossless).
+                if (bestIn < minStations(kParamsOneSided)) return;
+                out.hyp = 1;
+                const double s = bestS == 0 ? 1.0 : -1.0;
+                double tpos = 0.0, radius = bestR;
+                auto centerOf = [&](double tp, double r) {
+                    return b + g * tp + nTs * (s * r);
+                };
+                // Slab: past the contact and on the centre side of T, τ
+                // slack each. Every I or Cover triangle has a corner in the
+                // slab within τ of the circle, so only triangles incident to
+                // such a vertex are examined.
+                auto collect = [&](double tp, double r, std::vector<int>& slab,
+                                   std::vector<int>& I) {
+                    slab.clear();
+                    I.clear();
+                    const gp_XYZ bc = b + g * tp;
+                    const gp_XYZ c = centerOf(tp, r);
+                    auto inSlab = [&](const gp_XYZ& pnt) {
+                        gp_XYZ w = pnt - bc;
+                        w -= axis * w.Dot(axis);
+                        return !(sg * g.Dot(w) < -tau || s * nTs.Dot(w) < -tau);
+                    };
+                    if (++sc.triTick > 2000000000) {
+                        std::fill(sc.triGen.begin(), sc.triGen.end(), 0);
+                        sc.triTick = 1;
+                    }
+                    for (const CandV& cv : candPts) {
+                        if (std::abs(radialDist(cv.p, c, axis) - r) > tau || !inSlab(cv.p))
+                            continue;
+                        for (int t : vertTris[(std::size_t)cv.lv]) {
+                            if (t < 0 || t >= nTri || sc.triGen[(std::size_t)t] == sc.triTick ||
+                                !candidate(t))
+                                continue;
+                            sc.triGen[(std::size_t)t] = sc.triTick;
+                            bool in = true, allTau = true;
+                            for (int k = 0; k < 3 && in; ++k) {
+                                const gp_XYZ pnt = cornerPt(mv, t, k);
+                                if (!inSlab(pnt)) in = false;
+                                if (std::abs(radialDist(pnt, c, axis) - r) > tau) allTau = false;
+                            }
+                            if (!in) continue;
+                            slab.push_back(t);
+                            if (allTau && triLevelCount(t, axis) >= 2) I.push_back(t);
+                        }
+                    }
+                    std::sort(slab.begin(), slab.end());
+                    std::sort(I.begin(), I.end());
+                };
+                BandDiag dg;
+                dg.tau = tau;
+                dg.mode = "onesided";
+                dg.fit = "anchored";
+                dg.params = kParamsOneSided;
+                dg.seed = st.ot;
+                dg.axis = axis;
+                dg.radius = radius;
+                dg.anchorTolA = TA.tolA;
+                auto finish = [&](const char* why) {
+                    dg.why = why;
+                    emitDiag(dg);
+                    tallyWhy(out.yc, why);
+                };
+                std::vector<int> slab, Iset;
+                collect(tpos, radius, slab, Iset);
+                bool stable = false;
+                const int itCap = std::max(1, p.maxRefineIters);
+                for (int iter = 0; iter < itCap && !Iset.empty(); ++iter) {
+                    std::vector<Vert> iv;
+                    uniqueVerts(mv, g2l, Iset, iv);
+                    if (!fitOneSided(iv, axis, b, g, nTs, s, itCap, tpos, radius)) {
+                        Iset.clear();
+                        break;
+                    }
+                    std::vector<int> I2, slab2;
+                    collect(tpos, radius, slab2, I2);
+                    if (I2 == Iset) {
+                        slab.swap(slab2);
+                        stable = true;
+                        break;
+                    }
+                    Iset.swap(I2);
+                    slab.swap(slab2);
+                }
+                dg.radius = radius;
+                if (Iset.empty()) {
+                    finish("vertex-off");
+                    return;
+                }
+                if (!stable) {
+                    finish("unstable");
+                    return;
+                }
+                const gp_XYZ center = centerOf(tpos, radius);
+                std::vector<Vert> iv;
+                uniqueVerts(mv, g2l, Iset, iv);
+                profileCounts(iv, axis, tau, dg.stations, dg.levels, dg.lineRes);
+                dg.nV = (int)iv.size();
+                dg.nI = (int)Iset.size();
+                dg.compsI = edgeComps(Iset);
+                double iRms = 0;
+                dg.certDev = devStats(iv, center, axis, radius, iRms);
+                dg.maxDev = dg.certDev;
+                if (dg.stations < minStations(kParamsOneSided) || dg.levels < 2) {
+                    finish("underdetermined");
+                    return;
+                }
+                if (dg.lineRes <= tau) {
+                    finish("line");
+                    return;
+                }
+                if (dg.certDev > tau) {
+                    finish("vertex-off");
+                    return;
+                }
+                // Contact on T.
+                double minOnT = std::numeric_limits<double>::infinity();
+                for (const Vert& vt : iv)
+                    minOnT = std::min(minOnT, std::abs((vt.p - TA.p0).Dot(TA.n)));
+                dg.tanDistA = minOnT;
+                if (minOnT > tanDistTol(TA.tolA, tau)) {
+                    finish("no-anchor");
+                    return;
+                }
+                // Coverage (D-fc-3.2.7).
+                double zlo = std::numeric_limits<double>::infinity();
+                double zhi = -std::numeric_limits<double>::infinity();
+                for (const Vert& vt : iv) {
+                    zlo = std::min(zlo, vt.p.Dot(axis));
+                    zhi = std::max(zhi, vt.p.Dot(axis));
+                }
+                double sDev = 0.0;
+                for (int t : Iset) {
+                    for (int k = 0; k < 3; ++k) {
+                        const gp_XYZ mid =
+                            0.5 * (cornerPt(mv, t, k) + cornerPt(mv, t, (k + 1) % 3));
+                        sDev = std::max(sDev, std::abs(radialDist(mid, center, axis) - radius));
+                    }
+                }
+                dg.sDev = sDev;
+                std::vector<char> inI((std::size_t)nTri, 0);
+                for (int t : Iset) inI[(std::size_t)t] = 1;
+                std::vector<int> cover;
+                for (int t : slab) {
+                    if (inI[(std::size_t)t] || !candidate(t)) continue;
+                    bool one = false, allS = true, allZ = true;
+                    for (int k = 0; k < 3; ++k) {
+                        const gp_XYZ pnt = cornerPt(mv, t, k);
+                        const double dv = std::abs(radialDist(pnt, center, axis) - radius);
+                        const double z = pnt.Dot(axis);
+                        if (dv <= tau) one = true;
+                        if (dv > sDev) allS = false;
+                        if (z < zlo - tau || z > zhi + tau) allZ = false;
+                    }
+                    // D-fc-3.2 item 1: fewer than 2 axial levels is never a member.
+                    if (one && allS && allZ && triLevelCount(t, axis) >= 2) cover.push_back(t);
+                }
+                dg.nCover = (int)cover.size();
+                {
+                    std::vector<Vert> cvv;
+                    uniqueVerts(mv, g2l, cover, cvv);
+                    double cRms = 0;
+                    dg.coverDev = cvv.empty() ? 0.0 : devStats(cvv, center, axis, radius, cRms);
+                }
+                std::vector<int> C = Iset;
+                C.insert(C.end(), cover.begin(), cover.end());
+                std::sort(C.begin(), C.end());
+                dg.compsC = edgeComps(C);
+                dg.nTri = (int)C.size();
+                std::vector<char> inC((std::size_t)nTri, 0);
+                for (int t : C) inC[(std::size_t)t] = 1;
+                {
+                    bool tOut = false;
+                    for (int t : work.provisionals[(std::size_t)TA.prov].tris) {
+                        if (t < 0 || t >= nTri || !inC[(std::size_t)t]) {
+                            tOut = true;
+                            break;
+                        }
+                    }
+                    if (!tOut) {
+                        finish("anchor-in-band");
+                        return;
+                    }
+                }
+                std::vector<Vert> cvAll;
+                uniqueVerts(mv, g2l, C, cvAll);
+                gp_XYZ u0, v0;
+                frameOf(axis, u0, v0);
+                auto azOf = [&](const gp_XYZ& pnt) {
+                    gp_XYZ d = pnt - center;
+                    d -= axis * d.Dot(axis);
+                    return std::atan2(d.Dot(v0), d.Dot(u0));
+                };
+                // Far end: the C vertex at the largest arc from the contact.
+                const gp_XYZ contact = center - nTs * (s * radius);
+                const double azC = azOf(contact);
+                gp_XYZ farP = center;
+                double farArc = -1.0, azFar = azC;
+                for (const Vert& vt : cvAll) {
+                    const double az = azOf(vt.p);
+                    const double da = std::abs(std::remainder(az - azC, kTwoPi));
+                    if (da > farArc) {
+                        farArc = da;
+                        azFar = az;
+                        farP = vt.p;
+                    }
+                }
+                // Trim X': the first certified anchor (arefs order) that owns
+                // triangles outside C, holds the far vertex and >= 2 levels of C
+                // within tanDistTol, has all of C on one side, is parallel to the
+                // axis, and is crossed.
+                std::size_t trimIdx = nA;
+                bool farTangent = false;
+                for (std::size_t ix = 0; ix < nA && !farTangent; ++ix) {
+                    if (ix == st.it || !anchorTabOk[ix] || !anchorTab[ix].certified) continue;
+                    const LiveAnchor& XA = anchorTab[ix];
+                    {
+                        bool outC = false;  // D-fc-3.2.9
+                        for (int t : XA.body) {
+                            if (t >= 0 && t < nTri && !inC[(std::size_t)t]) {
+                                outC = true;
+                                break;
+                            }
+                        }
+                        if (!outC) continue;
+                    }
+                    const double tolX = tanDistTol(XA.tolA, tau);
+                    if (std::abs((farP - XA.p0).Dot(XA.n)) > tolX) continue;
+                    std::vector<double> zOn;
+                    int nPos = 0, nNeg = 0;
+                    for (const Vert& vt : cvAll) {
+                        const double h = (vt.p - XA.p0).Dot(XA.n);
+                        if (std::abs(h) <= tolX) zOn.push_back(vt.p.Dot(axis));
+                        else if (h > 0.0) ++nPos;
+                        else ++nNeg;
+                    }
+                    if (nPos > 0 && nNeg > 0) continue;
+                    if (countLevels(zOn, tau) < 2) continue;
+                    const gp_XYZ plo = center + axis * (zlo - center.Dot(axis));
+                    const gp_XYZ phi = center + axis * (zhi - center.Dot(axis));
+                    const double dlo = std::abs((plo - XA.p0).Dot(XA.n));
+                    const double dhi = std::abs((phi - XA.p0).Dot(XA.n));
+                    if (std::abs(dlo - dhi) > tolX) continue;
+                    if (std::abs(0.5 * (dlo + dhi) - radius) <= tolX) {
+                        // Tangent at the far end: two-sided, or a hem (O2, D-fc-3.1).
+                        farTangent = true;
+                        break;
+                    }
+                    if (trimIdx < nA) continue;
+                    trimIdx = ix;
+                    dg.tanDistB = std::abs(0.5 * (dlo + dhi) - radius);
+                    dg.anchorTolB = XA.tolA;
+                }
+                if (farTangent) {
+                    finish("hem-deferred");
+                    return;
+                }
+                if (trimIdx == nA) {
+                    finish("no-anchor");
+                    return;
+                }
+                const LiveAnchor& XT = anchorTab[trimIdx];
+                // Expected arc: the contact azimuth to the circle's crossing
+                // with X' nearer the far vertex.
+                double expArc = -1.0;
+                {
+                    gp_XYZ nX = XT.n - axis * XT.n.Dot(axis);
+                    const double nXm = nX.Modulus();
+                    if (nXm > 0.0) {
+                        nX /= nXm;
+                        const double h = (XT.p0 - center).Dot(nX);
+                        const double half2 = radius * radius - h * h;
+                        if (half2 >= 0.0) {
+                            const gp_XYZ gx = axis.Crossed(nX);
+                            const gp_XYZ base = center + nX * h;
+                            const double half = std::sqrt(half2);
+                            const double a1 = azOf(base + gx * half);
+                            const double a2 = azOf(base - gx * half);
+                            const double d1 = std::abs(std::remainder(a1 - azFar, kTwoPi));
+                            const double d2 = std::abs(std::remainder(a2 - azFar, kTwoPi));
+                            const double aX = d1 <= d2 ? a1 : a2;
+                            expArc = std::abs(std::remainder(aX - azC, kTwoPi));
+                        }
+                    }
+                }
+                dg.dihedral = expArc;
+                const gp_XYZ xdir = lowestXDir(cvAll, center, axis);
+                const SpanInfo sp =
+                    measureSpan(mv, g2l, C, cvAll, center, axis, xdir, tol.thetaBin);
+                dg.span = sp.span;
+                dg.spanTolV = spanTol(TA.tolA, XT.tolA, radius);
+                const double normSep = maxFacetNormalSep(mv, C);
+                if (!(expArc >= 0.0) || std::abs(sp.span - expArc) > dg.spanTolV ||
+                    !normalsSpanDihedral(normSep, dg.spanTolV)) {
+                    finish("not-blend");
+                    return;
+                }
+                emitAdj(st.ot, axis, center, radius, inC);
+                if (sameSurface(axis, center, radius, inC)) {
+                    finish("same-surface");
+                    return;
+                }
+                const int provT = TA.prov, provX = XT.prov;
+                if (diagOn()) {
+                    // The anchors and every provisional the band splits
+                    // (D-fc-1.6.12), so a downstream change can be traced.
+                    std::string sp;
+                    for (int pi = 0; pi < (int)work.provisionals.size(); ++pi) {
+                        int nin = 0, nout = 0;
+                        for (int t : work.provisionals[(std::size_t)pi].tris) {
+                            if (t >= 0 && t < nTri && inC[(std::size_t)t]) ++nin;
+                            else ++nout;
+                        }
+                        if (nin == 0) continue;
+                        const gp_XYZ pn = work.provisionals[(std::size_t)pi].plane.Direction().XYZ();
+                        char buf[160];
+                        std::snprintf(buf, sizeof buf, " prov%d(minTri=%d,in=%d,out=%d,n=%.6g,%.6g,%.6g)",
+                                      pi, minTriOf(work.provisionals[(std::size_t)pi].tris), nin, nout,
+                                      pn.X(), pn.Y(), pn.Z());
+                        sp += buf;
+                    }
+                    diagPrintf("DIAG_REL_OSB_COMMIT stage=extrude seed=%d provT=%d minTriT=%d "
+                               "nT=%.6g,%.6g,%.6g dT=%.9g provX=%d minTriX=%d "
+                               "nX=%.6g,%.6g,%.6g dX=%.9g bandProvs=%s\n",
+                               st.ot, provT, TA.minTri, TA.n.X(), TA.n.Y(), TA.n.Z(),
+                               TA.p0.Dot(TA.n), provX, XT.minTri, XT.n.X(), XT.n.Y(),
+                               XT.n.Z(), XT.p0.Dot(XT.n), sp.c_str());
+                }
+                out.commit = true;
+                out.C = std::move(C);
+                out.axis = axis;
+                out.center = center + axis * (0.5 * (zlo + zhi) - center.Dot(axis));
+                out.radius = radius;
+                out.provT = provT;
+                out.provX = provX;
+                out.dg = dg;
+            };
+            std::vector<OsbT> osbTs;
+            std::vector<OsbSt> osbSts;
+            std::vector<OsbOut> osbOuts;
+            std::size_t curIt = 0;
+            int guard = 0;
+            while (curIt < nA && guard++ < nTri + 1) {
+                if (candEpoch != anchorEpoch) rebuildCand();
+                refreshAnchorTab(0);
+                osbTs.clear();
+                osbSts.clear();
+                for (std::size_t it = curIt; it < nA; ++it) {
+                    OsbT tr;
+                    tr.it = it;
+                    tr.first = osbSts.size();
+                    if (!osbStationsOf(it, tr.nEdges, osbSts)) continue;
+                    tr.last = osbSts.size();
+                    osbTs.push_back(tr);
+                }
+                const std::size_t ns = osbSts.size();
+                osbOuts.clear();
+                osbOuts.resize(ns);
+                // Stations past the first commit are stale; workers stop taking them.
+                std::atomic<std::size_t> stopAt{ns};
+                parallelEach(ns, [&](std::size_t k, unsigned wi) {
+                    if (k > stopAt.load()) return false;
+                    DiagSinkScope sink(&osbOuts[k].diag);
+                    evalStation(osbSts[k], scratch[wi], osbOuts[k]);
+                    if (osbOuts[k].commit) {
+                        std::size_t cur = stopAt.load();
+                        while (k < cur && !stopAt.compare_exchange_weak(cur, k)) {
+                        }
+                    }
+                    return true;
+                });
+                bool committed = false;
+                for (const OsbT& tr : osbTs) {
+                    osbEdges += tr.nEdges;
+                    for (std::size_t k = tr.first; k < tr.last; ++k) {
+                        OsbOut& o = osbOuts[k];
+                        ++osbStations;
+                        osbHyp += o.hyp;
+                        if (!o.diag.empty()) std::fputs(o.diag.c_str(), stderr);
+                        addWhy(yc, o.yc);
+                        if (!o.commit) continue;
+                        ++osbAcc;
+                        commitBand(std::move(o.C), o.axis, o.center, o.radius, true, o.provT,
+                                   o.provX, osbSts[k].ot, o.dg);
+                        committed = true;
+                        // The commit changed the claim state: T restarts.
+                        curIt = tr.it;
+                        break;
+                    }
+                    if (committed) break;
+                }
+                if (!committed) break;
+            }
+            if (diagOn()) {
+                const double seconds =
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - tOsb).count();
+                std::fprintf(stderr,
+                             "DIAG_REL_OSB stage=extrude contactEdges=%d stations=%d "
+                             "hypotheses=%d accept=%d seconds=%.6f\n",
+                             osbEdges, osbStations, osbHyp, osbAcc, seconds);
+            }
         }
 
         // Pegs. Axis is the plane anchor normal. Certified anchors keep that axis;

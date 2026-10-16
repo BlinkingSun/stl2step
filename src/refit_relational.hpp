@@ -30,6 +30,10 @@ inline bool anchorCertified(double tau, double maxVertexDev) {
 // D-fc-1.6(2). Model parameter counts. Under-determined when stations < params + 1.
 constexpr int kParamsAnchored = 1, kParamsLine = 2, kParamsCircle = 3, kParamsAxisDir = 2;
 
+// D-fc-4.9. One-sided extrusion blend: axis ∥ n_T × n_X and tangency to T
+// imposed; free are the contact position along T and r.
+constexpr int kParamsOneSided = 2;
+
 // D-fc-1.6(2).
 inline int minStations(int params) { return params + 1; }
 
