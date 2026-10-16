@@ -316,14 +316,12 @@ int sheetOf(const MeshView& mv, int t, const Frame& f) {
 void collectBand(const MeshView& mv, const Frame& f, const std::vector<int>& g2l, Band& b) {
     b.verts.clear();
     b.pts.clear();
-    std::vector<int> seen;
     for (int t : b.tris) {
         for (int k = 0; k < 3; ++k) {
             const int gt = mv.compTris ? mv.compTris[t] : t;
             const int g = mv.tris[gt][k];
             int lv = (g >= 0 && g < (int)g2l.size()) ? g2l[g] : -1;
             if (lv < 0) lv = g;
-            seen.push_back(lv);
             Vtx v;
             v.lv = lv;
             v.tri = t;
@@ -332,18 +330,14 @@ void collectBand(const MeshView& mv, const Frame& f, const std::vector<int>& g2l
             b.verts.push_back(v);
         }
     }
-    std::sort(seen.begin(), seen.end());
-    seen.erase(std::unique(seen.begin(), seen.end()), seen.end());
-    std::vector<char> took(b.verts.size(), 0);
-    for (int lv : seen) {
-        for (std::size_t i = 0; i < b.verts.size(); ++i) {
-            if (took[i]) continue;
-            if (b.verts[i].lv == lv) {
-                b.pts.push_back(b.verts[i].pr);
-                took[i] = 1;
-                break;
-            }
-        }
+    // One point per vertex, ascending lv, from its first occurrence in verts.
+    std::vector<std::pair<int, std::size_t>> firstOf;
+    firstOf.reserve(b.verts.size());
+    for (std::size_t i = 0; i < b.verts.size(); ++i) firstOf.emplace_back(b.verts[i].lv, i);
+    std::sort(firstOf.begin(), firstOf.end());
+    for (std::size_t i = 0; i < firstOf.size(); ++i) {
+        if (i > 0 && firstOf[i].first == firstOf[i - 1].first) continue;
+        b.pts.push_back(b.verts[firstOf[i].second].pr);
     }
     std::sort(b.tris.begin(), b.tris.end());
     b.tris.erase(std::unique(b.tris.begin(), b.tris.end()), b.tris.end());
