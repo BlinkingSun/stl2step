@@ -1,4 +1,447 @@
-// W1.0 stub. Lane b1-reclaim fills this (D-fc-1.12).
+// Synthetic relational-reclaim cases, Line mode (D-fc-4.4, D-fc-4.5). No training mesh.
 // SPDX-License-Identifier: MIT
 
-int main() { return 0; }
+#include "posix_compat.hpp"
+#include "refit_relational.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#if defined(_WIN32)
+#include <io.h>
+#define rc_dup _dup
+#define rc_dup2 _dup2
+#define rc_fileno _fileno
+#define rc_close _close
+#else
+// dup/dup2/close are libc. Declared here so this file does not include <unistd.h>.
+// fileno comes from <cstdio>.
+extern "C" {
+int dup(int);
+int dup2(int, int);
+int close(int);
+}
+#define rc_dup dup
+#define rc_dup2 dup2
+#define rc_fileno fileno
+#define rc_close close
+#endif
+
+using namespace stl2step::refit;
+
+static int gFail = 0;
+
+static void expect(bool ok, const char* name) {
+    std::fprintf(stderr, "%s %s\n", ok ? "PASS" : "FAIL", name);
+    if (!ok) ++gFail;
+}
+
+static constexpr double kPi = 3.14159265358979323846264338327950288;
+static constexpr double kDeg = kPi / 180.0;
+
+struct Synth {
+    std::vector<gp_XYZ> pts;
+    std::vector<int> triFlat;
+    std::vector<int> compTris, compVtx;
+    std::vector<std::pair<int, int>> edges;
+    std::vector<std::array<int, 3>> triEdges;
+    std::vector<uint8_t> triDirs;
+    double q = 1e-6;
+
+    int add(const gp_XYZ& p) {
+        pts.push_back(p);
+        return (int)pts.size() - 1;
+    }
+    int addTri(int a, int b, int c) {
+        triFlat.push_back(a);
+        triFlat.push_back(b);
+        triFlat.push_back(c);
+        return (int)(triFlat.size() / 3) - 1;
+    }
+    void finish() {
+        std::map<std::pair<int, int>, int> ids;
+        const std::size_t nT = triFlat.size() / 3;
+        compTris.resize(nT);
+        triEdges.resize(nT);
+        triDirs.assign(nT, 0);
+        for (std::size_t t = 0; t < nT; ++t) {
+            compTris[t] = (int)t;
+            const int v[4] = {triFlat[3 * t], triFlat[3 * t + 1], triFlat[3 * t + 2],
+                              triFlat[3 * t]};
+            for (int s = 0; s < 3; ++s) {
+                const int lo = std::min(v[s], v[s + 1]);
+                const int hi = std::max(v[s], v[s + 1]);
+                auto it = ids.find({lo, hi});
+                int id;
+                if (it == ids.end()) {
+                    id = (int)edges.size();
+                    ids.emplace(std::make_pair(lo, hi), id);
+                    edges.emplace_back(lo, hi);
+                } else {
+                    id = it->second;
+                }
+                triEdges[t][(std::size_t)s] = id;
+                if (v[s] < v[s + 1]) triDirs[t] = (uint8_t)(triDirs[t] | (uint8_t)(1u << s));
+            }
+        }
+        compVtx.resize(pts.size());
+        for (std::size_t i = 0; i < pts.size(); ++i) compVtx[i] = (int)i;
+    }
+    MeshView view() const {
+        MeshView mv{};
+        mv.pts = pts.data();
+        mv.tris = reinterpret_cast<const int (*)[3]>(triFlat.data());
+        mv.compTris = compTris.data();
+        mv.compVtx = compVtx.data();
+        mv.compEdges = edges.data();
+        mv.triEdges = triEdges.data();
+        mv.triDirs = triDirs.data();
+        mv.nTri = triFlat.size() / 3;
+        mv.nVtx = pts.size();
+        mv.nEdge = edges.size();
+        mv.diag = 100.0;
+        mv.weldTol = 0.0;
+        mv.sewTol = 0.0;
+        mv.quantFloor = q;
+        return mv;
+    }
+};
+
+// A cylinder (axis +Z through the origin) tessellated as nSect sectors of `step`
+// from th0, one quad (2 triangles) per sector per level gap. full => the last
+// sector closes onto the first column. Returns the triangles of each sector.
+struct Grid {
+    std::vector<std::vector<int>> col;  // col[j][i]: level j, column i
+    std::vector<std::vector<int>> sect; // sect[i]: triangles of sector i
+};
+
+static Grid cylGrid(Synth& s, double R, double th0, double step, int nSect, bool full,
+                    const std::vector<double>& zs) {
+    Grid g;
+    const int nCol = full ? nSect : nSect + 1;
+    for (double z : zs) {
+        std::vector<int> row;
+        for (int i = 0; i < nCol; ++i) {
+            const double th = th0 + step * i;
+            row.push_back(s.add(gp_XYZ(R * std::cos(th), R * std::sin(th), z)));
+        }
+        g.col.push_back(row);
+    }
+    g.sect.resize((std::size_t)nSect);
+    for (int i = 0; i < nSect; ++i) {
+        const int i1 = (i + 1) % nCol;
+        for (std::size_t j = 0; j + 1 < zs.size(); ++j) {
+            const int a = g.col[j][(std::size_t)i], b = g.col[j][(std::size_t)i1];
+            const int c = g.col[j + 1][(std::size_t)i], d = g.col[j + 1][(std::size_t)i1];
+            g.sect[(std::size_t)i].push_back(s.addTri(a, b, d));
+            g.sect[(std::size_t)i].push_back(s.addTri(a, d, c));
+        }
+    }
+    return g;
+}
+
+static std::vector<int> sectors(const Grid& g, int lo, int hi) {
+    std::vector<int> out;
+    for (int i = lo; i <= hi; ++i)
+        out.insert(out.end(), g.sect[(std::size_t)i].begin(), g.sect[(std::size_t)i].end());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+static void pushRadial(Synth& s, int v, double dr) {
+    gp_XYZ& p = s.pts[(std::size_t)v];
+    const double m = std::hypot(p.X(), p.Y());
+    p.SetX(p.X() * (m + dr) / m);
+    p.SetY(p.Y() * (m + dr) / m);
+}
+
+static Region cylRegion(const std::vector<int>& tris, double R, double maxDev) {
+    Region r;
+    r.id = 0;
+    r.type = SurfType::Cylinder;
+    r.origin = Origin::CylGrow;
+    r.ax = gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    r.radius = R;
+    r.closed360 = false;
+    r.tris = tris;
+    r.maxVertexDev = maxDev;
+    return r;
+}
+
+static Region planeRegion(const std::vector<int>& tris) {
+    Region r;
+    r.id = 0;
+    r.type = SurfType::Plane;
+    r.origin = Origin::PlaneGrow;
+    r.tris = tris;
+    return r;
+}
+
+static void addProv(SegmentWork& w, const std::vector<int>& tris, ProvClaim c) {
+    Provisional pr;
+    pr.claim = c;
+    pr.tris = tris;
+    w.provisionals.push_back(pr);
+}
+
+static void params(SegmentParams& p, DerivedTols& tol) {
+    p = SegmentParams{};
+    p.maxRefineIters = 8;
+    tol = DerivedTols{};
+    tol.thetaBin = 0.25 * kDeg;
+}
+
+struct Grab {
+    int saved = -1;
+    bool on = false;
+    Grab() {
+        ::setenv("STL2STEP_DIAG_REL", "1", 1);
+        saved = rc_dup(rc_fileno(stderr));
+        FILE* f = std::fopen("rel-reclaim-diag.txt", "w");
+        if (!f) return;
+        rc_dup2(rc_fileno(f), rc_fileno(stderr));
+        std::fclose(f);
+        on = true;
+    }
+    std::string stop() {
+        std::fflush(stderr);
+        if (on && saved >= 0) rc_dup2(saved, rc_fileno(stderr));
+        if (saved >= 0) rc_close(saved);
+        saved = -1;
+        ::unsetenv("STL2STEP_DIAG_REL");
+        std::ifstream in("rel-reclaim-diag.txt");
+        std::stringstream ss;
+        ss << in.rdbuf();
+        in.close();
+        std::remove("rel-reclaim-diag.txt");
+        return ss.str();
+    }
+};
+
+static bool has(const std::string& diag, const std::string& key) {
+    return diag.find(key) != std::string::npos;
+}
+
+static int nCyl(const SegmentWork& w) {
+    int n = 0;
+    for (const Region& r : w.accepted)
+        if (r.type == SurfType::Cylinder) ++n;
+    return n;
+}
+
+static const Region* firstCyl(const SegmentWork& w) {
+    for (const Region& r : w.accepted)
+        if (r.type == SurfType::Cylinder) return &r;
+    return nullptr;
+}
+
+static std::string run(Synth& s, SegmentWork& w, RelRevolveMode mode = RelRevolveMode::Line) {
+    const MeshView mv = s.view();
+    SegmentParams p;
+    DerivedTols tol;
+    params(p, tol);
+    Grab g;
+    reclaimRelational(mv, p, tol, w, mode);
+    const std::string out = g.stop();
+    if (std::getenv("RECLAIM_UNIT_ECHO")) std::fprintf(stderr, "%s", out.c_str());
+    return out;
+}
+
+// ---- D-fc-4.4 same-surface closure ------------------------------------------------
+
+// Two certified partials of one R3 surface with an unclaimed gap between them; one
+// gap vertex sits 50 tau inside the surface (an intersection-curve vertex), so the
+// triangles on it are chord-bounded cover, the rest of the gap is I.
+struct Closure {
+    Synth s;
+    SegmentWork w;
+    Grid g;
+};
+
+static Closure closurePart(bool gapClaimed, bool secondUncertified) {
+    Closure c;
+    const double tau = 2 * c.s.q;
+    c.g = cylGrid(c.s, 3.0, -90 * kDeg, 10 * kDeg, 18, false, {0.0, 5.0, 10.0});
+    pushRadial(c.s, c.g.col[1][9], -50 * tau);
+    c.s.finish();
+    c.w.accepted.push_back(cylRegion(sectors(c.g, 0, 6), 3.0, 0.0));
+    c.w.accepted.push_back(cylRegion(sectors(c.g, 11, 17), 3.0, secondUncertified ? 2 * tau : 0.0));
+    if (gapClaimed) c.w.accepted.push_back(planeRegion(sectors(c.g, 7, 10)));
+    else addProv(c.w, sectors(c.g, 7, 10), ProvClaim::Unclaimed);
+    return c;
+}
+
+static void caseClosureAccept() {
+    Closure c = closurePart(false, false);
+    const double tau = 2 * c.s.q;
+    const std::string d = run(c.s, c.w);
+    const Region* r = firstCyl(c.w);
+    expect(c.w.accepted.size() == 1 && r && r->tris.size() == 72, "closure_one_region_all_triangles");
+    expect(has(d, "stage=reclaim mode=closure") && has(d, "why=accept"), "closure_diag_accept");
+    expect(r && std::abs(r->radius - 3.0) <= tau, "closure_radius_within_tau");
+    // The cover triangles carry the 50 tau vertex; the certified set stays at tau.
+    expect(r && r->maxVertexDev > tau && r->maxVertexDev <= 51 * tau, "closure_cover_dev_measured");
+    expect(r && !r->closed360 && r->dVolPredicted != 0.0, "closure_fields_partial_with_dvol");
+    expect(c.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "closure_gap_peeled");
+}
+
+static void caseClosureNotJoined() {
+    Closure c = closurePart(true, false);
+    const std::string d = run(c.s, c.w);
+    expect(c.w.accepted.size() == 3 && nCyl(c.w) == 2, "closure_not_joined_unchanged");
+    expect(has(d, "why=not-joined"), "closure_diag_not_joined");
+}
+
+static void caseClosureUncertified() {
+    Closure c = closurePart(false, true);
+    const std::string d = run(c.s, c.w);
+    expect(c.w.accepted.size() == 2 && c.w.provisionals[0].claim == ProvClaim::Unclaimed,
+           "closure_uncertified_member_ignored");
+    expect(!has(d, "mode=closure"), "closure_uncertified_no_group");
+}
+
+// Two halves of one full ring merge to a band with two boundary loops: deferred.
+static void caseClosureNotDisk() {
+    Synth s;
+    SegmentWork w;
+    const Grid g = cylGrid(s, 3.0, 0.0, 10 * kDeg, 36, true, {0.0, 5.0});
+    s.finish();
+    w.accepted.push_back(cylRegion(sectors(g, 0, 17), 3.0, 0.0));
+    w.accepted.push_back(cylRegion(sectors(g, 18, 35), 3.0, 0.0));
+    const std::string d = run(s, w);
+    expect(w.accepted.size() == 2 && w.accepted[0].tris.size() == 36, "closure_not_disk_unchanged");
+    expect(has(d, "why=domain-not-disk"), "closure_diag_domain_not_disk");
+}
+
+// Stacked coaxial walls (no strict axial overlap) and a different radius never join.
+static void caseClosureStackedAndRadius() {
+    {
+        Synth s;
+        SegmentWork w;
+        const Grid a = cylGrid(s, 3.0, 0.0, 10 * kDeg, 9, false, {0.0, 5.0});
+        const Grid b = cylGrid(s, 3.0, 0.0, 10 * kDeg, 9, false, {5.0, 10.0});
+        s.finish();
+        w.accepted.push_back(cylRegion(sectors(a, 0, 8), 3.0, 0.0));
+        w.accepted.push_back(cylRegion(sectors(b, 0, 8), 3.0, 0.0));
+        const std::string d = run(s, w);
+        expect(w.accepted.size() == 2 && !has(d, "mode=closure"), "closure_stacked_apart");
+    }
+    {
+        Synth s;
+        SegmentWork w;
+        const double tau = 2 * s.q;
+        const Grid a = cylGrid(s, 3.0, 0.0, 10 * kDeg, 9, false, {0.0, 5.0});
+        const Grid b = cylGrid(s, 3.0 + 10 * tau, 180 * kDeg, 10 * kDeg, 9, false, {0.0, 5.0});
+        s.finish();
+        w.accepted.push_back(cylRegion(sectors(a, 0, 8), 3.0, 0.0));
+        w.accepted.push_back(cylRegion(sectors(b, 0, 8), 3.0 + 10 * tau, 0.0));
+        const std::string d = run(s, w);
+        expect(w.accepted.size() == 2 && !has(d, "mode=closure"), "closure_radius_apart");
+    }
+}
+
+// ---- D-fc-4.5 narrow donor heal ---------------------------------------------------
+
+// R2.5 half-ring donor (sectors 0..17) with one interior top vertex `off` inside the
+// surface (its triangles are the donor's cover); free sectors 18..23 on the surface;
+// sectors 24..29 a certified partner reached only through the gap (or a plane);
+// sectors 30..35 belong to a plane region.
+struct Heal {
+    Synth s;
+    SegmentWork w;
+    Grid g;
+};
+
+static Heal healPart(double off, bool partner) {
+    Heal h;
+    h.g = cylGrid(h.s, 2.5, 0.0, 10 * kDeg, 36, true, {0.0, 5.0});
+    if (off != 0.0) pushRadial(h.s, h.g.col[1][9], -off);
+    h.s.finish();
+    h.w.accepted.push_back(cylRegion(sectors(h.g, 0, 17), 2.5, off));
+    if (partner) h.w.accepted.push_back(cylRegion(sectors(h.g, 24, 29), 2.5, 0.0));
+    else h.w.accepted.push_back(planeRegion(sectors(h.g, 24, 29)));
+    h.w.accepted.push_back(planeRegion(sectors(h.g, 30, 35)));
+    addProv(h.w, sectors(h.g, 18, 23), ProvClaim::Unclaimed);
+    return h;
+}
+
+static void caseHealAccept() {
+    const double tau = 2e-6;
+    Heal h = healPart(3 * tau, true);
+    const std::string d = run(h.s, h.w);
+    const Region* r = firstCyl(h.w);
+    expect(nCyl(h.w) == 1 && h.w.accepted.size() == 2, "heal_partner_merged");
+    expect(r && r->tris.size() == 60, "heal_grows_over_gap");
+    expect(r && std::abs(r->radius - 2.5) <= tau, "heal_radius_within_tau");
+    expect(r && r->maxVertexDev > tau, "heal_cover_dev_kept");
+    expect(has(d, "mode=heal") && has(d, "why=accept"), "heal_diag_accept");
+    expect(h.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "heal_gap_peeled");
+}
+
+static void caseHealNoPartner() {
+    const double tau = 2e-6;
+    Heal h = healPart(3 * tau, false);
+    run(h.s, h.w);
+    const Region* r = firstCyl(h.w);
+    expect(h.w.accepted.size() == 3 && r && r->tris.size() == 48, "heal_grows_without_partner");
+}
+
+static void caseHealNarrowTrigger() {
+    Heal h = healPart(0.0, false);
+    const std::string d = run(h.s, h.w);
+    expect(h.w.accepted.size() == 3 && h.w.accepted[0].tris.size() == 36 &&
+               h.w.provisionals[0].claim == ProvClaim::Unclaimed,
+           "heal_certified_region_untouched");
+    expect(!has(d, "mode=heal"), "heal_certified_no_band");
+}
+
+static void caseHealNotCover() {
+    // 2x the 10 degree chord sagitta: no chord bound admits it.
+    const double sag = 2.5 * (1 - std::cos(5 * kDeg));
+    Heal h = healPart(2 * sag, false);
+    const std::string d = run(h.s, h.w);
+    expect(h.w.accepted.size() == 3 && h.w.accepted[0].tris.size() == 36 &&
+               h.w.provisionals[0].claim == ProvClaim::Unclaimed,
+           "heal_off_surface_refused");
+    expect(has(d, "mode=heal") && !has(d, "why=accept"), "heal_off_surface_diag_refusal");
+}
+
+// ---- gates ------------------------------------------------------------------------
+
+static void caseNoQuantum() {
+    Closure c = closurePart(false, false);
+    c.s.q = 0.0;
+    const std::string d = run(c.s, c.w);
+    expect(c.w.accepted.size() == 2 && !has(d, "stage=reclaim"), "q_zero_admits_nothing");
+}
+
+static void caseTorusModeIsNotLine() {
+    Closure c = closurePart(false, false);
+    const std::string d = run(c.s, c.w, RelRevolveMode::Torus);
+    expect(c.w.accepted.size() == 2 && !has(d, "mode=closure"), "torus_mode_runs_no_line_pass");
+}
+
+int main() {
+    caseClosureAccept();
+    caseClosureNotJoined();
+    caseClosureUncertified();
+    caseClosureNotDisk();
+    caseClosureStackedAndRadius();
+    caseHealAccept();
+    caseHealNoPartner();
+    caseHealNarrowTrigger();
+    caseHealNotCover();
+    caseNoQuantum();
+    caseTorusModeIsNotLine();
+    if (gFail) std::fprintf(stderr, "relational_reclaim_unit: %d FAIL\n", gFail);
+    return gFail ? 1 : 0;
+}
