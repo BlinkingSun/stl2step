@@ -840,8 +840,47 @@ Result Converter::run() {
                 };
                 const bool torusProbe = rs.torusRevertValid && !rs.torusRevertApplied;
                 torusProbeWarn.clear();
+                // The shipped shell's own test: closed, valid, inside the volume
+                // budget. U-3 covers every torus (D-fc-1.3), so a probe whose
+                // faces built but whose shell fails this test takes the pre-T
+                // snapshot too, before the verbatim revert (D-fc-4.6).
+                auto shellOk = [&]() -> bool {
+                    TopoDS_Shell probe;
+                    BRep_Builder pb;
+                    pb.MakeShell(probe);
+                    for (auto& f : rf) pb.Add(probe, f);
+                    bool good = BRep_Tool::IsClosed(probe);
+                    if (good) {
+                        try {
+                            BRepCheck_Analyzer an(probe, Standard_True, Standard_True);
+                            good = an.IsValid();
+                        } catch (const Standard_Failure&) {
+                            good = false;
+                        }
+                    }
+                    if (good) {
+                        double dVolAbs = 0;
+                        for (const auto& reg : rs.regions)
+                            dVolAbs += std::fabs(reg.dVolPredicted);
+                        const double meshVol = std::fabs(cs.vol);
+                        const double budget = std::max(1e-4 * meshVol, 3.0 * dVolAbs);
+                        try {
+                            const double shellVol = shapeVolume(probe);
+                            if (std::fabs(shellVol - meshVol) > budget) good = false;
+                        } catch (const Standard_Failure&) {
+                            good = false;
+                        }
+                    }
+                    return good;
+                };
                 bool ok = tryBuild(rs, torusProbe);
-                if (!ok && rs.torusRevertValid && !rs.torusRevertApplied) {
+                bool shellChecked = false;
+                if (ok && torusProbe) {
+                    ok = shellOk();
+                    shellChecked = true;
+                }
+                if (!ok && torusProbe) {
+                    shellChecked = false;
                     torusProbeWarn.clear();
                     parallelFor(subThreads, nV, [&](size_t i) {
                         BRep_Builder bb;
@@ -867,32 +906,7 @@ Result Converter::run() {
                     for (const auto& m : torusProbeWarn) warn(m);
                 }
                 if (ok) {
-                    TopoDS_Shell probe;
-                    BRep_Builder pb;
-                    pb.MakeShell(probe);
-                    for (auto& f : rf) pb.Add(probe, f);
-                    ok = BRep_Tool::IsClosed(probe);
-                    if (ok) {
-                        try {
-                            BRepCheck_Analyzer an(probe, Standard_True, Standard_True);
-                            ok = an.IsValid();
-                        } catch (const Standard_Failure&) {
-                            ok = false;
-                        }
-                    }
-                    if (ok) {
-                        double dVolAbs = 0;
-                        for (const auto& reg : rs.regions)
-                            dVolAbs += std::fabs(reg.dVolPredicted);
-                        const double meshVol = std::fabs(cs.vol);
-                        const double budget = std::max(1e-4 * meshVol, 3.0 * dVolAbs);
-                        try {
-                            const double shellVol = shapeVolume(probe);
-                            if (std::fabs(shellVol - meshVol) > budget) ok = false;
-                        } catch (const Standard_Failure&) {
-                            ok = false;
-                        }
-                    }
+                    if (!shellChecked) ok = shellOk();
                     if (ok) {
                         usedRefit = true;
                         built = std::move(rf);
