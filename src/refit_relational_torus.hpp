@@ -91,6 +91,37 @@ std::vector<CoaxialFamily> coaxialFamilies(const std::vector<AxisDonor>& donors,
 bool torusChainSupersetFails(const std::vector<ProfPt>& candidatePts, std::size_t nCandidates,
                              std::size_t nBand, double tau);
 
+// D-fc-4.10 F1: a Torus-mode band that shares a triangle with the candidate set
+// of an earlier refused chain (failedTri[t] != 0) is a passing window of a
+// failing band, and is refused.
+bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
+                                const std::vector<char>& failedTri);
+
+// The profile (rho, z, psi) of each point about the frame (origin, axis, xHint):
+// the Torus scan's frame, psi measured from xHint projected off the axis.
+std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& origin,
+                                 const gp_XYZ& axis, const gp_XYZ& xHint);
+
+// D-fc-4.9 P2 option (i): the over-determined family certificate of a Torus-mode
+// ring chain. One least-squares axis (4 DOF) over the coaxial donor family's
+// certified vertices (one radius per donor, projected out) PLUS the chain's
+// vertices (one profile circle Rmaj, z0, Rmin about that axis), from the seed
+// frame. The chain is accepted only when every donor vertex stays within tau of
+// its donor's radius about the joint axis AND certifyTorus itself passes on the
+// chain's profile about it (every chain vertex within tau of the torus). Never a
+// band-only refit: the donors are always in the fit and in the certificate.
+struct JointTorusCert {
+    JointAxisFit family;  // the joint axis; radius / maxDev per donor
+    TorusCert chain;      // certifyTorus on the chain's profile about the joint axis
+    double tilt = 0;      // angle between the seed axis and the joint axis (rad)
+    bool fitted = false;  // the joint least squares produced a finite axis
+    bool ok = false;      // jointAxisCertifies(family, tau) && chain.ok
+};
+JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
+                                 const std::vector<gp_XYZ>& chain, const gp_XYZ& originSeed,
+                                 const gp_XYZ& axisSeed, const gp_XYZ& xHint, double tau,
+                                 int maxIters);
+
 }  // namespace refit
 }  // namespace stl2step
 

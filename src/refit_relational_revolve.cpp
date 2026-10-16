@@ -288,6 +288,23 @@ void collectBand(const MeshView& mv, const Frame& f, const std::vector<int>& g2l
     b.tris.erase(std::unique(b.tris.begin(), b.tris.end()), b.tris.end());
 }
 
+// The points of b.pts in their order: one per vertex, ascending lv, from its
+// first occurrence in b.verts (collectBand's rule).
+void bandPoints(const Band& b, std::vector<gp_XYZ>& out) {
+    std::vector<std::pair<int, std::size_t>> firstOf;
+    firstOf.reserve(b.verts.size());
+    for (std::size_t i = 0; i < b.verts.size(); ++i) firstOf.emplace_back(b.verts[i].lv, i);
+    std::sort(firstOf.begin(), firstOf.end());
+    out.clear();
+    for (std::size_t i = 0; i < firstOf.size(); ++i) {
+        if (i > 0 && firstOf[i].first == firstOf[i - 1].first) continue;
+        out.push_back(b.verts[firstOf[i].second].p);
+    }
+}
+
+// certifyTorus's own count of distinct profile points (D-fc-1.6.2).
+constexpr int kTorusProfPts = 5;
+
 struct ClosedM {
     int nBands = 0;
     double maxGap = kTwoPi;
@@ -435,6 +452,7 @@ struct Donor {
     bool updated = false;
     std::vector<int> gids;     // its own certified vertices (global ids)
     std::vector<int> members;  // D-fc-4.8 (b): accepted indices of its coaxial family
+    std::vector<std::vector<gp_XYZ>> famPts;  // D-fc-4.9: each member's certified vertices
 };
 
 bool regionIsDonorClass(const Region& r) {
@@ -1971,6 +1989,9 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         return A.sheet < B.sheet;
     });
     std::set<std::vector<int>> tried;
+    // D-fc-4.10 F1: the candidate sets of refused chains; no later band that
+    // overlaps one may pass (a passing subset of a failing band is a refusal).
+    std::vector<char> failedTri((std::size_t)nTri, 0);
     for (int ei0 : edgeOrder) {
         if (edges[(std::size_t)ei0].used) continue;
         const int sheet = edges[(std::size_t)ei0].sheet;
@@ -2021,7 +2042,6 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         if (bandTris.empty()) continue;
         // D-fc-4.8 (a): the chain's candidate set is the band's superset.
         const std::vector<int> chainCands = bandTris;
-        int chainSupersetOk = -1;  // -1 unknown, 0 refused by certifyTorus, 1 certified
         // An atom joins only whole: one that is not wholly on the chain leaves it.
         {
             std::map<int, int> hit;
@@ -2043,6 +2063,68 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 bandTris.swap(keep);
             }
         }
+        if (bandTris.empty()) continue;
+        // D-fc-4.9 P2 (i): the chain is certified with its donor family. The
+        // family axis is kept when it already certifies the chain's candidate set
+        // (every donor vertex is within tau on it by construction); otherwise one
+        // LS axis over the family's donor vertices plus the chain's vertices
+        // decides, and the chain is accepted only when every donor vertex and
+        // every chain vertex is within tau on it. The chain's bands are certified
+        // and built on the axis the chain certified on. A band that is a strict
+        // subset of a refused chain set is refused (D-fc-4.8 (a)).
+        bool chainOk = false;
+        Frame cfr = fr;
+        Donor jointDonor;
+        bool joint = false;
+        bool chainFailed = false;  // a determinate certificate refused the candidate set
+        {
+            Band sup;
+            sup.in.assign((std::size_t)nTri, 0);
+            sup.tris = chainCands;
+            sup.sheet = sheet;
+            for (int t : chainCands) sup.in[(std::size_t)t] = 1;
+            collectBand(mv, fr, wm.g2l, sup);
+            const TorusCert onFamily = certifyTorus(sup.pts, tau);
+            chainOk = onFamily.ok;
+            // certifyTorus needs kTorusProfPts distinct profile points on any axis:
+            // a chain with fewer distinct vertices cannot certify jointly either.
+            if (!chainOk && (int)sup.pts.size() >= kTorusProfPts) {
+                std::vector<gp_XYZ> cpts;
+                bandPoints(sup, cpts);
+                const JointTorusCert jc = jointTorusCertify(donor.famPts, cpts, fr.origin, fr.axis,
+                                                            fr.e1, tau, wm.maxIter);
+                if (diagOn()) {
+                    double dMax = 0;
+                    for (double m : jc.family.maxDev) dMax = std::max(dMax, m);
+                    std::fprintf(stderr,
+                                 "DIAG_REL_TORUS_JOINT seed=%d nCand=%zu nV=%zu donor=%d "
+                                 "members=%zu familyWhy=%s familyDevTau=%.4f fitted=%d "
+                                 "tilt=%.4g donorDevTau=%.4f chainDevTau=%.4f radii=%.8g/%.8g "
+                                 "chainWhy=%s ok=%d\n",
+                                 minTriOf(chainCands), chainCands.size(), sup.pts.size(),
+                                 donor.idx, donor.famPts.size(), torusWhy(onFamily),
+                                 onFamily.determinate ? onFamily.maxDev / tau : -1.0,
+                                 jc.fitted ? 1 : 0, jc.tilt, dMax / tau,
+                                 jc.chain.determinate ? jc.chain.maxDev / tau : -1.0,
+                                 jc.chain.Rmaj, jc.chain.Rmin, torusWhy(jc.chain), jc.ok ? 1 : 0);
+                }
+                if (jc.ok) {
+                    chainOk = true;
+                    joint = true;
+                    cfr = makeFrame(jc.family.origin, jc.family.axis, fr.e1);
+                    jointDonor = donor;
+                    jointDonor.fr = cfr;
+                    jointDonor.radius = jc.family.radius.front();
+                    jointDonor.maxDev = jc.family.maxDev.front();
+                }
+            }
+            chainFailed = !chainOk && onFamily.determinate;
+        }
+        Donor& cdonor = joint ? jointDonor : donor;
+        // D-fc-4.10 F1: an evaluated chain, claimed or refused, consumes its
+        // ring-graph edges (Line mode's partition).
+        for (Edge& e : edges)
+            if (e.sheet == sheet && inChain[(std::size_t)e.u] && inChain[(std::size_t)e.v]) e.used = true;
         // Each edge-connected component is one band.
         auto components = [&](const std::vector<int>& tris) {
             std::vector<char> in((std::size_t)nTri, 0), seen((std::size_t)nTri, 0);
@@ -2070,7 +2152,6 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         std::vector<std::vector<int>> queue = components(bandTris);
         std::sort(queue.begin(), queue.end(),
                   [](const std::vector<int>& a, const std::vector<int>& b) { return a.front() < b.front(); });
-        bool claimedChain = false;
         for (std::size_t wi = 0; wi < queue.size(); ++wi) {
             std::vector<int> comp = queue[wi];
             Band band;
@@ -2079,10 +2160,10 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             band.sheet = sheet;
             band.seed = comp.front();
             for (int t : comp) band.in[(std::size_t)t] = 1;
-            collectBand(mv, fr, wm.g2l, band);
+            collectBand(mv, cfr, wm.g2l, band);
             if (band.pts.empty()) continue;
             const SurfaceFit fit = fitSurface(band.pts, tau);
-            const ClosedM cl = closedOf(mv, fr, band.tris, band.verts, wm.thetaBin);
+            const ClosedM cl = closedOf(mv, cfr, band.tris, band.verts, wm.thetaBin);
             std::vector<double> zs, psis, rhos;
             for (const ProfPt& pp : band.pts) {
                 zs.push_back(pp.z);
@@ -2098,7 +2179,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
             auto refuse = [&](const char* why, const TorusCert* c) {
                 ++refused;
-                DiagRec d = baseDiag("torus", donor, band, tau);
+                DiagRec d = baseDiag("torus", cdonor, band, tau);
                 d.stations = stations;
                 d.levels = levels;
                 d.params = kParamsCircle;
@@ -2128,7 +2209,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                         const int a = atomOf[(std::size_t)t];
                         if (a < 0 || off[(std::size_t)a]) continue;
                         for (int k = 0; k < 3; ++k) {
-                            const ProfPt p = profOfPoint(triVert(mv, t, k), fr, 0);
+                            const ProfPt p = profOfPoint(triVert(mv, t, k), cfr, 0);
                             if (std::fabs(std::hypot(p.rho - cert.Rmaj, p.z - cert.z0) - cert.Rmin) > tau) {
                                 off[(std::size_t)a] = 1;
                                 break;
@@ -2165,7 +2246,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 triAtom.reserve(comp.size());
                 for (int t : comp) {
                     std::array<ProfPt, 3> tp;
-                    for (int k = 0; k < 3; ++k) tp[(std::size_t)k] = profOfPoint(triVert(mv, t, k), fr, localId(wm, t, k));
+                    for (int k = 0; k < 3; ++k) tp[(std::size_t)k] = profOfPoint(triVert(mv, t, k), cfr, localId(wm, t, k));
                     triPts.push_back(tp);
                     const int a = atomOf[(std::size_t)t];
                     int slot = -1;
@@ -2178,30 +2259,20 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                     continue;
                 }
             }
-            if (band.tris.size() < chainCands.size()) {
-                if (chainSupersetOk < 0) {
-                    Band sup;
-                    sup.in.assign((std::size_t)nTri, 0);
-                    sup.tris = chainCands;
-                    sup.sheet = sheet;
-                    for (int t : chainCands) sup.in[(std::size_t)t] = 1;
-                    collectBand(mv, fr, wm.g2l, sup);
-                    chainSupersetOk = torusChainSupersetFails(sup.pts, chainCands.size(),
-                                                              band.tris.size(), tau)
-                                          ? 0
-                                          : 1;
-                }
-                if (chainSupersetOk == 0) {
-                    refuse("vertex-off", &cert);
-                    continue;
-                }
+            if (band.tris.size() < chainCands.size() && !chainOk) {
+                refuse("vertex-off", &cert);
+                continue;
             }
-            if (sameSurfaceTorus(wm, work, fr, band, fit, atomDead)) {
+            if (torusWindowOverlapsRefused(band.tris, failedTri)) {
+                refuse("vertex-off", &cert);
+                continue;
+            }
+            if (sameSurfaceTorus(wm, work, cfr, band, fit, atomDead)) {
                 refuse("same-surface", &cert);
                 continue;
             }
             int straddle = countStraddle(work, band.tris, nTri);
-            if (!emitTorus(wm, work, donor, band, cert, cl, straddle)) {
+            if (!emitTorus(wm, work, cdonor, band, cert, cl, straddle)) {
                 refuse("degenerate", &cert);
                 continue;
             }
@@ -2219,11 +2290,11 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             for (int t : band.tris) wm.freeTri[(std::size_t)t] = 0;
             // F8: one seam azimuth per revolution axis. The coaxial cylinders the
             // torus touches take the donor frame it took.
-            shareSeamFrame(wm, work, donor, band);
-            updateDonor(work, donor);
-            claimedChain = true;
+            shareSeamFrame(wm, work, cdonor, band);
+            updateDonor(work, cdonor);
+            if (joint) donor.updated = donor.updated || jointDonor.updated;
             ++claimed;
-            DiagRec d = baseDiag("torus", donor, band, tau);
+            DiagRec d = baseDiag("torus", cdonor, band, tau);
             d.stations = cert.profPts;
             d.levels = cert.levels;
             d.params = kParamsCircle;
@@ -2235,7 +2306,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             d.r0 = cert.Rmaj;
             d.r1 = cert.Rmin;
             double ang0 = 0, ang1 = 0;
-            endTangency(wm, fr, band, fit, ang0, ang1);
+            endTangency(wm, cfr, band, fit, ang0, ang1);
             d.tan0 = ang0;
             d.tan1 = ang1;
             d.straddle = straddle;
@@ -2248,10 +2319,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                              band.seed, band.tris.size(), atoms.size(), chain.size(), donor.idx,
                              donor.radius, work.accepted[(std::size_t)donor.idx].closed360 ? 1 : 0);
         }
-        if (claimedChain) {
-            for (Edge& e : edges)
-                if (e.sheet == sheet && inChain[(std::size_t)e.u] && inChain[(std::size_t)e.v]) e.used = true;
-        }
+        if (chainFailed)
+            for (int t : chainCands) failedTri[(std::size_t)t] = 1;
     }
     scan.scanned = true;
     scans.push_back(scan);
@@ -2438,7 +2507,10 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 coaxialFamilies(ad, scanOrder, tau, wm.maxIter);
             for (const CoaxialFamily& fam : fams) {
                 Donor donor = donors[(std::size_t)fam.members.front()];
-                for (int m : fam.members) donor.members.push_back(donors[(std::size_t)m].idx);
+                for (int m : fam.members) {
+                    donor.members.push_back(donors[(std::size_t)m].idx);
+                    donor.famPts.push_back(ad[(std::size_t)m].pts);
+                }
                 if (fam.members.size() > 1) {
                     donor.fr = makeFrame(fam.fit.origin, fam.fit.axis, donor.fr.e1);
                     donor.radius = fam.fit.radius.front();
