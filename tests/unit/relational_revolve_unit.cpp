@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
+#include "refit_cone_math.hpp"
 #include "refit_relational.hpp"
+#include "refit_relational_arc.hpp"
 
 #include <algorithm>
 #include <array>
@@ -784,6 +786,289 @@ static void caseThreads() {
     expect(a0 == b0 && a1 == b1 && a2 == b2 && na == nb && va == vb, "threads 1 and N agree");
 }
 
+// ---- D-fc-5.11 F1 / F2 / F4 (fx-ringdonor) --------------------------------------
+
+static std::vector<gp_XYZ> circlePts(double R, double z, int N, double cx = 0, double cy = 0) {
+    std::vector<gp_XYZ> v;
+    for (int i = 0; i < N; ++i) {
+        const double th = kPi * 2.0 * (double)i / (double)N;
+        v.emplace_back(cx + R * std::cos(th), cy + R * std::sin(th), z);
+    }
+    return v;
+}
+
+// F1 ring certificate: planar and circular within tau, minStations(kParamsCircle).
+static void caseMeshRing() {
+    const double tau = 2e-6;
+    MeshRing r;
+    expect(certifyMeshRing(circlePts(5.0, 1.0, 24, 2.0, -3.0), tau, r), "ring: circle accepted");
+    expect(std::fabs(r.R - 5.0) <= tau && std::fabs(std::fabs(r.n.Z()) - 1.0) <= 1e-9 &&
+               (r.c - gp_XYZ(2.0, -3.0, 1.0)).Modulus() <= tau && r.stations == 24,
+           "ring: centre, normal, radius, stations");
+    expect(!certifyMeshRing(circlePts(5.0, 0.0, 3), tau, r), "ring: 3 points under-determined");
+    std::vector<gp_XYZ> bump = circlePts(5.0, 0.0, 24);
+    bump[5].SetZ(10.0 * tau);
+    expect(!certifyMeshRing(bump, tau, r), "ring: off-plane vertex refused");
+    std::vector<gp_XYZ> off = circlePts(5.0, 0.0, 24);
+    off[7] = off[7] * (1.0 + 10.0 * tau / 5.0);
+    expect(!certifyMeshRing(off, tau, r), "ring: off-circle vertex refused");
+    expect(!certifyMeshRing(circlePts(0.5 * tau, 0.0, 24), tau, r), "ring: radius <= tau refused");
+    expect(!certifyMeshRing(circlePts(5.0, 0.0, 24), 0.0, r), "ring: tau 0 admits nothing");
+}
+
+// F1 helper: the closed boundary loops of a triangle set.
+static void caseTriSetLoops() {
+    Synth s;
+    const int N = 16;
+    auto a = ring(s, 5.0, 0.0, N);
+    auto b = ring(s, 5.0, 2.0, N);
+    std::vector<int> all, half;
+    band(s, a, b, N, all);
+    s.finish();
+    for (int t = 0; t < N; ++t) half.push_back(all[(std::size_t)t]);
+    const MeshView mv = s.view();
+    const auto loops = triSetLoops(mv, all);
+    expect(loops.size() == 2 && loops[0].size() == (std::size_t)N &&
+               loops[1].size() == (std::size_t)N,
+           "loops: closed wall has its two rims");
+    expect(triSetLoops(mv, half).size() == 1, "loops: half wall is a disk (one loop)");
+}
+
+// A planar annulus chart at z=0 (Ri..Ro) and, below it, a closed cone band from
+// the annulus outer ring (Ro at z=0) to (Rc at z=-h). No region donor.
+struct RingPart {
+    Synth mesh;
+    SegmentWork work;
+    std::vector<int> annulus, cone;
+};
+
+static RingPart ringCone(int N, double Ri, double Ro, double Rc, double h, bool everyOther,
+                         bool annulusChart) {
+    RingPart p;
+    auto in = ring(p.mesh, Ri, 0.0, N);
+    auto out = ring(p.mesh, Ro, 0.0, N);
+    auto low = ring(p.mesh, Rc, -h, N);
+    band(p.mesh, in, out, N, p.annulus);
+    std::vector<int> cone;
+    band(p.mesh, out, low, N, cone);
+    for (std::size_t i = 0; i < cone.size(); i += 2)
+        if (!everyOther || (i / 2) % 2 == 0) {
+            p.cone.push_back(cone[i]);
+            p.cone.push_back(cone[i + 1]);
+        }
+    p.mesh.finish();
+    Provisional ann;
+    ann.claim = ProvClaim::Unclaimed;
+    ann.tris = p.annulus;
+    if (annulusChart) {
+        p.work.provisionals.push_back(ann);
+    } else {
+        // The annulus split into two charts: neither has two loops.
+        Provisional a1 = ann, a2 = ann;
+        a1.tris.assign(p.annulus.begin(), p.annulus.begin() + (long)N);
+        a2.tris.assign(p.annulus.begin() + (long)N, p.annulus.end());
+        p.work.provisionals.push_back(a1);
+        p.work.provisionals.push_back(a2);
+    }
+    Provisional cp;
+    cp.claim = ProvClaim::Unclaimed;
+    cp.tris = p.cone;
+    p.work.provisionals.push_back(cp);
+    return p;
+}
+
+static void caseAnnulusRings() {
+    {
+        RingPart p = ringCone(32, 5.0, 8.0, 9.0, 3.0, false, true);
+        const MeshView mv = p.mesh.view();
+        const auto a = annulusRingCharts(mv, p.work, 2.0 * p.mesh.q);
+        expect(a.size() == 1 && a[0].chart == 0, "annulus: one chart");
+        if (a.size() == 1) {
+            const double r0 = a[0].ring[0].R, r1 = a[0].ring[1].R;
+            expect(std::fabs(std::min(r0, r1) - 5.0) < 1e-6 &&
+                       std::fabs(std::max(r0, r1) - 8.0) < 1e-6,
+                   "annulus: both rims certified");
+        }
+    }
+    {
+        RingPart p = ringCone(32, 5.0, 8.0, 9.0, 3.0, false, false);
+        const MeshView mv = p.mesh.view();
+        expect(annulusRingCharts(mv, p.work, 2.0 * p.mesh.q).empty(),
+               "annulus: split chart (one loop each) is no ring donor");
+    }
+    {
+        RingPart p = ringCone(32, 5.0, 8.0, 9.0, 3.0, false, true);
+        Region owner;
+        owner.type = SurfType::Plane;
+        owner.tris = {p.annulus.front()};
+        p.work.accepted.push_back(owner);
+        const MeshView mv = p.mesh.view();
+        expect(annulusRingCharts(mv, p.work, 2.0 * p.mesh.q).empty(),
+               "annulus: chart holding an accepted triangle refused");
+    }
+}
+
+// F1 end to end: the annulus's rings donate the cone's axis; scattered columns
+// (every other sector) pass the column rule but are no wall.
+static void caseRingDonorCone() {
+    {
+        RingPart p = ringCone(32, 5.0, 8.0, 9.0, 3.0, false, true);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        const std::string diag = g.stop();
+        const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+        expect(c != nullptr && c->closed360 && c->tris.size() == p.cone.size(),
+               "ring donor: closed cone claimed");
+        expect(diag.find("DIAG_REL_RINGDONOR") != std::string::npos, "ring donor: diag line");
+        if (c) {
+            expect(std::fabs(c->radius - 8.0) < 1e-6 && std::fabs(c->vMax - 9.0) < 1e-6 &&
+                       std::fabs(c->ax.Direction().Z()) > 1.0 - 1e-9,
+                   "ring donor: cone on the ring axis");
+        } else {
+            std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+        }
+    }
+    {
+        RingPart p = ringCone(32, 5.0, 8.0, 9.0, 3.0, false, false);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        g.stop();
+        expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 0,
+               "ring donor: no annulus, no donor, no cone");
+    }
+    {
+        RingPart p = ringCone(32, 5.0, 8.0, 9.0, 3.0, true, true);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        const std::string diag = g.stop();
+        expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 0,
+               "ring donor: scattered columns not claimed");
+        expect(hasWhy(diag, "domain-not-annulus"), "ring donor: domain-not-annulus why");
+    }
+}
+
+// F4: the apex. A cone may stand on its apex rim (radius 0); a vertex on the axis
+// is no azimuth station of a partial cone.
+static void caseConeApex() {
+    gp_Cone cone;
+    const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    expect(coneFromRims(ax, 0.0, 1.0, 1.0, cone) && cone.RefRadius() == 0.0 &&
+               std::fabs(cone.SemiAngle() - 0.25 * kPi) < 1e-12,
+           "apex: cone from an apex rim");
+    expect(!coneFromRims(ax, -1e-9, 1.0, 1.0, cone), "apex: negative rim radius refused");
+    expect(!coneFromRims(ax, 0.0, 0.0, 1.0, cone), "apex: both rims at the axis refused");
+    const double tau = 2e-6;
+    std::vector<std::vector<gp_XYZ>> fam{circlePts(3.0, 0.0, 48), circlePts(3.0, 2.0, 48)};
+    std::vector<gp_XYZ> band;
+    for (int st = 0; st <= 4; ++st) {
+        const double z = 0.25 * st, R = 1.0 - z;
+        if (R <= 0.0) continue;
+        for (int i = 0; i <= 8; ++i) {
+            const double th = 0.5 * kPi * (double)i / 8.0;
+            band.emplace_back(R * std::cos(th), R * std::sin(th), z);
+        }
+    }
+    const PartialConeCert a = certifyPartialCone(fam, band, gp_XYZ(0, 0, 0), gp_XYZ(0, 0, 1), tau);
+    band.emplace_back(0.0, 0.0, 1.0);  // the apex
+    const PartialConeCert b = certifyPartialCone(fam, band, gp_XYZ(0, 0, 0), gp_XYZ(0, 0, 1), tau);
+    expect(a.ok && b.ok, "apex: partial cone certifies with its apex");
+    expect(a.cols == b.cols && b.stations == a.stations + 1,
+           "apex: apex is a line station, not an azimuth column");
+}
+
+// F2: a same-radius coaxial band merges into its member by the D-fc-4.4 closure.
+struct MergePart {
+    Synth mesh;
+    SegmentWork work;
+    std::vector<int> member, band;
+};
+
+static MergePart halfWall(double bandR, double bandZ0, bool closedMember) {
+    MergePart p;
+    const int N = 32;
+    auto a = ring(p.mesh, 10.0, 0.0, N);
+    auto b = ring(p.mesh, 10.0, 4.0, N);
+    std::vector<int> wall;
+    band(p.mesh, a, b, 16, wall);
+    for (std::size_t i = 0; i < 16; ++i) p.member.push_back(wall[i]);
+    if (bandR == 10.0 && bandZ0 == 0.0) {
+        for (std::size_t i = 16; i < wall.size(); ++i) p.band.push_back(wall[i]);
+    } else {
+        auto c = ring(p.mesh, bandR, bandZ0, N);
+        auto d = ring(p.mesh, bandR, bandZ0 + 4.0, N);
+        std::vector<int> other;
+        band(p.mesh, c, d, 16, other);
+        for (std::size_t i = 16; i < other.size(); ++i) p.band.push_back(other[i]);
+    }
+    p.mesh.finish();
+    Region r;
+    r.id = 0;
+    r.type = SurfType::Cylinder;
+    r.origin = Origin::CylGrow;
+    r.ax = gp_Ax3(gp_Pnt(0, 0, 2.0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    r.radius = 10.0;
+    r.closed360 = closedMember;
+    r.tris = p.member;
+    p.work.accepted.push_back(r);
+    Provisional pr;
+    pr.claim = ProvClaim::Unclaimed;
+    pr.tris = p.band;
+    p.work.provisionals.push_back(pr);
+    return p;
+}
+
+static void caseSameSurfaceMerge() {
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    {
+        MergePart p = halfWall(10.0, 0.0, false);
+        const MeshView mv = p.mesh.view();
+        const bool ok = mergeSameSurfaceBand(mv, sp, tol, p.work, 0, p.band, gp_XYZ(0, 0, 0),
+                                             gp_XYZ(0, 0, 1), 10.0, 10.0);
+        expect(ok && p.work.accepted.size() == 1 &&
+                   p.work.accepted[0].tris.size() == p.member.size() + p.band.size() &&
+                   std::fabs(p.work.accepted[0].radius - 10.0) < 1e-6 &&
+                   p.work.provisionals[0].claim != ProvClaim::Unclaimed,
+               "merge: band joins its member");
+    }
+    {
+        const double tau = 2e-6;
+        MergePart p = halfWall(10.0 + 10.0 * tau, 0.0, false);
+        const MeshView mv = p.mesh.view();
+        expect(!mergeSameSurfaceBand(mv, sp, tol, p.work, 0, p.band, gp_XYZ(0, 0, 0),
+                                     gp_XYZ(0, 0, 1), 10.0, 10.0 + 10.0 * tau) &&
+                   p.work.accepted[0].tris.size() == p.member.size(),
+               "merge: off-radius band refused, member unchanged");
+    }
+    {
+        MergePart p = halfWall(10.0, 8.0, false);
+        const MeshView mv = p.mesh.view();
+        expect(!mergeSameSurfaceBand(mv, sp, tol, p.work, 0, p.band, gp_XYZ(0, 0, 0),
+                                     gp_XYZ(0, 0, 1), 10.0, 10.0),
+               "merge: stacked (no axial overlap) refused");
+    }
+    {
+        MergePart p = halfWall(10.0, 0.0, true);
+        const MeshView mv = p.mesh.view();
+        expect(!mergeSameSurfaceBand(mv, sp, tol, p.work, 0, p.band, gp_XYZ(0, 0, 0),
+                                     gp_XYZ(0, 0, 1), 10.0, 10.0),
+               "merge: closed member refused");
+    }
+}
+
 int main() {
     caseClosed45();
     caseFunnel();
@@ -800,6 +1085,12 @@ int main() {
     caseBlendBesideCone();
     caseThreeRing();
     caseThreads();
+    caseMeshRing();
+    caseTriSetLoops();
+    caseAnnulusRings();
+    caseRingDonorCone();
+    caseConeApex();
+    caseSameSurfaceMerge();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
