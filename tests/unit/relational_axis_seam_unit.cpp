@@ -1,6 +1,7 @@
 // Synthetic cases for the torus-family seam predicates (D-fc-4.8), the closed-wall /
 // closed-torus build predicates of fx-closed360, the crossing-cap predicates of
-// D-fc-5.7 O-1 and the U-3 naming predicates. No mesh.
+// D-fc-5.7 O-1, the U-3 naming predicates and the split-cap / single-wire
+// orientation rules of D-fc-5.7 O-4. No mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -11,7 +12,18 @@
 #include <cstdio>
 #include <vector>
 
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepLib.hxx>
 #include <BRep_Builder.hxx>
+#include <Geom2d_Line.hxx>
+#include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <gp_Dir2d.hxx>
+#include <gp_Pnt2d.hxx>
+#include <gp_Vec2d.hxx>
 #include <Geom2d_BSplineCurve.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Line.hxx>
@@ -113,7 +125,80 @@ static void caseEdgeBound() {
     expect(std::fabs(exR - Precision::Confusion() - sag) <= 1e-9, "edge bound: row chord = its sagitta");
 }
 
+// A single wire on surface S through the (u, v) corners in the given order, each side an
+// iso line built from its pcurve; the face is made bare (no MakeFace orientation pass).
+static TopoDS_Face faceThroughUV(const Handle(Geom_Surface)& S, const std::vector<gp_Pnt2d>& c) {
+    BRepBuilderAPI_MakeWire mw;
+    for (size_t i = 0; i < c.size(); ++i) {
+        const gp_Pnt2d a = c[i], b = c[(i + 1) % c.size()];
+        Handle(Geom2d_Line) l = new Geom2d_Line(a, gp_Dir2d(gp_Vec2d(a, b)));
+        BRepBuilderAPI_MakeEdge me(l, S, 0.0, a.Distance(b));
+        TopoDS_Edge e = me.Edge();
+        BRepLib::BuildCurves3d(e);
+        mw.Add(e);
+    }
+    TopoDS_Face f;
+    BRep_Builder B;
+    B.MakeFace(f, S, Precision::Confusion());
+    B.Add(f, mw.Wire());
+    return f;
+}
+
+static int edgeCount(const TopoDS_Shape& s) {
+    int n = 0;
+    for (TopExp_Explorer ex(s, TopAbs_EDGE); ex.More(); ex.Next()) ++n;
+    return n;
+}
+
+static void caseInsideOut() {
+    // A patch of a convex torus tube (u and v ranges of a partial fillet).
+    Handle(Geom_ToroidalSurface) S =
+        new Geom_ToroidalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), 10.0, 2.5);
+    const std::vector<gp_Pnt2d> ccw = {gp_Pnt2d(0.5, 0.2), gp_Pnt2d(2.0, 0.2), gp_Pnt2d(2.0, 1.3),
+                                       gp_Pnt2d(0.5, 1.3)};
+    const std::vector<gp_Pnt2d> cw = {ccw[0], ccw[3], ccw[2], ccw[1]};
+    TopoDS_Face good = faceThroughUV(S, ccw), bad = faceThroughUV(S, cw);
+    expect(!singleWireInsideOut(good), "inside out: a counter-clockwise wire is not");
+    expect(singleWireInsideOut(bad), "inside out: a clockwise single wire is");
+    TopoDS_Face badR = TopoDS::Face(bad.Reversed());
+    expect(singleWireInsideOut(badR), "inside out: read on the FORWARD face whatever the flag");
+    // The reversal: same loop, same edges, same orientation flag; now valid by BRepCheck's rule.
+    TopoDS_Face fixedF = bad;
+    expect(reverseInsideOutWire(fixedF), "inside out: the clockwise wire is reversed");
+    expect(!singleWireInsideOut(fixedF), "inside out: the reversed wire leaves infinity OUT");
+    expect(fixedF.Orientation() == bad.Orientation(), "inside out: the face keeps its flag");
+    expect(edgeCount(fixedF) == edgeCount(bad), "inside out: the same edges");
+    {
+        TopTools_IndexedMapOfShape a, b;
+        TopExp::MapShapes(bad, TopAbs_EDGE, a);
+        TopExp::MapShapes(fixedF, TopAbs_EDGE, b);
+        bool same = a.Extent() == b.Extent();
+        for (int i = 1; same && i <= a.Extent(); ++i) same = b.Contains(a(i));
+        expect(same, "inside out: every edge keeps its TShape");
+    }
+    expect(BRepCheck_Analyzer(fixedF).IsValid() == Standard_True, "inside out: BRepCheck accepts it");
+    TopoDS_Face goodCopy = good;
+    expect(!reverseInsideOutWire(goodCopy) && goodCopy.IsEqual(good),
+           "inside out: a healthy face is left untouched");
+    TopoDS_Face badRCopy = badR;
+    expect(reverseInsideOutWire(badRCopy) && badRCopy.Orientation() == TopAbs_REVERSED &&
+               !singleWireInsideOut(badRCopy),
+           "inside out: a REVERSED face is fixed on its FORWARD reading");
+    // Two wires (a hole) are not this rule's: classification needs both.
+    {
+        const std::vector<gp_Pnt2d> in = {gp_Pnt2d(1.0, 0.5), gp_Pnt2d(1.0, 0.9), gp_Pnt2d(1.4, 0.9),
+                                          gp_Pnt2d(1.4, 0.5)};
+        TopoDS_Face two = faceThroughUV(S, cw);
+        TopoDS_Face hole = faceThroughUV(S, in);
+        BRep_Builder B;
+        for (TopExp_Explorer wx(hole, TopAbs_WIRE); wx.More(); wx.Next()) B.Add(two, wx.Current());
+        expect(!singleWireInsideOut(two), "inside out: a two-wire face is not read");
+    }
+    expect(!singleWireInsideOut(TopoDS_Face()), "inside out: a null face is not");
+}
+
 int main() {
+    caseInsideOut();
     caseEdgeBound();
     const gp_Ax1 fam(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
 
@@ -396,6 +481,15 @@ int main() {
     expect(closedLoopFromTerminal(std::vector<int>{7, 8, 9}, 3) == std::vector<int>({7, 8, 9, 7}),
            "rim loop: a terminal off the loop keeps the order");
     expect(closedLoopFromTerminal(std::vector<int>{}, 3).empty(), "rim loop: empty stays empty");
+
+    // capPathsRunOpposite (D-fc-5.7 O-4): the plain split-cap wire closes in (u, v) only
+    // when both cap paths sweep the same way round the axis.
+    expect(!capPathsRunOpposite(-2.0 * kPi, -2.0 * kPi), "cap paths: both -u close the plain wire");
+    expect(!capPathsRunOpposite(2.0 * kPi, 2.0 * kPi), "cap paths: both +u close the plain wire");
+    expect(capPathsRunOpposite(-2.0 * kPi, 2.0 * kPi), "cap paths: -u high, +u low jump a period");
+    expect(capPathsRunOpposite(2.0 * kPi, -2.0 * kPi), "cap paths: +u high, -u low jump a period");
+    expect(!capPathsRunOpposite(0.0, 2.0 * kPi), "cap paths: a path with no sweep decides nothing");
+    expect(!capPathsRunOpposite(-2.0 * kPi, 0.0), "cap paths: no sweep on the low path either");
 
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
