@@ -13199,6 +13199,9 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         };
         keepSharedCaps = partnerTorus(capL) || partnerTorus(capH);
     }
+    // D-fc-5.7 O-4 (capPathsRunOpposite): a split cap whose two paths sweep opposite
+    // ways round the axis takes the composite UV-sense and seam-pair binding.
+    bool senseBind = false;
 
     // The seam names the face's parameter domain [u0, u0+2pi] (D-130-16); every
     // wire the face carries has to be written on that branch. Declared here so
@@ -13358,7 +13361,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             // D-140-2 / e7c00a8 / F7: ShapeFix_Face displaces verts[] shared
             // with the island fill (measured 18.8 mm on S02). A mint-refused
             // polyline rim is that construction; skip the rung.
-            if (!mintRefused) {
+            if (!mintRefused && !senseBind) {
                 try {
                     ShapeFix_Face sff(got);
                     sff.FixMissingSeamMode() = 1;
@@ -13511,7 +13514,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // monotone cap branch this face is assembled on. A union face carries
         // an inner wire and cannot survive that, so it takes makeFaceKeep
         // first; faces without an inner wire keep the order they had.
-        const bool keepFirst = composite360 || mintRefused || keepSharedCaps;
+        const bool keepFirst = composite360 || mintRefused || senseBind || keepSharedCaps;
         if (keepFirst) {
             if (!makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2) &&
                 !makeFaceCopy(surf, ow2, inners, r.outwardNormal, out2))
@@ -13520,7 +13523,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                    !makeFaceKeep(surf, ow2, inners, r.outwardNormal, out2)) {
             return false;
         }
-        if (!composite360 && !mintRefused) return true;
+        if (!composite360 && !mintRefused && !senseBind) return true;
         // D-130-16: an inner wire's sense on the FACE is opposite the outer's,
         // and the wire P1 hands over is oriented for the REGION boundary. Which
         // sense is right cannot be judged on the bare face: the inner wire's
@@ -13792,10 +13795,53 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             emit(warn, "seamed360: composite cap wire failed — try TwoHalves");
             return false;
         }
+        // Each path's sense, read off its own 3d curves (the composite binding
+        // below reverses the path that runs +u).
+        auto sweepU = [&](const std::vector<TopoDS_Edge>& path) -> double {
+            double sweep = 0.0;
+            for (const TopoDS_Edge& e : path) {
+                Standard_Real f3 = 0, l3 = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+                if (c3.IsNull()) continue;
+                // Nine samples: a full circle read at three gives two
+                // exact half turns whose wrapped signs cancel (measured:
+                // sweep 0.0000 on an R5 rim). A polyline B-spline is read
+                // at eight per span.
+                int nS = 9;
+                {
+                    Handle(Geom_BSplineCurve) bsS =
+                        Handle(Geom_BSplineCurve)::DownCast(basisCurveOf(c3));
+                    if (!bsS.IsNull()) nS = std::max(9, 8 * (bsS->NbKnots() - 1) + 1);
+                }
+                double prev = 0.0;
+                for (int i = 0; i < nS; i++) {
+                    const int k = e.Orientation() == TopAbs_REVERSED ? nS - 1 - i : i;
+                    const double tk = f3 + (l3 - f3) * (double)k / (double)(nS - 1);
+                    const double u = azimuthOf(r, c3->Value(tk));
+                    if (i > 0) {
+                        double du = u - prev;
+                        while (du > kPi) du -= 2.0 * kPi;
+                        while (du < -kPi) du += 2.0 * kPi;
+                        sweep += du;
+                    }
+                    prev = u;
+                }
+            }
+            return sweep;
+        };
+        auto reversePath = [](std::vector<TopoDS_Edge>& path) {
+            std::reverse(path.begin(), path.end());
+            for (TopoDS_Edge& e : path) e.Reverse();
+        };
         const bool rotatedOK = rotateEdgesToVertex(pathH, verts[(size_t)vH]) &&
                                rotateEdgesToVertex(pathL, verts[(size_t)vL]);
-        if (composite360 || mintRefused || !rotatedOK) {
-            if (!composite360 && !mintRefused) {
+        senseBind = !composite360 && !mintRefused && rotatedOK &&
+                    capPathsRunOpposite(sweepU(pathH), sweepU(pathL));
+        if (diagP2Enabled() && senseBind)
+            std::fprintf(stderr, "DIAG_SENSEBIND rid=%d nH=%zu nL=%zu\n", r.id, pathH.size(),
+                         pathL.size());
+        if (composite360 || mintRefused || senseBind || !rotatedOK) {
+            if (!composite360 && !mintRefused && !senseBind) {
                 emit(warn, "seamed360: cap wire does not pass seam vertex — try TwoHalves");
                 return false;
             }
@@ -13865,42 +13911,6 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             // true sign; the path that runs +u is reversed. Nothing moves: an
             // edge sequence and its reversal are the same closed loop through
             // the same seam vertex.
-            auto sweepU = [&](const std::vector<TopoDS_Edge>& path) -> double {
-                double sweep = 0.0;
-                for (const TopoDS_Edge& e : path) {
-                    Standard_Real f3 = 0, l3 = 0;
-                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
-                    if (c3.IsNull()) continue;
-                    // Nine samples: a full circle read at three gives two
-                    // exact half turns whose wrapped signs cancel (measured:
-                    // sweep 0.0000 on an R5 rim). A polyline B-spline is read
-                    // at eight per span.
-                    int nS = 9;
-                    {
-                        Handle(Geom_BSplineCurve) bsS =
-                            Handle(Geom_BSplineCurve)::DownCast(basisCurveOf(c3));
-                        if (!bsS.IsNull()) nS = std::max(9, 8 * (bsS->NbKnots() - 1) + 1);
-                    }
-                    double prev = 0.0;
-                    for (int i = 0; i < nS; i++) {
-                        const int k = e.Orientation() == TopAbs_REVERSED ? nS - 1 - i : i;
-                        const double tk = f3 + (l3 - f3) * (double)k / (double)(nS - 1);
-                        const double u = azimuthOf(r, c3->Value(tk));
-                        if (i > 0) {
-                            double du = u - prev;
-                            while (du > kPi) du -= 2.0 * kPi;
-                            while (du < -kPi) du += 2.0 * kPi;
-                            sweep += du;
-                        }
-                        prev = u;
-                    }
-                }
-                return sweep;
-            };
-            auto reversePath = [](std::vector<TopoDS_Edge>& path) {
-                std::reverse(path.begin(), path.end());
-                for (TopoDS_Edge& e : path) e.Reverse();
-            };
             const double sweepH = sweepU(pathH), sweepL = sweepU(pathL);
             if (sweepH > 0.0) reversePath(pathH);
             if (sweepL > 0.0) reversePath(pathL);
@@ -13940,7 +13950,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             // face cannot: TwoHalves has no inner wire to give the enclosed
             // interruption. Bind the pair here exactly as the single-circle
             // path does, at the seam generator's own azimuth.
-            if (composite360 || mintRefused) {
+            if (composite360 || mintRefused || senseBind) {
                 BRep_Builder Bs;
                 const double u0 = azimuthOf(r, BRep_Tool::Pnt(seamVL));
                 if (!inners.empty() && seamCrossesInner(u0)) {

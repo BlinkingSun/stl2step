@@ -1,5 +1,6 @@
 // Synthetic cases for the torus-family seam predicates (D-fc-4.8), the closed-wall /
-// closed-torus build predicates of fx-closed360 and the U-3 naming predicates. No mesh.
+// closed-torus build predicates of fx-closed360, the U-3 naming predicates and the
+// split-cap orientation rule of D-fc-5.7 O-4. No mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -275,6 +276,15 @@ int main() {
     expect(!torusRoundDecided(true, 3, 4), "round decided: a naming region is still unbuilt");
     expect(torusRoundDecided(true, 4, 4), "round decided: every naming region built");
     expect(torusRoundDecided(true, 7, 4), "round decided: later regions cannot name a torus");
+
+    // capPathsRunOpposite (D-fc-5.7 O-4): the plain split-cap wire closes in (u, v) only
+    // when both cap paths sweep the same way round the axis.
+    expect(!capPathsRunOpposite(-2.0 * kPi, -2.0 * kPi), "cap paths: both -u close the plain wire");
+    expect(!capPathsRunOpposite(2.0 * kPi, 2.0 * kPi), "cap paths: both +u close the plain wire");
+    expect(capPathsRunOpposite(-2.0 * kPi, 2.0 * kPi), "cap paths: -u high, +u low jump a period");
+    expect(capPathsRunOpposite(2.0 * kPi, -2.0 * kPi), "cap paths: +u high, -u low jump a period");
+    expect(!capPathsRunOpposite(0.0, 2.0 * kPi), "cap paths: a path with no sweep decides nothing");
+    expect(!capPathsRunOpposite(-2.0 * kPi, 0.0), "cap paths: no sweep on the low path either");
 
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;

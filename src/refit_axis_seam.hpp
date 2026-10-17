@@ -168,6 +168,16 @@ inline bool torusRoundDecided(bool torusFailed, std::size_t built, std::size_t n
     return torusFailed && built >= namingEnd;
 }
 
+// D-fc-5.7 O-4. A split-cap closed wall's plain wire runs seam up, the high cap path,
+// seam down, the low cap path reversed. It closes in (u, v) only when the two paths
+// sweep the same way round the axis. Each cap loop is oriented by its own chains, so
+// the two can arrive sweeping opposite ways. That wire then jumps a whole period at
+// each seam copy, and the wall takes the composite UV-sense and seam-pair binding.
+// A path that reads no sweep decides nothing.
+inline bool capPathsRunOpposite(double sweepH, double sweepL) {
+    return sweepH * sweepL < 0.0;
+}
+
 }  // namespace refit
 }  // namespace stl2step
 
