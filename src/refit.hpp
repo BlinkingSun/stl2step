@@ -87,7 +87,10 @@ struct SegmentParams {
 
 enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus };
 enum class Origin   : uint8_t { PlaneGrow, CylGrow, FilletStrip, NgonWall, ChamferCone,
-                                TorusBlend };
+                                TorusBlend,
+                                // D-fc-5.11 F8: a sphere tangent to three certified
+                                // rounds meeting at a corner (SurfType::Sphere).
+                                SphereCorner };
 enum class BuiltAs  : uint8_t { NotBuilt, Single, Seamed360, TwoHalves, ExplodedToFacets };
 enum class Reject   : uint8_t { None, GaussPlanarity, VertexResidual, ChordConsistency,
                                 RadiusSanity, Span, FilletConsensus, NeighborNotAnalytic,
@@ -143,7 +146,8 @@ struct Region {
                                     // a REAL MESH VERTEX azimuth (the region vertex with the
                                     // lowest local id), so a 360° seam at u=0 lands on a
                                     // facet generator instead of bisecting a facet.
-    double   radius = 0;            // Cylinder only; Torus: R_major
+    double   radius = 0;            // Cylinder only; Torus: R_major; Sphere: radius
+                                    // (SphereCorner: ax.Location() is the centre)
     double   radius2 = 0;           // Torus only: R_minor (D-140-6 §3(1))
     double   uMin = 0, uMax = 0;    // Cylinder: angular start + end from ax.XDirection().
                                     // closed360 => exactly 0 and 2*pi. Partial => the

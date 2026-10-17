@@ -16,7 +16,9 @@
 #include "refit_cone_math.hpp"
 #include "refit_torus_math.hpp"
 #include "refit_internal.hpp"
+#include "refit_relational.hpp"
 #include "refit_relational_arc.hpp"
+#include "refit_relational_sphere.hpp"
 #include "refit_axis_seam.hpp"
 #include "refit_cap_arc.hpp"
 #include "refit_edge_bound.hpp"
@@ -86,6 +88,7 @@
 #include <Geom_BSplineCurve.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ConicalSurface.hxx>
+#include <Geom_SphericalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
 #include <Geom_Ellipse.hxx>
 #include <Geom_Line.hxx>
@@ -104,6 +107,7 @@
 #include <math_Vector.hxx>
 #include <ShapeFix_Edge.hxx>
 #include <ShapeFix_Face.hxx>
+#include <ShapeFix_Wire.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -236,7 +240,10 @@ bool isAnalytic(const Region* r) {
         (r->type == SurfType::Cone && r->origin == Origin::ChamferCone);
     const bool torusBlend =
         (r->type == SurfType::Torus && r->origin == Origin::TorusBlend);
-    if (!planeOrCyl && !chamferCone && !torusBlend) return false;
+    // D-fc-5.11 F8.
+    const bool sphereCorner =
+        (r->type == SurfType::Sphere && r->origin == Origin::SphereCorner);
+    if (!planeOrCyl && !chamferCone && !torusBlend && !sphereCorner) return false;
     if (r->id >= 0 && (size_t)r->id < gEPrimeDemoted.size() && gEPrimeDemoted[(size_t)r->id])
         return false;
     return true;
@@ -1433,6 +1440,11 @@ bool isChamferConeR(const Region& r) {
 
 bool isTorusBlendR(const Region& r) {
     return r.type == SurfType::Torus && r.origin == Origin::TorusBlend;
+}
+
+// D-fc-5.11 F8.
+bool isSphereCornerR(const Region& r) {
+    return r.type == SurfType::Sphere && r.origin == Origin::SphereCorner;
 }
 
 void commitTorusPendingReclaim(RegionSet& rs, int torId) {
@@ -2986,6 +2998,33 @@ void emitDiagFallback(int ci, const BoundaryChain& ch, const char* cls, const ch
                  ci, cls, outcome, nA, nB, ch.regA, ch.regB, residual, nV);
 }
 
+// D-fc-5.11 F8. The contact circle of a sphere corner with a cylinder round,
+// within tanDistTol(tau, tau) of the round's axis and radius (D-fc-1.6(7)):
+// the cylinder's own v-iso through the centre, so it lies on the cylinder
+// exactly.
+AnalyticCurve sphereCornerContact(const Region& sph, const Region& oth, const MeshView& mv) {
+    AnalyticCurve out;
+    const double tau = 2.0 * std::max(mv.quantFloor, 0.0);
+    if (!(tau > 0.0)) return out;
+    // The claim certified the centre within tau of the round's axis and the
+    // radii within tau of each other (sphereOfRounds).
+    const double tolC = tanDistTol(tau, tau);
+    const gp_XYZ c = sph.ax.Location().XYZ();
+    if (oth.type == SurfType::Cylinder) {
+        double v = 0.0;
+        if (sphereCylinderContact(c, sph.radius, oth.ax.Location().XYZ(),
+                                  oth.ax.Direction().XYZ(), oth.radius, tolC, v)) {
+            out.kind = AnalyticCurve::Circ;
+            out.circ = cylinderIsoCircle(oth, v);
+        }
+    }
+    // Only cylinder rounds reach here: the claim takes no torus round (the
+    // partial-torus face does not yet take a u-iso edge -- its pcurves land a
+    // whole period off on both parameters -- and a polyline contact between
+    // two curved faces leaves the shell open by its chord lunes).
+    return out;
+}
+
 AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView& mv,
                                 const BoundaryChain& ch, double sewTol, WarnFn warn,
                                 bool* usedCylCylFallback = nullptr) {
@@ -2993,6 +3032,12 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
     const double tolAng = Precision::Angular();
     const double tol = std::max(sewTol, Precision::Confusion());
     try {
+        // D-fc-5.11 F8: a sphere corner meets a cylinder round tangentially,
+        // along the cylinder's v-iso through the sphere's centre. It is
+        // constructed, never intersected. Any other neighbour keeps the mesh
+        // polyline.
+        if (isSphereCornerR(A) || isSphereCornerR(B))
+            return sphereCornerContact(isSphereCornerR(A) ? A : B, isSphereCornerR(A) ? B : A, mv);
         if (A.type == SurfType::Plane && B.type == SurfType::Plane) {
             IntAna_QuadQuadGeo iq(asPlane(A), asPlane(B), tolAng, tol);
             const double acceptR = intAnaAcceptResidual(mv, ch, sewTol, &A, &B);
@@ -7365,6 +7410,9 @@ thread_local std::unordered_set<const void*> gTier2TShapes;
 // rewrites the tolerance down to the sampled gap; the census reads the
 // closed-form supremum, which is larger. Raised again after SameParameter.
 thread_local std::unordered_set<const void*> gConeIsoCapTShapes;
+// D-fc-5.11 F8: sphere-corner contacts on an iso-line pcurve. The same
+// SameParameter rewrite; the census reads sphereIsoBound. Raised again after.
+thread_local std::unordered_set<const void*> gSphereIsoTShapes;
 // The TShape-address sets above (and gMeshTShapes) are refilled only at a
 // canon-clear transition, but every rebuild round inside one recoverPass
 // re-mints chain edges and frees the old ones. A freed address handed to a
@@ -7686,7 +7734,8 @@ enum class SurfVar : int {
     CylRectTrim = 4,
     CylRotTrim = 5,
     ConeBase = 6,
-    TorusBase = 7
+    TorusBase = 7,
+    SphereBase = 8  // D-fc-5.11 F8
 };
 
 const char* surfVarName(SurfVar v) {
@@ -7699,6 +7748,7 @@ const char* surfVarName(SurfVar v) {
     case SurfVar::CylRotTrim: return "CylRotTrim";
     case SurfVar::ConeBase: return "ConeBase";
     case SurfVar::TorusBase: return "TorusBase";
+    case SurfVar::SphereBase: return "SphereBase";
     }
     return "?";
 }
@@ -7725,6 +7775,8 @@ Handle(Geom_Surface) regionSurf(const Region& r, SurfVar v) {
             if (r.type == SurfType::Plane) s = new Geom_Plane(asPlane(r));
         } else if (isTorusBlendR(r) && v == SurfVar::TorusBase) {
             s = new Geom_ToroidalSurface(r.ax, r.radius, r.radius2);
+        } else if (isSphereCornerR(r) && v == SurfVar::SphereBase) {
+            s = new Geom_SphericalSurface(gp_Sphere(r.ax, r.radius));
         } else if (isChamferConeR(r) && v == SurfVar::ConeBase) {
             // The frustum's surface comes from the REGION's own fitted numbers
             // (Location on the R_lo rim, Direction toward R_hi, RefRadius R_lo,
@@ -7781,6 +7833,10 @@ void variantsForRegion(const Region& r, SurfVar* out, int& n) {
     }
     if (isTorusBlendR(r)) {
         out[n++] = SurfVar::TorusBase;
+        return;
+    }
+    if (isSphereCornerR(r)) {
+        out[n++] = SurfVar::SphereBase;
         return;
     }
     if (r.type != SurfType::Cylinder) return;
@@ -8736,6 +8792,42 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
                     if (clsOut) *clsOut = torusDevClassName(tcls);
                     return m;
                 }
+            }
+        }
+        if (clsOut) *clsOut = "unhandled-surface";
+        return -1.0;
+    }
+    // D-fc-5.11 F8: a circle on a sphere whose pcurve is an iso line (a
+    // parallel or a meridian, unit speed in the circle's parameter): the
+    // closed-form bound of sphereIsoBound plus the end terms. Any other pcurve
+    // on a sphere is not certified.
+    Handle(Geom_SphericalSurface) gsph = Handle(Geom_SphericalSurface)::DownCast(srf);
+    if (!gsph.IsNull()) {
+        Handle(Geom_Curve) src = basisCurveOf(c3);
+        if (src.IsNull()) src = c3;
+        Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+        Handle(Geom2d_Curve) b2 = c2d;
+        if (Handle(Geom2d_TrimmedCurve) t2 = Handle(Geom2d_TrimmedCurve)::DownCast(c2d))
+            b2 = t2->BasisCurve();
+        Handle(Geom2d_Line) l2 = Handle(Geom2d_Line)::DownCast(b2);
+        if (!gc.IsNull() && !l2.IsNull()) {
+            const gp_Dir2d d2 = l2->Direction();
+            const bool mer = std::fabs(d2.X()) <= Precision::PConfusion();
+            const bool par = std::fabs(d2.Y()) <= Precision::PConfusion();
+            if (mer || par) {
+                gp_Sphere sp = gsph->Sphere();
+                if (!loc.IsIdentity()) sp.Transform(loc.Transformation());
+                const gp_Ax3 pos = sp.Position();
+                const gp_Circ ci = gc->Circ();
+                const double sgn = mer ? (d2.Y() >= 0.0 ? 1.0 : -1.0) : (d2.X() >= 0.0 ? 1.0 : -1.0);
+                const double b = sphereIsoBound(
+                    pos.Location().XYZ(), sp.Radius(), pos.XDirection().XYZ(),
+                    pos.YDirection().XYZ(), pos.Direction().XYZ(), ci.Location().XYZ(),
+                    ci.Radius(), ci.XAxis().Direction().XYZ(), ci.YAxis().Direction().XYZ(), mer,
+                    l2->Location().X(), l2->Location().Y(), sgn);
+                if (clsOut) *clsOut = "circle-on-sphere";
+                return std::max(b, std::max(curveSurfDevAtBind(c3, f, srf, c2d, loc),
+                                            curveSurfDevAtBind(c3, l, srf, c2d, loc)));
             }
         }
         if (clsOut) *clsOut = "unhandled-surface";
@@ -12693,6 +12785,409 @@ bool buildPartialCone(const Region& r, const RegionSet& rs, const MeshView& mv,
     return fail("face-invalid");
 }
 
+// D-fc-5.11 F8. A sphere corner is ONE outer loop: its contacts with its three
+// rounds (each the round's section circle through the centre, shared with the
+// round's face). The face is that wire on the region's own SphereBase surface,
+// whose frame puts the patch's middle on the equator at u = pi, away from the
+// parametrisation's seam and poles. Validity budget: partialFaceTolCap.
+bool buildSphereCorner(const Region& r, const RegionSet& rs, const MeshView& mv,
+                       const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
+                       const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
+                       double sewTol, TopoDS_Face& outF) {
+    auto fail = [&](const char* why) {
+        if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+            std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d nTri=%zu R=%.6f why=%s\n", r.id,
+                         r.tris.size(), r.radius, why);
+        return false;
+    };
+    const Loop* outer = nullptr;
+    std::vector<TopoDS_Wire> inners;
+    for (const Loop& lp : r.loops) {
+        if (lp.role == LoopRole::Outer) {
+            outer = &lp;
+        } else if (lp.role == LoopRole::Inner) {
+            TopoDS_Wire iw;
+            if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk, nullptr))
+                return fail("inner-wire");
+            inners.push_back(iw);
+        }
+    }
+    if (!outer) return fail("no-outer");
+    TopoDS_Wire ow;
+    if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk, nullptr))
+        return fail("outer-wire");
+    Handle(Geom_SphericalSurface) ss =
+        Handle(Geom_SphericalSurface)::DownCast(regionSurf(r, SurfVar::SphereBase));
+    if (ss.IsNull()) return fail("surface");
+    const double cap = partialFaceTolCap(mv, r);
+    // A vertex or edge off the sphere by more than its tolerance gets the
+    // measured distance, up to the cap.
+    auto sphereTol = [&](TopoDS_Face& f) -> bool {
+        const gp_Pnt c = r.ax.Location();
+        auto dev = [&](const gp_Pnt& p) { return std::fabs(p.Distance(c) - r.radius); };
+        try {
+            BRep_Builder B;
+            for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
+                const TopoDS_Vertex& vv = TopoDS::Vertex(vx.Current());
+                const double d = dev(BRep_Tool::Pnt(vv));
+                if (d > cap) return false;
+                if (d > BRep_Tool::Tolerance(vv))
+                    B.UpdateVertex(vv, std::min(d * 1.001 + Precision::Confusion(), cap));
+            }
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                Standard_Real fp = 0, lp = 0;
+                Handle(Geom_Curve) cv = BRep_Tool::Curve(e, fp, lp);
+                if (cv.IsNull()) continue;
+                const double d = dev(cv->Value(0.5 * (fp + lp)));
+                if (d > cap) return false;
+                if (d > BRep_Tool::Tolerance(e))
+                    fireTolRewriteEdge(B, e, std::min(d * 1.001 + Precision::Confusion(), cap),
+                                       "other", cap);
+            }
+        } catch (const Standard_Failure&) {
+            return false;
+        }
+        return faceIsValid(f);
+    };
+    // Every circle edge within tau of an iso-curve of the sphere carries that
+    // iso's exact line pcurve; the edge tolerance covers the closed-form bound.
+    const double tauB = 2.0 * std::max(mv.quantFloor, 0.0);
+    auto bindIso = [&](TopoDS_Face& f, bool replace) {
+        const gp_Sphere sp = ss->Sphere();
+        const gp_Ax3 pos = sp.Position();
+        BRep_Builder Bi;
+        TopTools_IndexedMapOfShape emap;
+        TopExp::MapShapes(f, TopAbs_EDGE, emap);
+        for (int i = 1; i <= emap.Extent(); ++i) {
+            const TopoDS_Edge& e = TopoDS::Edge(emap(i));
+            if (BRep_Tool::Degenerated(e)) continue;
+            Standard_Real a = 0, b = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, a, b);
+            if (c3.IsNull()) continue;
+            Handle(Geom_Curve) src = basisCurveOf(c3);
+            if (src.IsNull()) src = c3;
+            Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+            if (gc.IsNull()) continue;
+            const gp_Circ ci = gc->Circ();
+            const SphereIsoLine L = sphereIsoLineOf(
+                pos.Location().XYZ(), sp.Radius(), pos.XDirection().XYZ(), pos.YDirection().XYZ(),
+                pos.Direction().XYZ(), ci.Location().XYZ(), ci.Radius(),
+                ci.XAxis().Direction().XYZ(), ci.YAxis().Direction().XYZ(), 0.5 * (a + b));
+            if (replace && L.bound <= tauB) {
+                Handle(Geom2d_Line) l2 =
+                    L.meridian ? new Geom2d_Line(gp_Pnt2d(L.u0, L.v0), gp_Dir2d(0.0, L.s))
+                               : new Geom2d_Line(gp_Pnt2d(L.u0, L.v0), gp_Dir2d(L.s, 0.0));
+                Bi.UpdateEdge(e, l2, f, BRep_Tool::Tolerance(e));
+                Bi.Range(e, f, a, b);
+            }
+            // The tolerance covers the bound the edge census reads off this
+            // face's own pcurve (exactMaxAtBind), whichever pcurve it is.
+            TopLoc_Location floc;
+            Handle(Geom_Surface) fs = BRep_Tool::Surface(f, floc);
+            Standard_Real pa = 0, pb = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, pa, pb);
+            const char* cls = nullptr;
+            const double ex = pc.IsNull() ? -1.0 : exactMaxAtBind(c3, a, b, fs, pc, floc, &cls);
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_SPHERE_ISO rid=%d replace=%d iso=%s bound=%.9g ex=%.9g "
+                             "tolBefore=%.9g cls=%s range=[%.9g,%.9g] pc=[%.9g,%.9g]\n",
+                             r.id, replace ? 1 : 0, L.meridian ? "meridian" : "parallel", L.bound,
+                             ex, BRep_Tool::Tolerance(e), cls ? cls : "none", a, b, pa, pb);
+            if (ex >= 0.0 && std::isfinite(ex)) {
+                enrollTShape(gSphereIsoTShapes, e);
+                if (ex + Precision::PConfusion() > BRep_Tool::Tolerance(e))
+                    fireTolRewriteEdge(Bi, e, ex + Precision::PConfusion(), "sphere-iso",
+                                       std::max(cap, ex + Precision::PConfusion()));
+            }
+        }
+    };
+    // The polar frame's meridian contacts meet at the pole: the parameter-space
+    // wire takes the degenerated edge there.
+    auto closePole = [&](TopoDS_Face& f) {
+        try {
+            const TopoDS_Face fw = TopoDS::Face(f.Oriented(TopAbs_FORWARD));
+            BRep_Builder Bp;
+            std::vector<TopoDS_Wire> ws;
+            std::vector<TopAbs_Orientation> wo;
+            bool changed = false;
+            for (TopoDS_Iterator it(fw); it.More(); it.Next()) {
+                if (it.Value().ShapeType() != TopAbs_WIRE) continue;
+                const TopoDS_Wire w = TopoDS::Wire(it.Value());
+                ShapeFix_Wire sfw(w, fw, sewTol);
+                sfw.FixDegenerated();
+                TopoDS_Wire w2 = sfw.Wire();
+                if (w2.IsNull()) w2 = w;
+                if (!w2.IsSame(w)) changed = true;
+                ws.push_back(w2);
+                wo.push_back(w.Orientation());
+            }
+            if (!changed || ws.size() != 1) return;
+            // The fixed wire's own edge order may run either way round the
+            // patch: take the orientation the face accepts.
+            TopoDS_Face pick;
+            for (int k = 0; k < 2 && pick.IsNull(); ++k) {
+                TopoDS_Face nf = TopoDS::Face(fw.EmptyCopied());
+                Bp.Add(nf, k == 0 ? ws[0].Oriented(wo[0]) : ws[0].Oriented(TopAbs::Reverse(wo[0])));
+                nf.Orientation(f.Orientation());
+                if (k == 1 || faceIsValid(nf)) pick = nf;
+            }
+            if (!faceIsValid(pick)) {
+                TopoDS_Face nf = TopoDS::Face(fw.EmptyCopied());
+                Bp.Add(nf, ws[0].Oriented(wo[0]));
+                nf.Orientation(f.Orientation());
+                pick = nf;
+            }
+            f = pick;
+        } catch (const Standard_Failure&) {
+        }
+    };
+    // A mesh vertex at a contact's end lies within tau of the sphere, not on
+    // the exact iso point its pcurve ends at (nor, at the pole, on the pole):
+    // its tolerance takes that measured distance, up to the cap.
+    auto pinVertices = [&](TopoDS_Face& f) {
+        try {
+            TopLoc_Location floc;
+            Handle(Geom_Surface) fs = BRep_Tool::Surface(f, floc);
+            BRep_Builder Bv;
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                Standard_Real a = 0, b = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                if (pc.IsNull() || fs.IsNull()) continue;
+                TopoDS_Vertex vf, vl;
+                TopExp::Vertices(e, vf, vl);
+                Standard_Real ca = 0, cb = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, ca, cb);
+                for (int k = 0; k < 2; ++k) {
+                    const TopoDS_Vertex& vv = k == 0 ? vf : vl;
+                    if (vv.IsNull()) continue;
+                    const gp_Pnt pv = BRep_Tool::Pnt(vv);
+                    double d = pv.Distance(fs->Value(pc->Value(k == 0 ? a : b).X(),
+                                                     pc->Value(k == 0 ? a : b).Y())
+                                               .Transformed(floc.Transformation()));
+                    if (!c3.IsNull()) d = std::max(d, pv.Distance(c3->Value(k == 0 ? ca : cb)));
+                    if (d <= cap && d > BRep_Tool::Tolerance(vv))
+                        Bv.UpdateVertex(vv, d * 1.001 + Precision::Confusion());
+                }
+            }
+        } catch (const Standard_Failure&) {
+        }
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        TopoDS_Wire w = ow;
+        if (pass == 1) w.Reverse();
+        TopoDS_Face f;
+        const bool got = makeFaceCopy(ss, w, inners, r.outwardNormal, f) ||
+                         makeFaceKeep(ss, w, inners, r.outwardNormal, f);
+        if (!got || f.IsNull()) continue;
+        addPcurvesOnFace(f, sewTol, false);
+        bindIso(f, true);
+        closePole(f);
+        setFaceOutward(f, r.outwardNormal);
+        if (!faceIsValid(f)) {
+            try {
+                BRep_Builder Bs;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                    Bs.SameParameter(e, Standard_False);
+                    BRepLib::SameParameter(e, sewTol);
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        // Last: every tolerance covers the bound the census reads off the
+        // final pcurves (SameParameter above may have lowered it).
+        bindIso(f, false);
+        pinVertices(f);
+        const bool okF = faceIsValid(f) || sphereTol(f);
+        if (!okF && (diagP2Enabled() || diag130Enabled() || diagRelEnabled())) {
+            try {
+                BRepCheck_Analyzer an(f, Standard_True);
+                char ctx[160];
+                formatStatusInContext(an.Result(f), f, ctx, sizeof(ctx));
+                {
+                    BRepCheck_Status fst = BRepCheck_NoError;
+                    const bool fe = firstOwnError(an.Result(f), fst);
+                    std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d pass=%d check=%s own=%d\n", r.id,
+                                 pass, ctx, fe ? (int)fst : 0);
+                    for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) {
+                        BRepCheck_Status wst = BRepCheck_NoError;
+                        if (firstOwnError(an.Result(wx.Current()), wst))
+                            std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d pass=%d wireOwn=%d\n",
+                                         r.id, pass, (int)wst);
+                    }
+                }
+                for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
+                    const TopoDS_Vertex vv = TopoDS::Vertex(vx.Current());
+                    char vctx[160];
+                    formatStatusInContext(an.Result(vv), f, vctx, sizeof(vctx));
+                    const gp_Pnt pv = BRep_Tool::Pnt(vv);
+                    std::fprintf(stderr,
+                                 "DIAG_SPHEREFACE rid=%d pass=%d vertex=(%.6f,%.6f,%.6f) tol=%.3g "
+                                 "check=%s\n",
+                                 r.id, pass, pv.X(), pv.Y(), pv.Z(), BRep_Tool::Tolerance(vv), vctx);
+                }
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    char ectx[160];
+                    const Handle(BRepCheck_Result)& er = an.Result(ex.Current());
+                    if (er.IsNull()) continue;
+                    BRepCheck_Status est = BRepCheck_NoError;
+                    if (firstOwnError(er, est))
+                        std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d pass=%d edgeOwn=%d\n", r.id,
+                                     pass, (int)est);
+                    (void)ectx;
+                }
+                int wi = 0;
+                for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                    const TopoDS_Wire wr = TopoDS::Wire(wx.Current());
+                    char wctx[160];
+                    formatStatusInContext(an.Result(wr), f, wctx, sizeof(wctx));
+                    std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d pass=%d wire=%d check=%s uvA=%.6f\n",
+                                 r.id, pass, wi, wctx, pcurveSignedArea(f, wr));
+                    int ei = 0;
+                    for (BRepTools_WireExplorer ex(wr, f); ex.More(); ex.Next(), ++ei) {
+                        const TopoDS_Edge e = ex.Current();
+                        char ectx[160];
+                        formatStatusInContext(an.Result(e), f, ectx, sizeof(ectx));
+                        Standard_Real a = 0, b = 0;
+                        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                        std::fprintf(stderr,
+                                     "DIAG_SPHEREFACE rid=%d pass=%d wire=%d edge=%d deg=%d ori=%d "
+                                     "check=%s tol=%.3g uv0=(%.4f,%.4f) uv1=(%.4f,%.4f)\n",
+                                     r.id, pass, wi, ei, BRep_Tool::Degenerated(e) ? 1 : 0,
+                                     (int)e.Orientation(), ectx, BRep_Tool::Tolerance(e),
+                                     pc.IsNull() ? 0.0 : pc->Value(a).X(),
+                                     pc.IsNull() ? 0.0 : pc->Value(a).Y(),
+                                     pc.IsNull() ? 0.0 : pc->Value(b).X(),
+                                     pc.IsNull() ? 0.0 : pc->Value(b).Y());
+                    }
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        if (okF) {
+            if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_SPHEREFACE rid=%d nTri=%zu R=%.6f why=BUILT pass=%d "
+                             "outward=%d\n",
+                             r.id, r.tris.size(), r.radius, pass, r.outwardNormal ? 1 : 0);
+            outF = f;
+            return true;
+        }
+    }
+    // Second attempt: the same sphere in a frame whose seam and poles are off
+    // the patch (its middle on the equator at u = pi), pcurves projected. Where
+    // the iso-line layout's exact corners trip the wire check, this face still
+    // ships the certified surface. Its surface is not the interned SphereBase,
+    // so the edge census reads its contacts as mixed, not as certified iso
+    // lines (they are not).
+    try {
+        const gp_Pnt c = r.ax.Location();
+        gp_XYZ m(0, 0, 0);
+        for (int t : r.tris) {
+            if (t < 0 || (size_t)t >= mv.nTri) continue;
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3; ++k) {
+                gp_XYZ d = mv.pts[mv.tris[gt][k]] - c.XYZ();
+                const double dm = d.Modulus();
+                if (dm > 0.0) m += d / dm;
+            }
+        }
+        const double mm = m.Modulus();
+        if (mm > 0.0) {
+            m /= mm;
+            const double ax3[3] = {std::fabs(m.X()), std::fabs(m.Y()), std::fabs(m.Z())};
+            int ke = 0;
+            for (int i = 1; i < 3; ++i)
+                if (ax3[i] < ax3[ke]) ke = i;
+            const gp_XYZ e(ke == 0 ? 1.0 : 0.0, ke == 1 ? 1.0 : 0.0, ke == 2 ? 1.0 : 0.0);
+            gp_XYZ zd = m.Crossed(e);
+            zd /= zd.Modulus();
+            Handle(Geom_SphericalSurface) alt = new Geom_SphericalSurface(
+                gp_Sphere(gp_Ax3(c, gp_Dir(zd), gp_Dir(m.Reversed())), r.radius));
+            for (int pass = 0; pass < 2; ++pass) {
+                TopoDS_Wire w = ow;
+                if (pass == 1) w.Reverse();
+                TopoDS_Face f;
+                const bool got = makeFaceCopy(alt, w, inners, r.outwardNormal, f) ||
+                                 makeFaceKeep(alt, w, inners, r.outwardNormal, f);
+                if (!got || f.IsNull()) continue;
+                addPcurvesOnFace(f, sewTol, false);
+                setFaceOutward(f, r.outwardNormal);
+                if (!faceIsValid(f)) {
+                    BRep_Builder Bs;
+                    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                        const TopoDS_Edge& e2 = TopoDS::Edge(ex.Current());
+                        Bs.SameParameter(e2, Standard_False);
+                        BRepLib::SameParameter(e2, sewTol);
+                    }
+                }
+                pinVertices(f);
+                if (faceIsValid(f) || sphereTol(f)) {
+                    if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+                        std::fprintf(stderr,
+                                     "DIAG_SPHEREFACE rid=%d nTri=%zu R=%.6f why=BUILT-centred "
+                                     "pass=%d outward=%d\n",
+                                     r.id, r.tris.size(), r.radius, pass, r.outwardNormal ? 1 : 0);
+                    outF = f;
+                    return true;
+                }
+                if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
+                    BRepCheck_Analyzer an(f, Standard_True);
+                    BRepCheck_Status fst = BRepCheck_NoError, wst = BRepCheck_NoError;
+                    const bool fe = firstOwnError(an.Result(f), fst);
+                    bool we = false;
+                    for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More() && !we; wx.Next())
+                        we = firstOwnError(an.Result(wx.Current()), wst);
+                    std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d centred pass=%d faceOwn=%d wireOwn=%d\n",
+                                 r.id, pass, fe ? (int)fst : 0, we ? (int)wst : 0);
+                }
+            }
+        }
+    } catch (const Standard_Failure&) {
+    }
+    if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
+        TopoDS_Face f;
+        if (makeFaceCopy(ss, ow, inners, r.outwardNormal, f)) {
+            addPcurvesOnFace(f, sewTol, false);
+            try {
+                BRepCheck_Analyzer an(f, Standard_True);
+                char ctx[160];
+                formatStatusInContext(an.Result(f), f, ctx, sizeof(ctx));
+                std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d check=%s\n", r.id, ctx);
+                int wi = 0;
+                for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                    const TopoDS_Wire wr = TopoDS::Wire(wx.Current());
+                    char wctx[160];
+                    formatStatusInContext(an.Result(wr), f, wctx, sizeof(wctx));
+                    std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d wire=%d check=%s uvA=%.6f\n",
+                                 r.id, wi, wctx, pcurveSignedArea(f, wr));
+                    int ei = 0;
+                    for (TopExp_Explorer ex(wr, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+                        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                        char ectx[160];
+                        formatStatusInContext(an.Result(e), f, ectx, sizeof(ectx));
+                        Standard_Real a = 0, b = 0;
+                        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                        std::fprintf(stderr,
+                                     "DIAG_SPHEREFACE rid=%d wire=%d edge=%d check=%s tol=%.3g "
+                                     "uv0=(%.4f,%.4f) uv1=(%.4f,%.4f)\n",
+                                     r.id, wi, ei, ectx, BRep_Tool::Tolerance(e),
+                                     pc.IsNull() ? 0.0 : pc->Value(a).X(),
+                                     pc.IsNull() ? 0.0 : pc->Value(a).Y(),
+                                     pc.IsNull() ? 0.0 : pc->Value(b).X(),
+                                     pc.IsNull() ? 0.0 : pc->Value(b).Y());
+                    }
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+    }
+    return fail("face-invalid");
+}
+
 // D-130-14 / D-fc-3.2.10. A relational FilletStrip is one surface and one face
 // per edge-component. The chain stitch keeps every component on this region and
 // tags only the largest loop Outer, so one partial-cylinder face treats the
@@ -15857,6 +16352,7 @@ const char* originName(Origin o) {
         case Origin::NgonWall: return "NgonWall";
         case Origin::ChamferCone: return "ChamferCone";
         case Origin::TorusBlend: return "TorusBlend";
+        case Origin::SphereCorner: return "SphereCorner";
     }
     return "?";
 }
@@ -16609,6 +17105,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gCrossCapRimTShapes.clear();
                     gTier2TShapes.clear();
                     gConeIsoCapTShapes.clear();
+                    gSphereIsoTShapes.clear();
                     gMeshTShapes.clear();
                     gWirePopCi.clear();
                     gWirePopSite.clear();
@@ -17730,6 +18227,16 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             r.builtAs = BuiltAs::NotBuilt;
             if (r.type == SurfType::Cone || r.type == SurfType::Sphere || r.type == SurfType::Torus) {
+                if (isSphereCornerR(r)) {
+                    // D-fc-5.11 F8. A face that fails returns false: the R1 rung
+                    // explodes this region, the component stays.
+                    TopoDS_Face f;
+                    if (!buildSphereCorner(r, rs, mv, geom, collapsed, meshE, edgeOk, sewTol, f))
+                        return false;
+                    r.builtAs = BuiltAs::Single;
+                    acc.push_back(f);
+                    return true;
+                }
                 // U-3: Sphere/Torus stay NYI. Other cones stay ConeNYI.
                 // ChamferCone: Geom_ConicalSurface from axis + two radii
                 // (radius / v range), MakeFace like cylinder Single.
@@ -20382,6 +20889,21 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 const double want =
                     std::max(Precision::Confusion(), exm + Precision::PConfusion());
                 fireTolRewriteEdge(bb, e, want, "cone-iso-cap", meshTolCap(mv, nullptr));
+            }
+        }
+
+        // D-fc-5.11 F8: the same for a sphere corner's iso-line contacts.
+        if (!gSphereIsoTShapes.empty()) {
+            BRep_Builder bb;
+            for (TopExp_Explorer ex(sh, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                const void* ts = diagTShapePtr(e);
+                if (!ts || !gSphereIsoTShapes.count(ts)) continue;
+                const double exm = maxExactAllPcurves(e, -1.0);
+                if (!(exm >= 0.0) || !std::isfinite(exm)) continue;
+                const double want =
+                    std::max(Precision::Confusion(), exm + Precision::PConfusion());
+                fireTolRewriteEdge(bb, e, want, "sphere-iso", meshTolCap(mv, nullptr));
             }
         }
 
