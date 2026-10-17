@@ -169,6 +169,8 @@ struct MeshRing {
     int stations = 0;
 };
 bool certifyMeshRing(const std::vector<gp_XYZ>& pts, double tau, MeshRing& out);
+// D-fc-5.17 F-2: tessellation-law refutation for ring donors (decl in
+// refit_internal.hpp; MeshRing defined here).
 
 // D-fc-5.11 F1 ring donors: the Unclaimed plane charts whose whole boundary is
 // two closed loops that are both rings lying in one plane within tau -- a planar

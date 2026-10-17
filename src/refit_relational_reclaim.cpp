@@ -1937,6 +1937,10 @@ bool certifyMeshRing(const std::vector<gp_XYZ>& pts, double tau, MeshRing& out) 
 std::vector<AnnulusRings> annulusRingCharts(const MeshView& mv, const SegmentWork& work,
                                             double tau) {
     std::vector<AnnulusRings> out;
+    struct Cand {
+        AnnulusRings a;
+    };
+    std::vector<Cand> cands;
     if (!(tau > 0.0) || mv.nTri == 0 || !mv.triEdges || !mv.compEdges || !mv.compVtx) return out;
     const RMesh rm = makeRMesh(mv);
     const int nTri = (int)mv.nTri;
@@ -1974,7 +1978,20 @@ std::vector<AnnulusRings> annulusRingCharts(const MeshView& mv, const SegmentWor
         for (int k = 0; k < kAnnulusLoops && ok; ++k)
             for (const gp_XYZ& q : lp[1 - k])
                 if (!(std::abs((q - a.ring[k].c).Dot(a.ring[k].n)) <= tau)) ok = false;
-        if (ok) out.push_back(std::move(a));
+        if (ok) cands.push_back({std::move(a)});
+    }
+    std::vector<const MeshRing*> peers;
+    peers.reserve(cands.size() * static_cast<std::size_t>(kAnnulusLoops));
+    for (const Cand& c : cands) {
+        for (int k = 0; k < kAnnulusLoops; ++k) peers.push_back(&c.a.ring[k]);
+    }
+    SegmentParams sp;
+    for (Cand& c : cands) {
+        bool ok = true;
+        for (int k = 0; k < kAnnulusLoops && ok; ++k) {
+            if (meshRingRefutedByTessLaw(mv, sp, tau, work, c.a.ring[k], peers)) ok = false;
+        }
+        if (ok) out.push_back(std::move(c.a));
     }
     return out;
 }

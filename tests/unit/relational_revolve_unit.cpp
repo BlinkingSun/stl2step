@@ -908,6 +908,25 @@ static void caseAnnulusRings() {
     }
 }
 
+// D-fc-5.17 F-2: an N-gon plate outline concentric with a round bore is no ring.
+static void caseMeshRingTessLaw() {
+    const double tau = 2e-6;
+    MeshRing outer, inner;
+    expect(certifyMeshRing(circlePts(10.0, 0.0, 4), tau, outer), "tesslaw: square certifies");
+    expect(certifyMeshRing(circlePts(4.0, 0.0, 48), tau, inner), "tesslaw: bore certifies");
+    outer.verts.assign(4, 0);
+    inner.verts.assign(48, 0);
+    Synth s;
+    SegmentWork work;
+    SegmentParams sp;
+    std::vector<const MeshRing*> peers = {&inner};
+    expect(meshRingRefutedByTessLaw(s.view(), sp, tau, work, outer, peers),
+           "tesslaw: square refuted by round bore witness");
+    peers = {&outer};
+    expect(!meshRingRefutedByTessLaw(s.view(), sp, tau, work, inner, peers),
+           "tesslaw: round bore not refuted by square");
+}
+
 // F1 end to end: the annulus's rings donate the cone's axis; scattered columns
 // (every other sector) pass the column rule but are no wall.
 static void caseRingDonorCone() {
@@ -1095,6 +1114,7 @@ int main() {
     caseThreeRing();
     caseThreads();
     caseMeshRing();
+    caseMeshRingTessLaw();
     caseTriSetLoops();
     caseAnnulusRings();
     caseRingDonorCone();
