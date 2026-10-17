@@ -18,6 +18,7 @@
 #include "refit_internal.hpp"
 #include "refit_relational_arc.hpp"
 #include "refit_axis_seam.hpp"
+#include "refit_cap_arc.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -7514,7 +7515,14 @@ bool seamStraddleU(const Region& r) {
 // Mid-vertex selector for partial-cylinder cap arcs when the chain has only
 // two terminals (no mesh interior point). Uses the fitted u-span midpoint on
 // the iso-circle at the cap V — not OCCT's shortest arc between endpoints.
-gp_Pnt partialCylCapArcMid(const Region& cyl, const Region* plnR, const gp_Circ& circ) {
+// D-fc-3.2.10: a FilletStrip of several edge-components is fitted over all of
+// them, so its u-midpoint can sit in the gap between two components. A
+// one-edge cap of the other component then came back as the 2π complement of
+// its own chord and the component face was UnorientableShape. When the
+// midpoint is off the chord's short arc and that arc lies inside the fitted
+// u-span, the short arc is the cap (shortArcInsideSpanOffMid).
+gp_Pnt partialCylCapArcMid(const Region& cyl, const Region* plnR, const gp_Circ& circ,
+                           const gp_Pnt& pa, const gp_Pnt& pb) {
     double v = gp_Vec(cyl.ax.Location(), circ.Location()).Dot(cyl.ax.Direction());
     if (plnR && planePerpCylinder(*plnR, cyl)) v = planeVOnCylinder(*plnR, cyl);
     double u0 = cyl.uMin, u1 = cyl.uMax;
@@ -7527,7 +7535,13 @@ gp_Pnt partialCylCapArcMid(const Region& cyl, const Region* plnR, const gp_Circ&
     }
     gp_Vec rad(gp_Vec(cyl.ax.XDirection()) * std::cos(ang) +
                gp_Vec(cyl.ax.YDirection()) * std::sin(ang));
-    return cyl.ax.Location().Translated(gp_Vec(cyl.ax.Direction()) * v + rad * cyl.radius);
+    const gp_Pnt spanMid =
+        cyl.ax.Location().Translated(gp_Vec(cyl.ax.Direction()) * v + rad * cyl.radius);
+    gp_Pnt shortMid;
+    if (shortArcInsideSpanOffMid(circ, pa, pb, spanMid, u0, u1,
+                                 [&](const gp_Pnt& p) { return azimuthOf(cyl, p); }, shortMid))
+        return shortMid;
+    return spanMid;
 }
 
 double regionU(const Region& r, const gp_Pnt& p) {
@@ -9385,7 +9399,8 @@ gp_Pnt probeArcMid(const AnalyticCurve& curve, const BoundaryChain& ch, const Me
     const bool partialCylArc =
         cylHint && !cylHint->closed360 && curve.kind == AnalyticCurve::Circ;
     if (partialCylArc && ch.meshVerts.size() < 3 && !partialConeSide(A, B))
-        return partialCylCapArcMid(*cylHint, plnHint, curve.circ);
+        return partialCylCapArcMid(*cylHint, plnHint, curve.circ, BRep_Tool::Pnt(verts[(size_t)ia]),
+                                   BRep_Tool::Pnt(verts[(size_t)ib]));
     if ((!full && curve.kind == AnalyticCurve::Circ && ch.meshVerts.size() >= 3) ||
         (partialCylArc && ch.meshVerts.size() >= 3)) {
         mid = pntOf(mv, ch.meshVerts[ch.meshVerts.size() / 2]);
@@ -17040,7 +17055,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // the cone's own side chains; a 2-vertex piece is not the cylinder's
                 // whole cap, so its short arc's middle is the hint (below).
                 if (partialCylArcMid && ch.meshVerts.size() < 3 && !partialConeSide(A, B))
-                    mid = partialCylCapArcMid(*cylHint, plnHint, curve.circ);
+                    mid = partialCylCapArcMid(*cylHint, plnHint, curve.circ,
+                                              BRep_Tool::Pnt(verts[(size_t)ia]),
+                                              BRep_Tool::Pnt(verts[(size_t)ib]));
                 else if ((!full && curve.kind == AnalyticCurve::Circ &&
                           ch.meshVerts.size() >= 3) ||
                          (partialCylArcMid && ch.meshVerts.size() >= 3)) {
@@ -19080,91 +19097,106 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     const gp_Ax3 axR = tsurf->Position().Transformed(spin);
                     Handle(Geom_ToroidalSurface) spun =
                         new Geom_ToroidalSurface(axR, tsurf->MajorRadius(), tsurf->MinorRadius());
-                    Handle(Geom_RectangularTrimmedSurface) trim =
-                        new Geom_RectangularTrimmedSurface(spun, 0.0, uSpan, r.vMin, r.vMax);
-                    TopoDS_Face f;
-                    const bool got = makeFaceCopy(trim, ow, inners, r.outwardNormal, f) ||
-                                     makeFaceKeep(trim, ow, inners, r.outwardNormal, f);
-                    if (!got || f.IsNull()) return torusFail("makeFace-failed", __LINE__, &f);
-                    addPcurvesOnFace(f, sewTol, false);
-                    {
-                        BRep_Builder Bb;
-                        for (TopExp_Explorer it(f, TopAbs_EDGE); it.More(); it.Next()) {
-                            TopoDS_Edge e = TopoDS::Edge(it.Current());
-                            Standard_Real a = 0, b = 0;
-                            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
-                            if (pc.IsNull()) continue;
-                            const gp_Pnt2d q0 = pc->Value(a), q1 = pc->Value(b);
-                            const double uMid = 0.5 * (q0.X() + q1.X());
-                            double shift = 0.0;
-                            if (uMid < 0.0)
-                                shift = -std::floor(uMid / (2.0 * kPi)) * 2.0 * kPi;
-                            else if (uMid > uSpan)
-                                shift = -std::ceil((uMid - uSpan) / (2.0 * kPi)) * 2.0 * kPi;
-                            // A short 3D chord whose pcurve takes the long way
-                            // around the period is the branch cut, not a rim.
-                            // Flip onto the short branch when that UV length is
-                            // closer to the chord than the current one, by more
-                            // than tau. A real rim arc (UV length ≈ chord) stays.
-                            if (shift == 0.0) {
-                                const double du = q1.X() - q0.X();
-                                const double dv = q1.Y() - q0.Y();
-                                if (std::fabs(du) > kPi) {
-                                    Standard_Real f3 = 0, l3 = 0;
-                                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
-                                    const double chord =
-                                        c3.IsNull() ? 0.0
-                                                    : c3->Value(f3).Distance(c3->Value(l3));
-                                    const double rho =
-                                        std::max(tsurf->MajorRadius() - tsurf->MinorRadius(),
-                                                 Precision::Confusion());
-                                    const double rmin =
-                                        std::max(tsurf->MinorRadius(), Precision::Confusion());
-                                    const double lenUV = std::hypot(du * rho, dv * rmin);
-                                    const double duAlt = (du > 0.0) ? (du - 2.0 * kPi)
-                                                                    : (du + 2.0 * kPi);
-                                    const double lenAlt = std::hypot(duAlt * rho, dv * rmin);
-                                    const double qMesh =
-                                        (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0)
-                                            ? mv.quantFloor
-                                            : 0.0;
-                                    const double tau = (qMesh > 0.0) ? (2.0 * qMesh) : 0.0;
-                                    if (lenAlt + tau < lenUV && lenAlt <= chord + tau)
-                                        shift = (du > 0.0) ? -2.0 * kPi : 2.0 * kPi;
-                                }
-                            }
-                            if (shift == 0.0) continue;
-                            Handle(Geom2d_Curve) moved = Handle(Geom2d_Curve)::DownCast(
-                                pc->Translated(gp_Vec2d(shift, 0.0)));
-                            if (moved.IsNull()) continue;
-                            Bb.UpdateEdge(e, moved, f, sewTol);
-                            Bb.Range(e, f, a, b);
-                        }
-                    }
-                    if ((diag130Enabled() || diagRelEnabled()) && !faceIsValid(f)) {
-                        int wi = 0;
-                        for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
-                            int ei = 0, nJump = 0;
-                            for (TopExp_Explorer ex(TopoDS::Wire(wx.Current()), TopAbs_EDGE);
-                                 ex.More(); ex.Next(), ++ei) {
-                                const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                    // A partial torus face on the wire as walked; when that face fails its
+                    // orientation check, on the reversed wire (partialTorusWireRetry).
+                    auto partialTorusFace = [&](const TopoDS_Wire& w, TopoDS_Face& f) -> bool {
+                        Handle(Geom_RectangularTrimmedSurface) trim =
+                            new Geom_RectangularTrimmedSurface(spun, 0.0, uSpan, r.vMin, r.vMax);
+                        f.Nullify();
+                        const bool got = makeFaceCopy(trim, w, inners, r.outwardNormal, f) ||
+                                         makeFaceKeep(trim, w, inners, r.outwardNormal, f);
+                        if (!got || f.IsNull()) return false;
+                        addPcurvesOnFace(f, sewTol, false);
+                        {
+                            BRep_Builder Bb;
+                            for (TopExp_Explorer it(f, TopAbs_EDGE); it.More(); it.Next()) {
+                                TopoDS_Edge e = TopoDS::Edge(it.Current());
                                 Standard_Real a = 0, b = 0;
                                 Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
                                 if (pc.IsNull()) continue;
-                                const gp_Pnt2d p0 = pc->Value(a), p1 = pc->Value(b);
-                                if (std::fabs(p1.X() - p0.X()) <= 0.4 &&
-                                    std::fabs(p1.Y() - p0.Y()) <= 0.4)
-                                    continue;
-                                if (nJump >= 8) continue;
-                                ++nJump;
-                                std::fprintf(stderr,
-                                             "DIAG_TORUSJUMP rid=%d wi=%d ei=%d uv0=(%.4f,%.4f) "
-                                             "uv1=(%.4f,%.4f)\n",
-                                             r.id, wi, ei, p0.X(), p0.Y(), p1.X(), p1.Y());
+                                const gp_Pnt2d q0 = pc->Value(a), q1 = pc->Value(b);
+                                const double uMid = 0.5 * (q0.X() + q1.X());
+                                double shift = 0.0;
+                                if (uMid < 0.0)
+                                    shift = -std::floor(uMid / (2.0 * kPi)) * 2.0 * kPi;
+                                else if (uMid > uSpan)
+                                    shift = -std::ceil((uMid - uSpan) / (2.0 * kPi)) * 2.0 * kPi;
+                                // A short 3D chord whose pcurve takes the long way
+                                // around the period is the branch cut, not a rim.
+                                // Flip onto the short branch when that UV length is
+                                // closer to the chord than the current one, by more
+                                // than tau. A real rim arc (UV length ≈ chord) stays.
+                                if (shift == 0.0) {
+                                    const double du = q1.X() - q0.X();
+                                    const double dv = q1.Y() - q0.Y();
+                                    if (std::fabs(du) > kPi) {
+                                        Standard_Real f3 = 0, l3 = 0;
+                                        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+                                        const double chord =
+                                            c3.IsNull() ? 0.0
+                                                        : c3->Value(f3).Distance(c3->Value(l3));
+                                        const double rho =
+                                            std::max(tsurf->MajorRadius() - tsurf->MinorRadius(),
+                                                     Precision::Confusion());
+                                        const double rmin =
+                                            std::max(tsurf->MinorRadius(), Precision::Confusion());
+                                        const double lenUV = std::hypot(du * rho, dv * rmin);
+                                        const double duAlt = (du > 0.0) ? (du - 2.0 * kPi)
+                                                                        : (du + 2.0 * kPi);
+                                        const double lenAlt = std::hypot(duAlt * rho, dv * rmin);
+                                        const double qMesh =
+                                            (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0)
+                                                ? mv.quantFloor
+                                                : 0.0;
+                                        const double tau = (qMesh > 0.0) ? (2.0 * qMesh) : 0.0;
+                                        if (lenAlt + tau < lenUV && lenAlt <= chord + tau)
+                                            shift = (du > 0.0) ? -2.0 * kPi : 2.0 * kPi;
+                                    }
+                                }
+                                if (shift == 0.0) continue;
+                                Handle(Geom2d_Curve) moved = Handle(Geom2d_Curve)::DownCast(
+                                    pc->Translated(gp_Vec2d(shift, 0.0)));
+                                if (moved.IsNull()) continue;
+                                Bb.UpdateEdge(e, moved, f, sewTol);
+                                Bb.Range(e, f, a, b);
                             }
                         }
+                        if ((diag130Enabled() || diagRelEnabled()) && !faceIsValid(f)) {
+                            int wi = 0;
+                            for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                                int ei = 0, nJump = 0;
+                                for (TopExp_Explorer ex(TopoDS::Wire(wx.Current()), TopAbs_EDGE);
+                                     ex.More(); ex.Next(), ++ei) {
+                                    const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                                    Standard_Real a = 0, b = 0;
+                                    Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                                    if (pc.IsNull()) continue;
+                                    const gp_Pnt2d p0 = pc->Value(a), p1 = pc->Value(b);
+                                    if (std::fabs(p1.X() - p0.X()) <= 0.4 &&
+                                        std::fabs(p1.Y() - p0.Y()) <= 0.4)
+                                        continue;
+                                    if (nJump >= 8) continue;
+                                    ++nJump;
+                                    std::fprintf(stderr,
+                                                 "DIAG_TORUSJUMP rid=%d wi=%d ei=%d uv0=(%.4f,%.4f) "
+                                                 "uv1=(%.4f,%.4f)\n",
+                                                 r.id, wi, ei, p0.X(), p0.Y(), p1.X(), p1.Y());
+                                }
+                            }
+                        }
+                        return true;
+                    };
+                    TopoDS_Face f;
+                    if (!partialTorusFace(ow, f)) return torusFail("makeFace-failed", __LINE__, &f);
+                    if (finishTorus(f, BuiltAs::Single)) return true;
+                    int orientBad = 0, otherBad = 0;
+                    faceCheckSplit(f, orientBad, otherBad);
+                    if (partialTorusWireRetry(orientBad, otherBad)) {
+                        TopoDS_Face fr;
+                        if (partialTorusFace(TopoDS::Wire(ow.Reversed()), fr) && finishTorus(fr, BuiltAs::Single))
+                            return true;
                     }
-                    if (!finishTorus(f, BuiltAs::Single)) return torusFail("invalid", __LINE__, &f);
+                    return torusFail("invalid", __LINE__, &f);
                     return true;
                 }
                 r.reject = (r.type == SurfType::Cone)     ? Reject::ConeNYI

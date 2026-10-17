@@ -128,12 +128,6 @@ int maxAreaFacet(const MeshView& mv, const std::vector<int>& tris, int nTri) {
     return best;
 }
 
-// D-fc-4.3. An accepted CylGrow region whose own maxVertexDev exceeds τ does
-// not certify its surface (D-fc-1.4), so a certified relational band may rob it.
-bool uncertifiedCylGrow(const Region& r, double tau) {
-    return r.origin == Origin::CylGrow && r.maxVertexDev > tau;
-}
-
 bool frameOf(const gp_XYZ& aUnit, gp_XYZ& u, gp_XYZ& v) {
     const double nx = std::abs(aUnit.X());
     const double ny = std::abs(aUnit.Y());
@@ -1249,16 +1243,16 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 if (t >= 0 && t < nTri) taken[t] = 1;
             }
         }
-        // D-fc-4.3. A CylGrow region whose own maxVertexDev exceeds τ is not a
-        // certified surface. Its triangles are candidates of the vote, and a
-        // certified band takes those that are I or Cover of its own surface
-        // (D-fc-3.2.7). The robbed region dissolves at commit. A region within
-        // τ is never touched.
+        // D-fc-4.3. A CylGrow or prior FilletStrip region whose own
+        // maxVertexDev exceeds τ is not a certified surface. Its triangles are
+        // candidates of the vote, and a certified band takes those that are I
+        // or Cover of its own surface (D-fc-3.2.7). The robbed region dissolves
+        // at commit. A region within τ is never touched.
         std::vector<int> uncertOwner((std::size_t)nTri, -1);
         std::vector<int> dissolved;
         for (int ri = 0; ri < (int)work.accepted.size(); ++ri) {
             const Region& acc = work.accepted[(std::size_t)ri];
-            if (!uncertifiedCylGrow(acc, tau)) continue;
+            if (!robbableUncertified(acc, tau)) continue;
             for (int t : acc.tris) {
                 if (t < 0 || t >= nTri) continue;
                 uncertOwner[(std::size_t)t] = ri;
@@ -1544,9 +1538,9 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             const ProvClaim stamp =
                 asFillet ? ProvClaim::ConsumedFillet : ProvClaim::ConsumedCylinder;
             // D-fc-4.3. Every uncertified region the band robbed dissolves. Its
-            // own provisionals return to Unclaimed (the rewrite below then
-            // drops the band's triangles from them), and its other triangles
-            // leave it.
+            // own provisionals (cylinder or fillet stamp) return to Unclaimed
+            // (the rewrite below then drops the band's triangles from them), and
+            // its other triangles leave it.
             std::vector<int> robbed;
             for (int t : band)
                 if (t >= 0 && t < nTri && uncertOwner[(std::size_t)t] >= 0)
@@ -1563,7 +1557,10 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (inBand[t]) ++nStolen;
                 }
                 for (Provisional& pr : work.provisionals) {
-                    if (pr.claim != ProvClaim::ConsumedCylinder || pr.tris.empty()) continue;
+                    if ((pr.claim != ProvClaim::ConsumedCylinder &&
+                         pr.claim != ProvClaim::ConsumedFillet) ||
+                        pr.tris.empty())
+                        continue;
                     bool own = true;
                     for (int t : pr.tris) {
                         if (t < 0 || t >= nTri || !inR[t]) {
@@ -1816,6 +1813,13 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         auto priorCornerUncertified = [&](const std::vector<int>& C,
                                            const std::vector<char>& inC,
                                            const gp_XYZ& axis) -> bool {
+            // D-fc-4.3: a strip C robs dissolves at commit, and one already
+            // dissolved is gone; neither is a blend partner at a corner.
+            std::vector<int> robs;
+            for (int t : C)
+                if (t >= 0 && t < nTri && uncertOwner[(std::size_t)t] >= 0)
+                    robs.push_back(uncertOwner[(std::size_t)t]);
+            std::sort(robs.begin(), robs.end());
             for (int t : C) {
                 if (t < 0 || t >= nTri) continue;
                 for (int s = 0; s < 3; ++s) {
@@ -1823,6 +1827,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     if (ot < 0 || ot >= nTri || inC[ot]) continue;
                     const int ai = priorFilTri[(std::size_t)ot];
                     if (ai < 0) continue;
+                    if (blendPartnerGone(robs, ai, work.accepted[(std::size_t)ai])) continue;
                     const gp_XYZ pa = cornerPt(mv, t, s);
                     const gp_XYZ pb = cornerPt(mv, t, (s + 1) % 3);
                     gp_XYZ dir = pb - pa;

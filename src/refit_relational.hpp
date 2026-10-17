@@ -85,6 +85,23 @@ inline double tanDistTol(double tolA, double tau) { return tolA + tau; }
 // D-fc-1.6(7). |a·n_A| <= (anchorTol(A) + τ) / L.
 inline double tanAngTol(double tolA, double tau, double L) { return (tolA + tau) / L; }
 
+// D-fc-4.3. An accepted cylinder region the extrude stage finds on entry whose
+// own maxVertexDev exceeds τ does not certify its surface (D-fc-1.4: B1
+// phantoms, and plane|plane strips of the segment's fillet stage that miss τ),
+// so a certified relational band may rob it; the robbed region dissolves. A
+// region within τ is never touched.
+inline bool robbableUncertified(const Region& r, double tau) {
+    return (r.origin == Origin::CylGrow || r.origin == Origin::FilletStrip) &&
+           r.type == SurfType::Cylinder && r.maxVertexDev > tau;
+}
+
+// D-fc-4.3 with D-fc-1.6.10. A prior strip the band robs dissolves at its commit,
+// and a strip an earlier band dissolved holds no triangle: neither is a blend
+// partner at a corner of the band. robs is sorted.
+inline bool blendPartnerGone(const std::vector<int>& robs, int ai, const Region& acc) {
+    return acc.tris.empty() || std::binary_search(robs.begin(), robs.end(), ai);
+}
+
 }}  // namespace stl2step::refit
 
 #endif  // STL2STEP_REFIT_RELATIONAL_HPP
