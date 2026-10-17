@@ -308,9 +308,16 @@ bool claimChamferConesC(const MeshView& mv, const SegmentParams& p, const Derive
 // D-fc-1.3 / D-fc-1.12. Wave-1 relational stages. W1.0 definitions are no-op
 // stubs; the owning lane fills each TU. RelRevolveMode selects H0 (Line) or
 // H1 (Torus).
+struct MeshRing;  // refit_relational_arc.hpp (ring donors)
+
 enum class RelRevolveMode : uint8_t { Line, Torus };
 bool claimRelExtrude (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
 bool refuteNgonByLaw (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+// D-fc-5.17 F-2 / D-fc-2 P-TL: a mesh ring loop is a polygon (not a rim) when
+// its azimuth step is no finer than a tess-law witness at radius <= R + tau.
+bool meshRingRefutedByTessLaw(const MeshView&, const SegmentParams&, double tau,
+                              const SegmentWork&, const MeshRing&,
+                              const std::vector<const MeshRing*>& peerRings);
 bool claimRelRevolve (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
 bool reclaimRelational(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
 

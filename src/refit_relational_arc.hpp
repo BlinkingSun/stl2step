@@ -156,6 +156,49 @@ int leaveOneSourceOutStations(const std::vector<std::array<gp_XYZ, 3>>& triPts,
 bool claimSectionFillets(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                          SegmentWork& work, const std::vector<SectionCircle>& circles);
 
+// D-fc-5.11 F1. A ring: a closed loop of mesh vertices that is planar within
+// tau and circular within tau (the ring path's PCA plane + algebraic circle,
+// refit_relational_reclaim.cpp ringCircle) with at least
+// minStations(kParamsCircle) azimuth stations about its own circle. n is the
+// ring plane's unit normal, c the circle's centre; verts are local vertex ids
+// in loop order. Bodies in refit_relational_reclaim.cpp.
+struct MeshRing {
+    std::vector<int> verts;
+    gp_XYZ n, c;
+    double R = 0, planeDev = 0, circDev = 0;
+    int stations = 0;
+};
+bool certifyMeshRing(const std::vector<gp_XYZ>& pts, double tau, MeshRing& out);
+// D-fc-5.17 F-2: tessellation-law refutation for ring donors (decl in
+// refit_internal.hpp; MeshRing defined here).
+
+// D-fc-5.11 F1 ring donors: the Unclaimed plane charts whose whole boundary is
+// two closed loops that are both rings lying in one plane within tau -- a planar
+// annulus between two circles, the constant-z station of a surface of
+// revolution. One entry per chart, in provisional order.
+struct AnnulusRings {
+    int chart = -1;
+    int minTri = 0;
+    MeshRing ring[2];
+};
+std::vector<AnnulusRings> annulusRingCharts(const MeshView& mv, const SegmentWork& work,
+                                            double tau);
+
+// D-fc-5.11 F2: a certified coaxial band refused same-surface against the
+// accepted partial CylGrow cylinder `acc` (radiusAcc: its radius about the family axis)
+// is merged into it by the D-fc-4.4 closure -- mutual vertex containment at tau,
+// strictly overlapping axial extents, one joint least-squares cylinder within
+// tau, the Unclaimed I/Cover triangles inside the union's extent filled -- and
+// commits only as ONE edge-component that is a disk. False: deferred unchanged.
+bool mergeSameSurfaceBand(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                          SegmentWork& work, int acc, const std::vector<int>& band,
+                          const gp_XYZ& origin, const gp_XYZ& axis, double radiusAcc,
+                          double radius);
+
+// The closed boundary loops of a triangle set (local vertex ids, loop order);
+// empty when its boundary is not a union of simple loops.
+std::vector<std::vector<int>> triSetLoops(const MeshView& mv, const std::vector<int>& tris);
+
 }  // namespace refit
 }  // namespace stl2step
 

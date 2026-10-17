@@ -10,6 +10,7 @@
 
 #include "refit_internal.hpp"
 #include "refit_relational.hpp"
+#include "refit_relational_arc.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1031,6 +1032,50 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
                      nRefute + nKeep + nNoref, nRefute, nKeep, nNoref);
     }
     return true;
+}
+
+// D-fc-5.17 F-2 / D-fc-2 P-TL: a concyclic N-gon loop is not a surface rim.
+bool meshRingRefutedByTessLaw(const MeshView& mv, const SegmentParams& p, double tau,
+                              const SegmentWork& work, const MeshRing& ring,
+                              const std::vector<const MeshRing*>& peerRings) {
+    const int nAz = !ring.verts.empty() ? static_cast<int>(ring.verts.size())
+                                        : ring.stations;
+    if (nAz < minStations(kParamsCircle) || !(ring.R > 0.0) || !(tau > 0.0)) return false;
+    const double step = kTwoPi / static_cast<double>(nAz);
+
+    std::vector<Meas> meas;
+    meas.reserve(work.accepted.size());
+    int nextRailId = 0;
+    for (int i = 0; i < static_cast<int>(work.accepted.size()); ++i) {
+        Meas m;
+        if (measureRef(mv, p, tau, i, work.accepted[static_cast<size_t>(i)], nextRailId, m) &&
+            m.certified && !m.isNgon)
+            meas.push_back(std::move(m));
+    }
+    markAdmissible(meas, tau);
+
+    auto stepHitsWitness = [&](double rBound, double uBound) -> bool {
+        return std::isfinite(uBound) && step >= uBound;
+    };
+
+    for (const Meas& ref : meas) {
+        for (const Rail& a : ref.rails) {
+            if (!a.admissible || a.k < 2) continue;
+            if (!(a.r <= ring.R + tau)) continue;
+            if (stepHitsWitness(ring.R, a.U)) return true;
+        }
+    }
+    for (const MeshRing* pr : peerRings) {
+        if (!pr || pr == &ring) continue;
+        if (pr->stations < minStations(kParamsCircle)) continue;
+        const int nP = static_cast<int>(pr->verts.size());
+        if (nP < minStations(kParamsCircle)) continue;
+        if (!(pr->R <= ring.R + tau)) continue;
+        // Equal-step rim: maxStep = 2π/k, U = maxStep·k/(k−1) = 2π/(k−1).
+        const double uPeer = kTwoPi / static_cast<double>(pr->stations - 1);
+        if (stepHitsWitness(ring.R, uPeer)) return true;
+    }
+    return false;
 }
 
 }}  // namespace stl2step::refit
