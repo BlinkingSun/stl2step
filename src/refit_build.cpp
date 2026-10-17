@@ -19197,7 +19197,6 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             return true;
                     }
                     return torusFail("invalid", __LINE__, &f);
-                    return true;
                 }
                 r.reject = (r.type == SurfType::Cone)     ? Reject::ConeNYI
                            : (r.type == SurfType::Sphere) ? Reject::SphereNYI
@@ -19382,11 +19381,33 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
             const size_t namingEnd = torusNamingEnd(namesTorus);
+            // The partner rule below: a closed torus built whole beside a region id.
+            auto builtClosedTorusBeside = [&](int id) -> const Region* {
+                for (const BoundaryChain& ch : rs.chains) {
+                    if (ch.regA != id && ch.regB != id) continue;
+                    const Region* o = regionById(rs, ch.regA == id ? ch.regB : ch.regA);
+                    if (o && o->origin == Origin::TorusBlend && o->closed360 &&
+                        o->builtAs == BuiltAs::Seamed360)
+                        return o;
+                }
+                return nullptr;
+            };
+            // Under the snapshot a failed cap partner decides the round as a failed
+            // torus does (closedTorusPartnerFailed); read once the naming regions
+            // are built, the only builds that can change it.
+            bool partnerRead = false, partnerFailed = false;
             for (size_t k = 0; k < buildOrder.size(); k++) {
-                if (torusRoundDecided(torusU3Failed, k, namingEnd)) {
+                if (!partnerRead && k >= namingEnd) {
+                    partnerRead = true;
+                    partnerFailed = torusSnapshot &&
+                                    closedTorusPartnerFailed(failedIds, [&](int id) {
+                                        return builtClosedTorusBeside(id) != nullptr;
+                                    });
+                }
+                if (torusRoundDecided(torusU3Failed || partnerFailed, k, namingEnd)) {
                     if (diagRelEnabled())
-                        std::fprintf(stderr, "DIAG_TORUS_U3 round decided built=%zu of %zu\n", k,
-                                     buildOrder.size());
+                        std::fprintf(stderr, "DIAG_TORUS_U3 round decided built=%zu of %zu%s\n", k,
+                                     buildOrder.size(), torusU3Failed ? "" : " by=partner");
                     break;
                 }
                 Region& r = rs.regions[buildOrder[k]];
@@ -19435,19 +19456,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // pre-T on false).
             if (torusSnapshot) {
                 for (int id : failedIds) {
-                    for (const BoundaryChain& ch : rs.chains) {
-                        if (ch.regA != id && ch.regB != id) continue;
-                        const Region* o = regionById(rs, ch.regA == id ? ch.regB : ch.regA);
-                        if (o && o->origin == Origin::TorusBlend && o->closed360 &&
-                            o->builtAs == BuiltAs::Seamed360) {
-                            noteTorusFailed(rs, *o);
-                            if (diagRelEnabled())
-                                std::fprintf(stderr,
-                                             "DIAG_TORUS_U3 partner=%d of torus=%d failed: pre-T\n",
-                                             id, o->id);
-                            out.clear();
-                            return false;
-                        }
+                    if (const Region* o = builtClosedTorusBeside(id)) {
+                        noteTorusFailed(rs, *o);
+                        if (diagRelEnabled())
+                            std::fprintf(stderr,
+                                         "DIAG_TORUS_U3 partner=%d of torus=%d failed: pre-T\n",
+                                         id, o->id);
+                        out.clear();
+                        return false;
                     }
                 }
             }
