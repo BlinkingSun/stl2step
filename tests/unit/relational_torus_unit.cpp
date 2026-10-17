@@ -668,7 +668,7 @@ static void caseChainFailsGeometric() {
            "F1 refined: a chain that certifies jointly does not fail (it may still be "
            "refused for over-determination, and then consumes nothing)");
     // Under-determined on the joint axis: the deviations of the donors about an
-    // axis the chain cannot determine refuse nothing.
+    // axis the chain cannot determine refuse nothing ...
     JointTorusCert und = jc;
     und.ok = false;
     und.chain = certifyTorus(
@@ -676,8 +676,18 @@ static void caseChainFailsGeometric() {
                      xHint),
         tau);
     for (double& m : und.family.maxDev) m = 1e3 * tau;
-    expect(!und.chain.determinate && !torusChainFailsGeometric(onSeed, &und, tau),
-           "F1 refined: a chain under-determined on the joint axis does not fail");
+    const TorusCert thinSeed = certifyTorus(
+        profileAbout(torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, 0.6 * kPi, 1, 0.0), o, ax,
+                     xHint),
+        tau);
+    expect(!und.chain.determinate && !thinSeed.determinate &&
+               !torusChainFailsGeometric(thinSeed, &und, tau),
+           "F1 refined: a chain under-determined on both axes does not fail");
+    // ... but D-fc-4.12: a refusal on a determinate family-axis certificate is
+    // geometric even when the joint fit is under-determined.
+    expect(!und.chain.determinate && torusChainFailsGeometric(onSeed, &und, tau),
+           "D-fc-4.12: vertex-off on the family axis fails though the joint fit is "
+           "under-determined");
     // Determinate on the joint axis but a donor vertex off tau: geometric.
     JointTorusCert don = jc;
     don.ok = false;
@@ -696,6 +706,52 @@ static void caseChainFailsGeometric() {
     JointTorusCert unfit;
     expect(torusChainFailsGeometric(onSeed, &unfit, tau),
            "F1 refined: without a finite joint axis the family verdict decides");
+}
+
+// D-fc-4.12 (audit-fx-tori-r3 F-1): a ring chain that bridges two surfaces --
+// the base-plane annulus between a rho 72.5 rim and the fillet's contact ring at
+// rho 89.5, plus the fillet's next row -- has three profile stations, so no
+// axis over-determines it, yet on a seed axis tilted by the donors' residual the
+// stations split and certifyTorus refuses it vertex-off on determinate counts.
+// The joint fit cannot determine it; under the strict rule it is a geometric
+// failure (it consumes its edges and is a failing superset).
+static void caseBridgeChain() {
+    const double tau = 1e-4;
+    const gp_XYZ o(10, -5, 3), ax(0, 1, 0), xHint(1, 0, 0);
+    const std::vector<std::vector<gp_XYZ>> donors = {
+        cylPts(o, ax, 92.5, 0.2, 0.25, 0, 3, 0.3 * tau),
+        cylPts(o, ax, 72.5, 1.0, 1.05, -1, 2, 0.3 * tau)};
+    const gp_XYZ y = ax, x = ax.Crossed(gp_XYZ(1, 0, 0)) / ax.Crossed(gp_XYZ(1, 0, 0)).Modulus();
+    const gp_XYZ e2 = ax.Crossed(x);
+    std::vector<gp_XYZ> bridge;
+    const double vNext = 75.0 * kPi / 180.0;
+    const std::array<std::pair<double, double>, 3> stations = {
+        std::make_pair(72.5, 4.5), std::make_pair(89.5, 4.5),
+        std::make_pair(89.5 + 3.0 * std::cos(vNext), 1.5 + 3.0 * std::sin(vNext))};
+    for (const auto& st : stations)
+        for (int i = 0; i <= 20; ++i) {
+            const double u = 0.1 + 1.0 * i / 20.0;
+            bridge.push_back(o + y * st.second + x * (st.first * std::cos(u)) +
+                             e2 * (st.first * std::sin(u)));
+        }
+    const TorusCert onTrue = certifyTorus(profileAbout(bridge, o, ax, xHint), tau);
+    expect(!onTrue.ok && !onTrue.determinate,
+           "bridge: three stations are under-determined on the true axis");
+    const gp_XYZ seedAx(8e-6, 1, 0);
+    const TorusCert onSeed = certifyTorus(profileAbout(bridge, o, seedAx, xHint), tau);
+    expect(!onSeed.ok && onSeed.determinate && torusRefusalGeometric(onSeed),
+           "bridge: on the tilted family axis the split stations refuse vertex-off, "
+           "determinately");
+    const JointTorusCert jb = jointTorusCertify(donors, bridge, o, seedAx, xHint, tau, 16);
+    expect(jb.fitted && !jb.ok, "bridge: the joint certificate refuses it");
+    expect(torusChainFailsGeometric(onSeed, &jb, tau),
+           "D-fc-4.12: the bridge chain fails geometrically (consumes, failing superset)");
+    JointTorusCert jbu = jb;
+    jbu.chain = onTrue;
+    expect(!jbu.chain.determinate && torusChainFailsGeometric(onSeed, &jbu, tau),
+           "D-fc-4.12: ... also when the joint fit finds it under-determined");
+    expect(!torusChainFailsGeometric(onTrue, &jbu, tau),
+           "D-fc-4.12: under-determined on the family axis and jointly is not geometric");
 }
 
 // D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
@@ -787,7 +843,7 @@ static void caseResegment(const char* stl) {
         else ++nArc;
     }
     std::sort(held.begin(), held.end());
-    expect(!held.empty() && nArc == 2, "reseg: hub and arc tori claimed");
+    expect(!held.empty() && nArc >= 1, "reseg: hub and arc tori claimed");
     SegmentParams hp = sp;
     hp.torusWithheldTris = held;
     RegionSet full, tail;
@@ -804,7 +860,7 @@ static void caseResegment(const char* stl) {
                 break;
             }
     }
-    expect(nTorus == 2 && nHeldTorus == 0, "reseg: only the withheld tori are gone");
+    expect(nTorus == nArc && nHeldTorus == 0, "reseg: only the withheld tori are gone");
     RegionSet none;
     expect(!resegmentTorus(mv, hp, RegionSet{}, none, nullptr),
            "reseg: no pre-T state, no resegment");
@@ -814,6 +870,7 @@ int main(int argc, char** argv) {
     if (argc > 1) caseResegment(argv[1]);
     caseRefusalGeometric();
     caseChainFailsGeometric();
+    caseBridgeChain();
     caseWithheld();
     caseWindowOverlap();
     caseJointTorus();

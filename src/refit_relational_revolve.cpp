@@ -1879,6 +1879,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
     struct Ring {
         double rho = 0, z = 0;
         int minV = 0;
+        int nV = 0;
     };
     std::vector<Ring> rings;
     std::vector<int> ringOf((std::size_t)maxV + 1, -1);
@@ -1901,6 +1902,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             }
             ring.rho = sr / (double)g.size();
             ring.z = sz / (double)g.size();
+            ring.nV = (int)g.size();
             made.emplace_back(ring, std::move(g));
         }
         std::sort(made.begin(), made.end(), [](const auto& a, const auto& b) {
@@ -2412,6 +2414,13 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                          jointRan ? torusWhy(jointCert.chain) : "-", chainOk ? 1 : 0,
                          chainGeomFail ? 1 : 0, queue.size(), nBandClaimed, nBandGeom,
                          nBandOverdet, nBandOther, consumes ? 1 : 0, chainGeomFail ? 1 : 0);
+            // The chain's rings: id:rho/z/vertex count about the scan frame.
+            std::fprintf(stderr, "DIAG_REL_TORUS_RINGS seed=%d n=%zu", minTriOf(chainCands),
+                         chain.size());
+            for (int id : chain)
+                std::fprintf(stderr, " %d:%.6f/%.6f/%d", id, rings[(std::size_t)id].rho,
+                             rings[(std::size_t)id].z, rings[(std::size_t)id].nV);
+            std::fprintf(stderr, "\n");
         }
     }
     scan.scanned = true;

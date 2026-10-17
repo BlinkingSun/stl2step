@@ -1731,14 +1731,15 @@ bool torusRefusalGeometric(const TorusCert& c) {
 
 bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* joint, double tau) {
     if (onFamily.ok) return false;
-    if (joint && joint->fitted) {
-        // An under-determined chain does not determine the joint axis either:
-        // its donors' deviations about that axis refuse nothing.
-        if (joint->ok || !joint->chain.determinate) return false;
-        if (!jointAxisCertifies(joint->family, tau)) return true;
-        return torusRefusalGeometric(joint->chain);
-    }
-    return torusRefusalGeometric(onFamily);
+    if (joint && joint->ok) return false;
+    // D-fc-4.12: a refusal on a determinate family-axis certificate is geometric
+    // whatever the joint fit made of the chain, under-determined included.
+    if (torusRefusalGeometric(onFamily)) return true;
+    // An under-determined chain does not determine the joint axis either: its
+    // donors' deviations about that axis refuse nothing.
+    if (!joint || !joint->fitted || !joint->chain.determinate) return false;
+    if (!jointAxisCertifies(joint->family, tau)) return true;
+    return torusRefusalGeometric(joint->chain);
 }
 
 int torusSidesOf(int cols, double span, bool closed) {
