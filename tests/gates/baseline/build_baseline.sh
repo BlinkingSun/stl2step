@@ -99,6 +99,28 @@ fi
 if [[ -z "$OCCT_DIR" && -d /opt/homebrew/lib/cmake/opencascade ]]; then
     OCCT_DIR="/opt/homebrew/lib/cmake/opencascade"
 fi
+# The Linux preflight links g++-13 against the OCCT env's libstdc++ through
+# -L<env lib> in the linker flags and pins that dir as the build rpath. Without
+# them the baseline links g++-13's own runtime and dies on
+# __cxa_call_terminate@CXXABI_1.3.15, G0.1 XFAILs on every fixture and G0.3
+# falls back to its own-off-path twin. Propagated only when non-empty (macOS and
+# hosted CI leave them empty, so their configure line is unchanged) and never to
+# a Visual Studio generator, whose cache holds MSVC defaults (/machine:x64).
+EXE_LINKER_FLAGS="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_EXE_LINKER_FLAGS || true)"
+SHARED_LINKER_FLAGS="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_SHARED_LINKER_FLAGS || true)"
+BUILD_RPATH="$(cache_get "$CURRENT_BUILD/CMakeCache.txt" CMAKE_BUILD_RPATH || true)"
+LINK_VARS=()
+if ! is_vs_generator "$GENERATOR"; then
+    if [[ -n "$EXE_LINKER_FLAGS" ]]; then
+        LINK_VARS+=("CMAKE_EXE_LINKER_FLAGS=$EXE_LINKER_FLAGS")
+    fi
+    if [[ -n "$SHARED_LINKER_FLAGS" ]]; then
+        LINK_VARS+=("CMAKE_SHARED_LINKER_FLAGS=$SHARED_LINKER_FLAGS")
+    fi
+    if [[ -n "$BUILD_RPATH" ]]; then
+        LINK_VARS+=("CMAKE_BUILD_RPATH=$BUILD_RPATH")
+    fi
+fi
 
 src_commit() {
     if [[ -e "$SRC_DIR/.git" ]]; then
@@ -172,6 +194,15 @@ else
         echo "build cache generator/type mismatch ($have_gen/$have_bt vs ${GENERATOR:-<default>}/$BUILD_TYPE); reconfiguring"
         need_configure=1
     fi
+    # A cache configured before the link settings were propagated (or by hand)
+    # is reconfigured so it links the same runtime as the current tree.
+    for kv in ${LINK_VARS[@]+"${LINK_VARS[@]}"}; do
+        have_kv="$(cache_get "$BUILD_DIR/CMakeCache.txt" "${kv%%=*}" || true)"
+        if [[ "$have_kv" != "${kv#*=}" ]]; then
+            echo "build cache ${kv%%=*} mismatch ('$have_kv' vs '${kv#*=}'); reconfiguring"
+            need_configure=1
+        fi
+    done
 fi
 
 CMAKE_ARGS=(
@@ -202,6 +233,9 @@ fi
 if [[ -n "$OCCT_DIR" ]]; then
     CMAKE_ARGS+=(-DOpenCASCADE_DIR="$OCCT_DIR")
 fi
+for kv in ${LINK_VARS[@]+"${LINK_VARS[@]}"}; do
+    CMAKE_ARGS+=(-D"$kv")
+done
 
 if [[ "$need_configure" -eq 1 ]]; then
     echo "configuring baseline (${GENERATOR:-<cmake default>} / $BUILD_TYPE)"
