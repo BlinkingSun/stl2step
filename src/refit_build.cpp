@@ -18385,8 +18385,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         }
                     }
                     dumpFaceTopo(r.id, f, "coneface", "pre-ensure");
-                    const bool fv = ensureFaceValid(f, meshTolCap(mv, &r));
-                    dumpFaceTopo(r.id, f, "coneface", "post-ensure");
+                    bool wiresClosed = true;
+                    for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) {
+                        if (!BRep_Tool::IsClosed(wx.Current())) wiresClosed = false;
+                    }
+                    const bool fv = faceIsValid(f) && wiresClosed;
                     if (diagP2Enabled() || diag130Enabled()) {
                         std::fprintf(stderr,
                                      "DIAG_CONEFACE rid=%d R=%.4f nTri=%zu why=BUILT simple=%d "
@@ -18430,10 +18433,18 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         } catch (const Standard_Failure&) {
                         }
                     }
-                    // Heal-not-revert (D-train-cone-2 3): an invalid cone face must
-                    // not publish. buildOneRegion returning false takes the landed
-                    // Edge-failure R1 rung (explode this region, keep the component).
+                    // Heal-not-revert (D-fc-5.17 F-1): invalid or facet-capped
+                    // composite rims do not publish (exact rims only).
                     if (!fv) return coneFail("face-invalid", simple ? 1.0 : 0.0, 0.0);
+                    bool facetCapRim = false;
+                    for (const Loop& lp : r.loops) {
+                        for (int cix : lp.chainIdx) {
+                            const Region* pr = regionById(rs, capPartnerRid(cix, r, rs));
+                            if (pr && !isAnalytic(pr)) facetCapRim = true;
+                        }
+                    }
+                    if (facetCapRim && !simple)
+                        return coneFail("facet-rim", 0.0, 0.0);
                     r.builtAs = BuiltAs::Seamed360;
                     acc.push_back(f);
                     return true;
