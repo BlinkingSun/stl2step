@@ -52,6 +52,8 @@ constexpr double kTiny = 1e-30;
 constexpr int kMinAxialLevels = 2;
 // D-fc-4.5: a cover triangle has >= 2 vertices within tau (the third within sDev).
 constexpr int kCoverOnVertices = 2;
+// A closed wall between two rims is an annulus: two boundary loops (topology).
+constexpr int kAnnulusLoops = 2;
 
 bool diagOn() {
     const char* e = std::getenv("STL2STEP_DIAG_REL");
@@ -1034,6 +1036,336 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
     return committed;
 }
 
+// ---- Ring donor (lowfold F2): circular loops on identified planes ---------------
+// The closed boundary loops of one Unclaimed plane chart, in ascending vertex order.
+// A loop is a cycle of the chart's boundary-edge graph through vertices of degree 2.
+std::vector<std::vector<int>> chartLoops(const RMesh& rm, const std::vector<int>& chartTris,
+                                         const std::vector<int>& triProv, int pi) {
+    const MeshView& mv = *rm.mv;
+    std::map<int, std::vector<int>> g;
+    for (int t : chartTris)
+        for (int s = 0; s < 3; ++s) {
+            const int o = rm.nbr(t, s);
+            if (o >= 0 && triProv[(std::size_t)o] == pi) continue;
+            const int e = mv.triEdges[t][s];
+            if (e < 0 || (std::size_t)e >= mv.nEdge) continue;
+            const auto& ev = mv.compEdges[e];
+            g[ev.first].push_back(ev.second);
+            g[ev.second].push_back(ev.first);
+        }
+    std::vector<std::vector<int>> loops;
+    std::set<int> used;
+    for (const auto& kv : g) {
+        const int st = kv.first;
+        if (used.count(st) || kv.second.size() != 2) continue;
+        std::vector<int> loop{st};
+        used.insert(st);
+        int prev = -1, cur = st;
+        bool ok = true;
+        for (;;) {
+            const auto& nb = g[cur];
+            if (nb.size() != 2) {
+                ok = false;
+                break;
+            }
+            const int nx = nb[0] != prev ? nb[0] : nb[1];
+            prev = cur;
+            cur = nx;
+            if (cur == st) break;
+            if (!used.insert(cur).second) {
+                ok = false;
+                break;
+            }
+            loop.push_back(cur);
+        }
+        if (ok) loops.push_back(std::move(loop));
+    }
+    return loops;
+}
+
+// Plane and circle of a loop's vertices (PCA plane, then the algebraic circle in it).
+// planeDev / circDev are the max vertex residuals of each fit.
+bool ringCircle(const std::vector<gp_XYZ>& pts, gp_XYZ& n, gp_XYZ& c, double& R,
+                double& planeDev, double& circDev) {
+    if (pts.size() < 3) return false;
+    gp_XYZ cm(0, 0, 0);
+    for (const gp_XYZ& q : pts) cm += q;
+    cm /= (double)pts.size();
+    std::array<std::array<double, 3>, 3> cov{{{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}};
+    for (const gp_XYZ& q : pts) {
+        const gp_XYZ d = q - cm;
+        const double v[3] = {d.X(), d.Y(), d.Z()};
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b) cov[a][b] += v[a] * v[b];
+    }
+    std::array<double, 3> ev{};
+    std::array<std::array<double, 3>, 3> evec{};
+    if (!jacobiEigenSymmetric3(cov, ev, evec)) return false;
+    n = gp_XYZ(evec[0][0], evec[0][1], evec[0][2]);
+    if (n.Modulus() < kTiny) return false;
+    n /= n.Modulus();
+    planeDev = 0;
+    for (const gp_XYZ& q : pts) planeDev = std::max(planeDev, std::abs((q - cm).Dot(n)));
+    gp_XYZ e1 = std::abs(n.X()) < 0.9 ? gp_XYZ(1, 0, 0).Crossed(n) : gp_XYZ(0, 1, 0).Crossed(n);
+    e1 /= e1.Modulus();
+    const gp_XYZ e2 = n.Crossed(e1);
+    // x^2 + y^2 = a x + b y + k, least squares (3 x 3 normal equations).
+    double M[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {0, 0, 0, 0}};
+    for (const gp_XYZ& q : pts) {
+        const gp_XYZ d = q - cm;
+        const double x = d.Dot(e1), y = d.Dot(e2), z = x * x + y * y;
+        const double row[4] = {x, y, 1.0, z};
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 4; ++j) M[i][j] += row[i] * row[j];
+    }
+    for (int col = 0; col < 3; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < 3; ++r)
+            if (std::abs(M[r][col]) > std::abs(M[piv][col])) piv = r;
+        for (int k = 0; k < 4; ++k) std::swap(M[col][k], M[piv][k]);
+        if (std::abs(M[col][col]) < kTiny) return false;
+        for (int r = 0; r < 3; ++r) {
+            if (r == col) continue;
+            const double f = M[r][col] / M[col][col];
+            for (int k = 0; k < 4; ++k) M[r][k] -= f * M[col][k];
+        }
+    }
+    const double a = M[0][3] / M[0][0], b = M[1][3] / M[1][1], k = M[2][3] / M[2][2];
+    const double cx = 0.5 * a, cy = 0.5 * b;
+    R = std::sqrt(std::max(0.0, k + cx * cx + cy * cy));
+    c = cm + e1 * cx + e2 * cy;
+    circDev = 0;
+    for (const gp_XYZ& q : pts)
+        circDev = std::max(circDev, std::abs(n.Crossed(q - c).Modulus() - R));
+    return R > 0;
+}
+
+// Largest dihedral fold (radians) across the band's own interior edges.
+double bandMaxFold(const RMesh& rm, const std::vector<int>& band, const std::vector<char>& inB) {
+    double mx = 0;
+    for (int t : band)
+        for (int s = 0; s < 3; ++s) {
+            const int w = rm.nbr(t, s);
+            if (w < 0 || w < t || !inB[(std::size_t)w]) continue;
+            const double d = triNormal(*rm.mv, t).XYZ().Dot(triNormal(*rm.mv, w).XYZ());
+            mx = std::max(mx, std::acos(std::max(-1.0, std::min(1.0, d))));
+        }
+    return mx;
+}
+
+// A closed boundary loop of an Unclaimed plane chart whose vertices are planar and
+// circular within tau names an axis where no stage found a cylinder (TRAINING-REVIEW
+// #3; spike-fc3-lowfold F2). The band is the free triangles across the loop grown at
+// tau about that cylinder, refit and regrown to a fixed point (D-fc-1.6.9), certified
+// with every vertex within tau, over-determined like a donor (D-fc-1.4) and closed by
+// the D2 rule. A band that reaches an owned triangle on its own surface is the same
+// surface as that region (D-130-14; the heal / closure passes own it) and is refused.
+int claimRingCylinders(const RMesh& rm, const SegmentParams& p, const DerivedTols& tol,
+                       double tau, SegmentWork& work) {
+    const MeshView& mv = *rm.mv;
+    if (!mv.compEdges || !mv.compVtx) return 0;
+    const int nTri = (int)mv.nTri;
+    const int maxIt = std::max(1, p.maxRefineIters);
+    std::vector<int> owner((std::size_t)nTri, -1), triProv((std::size_t)nTri, -1);
+    for (int i = 0; i < (int)work.accepted.size(); ++i)
+        for (int t : work.accepted[(std::size_t)i].tris)
+            if (t >= 0 && t < nTri) owner[(std::size_t)t] = i;
+    for (int i = 0; i < (int)work.provisionals.size(); ++i)
+        for (int t : work.provisionals[(std::size_t)i].tris)
+            if (t >= 0 && t < nTri) triProv[(std::size_t)t] = i;
+    auto isFree = [&](int t) {
+        if (t < 0 || t >= nTri || owner[(std::size_t)t] >= 0) return false;
+        const int pi = triProv[(std::size_t)t];
+        return pi >= 0 && work.provisionals[(std::size_t)pi].claim == ProvClaim::Unclaimed;
+    };
+    auto lpt = [&](int lv) { return mv.pts[mv.compVtx[lv]]; };
+
+    int claimed = 0;
+    const int nProv0 = (int)work.provisionals.size();
+    std::vector<char> inB((std::size_t)nTri, 0);
+    for (int pi = 0; pi < nProv0; ++pi) {
+        const bool anchorFree = work.provisionals[(std::size_t)pi].claim == ProvClaim::Unclaimed;
+        if (!anchorFree && !diagOn()) continue;
+        const std::vector<int> chart = work.provisionals[(std::size_t)pi].tris;
+        for (const std::vector<int>& loop : chartLoops(rm, chart, triProv, pi)) {
+            // Over-determined loop: a circle in its plane needs minStations(kParamsCircle).
+            if ((int)loop.size() < minStations(kParamsCircle)) continue;
+            std::vector<gp_XYZ> lp;
+            for (int lv : loop) lp.push_back(lpt(lv));
+            gp_XYZ n, c0;
+            double R0 = 0, planeDev = 0, circDev = 0;
+            if (!ringCircle(lp, n, c0, R0, planeDev, circDev)) continue;
+            if (!(planeDev <= tau) || !(circDev <= tau) || !(R0 > tau)) continue;
+            if (!anchorFree) {
+                // Print-only: a circular loop on a chart another stage already claimed.
+                std::fprintf(stderr,
+                             "DIAG_REL_RING seed=%d loop=%zu R=%.9g planeTau=%.4f circTau=%.4f "
+                             "chartClaim=%d why=no-anchor\n",
+                             minTriOf(chart), loop.size(), R0, planeDev / tau, circDev / tau,
+                             (int)work.provisionals[(std::size_t)pi].claim);
+                continue;
+            }
+            Cyl S{c0, n, R0};
+            BandDiag dg;
+            dg.mode = "ring";
+            dg.seed = minTriOf(chart);
+            dg.radius = R0;
+            dg.axis = n;
+            const std::set<int> lset(loop.begin(), loop.end());
+            // Seeds: the triangles across the loop's own edges.
+            std::vector<int> seeds;
+            for (int t : chart)
+                for (int s = 0; s < 3; ++s) {
+                    const int e = mv.triEdges[t][s];
+                    if (e < 0 || (std::size_t)e >= mv.nEdge) continue;
+                    if (!lset.count(mv.compEdges[e].first) || !lset.count(mv.compEdges[e].second))
+                        continue;
+                    const int o = rm.nbr(t, s);
+                    if (o >= 0 && triProv[(std::size_t)o] != pi) seeds.push_back(o);
+                }
+            std::sort(seeds.begin(), seeds.end());
+            seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+            std::vector<int> band;
+            bool touchesOwned = false, stable = false;
+            auto grow = [&](const Cyl& s) {
+                std::fill(inB.begin(), inB.end(), 0);
+                std::vector<int> out, st;
+                touchesOwned = false;
+                auto visit = [&](int w) {
+                    if (w < 0 || inB[(std::size_t)w] || triProv[(std::size_t)w] == pi) return;
+                    // A wall triangle spans two axial levels (D-fc-3.2.1 section ear); one
+                    // whose vertices stand on one rim is a cap chord across it.
+                    if (triDev(mv, w, s) > tau || triLevels(mv, w, s, tau) < kMinAxialLevels)
+                        return;
+                    if (!isFree(w)) {
+                        touchesOwned = true;
+                        return;
+                    }
+                    inB[(std::size_t)w] = 1;
+                    out.push_back(w);
+                    st.push_back(w);
+                };
+                for (int w : seeds) visit(w);
+                while (!st.empty()) {
+                    const int u = st.back();
+                    st.pop_back();
+                    for (int k = 0; k < 3; ++k) visit(rm.nbr(u, k));
+                }
+                std::sort(out.begin(), out.end());
+                return out;
+            };
+            for (int it = 0; it < maxIt; ++it) {
+                std::vector<int> b = grow(S);
+                if (b.empty()) break;
+                gp_Dir fa;
+                gp_Pnt fc;
+                double fr = 0, fres = 0;
+                if (!cylinderFitLS(mv, b, gp_Dir(S.A), fa, fc, fr, fres, maxIt) || !(fres <= tau)) {
+                    band = std::move(b);
+                    dg.certDevTau = fres / tau;
+                    break;
+                }
+                const Cyl S2{fc.XYZ(), fa.XYZ(), fr};
+                const bool same = (b == band);
+                band = std::move(b);
+                S = S2;
+                dg.certDevTau = fres / tau;
+                if (same) {
+                    stable = true;
+                    break;
+                }
+            }
+            if (band.empty()) continue;
+            if (stable) band = grow(S);
+            std::fill(inB.begin(), inB.end(), 0);
+            for (int t : band) inB[(std::size_t)t] = 1;
+            dg.nTri = (int)band.size();
+            dg.nV = (int)uniqueVerts(rm, band).size();
+            dg.radius = S.R;
+            dg.axis = S.A;
+            int cols = 0, levels = 0;
+            stationsOf(rm, band, S, tau, cols, levels);
+            dg.stations = cols;
+            dg.levels = levels;
+            dg.maxDev = setDev(mv, band, S);
+            dg.maxDevTau = dg.maxDev / tau;
+            const double fold = bandMaxFold(rm, band, inB);
+            auto refuse = [&](const char* why) {
+                dg.why = why;
+                printBand(dg);
+                if (diagOn())
+                    std::fprintf(stderr,
+                                 "DIAG_REL_RING seed=%d loop=%zu R=%.9g planeTau=%.4f circTau=%.4f "
+                                 "band=%zu touchesOwned=%d stable=%d maxFoldDeg=%.4f why=%s\n",
+                                 dg.seed, loop.size(), R0, planeDev / tau, circDev / tau,
+                                 band.size(), (int)touchesOwned, (int)stable,
+                                 fold * 180.0 / kPi, why);
+            };
+            if (touchesOwned) {
+                refuse("same-surface");
+                continue;
+            }
+            // Scope: the ring names cylinders B1 cannot seed (every fold under its seed
+            // floor). A band that folds at or above it is B1 / NgonWall / tess-law's to
+            // decide: its vertices alone cannot tell a prism from a cylinder.
+            if (!(fold < tol.thetaCylLo)) {
+                refuse("not-blend");
+                continue;
+            }
+            if (!stable || !(dg.maxDev <= tau)) {
+                refuse("vertex-off");
+                continue;
+            }
+            if (!overDetermined(cols, levels)) {
+                refuse("underdetermined");
+                continue;
+            }
+            // A closed wall is one edge-connected annulus: two boundary loops, its rims.
+            // Triangles that only touch the loop each on their own (a polygon's corners
+            // are concyclic) are no wall.
+            dg.comps = (int)edgeComponents(rm, band).size();
+            dg.loops = boundaryLoops(rm, band);
+            if (dg.comps != 1) {
+                refuse("not-joined");
+                continue;
+            }
+            if (dg.loops != kAnnulusLoops) {
+                refuse("domain-not-annulus");
+                continue;
+            }
+            CylFields f;
+            if (!cylFields(rm, tol, band, S, f) || !f.closed360) {
+                refuse("degenerate");
+                continue;
+            }
+            Region r;
+            r.type = SurfType::Cylinder;
+            r.origin = Origin::CylGrow;
+            r.tris = band;
+            r.reject = Reject::None;
+            r.builtAs = BuiltAs::NotBuilt;
+            r.filletNbrA = r.filletNbrB = -1;
+            applyCylFields(r, S, f);
+            std::vector<char> inAdd((std::size_t)nTri, 0);
+            for (int t : band) inAdd[(std::size_t)t] = 1;
+            dg.straddle = trimClaimed(rm, work, inAdd);
+            for (int t : band) owner[(std::size_t)t] = (int)work.accepted.size();
+            // The trim moved straddle remainders into new provisionals; later charts'
+            // boundaries are read against the provisionals as they now stand.
+            if (dg.straddle > 0)
+                for (int i = 0; i < (int)work.provisionals.size(); ++i)
+                    for (int t : work.provisionals[(std::size_t)i].tris)
+                        if (t >= 0 && t < nTri) triProv[(std::size_t)t] = i;
+            dg.nSides = r.nSides;
+            dg.dVol = r.dVolPredicted;
+            work.accepted.push_back(std::move(r));
+            ++claimed;
+            refuse("accept");
+        }
+    }
+    return claimed;
+}
+
 bool reclaimLine(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                  SegmentWork& work) {
     const double tau = tauOf(mv);
@@ -1042,9 +1374,12 @@ bool reclaimLine(const MeshView& mv, const SegmentParams& p, const DerivedTols& 
     const int healed = healRefusedDonors(rm, p, tol, tau, work);
     int deferred = 0;
     const int closed = closeSameSurface(rm, p, tol, tau, work, deferred);
+    const int rings = claimRingCylinders(rm, p, tol, tau, work);
     if (diagOn())
-        std::fprintf(stderr, "DIAG_REL_SUM stage=reclaim mode=line healed=%d closed=%d deferred=%d\n",
-                     healed, closed, deferred);
+        std::fprintf(stderr,
+                     "DIAG_REL_SUM stage=reclaim mode=line healed=%d closed=%d deferred=%d "
+                     "rings=%d\n",
+                     healed, closed, deferred, rings);
     return true;
 }
 
@@ -1188,6 +1523,83 @@ bool reclaimTorusMode(const MeshView& mv, SegmentWork& work) {
             if (t >= 0 && t < nTri) owner[(std::size_t)t] = i;
     std::vector<char> dead((std::size_t)nAcc, 0);
     int nDead = 0;
+
+    // F10: a surface triangle of a revolution spans two profile stations (the
+    // section-ear rule of the cylinder band, D-fc-3.2.1, in the (rho, z) plane).
+    // One whose three vertices merge into one station at tau (countProfPts, the
+    // certificate's own rule) is a chord across that ring -- a cap polygon
+    // triangulated on its rim vertices, which every vertex test passes. It leaves
+    // the torus; its triangles return to Unclaimed as their own provisionals
+    // (D-fc-1.6(12)), so A3 commits the cap and the torus keeps its two rims.
+    {
+        const RMesh rm = makeRMesh(mv);
+        std::vector<int> triProv((std::size_t)nTri, -1);
+        for (int i = 0; i < (int)work.provisionals.size(); ++i)
+            for (int t : work.provisionals[(std::size_t)i].tris)
+                if (t >= 0 && t < nTri) triProv[(std::size_t)t] = i;
+        for (int s = 0; s < nAcc; ++s) {
+            Region& T = work.accepted[(std::size_t)s];
+            if (T.origin != Origin::TorusBlend) continue;
+            const gp_XYZ o = T.ax.Location().XYZ(), a = T.ax.Direction().XYZ();
+            std::vector<int> keep, cap;
+            for (int t : T.tris) {
+                std::vector<ProfPt> P(3);
+                for (int k = 0; k < 3; ++k) {
+                    const gp_XYZ d = cornerOf(mv, t, k) - o;
+                    P[(std::size_t)k].z = d.Dot(a);
+                    P[(std::size_t)k].rho = (d - a * P[(std::size_t)k].z).Modulus();
+                }
+                (countProfPts(P, tau) < kMinAxialLevels ? cap : keep).push_back(t);
+            }
+            if (cap.empty() || keep.empty()) continue;
+            std::vector<char> inCap((std::size_t)nTri, 0);
+            for (int t : cap) inCap[(std::size_t)t] = 1;
+            std::vector<int> provs;
+            for (int t : cap)
+                if (triProv[(std::size_t)t] >= 0) provs.push_back(triProv[(std::size_t)t]);
+            std::sort(provs.begin(), provs.end());
+            provs.erase(std::unique(provs.begin(), provs.end()), provs.end());
+            int nNew = 0;
+            for (int pi : provs) {
+                std::vector<int> rest, gone;
+                for (int t : work.provisionals[(std::size_t)pi].tris)
+                    (inCap[(std::size_t)t] ? gone : rest).push_back(t);
+                auto comps = edgeComponents(rm, gone);
+                std::sort(comps.begin(), comps.end(),
+                          [](const std::vector<int>& x, const std::vector<int>& y) {
+                              return minTriOf(x) < minTriOf(y);
+                          });
+                if (rest.empty()) {
+                    // The whole chart is the cap: it is Unclaimed again as it stood.
+                    Provisional& pr = work.provisionals[(std::size_t)pi];
+                    pr.claim = ProvClaim::Unclaimed;
+                    pr.tris = comps.front();
+                    refitProvisional(rm, pr);
+                    comps.erase(comps.begin());
+                } else {
+                    work.provisionals[(std::size_t)pi].tris = rest;
+                    refitProvisional(rm, work.provisionals[(std::size_t)pi]);
+                }
+                for (auto& c : comps) {
+                    Provisional np = work.provisionals[(std::size_t)pi];
+                    np.tris = std::move(c);
+                    np.claim = ProvClaim::Unclaimed;
+                    refitProvisional(rm, np);
+                    work.provisionals.push_back(std::move(np));
+                    ++nNew;
+                }
+            }
+            for (int t : cap) owner[(std::size_t)t] = -1;
+            T.tris = std::move(keep);
+            refreshTorusRegion(mv, T);
+            if (diag)
+                std::fprintf(stderr,
+                             "DIAG_REL_TORUS_CAP acc=%d Rmaj=%.6f Rmin=%.6f capTri=%zu provs=%zu "
+                             "newProvs=%d nTri=%zu v=[%.6f,%.6f]\n",
+                             s, T.radius, T.radius2, cap.size(), provs.size(), nNew,
+                             T.tris.size(), T.vMin, T.vMax);
+        }
+    }
 
     // F2: an atom edge-adjacent to a certified torus joins it whole when every
     // vertex lies within tau. The torus band was certified without it, so the

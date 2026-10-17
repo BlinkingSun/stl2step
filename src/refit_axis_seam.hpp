@@ -8,6 +8,8 @@
 #ifndef STL2STEP_REFIT_AXIS_SEAM_HPP
 #define STL2STEP_REFIT_AXIS_SEAM_HPP
 
+#include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -19,6 +21,7 @@
 #include <Precision.hxx>
 
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 namespace stl2step {
@@ -103,6 +106,66 @@ inline double rimSeamOffset(const gp_Ax1& axis, const gp_Dir& refX, const std::v
     const gp_Vec d(axis.Location(), pts[(std::size_t)k]);
     const double x = d.Dot(h.x), y = d.Dot(h.y);
     return 2.0 * std::hypot(x, y) * std::sin(0.5 * std::fabs(std::atan2(y, x)));
+}
+
+// The builder builds closed-360 cylinders first, then regions in id order. A rim
+// shared with a face built before the torus is that face's own circle, minted at
+// that face's vertex; the closed-torus path can re-mint only a rim built after it.
+inline bool rimBuiltBeforeTorus(bool partnerClosedCylinder, int partnerId, int torusId) {
+    return partnerClosedCylinder || partnerId < torusId;
+}
+
+// A rim curve runs with the surface's u when its tangent at parameter f has no
+// negative component along the surface's du at (u0, v). A coaxial wall fitted with
+// an antiparallel axis gives its rims the opposite sense.
+inline bool rimRunsWithSurfaceU(const Handle(Geom_Curve)& c, double f,
+                                const Handle(Geom_Surface)& s, double u0, double v) {
+    if (c.IsNull() || s.IsNull()) return true;
+    gp_Pnt P, S;
+    gp_Vec T, Du, Dv;
+    c->D1(f, P, T);
+    s->D1(u0, v, S, Du, Dv);
+    return !(T.Dot(Du) < 0.0);
+}
+
+// Heal-not-revert for a closed wall whose split cap meets an unbuilt partner: only a
+// wall certified at tau (every vertex within tau, D-fc-1.4) that still shares one
+// exact rim with an analytic neighbour ships with its mesh-polyline rim.
+inline bool splitCapHealApplies(double maxVertexDev, double tau, bool oneExactRim) {
+    return tau > 0.0 && maxVertexDev <= tau && oneExactRim;
+}
+
+// D-fc-4.6 F9 over the whole rim. A closed torus's rim is one 2π circle, so every
+// chain of its cap loop must border a face that can carry that circle. A chain whose
+// partner cannot (facets, an island, an exploded or E'-filled region) leaves the
+// circle beside a mesh polyline that no later round can share. Only the loop's first
+// chain can hand the torus a rim edge already built (frontReused).
+template <class PartnerBuildable>
+inline bool capLoopUnshareable(const std::vector<int>& chainIdx, bool frontReused,
+                               PartnerBuildable&& partnerBuildable) {
+    for (std::size_t k = 0; k < chainIdx.size(); ++k) {
+        const int ci = chainIdx[k];
+        if (ci < 0 || (k == 0 && frontReused)) continue;
+        if (!partnerBuildable(ci)) return true;
+    }
+    return false;
+}
+
+// U-3 per torus (D-fc-4.11 (a)). A build round in which a torus failed ships nothing:
+// the builder returns the tori it names and the driver withholds them. That set is
+// decided by each torus's own build and by the cap-partner rule over the round's
+// failures beside a closed torus; namesTorus marks those regions in build order.
+// torusNamingEnd is one past the last of them (0 when there is none).
+inline std::size_t torusNamingEnd(const std::vector<char>& namesTorus) {
+    for (std::size_t k = namesTorus.size(); k > 0; --k)
+        if (namesTorus[k - 1]) return k;
+    return 0;
+}
+
+// Once a torus failed, the round is decided when every region that can name a torus
+// has been built: the regions after them cannot change the named set.
+inline bool torusRoundDecided(bool torusFailed, std::size_t built, std::size_t namingEnd) {
+    return torusFailed && built >= namingEnd;
 }
 
 }  // namespace refit

@@ -1,4 +1,5 @@
-// Synthetic cases for the torus-family seam predicates (D-fc-4.8). No mesh.
+// Synthetic cases for the torus-family seam predicates (D-fc-4.8), the closed-wall /
+// closed-torus build predicates of fx-closed360 and the U-3 naming predicates. No mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -8,7 +9,10 @@
 #include <cstdio>
 #include <vector>
 
+#include <Geom_Circle.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 
 using namespace stl2step::refit;
 
@@ -130,6 +134,64 @@ int main() {
         std::vector<gp_Pnt> within = {onCircle(20, s, 4)};
         expect(rimSeamOffset(fam, refX, within) <= kTau, "offset: an aligned rim is within tau");
     }
+
+    // rimBuiltBeforeTorus: closed-360 cylinders build first, then region id order.
+    expect(rimBuiltBeforeTorus(true, 40, 7), "built-before: a closed cylinder builds first");
+    expect(rimBuiltBeforeTorus(false, 3, 7), "built-before: a lower id builds first");
+    expect(!rimBuiltBeforeTorus(false, 9, 7), "built-before: a higher id builds after");
+
+    // rimRunsWithSurfaceU: a rim circle coaxial with the torus, axis along or against it.
+    {
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        Handle(Geom_Surface) tor = new Geom_ToroidalSurface(ax, 14.0, 3.0);
+        const double v = kPi;  // inner equator, rho = 11
+        Handle(Geom_Curve) with = new Geom_Circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), 11.0);
+        Handle(Geom_Curve) against = new Geom_Circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0)), 11.0);
+        expect(rimRunsWithSurfaceU(with, 0.0, tor, 0.0, v), "rim sense: coaxial circle runs with u");
+        expect(!rimRunsWithSurfaceU(against, 0.0, tor, 0.0, v), "rim sense: antiparallel circle runs -u");
+        expect(rimRunsWithSurfaceU(Handle(Geom_Curve)(), 0.0, tor, 0.0, v), "rim sense: no curve keeps +u");
+    }
+
+    // splitCapHealApplies: certified at tau and one exact rim, both required.
+    expect(splitCapHealApplies(0.5 * kTau, kTau, true), "split-cap: certified wall with an exact rim");
+    expect(!splitCapHealApplies(2.0 * kTau, kTau, true), "split-cap: uncertified wall keeps its path");
+    expect(!splitCapHealApplies(0.5 * kTau, kTau, false), "split-cap: all-polyline rims keep their path");
+    expect(!splitCapHealApplies(0.0, 0.0, true), "split-cap: tau 0 admits nothing");
+
+    // capLoopUnshareable: every chain of the cap loop must border a face that can carry
+    // the rim circle; only the first chain can hand over a built rim edge.
+    {
+        const std::vector<int> buildable = {3, 5};  // chain ids whose partner can carry it
+        auto ok = [&](int ci) {
+            for (int b : buildable)
+                if (b == ci) return true;
+            return false;
+        };
+        expect(!capLoopUnshareable(std::vector<int>{3}, false, ok), "cap loop: one buildable chain");
+        expect(capLoopUnshareable(std::vector<int>{4}, false, ok), "cap loop: one facet partner");
+        expect(!capLoopUnshareable(std::vector<int>{4}, true, ok),
+               "cap loop: a reused front edge is shared");
+        expect(capLoopUnshareable(std::vector<int>{3, 4}, false, ok),
+               "cap loop: a facet partner after the first chain");
+        expect(capLoopUnshareable(std::vector<int>{4, 3}, true, ok) == false,
+               "cap loop: reused front, buildable rest");
+        expect(capLoopUnshareable(std::vector<int>{3, 5, 7}, false, ok),
+               "cap loop: the last chain decides too");
+        expect(!capLoopUnshareable(std::vector<int>{3, -1, 5}, false, ok),
+               "cap loop: a chain with no index is skipped");
+        expect(!capLoopUnshareable(std::vector<int>{}, false, ok), "cap loop: no chain, nothing to share");
+    }
+
+    // torusNamingEnd / torusRoundDecided: a failed-torus round stops after the last
+    // region (in build order) that can name a torus.
+    expect(torusNamingEnd(std::vector<char>{}) == 0, "naming end: empty order");
+    expect(torusNamingEnd(std::vector<char>{0, 0, 0}) == 0, "naming end: no naming region");
+    expect(torusNamingEnd(std::vector<char>{0, 1, 0, 1, 0}) == 4, "naming end: one past the last");
+    expect(torusNamingEnd(std::vector<char>{1}) == 1, "naming end: a single torus");
+    expect(!torusRoundDecided(false, 9, 4), "round decided: no failed torus builds on");
+    expect(!torusRoundDecided(true, 3, 4), "round decided: a naming region is still unbuilt");
+    expect(torusRoundDecided(true, 4, 4), "round decided: every naming region built");
+    expect(torusRoundDecided(true, 7, 4), "round decided: later regions cannot name a torus");
 
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
