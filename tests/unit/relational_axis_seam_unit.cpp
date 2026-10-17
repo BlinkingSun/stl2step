@@ -230,6 +230,68 @@ int main() {
     expect(torusRoundDecided(true, 4, 4), "round decided: every naming region built");
     expect(torusRoundDecided(true, 7, 4), "round decided: later regions cannot name a torus");
 
+    // closedWallWithWindows: two rims winding once in opposite senses, every other
+    // loop a window that does not wind.
+    expect(closedWallWithWindows(std::vector<int>{1, -1}), "wall: two rims, no window");
+    expect(closedWallWithWindows(std::vector<int>{0, -1, 0, 1}), "wall: two rims and two windows");
+    expect(!closedWallWithWindows(std::vector<int>{0}), "wall: a disk is no wall");
+    expect(!closedWallWithWindows(std::vector<int>{0, 0}), "wall: two windows and no rim");
+    expect(!closedWallWithWindows(std::vector<int>{1, 1}), "wall: two rims in one sense");
+    expect(!closedWallWithWindows(std::vector<int>{1, -1, 1}), "wall: a third winding loop");
+    expect(!closedWallWithWindows(std::vector<int>{2, -2}), "wall: a loop winding twice");
+    expect(!closedWallWithWindows(std::vector<int>{}), "wall: no loop");
+
+    // windowGap: the complement of the largest gap of a window's own azimuths.
+    {
+        double lo = 0, hi = 0;
+        expect(windowGap(std::vector<double>{0.4, 0.5, 0.6}, lo, hi) &&
+                   std::fabs(lo - 0.6) < 1e-12 && std::fabs(hi - (0.4 + 2 * kPi)) < 1e-12,
+               "window gap: a window at 0.4..0.6 leaves 0.6..0.4+2pi");
+        expect(windowGap(std::vector<double>{kPi - 0.1, -kPi + 0.1}, lo, hi) &&
+                   std::fabs(lo - (-kPi + 0.1)) < 1e-12 && std::fabs(hi - (kPi - 0.1)) < 1e-12,
+               "window gap: a window across +-pi leaves the side opposite");
+        expect(!windowGap(std::vector<double>{1.0}, lo, hi), "window gap: one azimuth is no window");
+    }
+
+    // seamClearOfWindows: the seam stands in the widest gap of the pooled windows and
+    // must lie inside every window's own gap.
+    {
+        double u = -1;
+        expect(seamClearOfWindows(std::vector<std::vector<double>>{}, u) && u == 0.0,
+               "seam: no window, u = 0");
+        // Two slot windows facing each other (35 deg wide about +-pi/2): the seam stands
+        // between them, at 0 or pi.
+        const double h = 0.3;
+        const std::vector<std::vector<double>> slots = {
+            {0.5 * kPi - h, 0.5 * kPi, 0.5 * kPi + h}, {-0.5 * kPi - h, -0.5 * kPi, -0.5 * kPi + h}};
+        expect(seamClearOfWindows(slots, u) &&
+                   (std::fabs(u) < 1e-9 || std::fabs(std::fabs(u) - kPi) < 1e-9),
+               "seam: two opposed windows, seam between them");
+        // The builder stands the seam in the widest POOLED gap; when that gap is the
+        // inside of a sparsely sampled window the seam would cross it: refused.
+        const std::vector<std::vector<double>> blocked = {
+            {-3.0, -2.5, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0}, {1.5, 2.0, 2.5, 3.0}};
+        expect(!seamClearOfWindows(blocked, u), "seam: widest pooled gap inside a window");
+        // Windows that cover every generator between them.
+        const std::vector<std::vector<double>> full = {{-3.0, -1.0, 0.5}, {0.4, 2.0, 3.3}};
+        expect(!seamClearOfWindows(full, u), "seam: windows that cover every generator");
+        // Windows side by side: the pooled widest gap is clear of both.
+        const std::vector<std::vector<double>> side = {{0.1, 0.2}, {0.3, 0.4}};
+        expect(seamClearOfWindows(side, u) && std::fabs(u - std::remainder(0.25 + kPi, 2 * kPi)) < 1e-9,
+               "seam: adjacent windows, seam opposite them");
+        expect(!seamClearOfWindows(std::vector<std::vector<double>>{{0.3}}, u),
+               "seam: a one-azimuth window is refused");
+    }
+
+    // closedLoopFromTerminal: the loop starts at its terminal and closes on it.
+    expect(closedLoopFromTerminal(std::vector<int>{7, 8, 9, 4, 5}, 4) == std::vector<int>({4, 5, 7, 8, 9, 4}),
+           "rim loop: rotated to its terminal");
+    expect(closedLoopFromTerminal(std::vector<int>{7, 8, 9}, 7) == std::vector<int>({7, 8, 9, 7}),
+           "rim loop: terminal first is unchanged");
+    expect(closedLoopFromTerminal(std::vector<int>{7, 8, 9}, 3) == std::vector<int>({7, 8, 9, 7}),
+           "rim loop: a terminal off the loop keeps the order");
+    expect(closedLoopFromTerminal(std::vector<int>{}, 3).empty(), "rim loop: empty stays empty");
+
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
 }

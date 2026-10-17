@@ -21,6 +21,7 @@
 #include <gp_Vec.hxx>
 #include <Precision.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <vector>
@@ -191,6 +192,77 @@ inline std::size_t torusNamingEnd(const std::vector<char>& namesTorus) {
 // has been built: the regions after them cannot change the named set.
 inline bool torusRoundDecided(bool torusFailed, std::size_t built, std::size_t namingEnd) {
     return torusFailed && built >= namingEnd;
+}
+
+// A closed rim chain read from its terminal (D-130-16 two-arc rim collapse). The
+// chain's terminal is the seam column of the wall it bounds, which need not be
+// its first mesh vertex; the loop is rotated to start there and closed by
+// repeating it, so the split vertex's index divides the loop into the two arcs
+// the collapse builds. A terminal not on the loop leaves the order as it is.
+inline std::vector<int> closedLoopFromTerminal(std::vector<int> loop, int terminal) {
+    if (loop.empty()) return loop;
+    const auto at = std::find(loop.begin(), loop.end(), terminal);
+    if (at != loop.end()) std::rotate(loop.begin(), at, loop.end());
+    loop.push_back(loop.front());
+    return loop;
+}
+
+// A closed wall with windows (D-fc-4.4 ring closure). Each boundary loop of a
+// claimed triangle set winds round the axis a whole number of times. The set is
+// a closed wall when exactly two loops wind once, in opposite senses (its two
+// rims), and every other loop winds zero times (a window: an inner wire of the
+// face). Topology only; no tolerance.
+inline bool closedWallWithWindows(const std::vector<int>& windings) {
+    int up = 0, down = 0;
+    for (int w : windings) {
+        if (w == 1) ++up;
+        else if (w == -1) ++down;
+        else if (w != 0) return false;
+    }
+    return up == 1 && down == 1;
+}
+
+// The arc a window covers is the complement of the largest gap of its own
+// azimuths; returns that gap as [lo, hi) with hi - lo in (0, 2pi]. False for
+// fewer than two azimuths.
+inline bool windowGap(std::vector<double> us, double& lo, double& hi) {
+    if (us.size() < 2) return false;
+    const double twoPi = 2.0 * std::acos(-1.0);
+    for (double& u : us) u = std::remainder(u, twoPi);
+    std::sort(us.begin(), us.end());
+    lo = us.back();
+    hi = us.front() + twoPi;
+    for (std::size_t i = 1; i < us.size(); ++i)
+        if (us[i] - us[i - 1] > hi - lo) {
+            lo = us[i - 1];
+            hi = us[i];
+        }
+    return hi > lo;
+}
+
+// The seam of a closed wall is ONE generator of the face and may not enter a
+// window (OCCT: every inner wire inside the chart the seam names). It stands in
+// the middle of the widest gap of the windows' pooled azimuths -- the builder's
+// own placement (trySeamed360) -- and it is clear when it lies strictly inside
+// every window's own gap. With no window every generator is clear (seamU = 0).
+inline bool seamClearOfWindows(const std::vector<std::vector<double>>& windowU, double& seamU) {
+    const double twoPi = 2.0 * std::acos(-1.0);
+    std::vector<double> pooled;
+    for (const std::vector<double>& w : windowU) pooled.insert(pooled.end(), w.begin(), w.end());
+    seamU = 0.0;
+    if (pooled.empty()) return true;
+    double lo = 0, hi = 0;
+    if (!windowGap(pooled, lo, hi)) return false;
+    seamU = std::remainder(0.5 * (lo + hi), twoPi);
+    for (const std::vector<double>& w : windowU) {
+        double wl = 0, wh = 0;
+        if (!windowGap(w, wl, wh)) return false;
+        double u = seamU;
+        while (u < wl) u += twoPi;
+        while (u >= wl + twoPi) u -= twoPi;
+        if (!(u > wl && u < wh)) return false;
+    }
+    return true;
 }
 
 }  // namespace refit

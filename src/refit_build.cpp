@@ -17444,7 +17444,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (lvSplit >= 0 && (size_t)lvSplit < verts.size() &&
                         !verts[(size_t)lvSplit].IsNull()) {
                         std::vector<int> seq = ch.meshVerts;
-                        if (ch.closedLoop && !seq.empty()) seq.push_back(seq.front());
+                        // A closed rim's arcs run from its terminal ia (the seam
+                        // column, seamVertexOf), which need not be meshVerts.front():
+                        // the loop is read from ia so each half's middle vertex lies
+                        // on that half (both hints on one side build one arc twice).
+                        if (ch.closedLoop) seq = closedLoopFromTerminal(seq, ia);
                         size_t k = 0;
                         while (k < seq.size() && seq[k] != lvSplit) k++;
                         auto halfMid = [&](size_t i0, size_t i1) -> gp_Pnt {
