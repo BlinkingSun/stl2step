@@ -1,5 +1,6 @@
 // Synthetic relational-reclaim cases: Line mode (D-fc-4.4, D-fc-4.5, the ring donor of
-// spike-fc3-lowfold F2) and the Torus-mode cap-chord peel. No training mesh.
+// spike-fc3-lowfold F2, the closed-by-construction wall of D-fc-5.7 O-1) and the
+// Torus-mode cap-chord peel. No training mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -385,6 +386,7 @@ static void caseHealAccept() {
     expect(r && r->tris.size() == 60, "heal_grows_over_gap");
     expect(r && std::abs(r->radius - 3.5) <= tau, "heal_radius_within_tau");
     expect(r && r->maxVertexDev > tau, "heal_cover_dev_kept");
+    expect(r && !r->closed360 && has(d, "annulus=0"), "heal_partial_not_closed");
     expect(has(d, "mode=heal") && has(d, "why=accept"), "heal_diag_accept");
     expect(h.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "heal_gap_peeled");
 }
@@ -415,6 +417,79 @@ static void caseHealNotCover() {
                h.w.provisionals[0].claim == ProvClaim::Unclaimed,
            "heal_off_surface_refused");
     expect(has(d, "mode=heal") && !has(d, "why=accept"), "heal_off_surface_diag_refusal");
+}
+
+// ---- D-fc-5.7 O-1: a healed wall that is an annulus is closed by construction ------
+
+static void caseWindingAndAnnulus() {
+    std::vector<double> ring;
+    for (int i = 0; i < 8; ++i) ring.push_back(-kPi + 2 * kPi * i / 8.0 + 0.1);
+    expect(windingNumber(ring) == 1, "winding_ring_once");
+    std::vector<double> back(ring.rbegin(), ring.rend());
+    expect(windingNumber(back) == -1, "winding_ring_reversed");
+    expect(windingNumber({0.1, 0.4, 0.3, 0.2}) == 0, "winding_window_not_about_axis");
+    expect(windingNumber({3.0, -3.0, -1.0, 1.0}) == 1, "winding_across_branch_cut");
+    expect(windingNumber({0.0, 1.0}) == 0, "winding_two_points_none");
+    expect(annulusAboutAxis(1, {1, -1}) && annulusAboutAxis(1, {-1, -1}), "annulus_two_cycles_once");
+    expect(!annulusAboutAxis(2, {1, -1}), "annulus_two_components_refused");
+    expect(!annulusAboutAxis(1, {1}), "annulus_one_cycle_is_a_disk");
+    expect(!annulusAboutAxis(1, {1, 0}), "annulus_window_cycle_refused");
+    expect(!annulusAboutAxis(1, {2, -1}), "annulus_double_wind_refused");
+    expect(!annulusAboutAxis(1, {1, -1, 0}), "annulus_three_cycles_refused");
+}
+
+// An R4 ring (z 0..6) tessellated unevenly: one 20 degree sector, then 5 degree
+// sectors round to 360 (69 sectors). D2's band rule reads it open (largest vertex gap
+// 20 degrees > 1.5 x 360/69). The donor (sectors 0..34) carries one top vertex 3 tau
+// inside the surface (its cover); sectors 35..lastFree are free, the rest a plane.
+struct Uneven {
+    Synth s;
+    SegmentWork w;
+    std::vector<std::vector<int>> sect;
+};
+
+static Uneven unevenRing(int lastFree) {
+    Uneven u;
+    const double R = 4.0, tau = 2 * u.s.q;
+    std::vector<double> az{0.0};
+    for (double a = 20.0; a < 359.0; a += 5.0) az.push_back(a * kDeg);
+    const int n = (int)az.size();
+    std::vector<int> bot, top;
+    for (double a : az) bot.push_back(u.s.add(gp_XYZ(R * std::cos(a), R * std::sin(a), 0.0)));
+    for (double a : az) top.push_back(u.s.add(gp_XYZ(R * std::cos(a), R * std::sin(a), 6.0)));
+    for (int i = 0; i < n; ++i) {
+        const int j = (i + 1) % n;
+        u.sect.push_back({u.s.addTri(bot[i], bot[j], top[j]), u.s.addTri(bot[i], top[j], top[i])});
+    }
+    pushRadial(u.s, top[17], -3 * tau);
+    u.s.finish();
+    auto span = [&](int lo, int hi) {
+        std::vector<int> out;
+        for (int i = lo; i <= hi; ++i) out.insert(out.end(), u.sect[i].begin(), u.sect[i].end());
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+    u.w.accepted.push_back(cylRegion(span(0, 34), R, 3 * tau));
+    addProv(u.w, span(35, lastFree), ProvClaim::Unclaimed);
+    if (lastFree + 1 < n) u.w.accepted.push_back(planeRegion(span(lastFree + 1, n - 1)));
+    return u;
+}
+
+static void caseHealClosedByConstruction() {
+    Uneven u = unevenRing(68);
+    const std::string d = run(u.s, u.w);
+    const Region* r = firstCyl(u.w);
+    expect(nCyl(u.w) == 1 && r && r->tris.size() == 138, "heal_ring_whole_wall");
+    expect(r && r->closed360 && r->uMin == 0.0 && r->uMax > 6.28, "heal_ring_closed_by_construction");
+    expect(has(d, "closed360=1 annulus=1"), "heal_ring_diag_annulus");
+}
+
+static void caseHealOpenStaysOpen() {
+    Uneven u = unevenRing(67);
+    const std::string d = run(u.s, u.w);
+    const Region* r = firstCyl(u.w);
+    expect(r && r->tris.size() == 136 && !r->closed360, "heal_disk_stays_open");
+    expect(has(d, "closed360=0 annulus=0"), "heal_disk_diag_not_annulus");
 }
 
 // ---- Ring donor (spike-fc3-lowfold F2) --------------------------------------------
@@ -720,6 +795,9 @@ int main() {
     caseHealNoPartner();
     caseHealNarrowTrigger();
     caseHealNotCover();
+    caseWindingAndAnnulus();
+    caseHealClosedByConstruction();
+    caseHealOpenStaysOpen();
     caseRingAccept();
     caseRingPrismRefused();
     caseRingCapChordExcluded();
