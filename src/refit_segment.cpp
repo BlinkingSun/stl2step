@@ -34,6 +34,8 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                      SegmentWork& work, RelRevolveMode mode);
 bool reclaimRelational(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                        SegmentWork& work, RelRevolveMode mode);
+bool claimRuledQuads(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work);
 
 namespace {
 
@@ -98,6 +100,8 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     if (!refuteNgonByLaw(mv, p, tol, work)) return false;
     if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Line)) return false;
     if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Line)) return false;
+    // D-fc-5.9: the ruled quad between certified rails, at the tail of H0.
+    if (!claimRuledQuads(mv, p, tol, work)) return false;
 
     auto preTorus = std::make_shared<const SegmentWork>(work);
     if (!runTorusStages(mv, p, tol, *preTorus, nullptr, out)) return false;

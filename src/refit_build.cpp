@@ -18,6 +18,7 @@
 #include "refit_internal.hpp"
 #include "refit_relational_arc.hpp"
 #include "refit_axis_seam.hpp"
+#include "refit_relational_ruled.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -81,6 +82,8 @@
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
 #include <Geom_BSplineCurve.hxx>
+#include <Geom_BSplineSurface.hxx>
+#include <TColgp_Array2OfPnt.hxx>
 #include <Geom_CylindricalSurface.hxx>
 #include <Geom_ConicalSurface.hxx>
 #include <Geom_ToroidalSurface.hxx>
@@ -233,7 +236,9 @@ bool isAnalytic(const Region* r) {
         (r->type == SurfType::Cone && r->origin == Origin::ChamferCone);
     const bool torusBlend =
         (r->type == SurfType::Torus && r->origin == Origin::TorusBlend);
-    if (!planeOrCyl && !chamferCone && !torusBlend) return false;
+    const bool ruledQuad =
+        (r->type == SurfType::BSpline && r->origin == Origin::RuledQuad);
+    if (!planeOrCyl && !chamferCone && !torusBlend && !ruledQuad) return false;
     if (r->id >= 0 && (size_t)r->id < gEPrimeDemoted.size() && gEPrimeDemoted[(size_t)r->id])
         return false;
     return true;
@@ -1282,6 +1287,8 @@ double regionPointDev(const Region* R, const gp_Pnt& p) {
             const double radial = a.Crossed(px - c).Modulus();
             return std::fabs(radial - R->radius);
         }
+        if (R->type == SurfType::BSpline && R->origin == Origin::RuledQuad)
+            return ruledDistance(R->ruledPoles, p.XYZ(), SegmentParams{}.maxRefineIters, false);
     } catch (const Standard_Failure&) {
     }
     return 1e300;
@@ -1375,6 +1382,41 @@ gp_Circ cylinderIsoCircle(const Region& cyl, double v) {
 
 bool isChamferConeR(const Region& r) {
     return r.type == SurfType::Cone && r.origin == Origin::ChamferCone;
+}
+
+bool isRuledQuadR(const Region& r) {
+    return r.type == SurfType::BSpline && r.origin == Origin::RuledQuad;
+}
+
+// D-fc-5.9: the degree-(1,1) B-spline on the region's four corner poles; u runs
+// along the caps (rail A -> rail B), v along the rails (cap 0 -> cap 1), both
+// over [0, 1]. Its iso-lines are the straight lines the face is bounded by.
+Handle(Geom_BSplineSurface) ruledSurfaceOf(const Region& r) {
+    TColgp_Array2OfPnt poles(1, 2, 1, 2);
+    poles(1, 1) = gp_Pnt(r.ruledPoles[0]);
+    poles(2, 1) = gp_Pnt(r.ruledPoles[1]);
+    poles(1, 2) = gp_Pnt(r.ruledPoles[2]);
+    poles(2, 2) = gp_Pnt(r.ruledPoles[3]);
+    TColStd_Array1OfReal knots(1, 2);
+    knots(1) = 0.0;
+    knots(2) = 1.0;
+    TColStd_Array1OfInteger mults(1, 2);
+    mults(1) = 2;
+    mults(2) = 2;
+    return new Geom_BSplineSurface(poles, knots, knots, mults, mults, 1, 1);
+}
+
+// The poles of a ruled-quad surface (ruledSurfaceOf's shape), else false.
+bool bilinearPolesOf(const Handle(Geom_Surface)& srf, RuledPoles& P) {
+    Handle(Geom_BSplineSurface) bs = Handle(Geom_BSplineSurface)::DownCast(srf);
+    if (bs.IsNull() || bs->UDegree() != 1 || bs->VDegree() != 1 || bs->NbUPoles() != 2 ||
+        bs->NbVPoles() != 2 || bs->IsURational() || bs->IsVRational())
+        return false;
+    if (bs->UKnot(1) != 0.0 || bs->UKnot(2) != 1.0 || bs->VKnot(1) != 0.0 || bs->VKnot(2) != 1.0)
+        return false;
+    P = {bs->Pole(1, 1).XYZ(), bs->Pole(2, 1).XYZ(), bs->Pole(1, 2).XYZ(),
+         bs->Pole(2, 2).XYZ()};
+    return true;
 }
 
 bool isTorusBlendR(const Region& r) {
@@ -2930,6 +2972,58 @@ void emitDiagFallback(int ci, const BoundaryChain& ch, const char* cls, const ch
                  "DIAG_FALLBACK ci=%d class=%s outcome=%s nFaceA=%d nFaceB=%d "
                  "regA=%d regB=%d residual=%.4f nV=%zu\n",
                  ci, cls, outcome, nA, nB, ch.regA, ch.regB, residual, nV);
+}
+
+// D-fc-5.9: a ruled quad meets its neighbour along one of its four iso-lines
+// (v = 0 / v = 1 in the cap planes, u = 0 / u = 1 on the rails) -- the one the
+// chain's own vertices lie closest to. The neighbour (a plane or a ruled quad)
+// must hold that line at the chain's two ends within tanDistTol(anchorTol(X),
+// tau) (D-fc-1.6.7); otherwise, and against any other surface, the chain keeps
+// its mesh polyline.
+AnalyticCurve ruledContactLine(const Region& A, const Region& B, const MeshView& mv,
+                               const BoundaryChain& ch) {
+    AnalyticCurve out;
+    const Region& R = isRuledQuadR(A) ? A : B;
+    const Region& X = (&R == &A) ? B : A;
+    const double tau = (std::isfinite(mv.quantFloor) && mv.quantFloor > 0.0) ? 2.0 * mv.quantFloor
+                                                                              : 0.0;
+    if (!(tau > 0.0) || ch.closedLoop || ch.meshVerts.size() < 2) return out;
+    if (X.type != SurfType::Plane && !isRuledQuadR(X)) return out;
+    static const int kIso[4][2] = {{0, 1}, {2, 3}, {0, 2}, {1, 3}};
+    int best = -1;
+    double bestDev = 0.0;
+    for (int k = 0; k < 4; ++k) {
+        const gp_XYZ p0 = R.ruledPoles[(size_t)kIso[k][0]];
+        const gp_XYZ d = R.ruledPoles[(size_t)kIso[k][1]] - p0;
+        const double dm = d.Modulus();
+        if (!(dm > 0.0)) continue;
+        const gp_XYZ u = d / dm;
+        double m = 0.0;
+        for (int lv : ch.meshVerts) {
+            const gp_XYZ w = pntOf(mv, lv).XYZ() - p0;
+            m = std::max(m, (w - u * w.Dot(u)).Modulus());
+        }
+        if (best < 0 || m < bestDev) {
+            best = k;
+            bestDev = m;
+        }
+    }
+    if (best < 0) return out;
+    const gp_XYZ p0 = R.ruledPoles[(size_t)kIso[best][0]];
+    const gp_XYZ dir = R.ruledPoles[(size_t)kIso[best][1]] - p0;
+    const gp_Lin lin{gp_Pnt(p0), gp_Dir(dir)};
+    const double tolX = tanDistTol(anchorTol(tau, X.maxVertexDev), tau);
+    const int iters = SegmentParams{}.maxRefineIters;
+    for (int lv : {ch.meshVerts.front(), ch.meshVerts.back()}) {
+        const gp_Pnt q = ElCLib::Value(ElCLib::Parameter(lin, pntOf(mv, lv)), lin);
+        const double dX = X.type == SurfType::Plane
+                              ? std::fabs(gp_Vec(X.ax.Location(), q).Dot(X.ax.Direction()))
+                              : ruledDistance(X.ruledPoles, q.XYZ(), iters, false);
+        if (!(dX <= tolX)) return out;
+    }
+    out.kind = AnalyticCurve::Lin;
+    out.lin = lin;
+    return out;
 }
 
 AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView& mv,
@@ -7608,7 +7702,8 @@ enum class SurfVar : int {
     CylRectTrim = 4,
     CylRotTrim = 5,
     ConeBase = 6,
-    TorusBase = 7
+    TorusBase = 7,
+    RuledBase = 8
 };
 
 const char* surfVarName(SurfVar v) {
@@ -7621,6 +7716,7 @@ const char* surfVarName(SurfVar v) {
     case SurfVar::CylRotTrim: return "CylRotTrim";
     case SurfVar::ConeBase: return "ConeBase";
     case SurfVar::TorusBase: return "TorusBase";
+    case SurfVar::RuledBase: return "RuledBase";
     }
     return "?";
 }
@@ -7647,6 +7743,8 @@ Handle(Geom_Surface) regionSurf(const Region& r, SurfVar v) {
             if (r.type == SurfType::Plane) s = new Geom_Plane(asPlane(r));
         } else if (isTorusBlendR(r) && v == SurfVar::TorusBase) {
             s = new Geom_ToroidalSurface(r.ax, r.radius, r.radius2);
+        } else if (isRuledQuadR(r) && v == SurfVar::RuledBase) {
+            s = ruledSurfaceOf(r);
         } else if (isChamferConeR(r) && v == SurfVar::ConeBase) {
             // The frustum's surface comes from the REGION's own fitted numbers
             // (Location on the R_lo rim, Direction toward R_hi, RefRadius R_lo,
@@ -7703,6 +7801,10 @@ void variantsForRegion(const Region& r, SurfVar* out, int& n) {
     }
     if (isTorusBlendR(r)) {
         out[n++] = SurfVar::TorusBase;
+        return;
+    }
+    if (isRuledQuadR(r)) {
+        out[n++] = SurfVar::RuledBase;
         return;
     }
     if (r.type != SurfType::Cylinder) return;
@@ -8257,6 +8359,37 @@ Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Rea
         }
     }
     Handle(Geom_Curve) src = basisCurveOf(c3);
+    // D-fc-5.9: a line on the bilinear patch is one of its rulings, along which
+    // (u, v) is affine in the line's own parameter: the pcurve is the degree-1
+    // 2d B-spline through the endpoints' (u, v) on the line's own knots.
+    if (RuledPoles P{}; bilinearPolesOf(srf, P)) {
+        if (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Line) &&
+            l - f > Precision::PConfusion()) {
+            try {
+                const int iters = SegmentParams{}.maxRefineIters;
+                double u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+                (void)ruledDistance(P, c3->Value(f).XYZ(), iters, false, &u0, &v0);
+                (void)ruledDistance(P, c3->Value(l).XYZ(), iters, false, &u1, &v1);
+                TColgp_Array1OfPnt2d poles2(1, 2);
+                poles2.SetValue(1, gp_Pnt2d(u0, v0));
+                poles2.SetValue(2, gp_Pnt2d(u1, v1));
+                TColStd_Array1OfReal knots(1, 2);
+                knots.SetValue(1, f);
+                knots.SetValue(2, l);
+                TColStd_Array1OfInteger mults(1, 2);
+                mults.SetValue(1, 2);
+                mults.SetValue(2, 2);
+                return new Geom2d_BSplineCurve(poles2, knots, mults, 1);
+            } catch (const Standard_Failure&) {
+                return {};
+            }
+        }
+        try {
+            return GeomProjLib::Curve2d(c3, f, l, srf);
+        } catch (const Standard_Failure&) {
+            return {};
+        }
+    }
     const bool isCirc = (kind && std::strcmp(kind, "circ") == 0) ||
                         (!src.IsNull() && src->DynamicType() == STANDARD_TYPE(Geom_Circle));
     const bool isLin = (kind && std::strcmp(kind, "lin") == 0) ||
@@ -8658,6 +8791,31 @@ double exactMaxAtBind(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Re
                     if (clsOut) *clsOut = torusDevClassName(tcls);
                     return m;
                 }
+            }
+        }
+        if (clsOut) *clsOut = "unhandled-surface";
+        return -1.0;
+    }
+    // D-fc-5.9: a line over a straight pcurve on the bilinear patch. With s the
+    // pcurve's affine parameter the deviation is d0 + s d1 + s^2 d2, d2 =
+    // c du dv (c the twist vector), and |d| <= max(|d(0)|, |d(1)|) + |d2| / 4 on
+    // [0, 1] -- exact (d2 = 0) on an iso-line, the only line the face ships.
+    if (RuledPoles P{}; bilinearPolesOf(srf, P)) {
+        Handle(Geom_Curve) srcL = basisCurveOf(c3);
+        if (srcL.IsNull()) srcL = c3;
+        if (srcL->DynamicType() == STANDARD_TYPE(Geom_Line)) {
+            const gp_Pnt2d a = c2d->Value(f), b = c2d->Value(l);
+            Handle(Geom2d_BSplineCurve) pb = Handle(Geom2d_BSplineCurve)::DownCast(c2d);
+            const bool straight = (!pb.IsNull() && pb->Degree() == 1 && pb->NbPoles() == 2) ||
+                                  !Handle(Geom2d_Line)::DownCast(c2d).IsNull();
+            if (straight) {
+                const gp_XYZ tw = P[3] - P[1] - P[2] + P[0];
+                const double d2 =
+                    tw.Modulus() * std::fabs((b.X() - a.X()) * (b.Y() - a.Y()));
+                if (clsOut) *clsOut = "line-on-ruled";
+                return std::max(curveSurfDevAtBind(c3, f, srf, c2d, loc),
+                                curveSurfDevAtBind(c3, l, srf, c2d, loc)) +
+                       0.25 * d2;
             }
         }
         if (clsOut) *clsOut = "unhandled-surface";
@@ -12592,6 +12750,108 @@ bool buildPartialCone(const Region& r, const RegionSet& rs, const MeshView& mv,
     return fail("face-invalid");
 }
 
+// D-fc-5.9: the ruled quad's face on its degree-(1,1) B-spline, bounded by the
+// region's loops. Collapsed chains are its iso-lines (exact LINE contacts with
+// degree-1 pcurves); a chain against facets keeps its mesh polyline, whose
+// pcurve is projected and whose distance to the patch (the chord sagitta)
+// becomes its tolerance, up to the region's own cap. A face that does not
+// validate returns false: the R1 rung explodes this region only.
+bool buildRuledQuadFace(const Region& r, const RegionSet& rs, const MeshView& mv,
+                        const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
+                        const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
+                        double sewTol, TopoDS_Face& outF) {
+    auto fail = [&](const char* why) {
+        if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+            std::fprintf(stderr, "DIAG_RULEDFACE rid=%d nTri=%zu why=%s\n", r.id, r.tris.size(),
+                         why);
+        return false;
+    };
+    const Loop* outer = nullptr;
+    std::vector<TopoDS_Wire> inners;
+    for (const Loop& lp : r.loops) {
+        if (lp.role == LoopRole::Outer) {
+            outer = &lp;
+        } else if (lp.role == LoopRole::Inner) {
+            TopoDS_Wire iw;
+            if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk, nullptr))
+                return fail("inner-wire");
+            inners.push_back(iw);
+        }
+    }
+    if (!outer) return fail("no-outer");
+    TopoDS_Wire ow;
+    if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk, nullptr))
+        return fail("outer-wire");
+    Handle(Geom_Surface) bs = regionSurf(r, SurfVar::RuledBase);
+    if (bs.IsNull()) return fail("surface");
+    // The chord sagitta is the region's own measured mesh-to-patch distance.
+    const double cap = std::max(partialFaceTolCap(mv, r), meshTolCap(mv, &r));
+    const int iters = SegmentParams{}.maxRefineIters;
+    // A vertex or edge off the patch by more than its tolerance (a mesh chord)
+    // takes the measured distance, up to the cap.
+    auto ruledTol = [&](TopoDS_Face& f) -> bool {
+        auto dev = [&](const gp_Pnt& p) {
+            return ruledDistance(r.ruledPoles, p.XYZ(), iters, false);
+        };
+        try {
+            BRep_Builder B;
+            for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
+                const TopoDS_Vertex& vv = TopoDS::Vertex(vx.Current());
+                const double d = dev(BRep_Tool::Pnt(vv));
+                if (d > cap) return false;
+                if (d > BRep_Tool::Tolerance(vv))
+                    B.UpdateVertex(vv, std::min(d * 1.001 + Precision::Confusion(), cap));
+            }
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                Standard_Real fp = 0, lp = 0;
+                Handle(Geom_Curve) c = BRep_Tool::Curve(e, fp, lp);
+                if (c.IsNull()) continue;
+                const double d = dev(c->Value(0.5 * (fp + lp)));
+                if (d > cap) return false;
+                if (d > BRep_Tool::Tolerance(e))
+                    fireTolRewriteEdge(B, e, std::min(d * 1.001 + Precision::Confusion(), cap),
+                                       "other", cap);
+            }
+        } catch (const Standard_Failure&) {
+            return false;
+        }
+        return faceIsValid(f);
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        TopoDS_Wire w = ow;
+        if (pass == 1) w.Reverse();
+        TopoDS_Face f;
+        const bool got = makeFaceCopy(bs, w, inners, r.outwardNormal, f) ||
+                         makeFaceKeep(bs, w, inners, r.outwardNormal, f);
+        if (!got || f.IsNull()) continue;
+        addPcurvesOnFace(f, sewTol, false);
+        setFaceOutward(f, r.outwardNormal);
+        if (!faceIsValid(f)) {
+            // A mesh chord's pcurve is its projection; the edge keeps its own
+            // TShape (shared with the neighbour) and takes the measured
+            // same-parameter tolerance in place.
+            try {
+                BRep_Builder Bs;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                    Bs.SameParameter(e, Standard_False);
+                    BRepLib::SameParameter(e, sewTol);
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        if (faceIsValid(f) || ruledTol(f)) {
+            if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+                std::fprintf(stderr, "DIAG_RULEDFACE rid=%d nTri=%zu why=BUILT pass=%d\n", r.id,
+                             r.tris.size(), pass);
+            outF = f;
+            return true;
+        }
+    }
+    return fail("face-invalid");
+}
+
 // D-130-14 / D-fc-3.2.10. A relational FilletStrip is one surface and one face
 // per edge-component. The chain stitch keeps every component on this region and
 // tags only the largest loop Outer, so one partial-cylinder face treats the
@@ -14701,6 +14961,7 @@ const char* volidClassName(const RegionSet& rs, int rid, const std::vector<char>
         case SurfType::Cone: return "cone";
         case SurfType::Sphere: return "sphere";
         case SurfType::Torus: return "torus";
+        case SurfType::BSpline: return "bspline";
     }
     return "other";
 }
@@ -15602,6 +15863,7 @@ const char* originName(Origin o) {
         case Origin::NgonWall: return "NgonWall";
         case Origin::ChamferCone: return "ChamferCone";
         case Origin::TorusBlend: return "TorusBlend";
+        case Origin::RuledQuad: return "RuledQuad";
     }
     return "?";
 }
@@ -16046,8 +16308,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         dumpDiagTheta1136(mv, rs);
 
         // Stage P routing (RULE 5.1a): prismatic -> profiles/prisms/union;
-        // decline or build failure falls through byte-identically.
-        if (tryStageP(mv, rs, out)) {
+        // decline or build failure falls through byte-identically. Stage P
+        // builds planes and cylinders only, so a component that holds a ruled
+        // quad (D-fc-5.9) is never routed there.
+        const bool holdsRuled =
+            std::any_of(rs.regions.begin(), rs.regions.end(),
+                        [](const Region& r) { return isRuledQuadR(r); });
+        if (!holdsRuled && tryStageP(mv, rs, out)) {
             std::vector<ChainGeom> noGeom(rs.chains.size());
             std::vector<char> noCol(rs.chains.size(), 0);
             dumpBoundCredCensus(mv, rs, noGeom, noCol, sewTol);
@@ -16377,7 +16644,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                      j6UncollapsePass == 0)
                         ? warn
                         : nullptr;
-                if (anaPair) {
+                if (anaPair && (isRuledQuadR(*A) || isRuledQuadR(*B))) {
+                    curve = ruledContactLine(*A, *B, mv, ch);
+                    fallbackUsed[ci] = 0;
+                } else if (anaPair) {
                     if (ch.tangent) {
                         if (A->type == SurfType::Cylinder && B->type == SurfType::Plane)
                             curve = constructedGenerator(*A, *B);
@@ -17414,6 +17684,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 return true;
             }
             r.builtAs = BuiltAs::NotBuilt;
+            if (isRuledQuadR(r)) {
+                TopoDS_Face f;
+                if (!buildRuledQuadFace(r, rs, mv, geom, collapsed, meshE, edgeOk, sewTol, f))
+                    return false;
+                r.builtAs = BuiltAs::Single;
+                acc.push_back(f);
+                return true;
+            }
             if (r.type == SurfType::Cone || r.type == SurfType::Sphere || r.type == SurfType::Torus) {
                 // U-3: Sphere/Torus stay NYI. Other cones stay ConeNYI.
                 // ChamferCone: Geom_ConicalSurface from axis + two radii
@@ -20354,6 +20632,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     case SurfType::Cone: return "cone";
                     case SurfType::Sphere: return "sphere";
                     case SurfType::Torus: return "torus";
+                    case SurfType::BSpline: return "bspline";
                 }
                 return "?";
             };

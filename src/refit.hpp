@@ -85,9 +85,12 @@ struct SegmentParams {
     std::vector<int> torusWithheldTris;
 };
 
-enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus };
+// D-fc-5.9: BSpline / RuledQuad is the degree-(1,1) doubly ruled patch spanned
+// by four certified straight lines (Region::ruledPoles); no other origin is a
+// B-spline.
+enum class SurfType : uint8_t { Plane, Cylinder, /* v2 */ Cone, Sphere, Torus, BSpline };
 enum class Origin   : uint8_t { PlaneGrow, CylGrow, FilletStrip, NgonWall, ChamferCone,
-                                TorusBlend };
+                                TorusBlend, RuledQuad };
 enum class BuiltAs  : uint8_t { NotBuilt, Single, Seamed360, TwoHalves, ExplodedToFacets };
 enum class Reject   : uint8_t { None, GaussPlanarity, VertexResidual, ChordConsistency,
                                 RadiusSanity, Span, FilletConsensus, NeighborNotAnalytic,
@@ -207,6 +210,11 @@ struct Region {
                                     // Provenance, not a build instruction: P2 keys the
                                     // constructed-generator rule off BoundaryChain::tangent.
     int     torusPending = -1;      // Origin::TorusBlend: index into RegionSet::torusPending
+    // Origin::RuledQuad ONLY (D-fc-5.9): the four corner poles of the
+    // degree-(1,1) patch S(u,v) = (1-u)(1-v)P00 + u(1-v)P10 + (1-u)v P01 + uv P11,
+    // stored {P00, P10, P01, P11}; u, v in [0, 1]. The face is bounded by its
+    // iso-lines: v = 0 / v = 1 lie in the cap planes, u = 0 / u = 1 on the rails.
+    std::array<gp_XYZ, 4> ruledPoles{};
 };
 
 struct BoundaryChain {

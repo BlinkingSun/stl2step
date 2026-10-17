@@ -1375,6 +1375,8 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             case Origin::TorusBlend:
                 if (r.type == SurfType::Torus) ++st.tori;
                 break;
+            case Origin::RuledQuad:
+                break;  // D-fc-5.9: no RESULT key counts a ruled quad
             case Origin::PlaneGrow:
                 if (r.type == SurfType::Plane) ++st.planes;
                 else if (r.type == SurfType::Cylinder) ++st.cylinders;
@@ -1389,6 +1391,7 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             case Origin::ChamferCone:
                 break;  // two-radius cone, not a fillet/cyl sample
             case Origin::TorusBlend:
+            case Origin::RuledQuad:
                 break;
             case Origin::FilletStrip:
             case Origin::CylGrow:
