@@ -2,6 +2,8 @@
 // closed-torus build predicates of fx-closed360, the crossing-cap predicates of
 // D-fc-5.7 O-1, the U-3 naming predicates and the split-cap / single-wire
 // orientation rules of D-fc-5.7 O-4. No mesh.
+// D-fc-5.7 O-1, the U-3 naming predicates and the closed-ellipse rim construction of
+// D-fc-5.13. No mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -32,9 +34,19 @@
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <Geom_Circle.hxx>
+#include <Geom_Ellipse.hxx>
 #include <Geom_ToroidalSurface.hxx>
+#include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Elips.hxx>
+#include <gp_Pln.hxx>
 
 using namespace stl2step::refit;
 
@@ -490,6 +502,117 @@ int main() {
     expect(capPathsRunOpposite(2.0 * kPi, -2.0 * kPi), "cap paths: +u high, -u low jump a period");
     expect(!capPathsRunOpposite(0.0, 2.0 * kPi), "cap paths: a path with no sweep decides nothing");
     expect(!capPathsRunOpposite(-2.0 * kPi, 0.0), "cap paths: no sweep on the low path either");
+
+    // D-fc-5.13: edgeSampledSignedAreaUV reads every curve under its orientation flag;
+    // closedEllipseHalves / closedAnalyticRim ship and recognise a closed ellipse rim as
+    // two half-turn arcs. An ellipse 5 x 3 about z on the z = 0 plane.
+    {
+        const double a = 5.0, b = 3.0;
+        const gp_Elips el(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), a, b);
+        const gp_Pln up(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)));
+        const gp_Pln down(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0)));
+        const TopoDS_Edge full = BRepBuilderAPI_MakeEdge(el).Edge();
+        const TopoDS_Edge fullR = TopoDS::Edge(full.Reversed());
+        // 32 samples over a full turn: the inscribed 32-gon, (32 / 2) a b sin(2 pi / 32).
+        const double gon = 16.0 * a * b * std::sin(2.0 * kPi / 32.0);
+        const double aF = edgeSampledSignedAreaUV(full, up);
+        expect(std::fabs(aF - gon) < 1e-9, "sampled area: closed ellipse FORWARD, counter-clockwise");
+        expect(std::fabs(edgeSampledSignedAreaUV(fullR, up) + aF) < 1e-12,
+               "sampled area: the same ellipse REVERSED is clockwise");
+        expect(std::fabs(edgeSampledSignedAreaUV(full, down) + aF) < 1e-12,
+               "sampled area: read about the opposite normal");
+        const TopoDS_Edge line =
+            BRepBuilderAPI_MakeEdge(gp_Pnt(0, 0, 0), gp_Pnt(4, 1, 0)).Edge();
+        expect(std::fabs(edgeSampledSignedAreaUV(line, up)) < 1e-12 &&
+                   std::fabs(edgeSampledSignedAreaUV(TopoDS::Edge(line.Reversed()), up)) < 1e-12,
+               "sampled area: a line encloses nothing either way");
+
+        const std::vector<TopoDS_Edge> h = closedEllipseHalves(full);
+        bool shape = h.size() == 2;
+        TopoDS_Vertex V0, V1, A0, A1;
+        if (shape) {
+            TopExp::Vertices(full, V0, V1, Standard_True);
+            TopoDS_Vertex h0f, h0l, h1f, h1l;
+            TopExp::Vertices(h[0], h0f, h0l, Standard_True);
+            TopExp::Vertices(h[1], h1f, h1l, Standard_True);
+            Standard_Real f0 = 0, l0 = 0, f1 = 0, l1 = 0;
+            const Handle(Geom_Curve) c0 = BRep_Tool::Curve(h[0], f0, l0);
+            const Handle(Geom_Curve) c1 = BRep_Tool::Curve(h[1], f1, l1);
+            shape = h0f.IsSame(V0) && h1l.IsSame(V0) && h0l.IsSame(h1f) && !h0l.IsSame(V0) &&
+                    std::fabs((l0 - f0) - kPi) < 1e-12 && std::fabs((l1 - f1) - kPi) < 1e-12 &&
+                    !Handle(Geom_Ellipse)::DownCast(c0).IsNull() && c0 == c1;
+            A0 = h0l;
+        }
+        expect(shape, "halves: vertex to antipode and back, half a turn each, one ellipse");
+        expect(!A0.IsNull() && BRep_Tool::Pnt(A0).Distance(gp_Pnt(-a, 0, 0)) < 1e-12,
+               "halves: the antipode is the exact curve point half a turn on");
+        expect(h.size() == 2 && edgeSampledSignedAreaUV(h[0], up) > 0.0 &&
+                   std::fabs(edgeSampledSignedAreaUV(h[0], up) -
+                             edgeSampledSignedAreaUV(h[1], up)) < 1e-9,
+               "halves: each half runs with the whole, and they are equal");
+        const std::vector<TopoDS_Edge> hR = closedEllipseHalves(fullR);
+        bool rev = hR.size() == 2;
+        if (rev) {
+            TopoDS_Vertex r0f, r0l, r1f, r1l;
+            TopExp::Vertices(hR[0], r0f, r0l, Standard_True);
+            TopExp::Vertices(hR[1], r1f, r1l, Standard_True);
+            rev = r0f.IsSame(V0) && r1l.IsSame(V0) && r0l.IsSame(r1f) &&
+                  edgeSampledSignedAreaUV(hR[0], up) < 0.0 && edgeSampledSignedAreaUV(hR[1], up) < 0.0;
+        }
+        expect(rev, "halves: a REVERSED ellipse keeps its traversal (clockwise halves)");
+        // The antipode a caller already has a vertex for (the chain's own mesh vertex):
+        // the halves meet AT that vertex, on its own parameter, and mint nothing.
+        gp_Pnt pA;
+        expect(closedEllipseAntipode(full, pA) && pA.Distance(gp_Pnt(-a, 0, 0)) < 1e-12,
+               "antipode: half a turn from the edge's vertex");
+        {
+            TopoDS_Vertex mesh;
+            BRep_Builder().MakeVertex(mesh, gp_Pnt(-a, 2e-7, 0), 1e-6);
+            const std::vector<TopoDS_Edge> hm = closedEllipseHalves(full, mesh);
+            bool meet = hm.size() == 2;
+            if (meet) {
+                TopoDS_Vertex m0f, m0l, m1f, m1l;
+                TopExp::Vertices(hm[0], m0f, m0l, Standard_True);
+                TopExp::Vertices(hm[1], m1f, m1l, Standard_True);
+                Standard_Real f0 = 0, l0 = 0;
+                BRep_Tool::Range(hm[0], f0, l0);
+                meet = m0l.IsSame(mesh) && m1f.IsSame(mesh) && m0f.IsSame(V0) && m1l.IsSame(V0) &&
+                       std::fabs((l0 - f0) - kPi) < 1e-6 && closedAnalyticRim(hm);
+            }
+            expect(meet, "halves: meet at the caller's vertex standing at the antipode");
+            TopoDS_Vertex v0f = V0;
+            expect(closedEllipseHalves(full, v0f).empty(),
+                   "halves: the edge's own vertex cannot be its antipode");
+        }
+        const TopoDS_Edge circ =
+            BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 4.0)).Edge();
+        expect(closedEllipseHalves(circ).empty(), "halves: a circle ships whole");
+        expect(!closedEllipseAntipode(circ, pA), "antipode: a circle has none here");
+        const TopoDS_Edge arc = BRepBuilderAPI_MakeEdge(el, 0.0, kPi).Edge();
+        expect(closedEllipseHalves(arc).empty(), "halves: an ellipse arc is not a closed rim");
+        expect(closedEllipseHalves(TopoDS_Edge()).empty(), "halves: a null edge");
+
+        expect(closedAnalyticRim({full}), "rim: one closed ellipse");
+        expect(closedAnalyticRim({circ}), "rim: one closed circle");
+        expect(closedAnalyticRim(h) && closedAnalyticRim(hR), "rim: the two halves, either sense");
+        expect(h.size() == 2 && closedAnalyticRim({h[1], h[0]}), "rim: the halves from the antipode");
+        expect(!closedAnalyticRim({arc}), "rim: an open arc");
+        expect(h.size() == 2 && !closedAnalyticRim({h[0]}), "rim: one half alone");
+        const std::vector<TopoDS_Edge> hOther = closedEllipseHalves(BRepBuilderAPI_MakeEdge(
+            gp_Elips(gp_Ax2(gp_Pnt(0, 0, 1), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), a, b)).Edge());
+        expect(h.size() == 2 && hOther.size() == 2 && !closedAnalyticRim({h[0], hOther[1]}),
+               "rim: halves of two ellipses");
+        const TopoDS_Edge c1 = BRepBuilderAPI_MakeEdge(
+            gp_Circ(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 4.0), 0.0, kPi).Edge();
+        TopoDS_Vertex cv0, cv1;
+        TopExp::Vertices(c1, cv0, cv1, Standard_True);
+        const TopoDS_Edge c2 = BRepBuilderAPI_MakeEdge(
+            new Geom_Circle(gp_Circ(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 4.0)), cv1, cv0, kPi,
+            2.0 * kPi).Edge();
+        expect(!closedAnalyticRim({c1, c2}), "rim: two circle arcs are not this construction");
+        expect(h.size() == 2 && !closedAnalyticRim({h[0], h[1], full}), "rim: three edges");
+        expect(!closedAnalyticRim({}), "rim: no edge");
+    }
 
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
