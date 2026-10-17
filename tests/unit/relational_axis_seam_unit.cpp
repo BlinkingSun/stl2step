@@ -5,12 +5,21 @@
 
 #include "posix_compat.hpp"
 #include "refit_axis_seam.hpp"
+#include "refit_edge_bound.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <vector>
 
+#include <BRep_Builder.hxx>
+#include <Geom2d_BSplineCurve.hxx>
 #include <Geom_Circle.hxx>
+#include <Geom_Line.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <Geom_ToroidalSurface.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -31,7 +40,81 @@ static gp_Pnt onCircle(double R, double u, double z) {
     return gp_Pnt(R * std::cos(u), R * std::sin(u), z);
 }
 
+// fx-hubtori: a mesh chord on a torus with a straight UV pcurve (FixAddPCurve's
+// shape for a short chord), parametrised as the 3D line on [0, L].
+struct ChordOnTorus {
+    TopoDS_Face face;
+    TopoDS_Edge edge;
+    double L = 0;
+};
+
+static ChordOnTorus chordOnTorus(const Handle(Geom_ToroidalSurface)& S, double u0, double v0,
+                                 double u1, double v1, double tol) {
+    ChordOnTorus c;
+    BRep_Builder B;
+    B.MakeFace(c.face, S, Precision::Confusion());
+    const gp_Pnt P0 = S->Value(u0, v0), P1 = S->Value(u1, v1);
+    c.L = P0.Distance(P1);
+    Handle(Geom_Line) ln = new Geom_Line(P0, gp_Dir(gp_Vec(P0, P1)));
+    TColgp_Array1OfPnt2d poles(1, 2);
+    poles(1) = gp_Pnt2d(u0, v0);
+    poles(2) = gp_Pnt2d(u1, v1);
+    TColStd_Array1OfReal knots(1, 2);
+    knots(1) = 0.0;
+    knots(2) = c.L;
+    TColStd_Array1OfInteger mults(1, 2);
+    mults(1) = mults(2) = 2;
+    Handle(Geom2d_BSplineCurve) pc = new Geom2d_BSplineCurve(poles, knots, mults, 1);
+    B.MakeEdge(c.edge, ln, tol);
+    TopoDS_Vertex a, b;
+    B.MakeVertex(a, P0, tol);
+    B.MakeVertex(b, P1, tol);
+    B.Add(c.edge, a.Oriented(TopAbs_FORWARD));
+    B.Add(c.edge, b.Oriented(TopAbs_REVERSED));
+    B.Range(c.edge, 0.0, c.L);
+    B.UpdateEdge(c.edge, pc, c.face, tol);
+    return c;
+}
+
+static double sampledDev(const Handle(Geom_ToroidalSurface)& S, const ChordOnTorus& c, int n) {
+    Standard_Real f = 0, l = 0, a = 0, b = 0;
+    Handle(Geom_Curve) c3 = BRep_Tool::Curve(c.edge, f, l);
+    Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(c.edge, c.face, a, b);
+    double m = 0;
+    for (int i = 0; i < n; ++i) {
+        const double t = f + (l - f) * (double)i / (double)(n - 1);
+        const gp_Pnt2d q = pc->Value(t);
+        m = std::max(m, S->Value(q.X(), q.Y()).Distance(c3->Value(t)));
+    }
+    return m;
+}
+
+static void caseEdgeBound() {
+    Handle(Geom_ToroidalSurface) S =
+        new Geom_ToroidalSurface(gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), 12.0, 3.0);
+    // A diagonal chord between two rows of a fillet tube (u and v both move).
+    const ChordOnTorus d = chordOnTorus(S, 0.30, 2.62, 0.43, 2.88, Precision::Confusion());
+    const double ex = exactEdgeDeviationOnFace(d.edge, d.face);
+    const double grid = sampledDev(S, d, 23);
+    const double dense = sampledDev(S, d, 4001);
+    const double mid = sampledDev(S, d, 3);
+    expect(ex > 0.0, "edge bound: exact deviation measured");
+    expect(ex >= grid && ex >= dense && ex >= mid, "edge bound: exact >= every sampled reading");
+    expect(ex <= dense + 2.0 * Precision::Confusion(), "edge bound: exact is the maximum, not a bound");
+    expect(edgeBoundOf(ex, mid, 1.0) == EdgeBound::Raise, "edge bound: midpoint tolerance is raised");
+    expect(edgeBoundOf(ex, ex, 1.0) == EdgeBound::Keep, "edge bound: an exact tolerance is kept");
+    expect(edgeBoundOf(ex, 10.0 * ex, 1.0) == EdgeBound::Keep, "edge bound: never lowered");
+    expect(edgeBoundOf(ex, mid, 0.5 * ex) == EdgeBound::OverCap, "edge bound: never past cap");
+    expect(edgeBoundOf(-1.0, mid, 1.0) == EdgeBound::Keep, "edge bound: unmeasured edge kept");
+    // A chord along one row (u only): its deviation is the sagitta at the middle.
+    const ChordOnTorus r = chordOnTorus(S, 0.30, kPi, 0.45, kPi, Precision::Confusion());
+    const double exR = exactEdgeDeviationOnFace(r.edge, r.face);
+    const double sag = 9.0 * (1.0 - std::cos(0.075));
+    expect(std::fabs(exR - Precision::Confusion() - sag) <= 1e-9, "edge bound: row chord = its sagitta");
+}
+
 int main() {
+    caseEdgeBound();
     const gp_Ax1 fam(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
 
     // axisOnFamilyAxis: line distance and direction error times lever, each at tau.

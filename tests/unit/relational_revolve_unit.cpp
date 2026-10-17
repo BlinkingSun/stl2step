@@ -3,6 +3,8 @@
 
 #include "posix_compat.hpp"
 #include "refit_relational.hpp"
+#include "refit_band_volume.hpp"
+#include "refit_cone_math.hpp"
 
 #include <algorithm>
 #include <array>
@@ -784,6 +786,161 @@ static void caseThreads() {
     expect(a0 == b0 && a1 == b1 && a2 == b2 && na == nb && va == vb, "threads 1 and N agree");
 }
 
+// D-fc-5.7 O-3: revolvedChordTerm summed over a band is the exact chord volume.
+// A ring: n vertices at axial u, radius rho, first azimuth phi.
+struct BandRing {
+    int n;
+    double u, rho, phi;
+};
+
+static gp_XYZ ringPt(const BandRing& r, int k, const gp_XYZ& o, const gp_XYZ& ax,
+                     const gp_XYZ& e1, const gp_XYZ& e2) {
+    const double a = r.phi + 2.0 * kPi * (double)k / (double)r.n;
+    return o + ax * r.u + e1 * (r.rho * std::cos(a)) + e2 * (r.rho * std::sin(a));
+}
+
+// Closed band between consecutive rings, stitched by azimuth (rings may carry
+// different vertex counts and offsets, as an exporter's rows do). Triangles are
+// oriented away from the axis.
+static std::vector<std::array<gp_XYZ, 3>> bandTris(const std::vector<BandRing>& rings,
+                                                   const gp_XYZ& o, const gp_XYZ& ax,
+                                                   const gp_XYZ& e1, const gp_XYZ& e2) {
+    std::vector<std::array<gp_XYZ, 3>> out;
+    for (std::size_t j = 0; j + 1 < rings.size(); ++j) {
+        const BandRing& A = rings[j];
+        const BandRing& B = rings[j + 1];
+        auto angA = [&](int i) { return A.phi + 2.0 * kPi * (double)i / (double)A.n; };
+        auto angB = [&](int i) { return B.phi + 2.0 * kPi * (double)i / (double)B.n; };
+        int ia = 0, ib = 0;
+        while (ia < A.n || ib < B.n) {
+            const bool stepA = ib >= B.n || (ia < A.n && angA(ia + 1) <= angB(ib + 1));
+            std::array<gp_XYZ, 3> t;
+            if (stepA) {
+                t = {ringPt(A, ia, o, ax, e1, e2), ringPt(A, ia + 1, o, ax, e1, e2),
+                     ringPt(B, ib, o, ax, e1, e2)};
+                ++ia;
+            } else {
+                t = {ringPt(A, ia, o, ax, e1, e2), ringPt(B, ib + 1, o, ax, e1, e2),
+                     ringPt(B, ib, o, ax, e1, e2)};
+                ++ib;
+            }
+            const gp_XYZ c = (t[0] + t[1] + t[2]) / 3.0 - o;
+            const gp_XYZ n = (t[1] - t[0]).Crossed(t[2] - t[0]);
+            if ((c - ax * c.Dot(ax)).Dot(n) < 0.0) std::swap(t[1], t[2]);
+            out.push_back(t);
+        }
+    }
+    return out;
+}
+
+static double bandSum(const std::vector<std::array<gp_XYZ, 3>>& tris, const gp_XYZ& o,
+                      const gp_XYZ& ax, const gp_XYZ& e1, const gp_XYZ& e2, double rho0,
+                      double slope) {
+    double v = 0;
+    for (const auto& t : tris) v += revolvedChordTerm(t[0], t[1], t[2], o, ax, e1, e2, rho0, slope);
+    return v;
+}
+
+// Independent reference: frustum volume minus the polyhedron the band's facets
+// enclose with its two rim polygons (divergence theorem over a closed surface).
+static double bandReference(const std::vector<BandRing>& rings,
+                            const std::vector<std::array<gp_XYZ, 3>>& tris, const gp_XYZ& o,
+                            const gp_XYZ& ax, const gp_XYZ& e1, const gp_XYZ& e2) {
+    double six = 0;
+    auto add = [&](const gp_XYZ& a, const gp_XYZ& b, const gp_XYZ& c) {
+        six += a.Dot(b.Crossed(c));
+    };
+    for (const auto& t : tris) add(t[0], t[1], t[2]);
+    const BandRing& lo = rings.front();
+    const BandRing& hi = rings.back();
+    const gp_XYZ cLo = o + ax * lo.u, cHi = o + ax * hi.u;
+    for (int k = 0; k < lo.n; ++k)
+        add(cLo, ringPt(lo, k + 1, o, ax, e1, e2), ringPt(lo, k, o, ax, e1, e2));
+    for (int k = 0; k < hi.n; ++k)
+        add(cHi, ringPt(hi, k, o, ax, e1, e2), ringPt(hi, k + 1, o, ax, e1, e2));
+    const double h = hi.u - lo.u;
+    const double frustum =
+        kPi * h * (lo.rho * lo.rho + lo.rho * hi.rho + hi.rho * hi.rho) / 3.0;
+    return frustum - six / 6.0;
+}
+
+static bool relClose(double a, double b, double rel) {
+    return std::fabs(a - b) <= rel * std::max(std::fabs(a), std::fabs(b));
+}
+
+static void caseBandVolume() {
+    const gp_XYZ o(3.0, -2.0, 7.0);
+    const gp_XYZ ax = gp_XYZ(1.0, 2.0, 2.0) / 3.0;
+    gp_XYZ e1 = gp_XYZ(2.0, -1.0, 0.0);
+    e1 /= e1.Modulus();
+    const gp_XYZ e2 = ax.Crossed(e1);
+    // (1) Regular 24-gon prism: dVolCylinderSector's closed form.
+    {
+        const int N = 24;
+        const double R = 5.0, h = 3.0;
+        std::vector<BandRing> rings = {{N, 0.0, R, 0.0}, {N, h, R, 0.0}};
+        const auto tris = bandTris(rings, o, ax, e1, e2);
+        const double area = (double)N * 2.0 * R * std::sin(kPi / N) * h;
+        const double v = bandSum(tris, o, ax, e1, e2, R, 0.0);
+        expect(relClose(v, dVolCylinderSector(area, R, N, true), 1e-9),
+               "band volume: regular prism = dVolCylinderSector");
+    }
+    // (2) Regular 36-gon frustum, aligned columns: coneFrustumChordVolume.
+    {
+        const int N = 36;
+        const double R1 = 4.0, R2 = 7.0, h = 5.0;
+        std::vector<BandRing> rings = {{N, 0.0, R1, 0.0}, {N, h, R2, 0.0}};
+        const auto tris = bandTris(rings, o, ax, e1, e2);
+        const double v = bandSum(tris, o, ax, e1, e2, R1, (R2 - R1) / h);
+        expect(relClose(v, coneFrustumChordVolume(R1, R2, h, N), 1e-9),
+               "band volume: regular frustum = coneFrustumChordVolume");
+    }
+    // (3) Rims of 2N, staggered interior rows of N (the exporter's S26 cone
+    // pattern): exact against the independent polyhedron reference; one-N
+    // densities miss it either way.
+    const int N = 45;
+    const double R1 = 11.5, R2 = 24.0, h = 19.25, k = (R2 - R1) / h;
+    std::vector<BandRing> rings;
+    rings.push_back({2 * N, 0.0, R1, 0.0});
+    for (int j = 1; j < 7; ++j) {
+        const double u = h * j / 7.0;
+        rings.push_back({N, u, R1 + k * u, (j % 2) ? kPi / N : 0.0});
+    }
+    rings.push_back({2 * N, h, R2, 0.0});
+    const auto tris = bandTris(rings, o, ax, e1, e2);
+    const double ref = bandReference(rings, tris, o, ax, e1, e2);
+    const double v = bandSum(tris, o, ax, e1, e2, R1, k);
+    expect(ref > 0.0 && relClose(v, ref, 1e-9), "band volume: staggered rows exact");
+    double area = 0, dRim = 0, dRow = 0;
+    for (const auto& t : tris) {
+        const gp_XYZ c = (t[0] + t[1] + t[2]) / 3.0 - o;
+        const double a = 0.5 * (t[1] - t[0]).Crossed(t[2] - t[0]).Modulus();
+        const double rho = R1 + k * c.Dot(ax);
+        area += a;
+        dRim += a * coneFrustumDVolDensity(rho, R1, R2, h, 2 * N);
+        dRow += a * coneFrustumDVolDensity(rho, R1, R2, h, N);
+    }
+    expect(dRim < 0.5 * ref && dRow > ref, "band volume: no single side count fits");
+    // (4) Frame and origin invariance: another e1, origin moved along the axis.
+    {
+        const double phi = 0.7;
+        const gp_XYZ f1 = e1 * std::cos(phi) + e2 * std::sin(phi);
+        const gp_XYZ f2 = ax.Crossed(f1);
+        const double du = -4.25;
+        const gp_XYZ o2 = o + ax * du;
+        const double v2 = bandSum(tris, o2, ax, f1, f2, R1 + k * du, k);
+        expect(relClose(v, v2, 1e-9), "band volume: frame and origin invariant");
+    }
+    // (5) A bore's winding (facets toward the axis) gives the same magnitude.
+    {
+        auto rev = tris;
+        for (auto& t : rev) std::swap(t[1], t[2]);
+        expect(relClose(bandSum(rev, o, ax, e1, e2, R1, k), v, 1e-12),
+               "band volume: winding independent");
+    }
+    (void)area;
+}
+
 int main() {
     caseClosed45();
     caseFunnel();
@@ -800,6 +957,7 @@ int main() {
     caseBlendBesideCone();
     caseThreeRing();
     caseThreads();
+    caseBandVolume();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
