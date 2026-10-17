@@ -3354,12 +3354,35 @@ std::vector<TorusSeamFamily> shareTorusSeamFrames(const MeshView& mv, RegionSet&
             for (int lv : ch.meshVerts) pts.push_back(pntOf(mv, lv));
             worst = std::max(worst, rimSeamOffset(fam.axis, fam.refX, pts));
         }
+        // A closed torus stands its seam on its low rim's vertex and mints its high
+        // rim there. A high rim the face across it already minted (that face builds
+        // first: closed-360 cylinders, then region id -- the builder's order) starts
+        // at that face's own vertex, which only one half-plane for the whole family
+        // puts on the torus's meridian, even when its mesh rims already reach it.
+        int reusedHigh = 0;
+        for (int tid : fam.members) {
+            const Region* T = regionById(rs, tid);
+            if (!T || !isTorusBlendR(*T)) continue;
+            for (const Loop& lp : T->loops) {
+                if (lp.role != LoopRole::CapHigh || lp.chainIdx.size() != 1) continue;
+                const int ci = lp.chainIdx.front();
+                if (ci < 0 || (size_t)ci >= rs.chains.size() || !rs.chains[(size_t)ci].closedLoop)
+                    continue;
+                const BoundaryChain& ch = rs.chains[(size_t)ci];
+                const Region* P = regionById(rs, ch.regA == tid ? ch.regB : ch.regA);
+                if (!P || !isAnalytic(P)) continue;
+                const bool p360 = P->closed360 && P->type == SurfType::Cylinder;
+                if (p360 || P->id < tid) ++reusedHigh;
+            }
+        }
+        const bool active = worst > tau || reusedHigh > 0;
         if (diagRelEnabled())
             std::fprintf(stderr,
                          "DIAG_AXISSEAM_FAMILY seed=%d ref=%d members=%zu worstRimOff=%.6g "
-                         "active=%d\n",
-                         seed->id, first->id, fam.members.size(), worst, worst > tau ? 1 : 0);
-        if (!(worst > tau)) continue;
+                         "reusedHigh=%d active=%d\n",
+                         seed->id, first->id, fam.members.size(), worst, reusedHigh,
+                         active ? 1 : 0);
+        if (!active) continue;
         for (int id : fam.members) {
             Region* m = regionByIdMut(rs, id);
             gp_Ax3 turned;
@@ -13432,6 +13455,19 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     const bool tookH = capsOneChain && takeFullCap(ciH0, circH, verts[(size_t)vH], eH);
     const bool simple = tookL && tookH;
     mintRefused = capsOneChain && !simple;
+    // A cap split over several chains, one of whose partners cannot carry an
+    // analytic rim (facets, an island, an exploded region), ships that chain as
+    // its mesh polyline -- the rim D-140-2 builds when it refuses a one-chain
+    // mint -- and takes the same UV-sense and seam-pair binding. Measured: a
+    // closed wall whose blend stayed facets (180 facet chains on one cap) is
+    // UnorientableShape on the plain split-cap path; its high cap runs +u.
+    // Heal-not-revert for a certified surface (every vertex within tau of it,
+    // D-fc-1.4): an uncertified wall keeps the path it had.
+    const double tauWall = 2.0 * std::max(mv.quantFloor, 0.0);
+    if (!capsOneChain && !capHasPolyline && tauWall > 0.0 && r.maxVertexDev <= tauWall)
+        for (const Loop* cp : {capL, capH})
+            for (int ci : cp->chainIdx)
+                if (!partnerBuildable(ci, r, rs, eprimeFill, exploded)) mintRefused = true;
     // D-140-13: persist onto the component. A mintRefused composite may still
     // close a shell (shelf / Body244); if it does not, buildFaces takes the
     // existing ChainUnstable facet path instead of returning false.
@@ -18598,6 +18634,26 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         // on the two-face shell. Do not Range the shared rim
                         // (J2). FixAddPCurve is not the author of these
                         // pcurves (nopc ⇒ Closed2d=NotClosed when f≠0).
+                        // A reused rim is its neighbour's circle, whose parameter may run
+                        // against the torus's u (a coaxial wall whose axis was fitted
+                        // antiparallel). Its pcurve then runs -u, and the wire takes it in
+                        // the opposite sense so the loop still closes on [u0, u0 + 2pi].
+                        auto rimRunsWithU = [&](const TopoDS_Edge& e, double vRim) -> bool {
+                            try {
+                                Standard_Real f = 0, l = 0;
+                                Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+                                if (c.IsNull()) return true;
+                                gp_Pnt P, S;
+                                gp_Vec T, Du, Dv;
+                                c->D1(f, P, T);
+                                tsurf->D1(u0, vRim, S, Du, Dv);
+                                return !(T.Dot(Du) < 0.0);
+                            } catch (const Standard_Failure&) {
+                            }
+                            return true;
+                        };
+                        const bool withUL = rimRunsWithU(eL, vLe);
+                        const bool withUH = rimRunsWithU(eH, vHe);
                         auto bindTorusPCurves = [&]() {
                             BRep_Builder Bp;
                             const TopLoc_Location loc;
@@ -18621,10 +18677,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                         uH0 = u0 + du;
                                 }
                             }
-                            Handle(Geom2d_Line) pcL = new Geom2d_Line(
-                                gp_Pnt2d(u0 - fL, vLe), gp_Dir2d(1.0, 0.0));
-                            Handle(Geom2d_Line) pcH = new Geom2d_Line(
-                                gp_Pnt2d(uH0 - fH, vHe), gp_Dir2d(1.0, 0.0));
+                            Handle(Geom2d_Line) pcL =
+                                withUL ? new Geom2d_Line(gp_Pnt2d(u0 - fL, vLe), gp_Dir2d(1.0, 0.0))
+                                       : new Geom2d_Line(gp_Pnt2d(u0 + 2.0 * kPi + fL, vLe),
+                                                         gp_Dir2d(-1.0, 0.0));
+                            Handle(Geom2d_Line) pcH =
+                                withUH ? new Geom2d_Line(gp_Pnt2d(uH0 - fH, vHe), gp_Dir2d(1.0, 0.0))
+                                       : new Geom2d_Line(gp_Pnt2d(uH0 + 2.0 * kPi + fH, vHe),
+                                                         gp_Dir2d(-1.0, 0.0));
                             Bp.UpdateEdge(eL, pcL, tsurf, loc, sewTol);
                             Bp.UpdateEdge(eH, pcH, tsurf, loc, sewTol);
                             // UIso is a full meridian circle: MakeEdge(VL,VH) may
@@ -18662,17 +18722,18 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         TopoDS_Wire w;
                         Bw.MakeWire(w);
                         Bw.Add(w, TopoDS::Edge(eSeam.Reversed()));
-                        Bw.Add(w, eL);
+                        Bw.Add(w, withUL ? eL : TopoDS::Edge(eL.Reversed()));
                         Bw.Add(w, eSeam);
-                        Bw.Add(w, TopoDS::Edge(eH.Reversed()));
+                        Bw.Add(w, withUH ? TopoDS::Edge(eH.Reversed()) : eH);
                         w.Closed(Standard_True);
 
                         if (diagP2Enabled() || diag130Enabled())
                             std::fprintf(stderr,
                                          "DIAG_TORUSCAP rid=%d ciL=%d ciH=%d reusedL=%d "
-                                         "reusedH=%d u0=%.5f eL=%p eH=%p\n",
+                                         "reusedH=%d u0=%.5f eL=%p eH=%p withUL=%d withUH=%d\n",
                                          r.id, ciL0, ciH0, reusedL ? 1 : 0, reusedH ? 1 : 0,
-                                         u0, diagTShapePtr(eL), diagTShapePtr(eH));
+                                         u0, diagTShapePtr(eL), diagTShapePtr(eH), withUL ? 1 : 0,
+                                         withUH ? 1 : 0);
 
                         TopoDS_Face f;
                         const bool kept = makeFaceKeep(tsurf, w, inners, r.outwardNormal, f);
