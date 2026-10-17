@@ -1,6 +1,6 @@
 {
   "reverts": {
-    "Body244.cyl360.rid1": "D-140-2 §4 / D-140-4 §2: R=14 closed360, 74+74+2 wire, 146/150 rim edges without pcurves, BRepCheck_UnorientableShape (st=27), TwoHalves also fails; contained to 148 facets by the explode path, not by containment; smoothContainedRegions reads 0 on this part. The defect is pcurve birth on a 150-edge 360° wire. Owed by D-140-5.",
+    "Body244.cyl360.rid1": "RETIRED in fact by fc-4 (fx-tori F9, 8654f72): the R14 neck ships as one Seamed360 cylinder on the axis family's seam half-plane. Kept as a documentary row (no gate reads 'reverts').",
     "S18.uncontainable-rim": "D-140-5: the J6 block IS reachable post-heal — a 160-tri synthetic (wedge plate 80x50x12->3, three N=6 R=5 bores, four R=1.2 fillets, deflection 0.2) emits 'J6: shell not closed freeEdges=4 faces=85 recover=1' on 728fc86; 90 of 1529 generated candidates do. The containment site is not: clause A (matchCollapsedChainToSegment matching a free edge to a collapsed chain within the absolute 1.0 mm 2*matchTol window) fires 0 times in 1529, because f10b3c9's mint refusal and the :15290 fallback guard between them remove every orphaned collapsed chain, and the only remaining route is an absolute-distance coincidence that cannot be specified. All 90 J6-reaching artefacts whole-component revert, so none can satisfy the 'other hole still ships as a cylinder' contract. Blocked additionally on the missing instrument DIAG_J6MATCH (D-140-5 §4). Sunset D-140-4 §1(5) FIRES: refit_build.cpp:15877-15925 and the two RESULT keys smoothContainedRegions/smoothContainedTriangles are reverted in this commit; changes 1 (regionClosureHealEligible widening) and 2 (fallbackGuardPass <= 2) stay, and change 2 is now measured load-bearing rather than dormant. See D-140-5 §3.",
     "S17.cap-claimed-by-a2": "D-140-4 §4(2): A2 claims a seeded-PRNG perturbed dome cap as a single plane at amplitudes 1024 q (rw1, seed 1403, capTris 90) and ≈5774 q (rw2, seed 0x54403137, capTris 40); both fixtures measured 6 planes + 1 cylinder + 0 facet islands, both satisfied the 2q adjacent-coplanarity premise. A2's plane-admission band is not q-derived. Blocked on revert.class-admission; S17 is rebuilt in the cycle that lands the certificate, and its generator asserts A2's own admission predicate (via DIAG_CLASSADMIT, D-140-3 §2(d)) rather than a q-coplanarity proxy. Owed by the class-admission lane.",
     "sidecar.recoverable-oracle": "D-140-4 §3: shelf_bracket and Body244 ship recoverable: [] / mustRemainFaceted: [] by the Body28 convention. The 130-arcs §1.6 mesh-fit oracle is not automated; tests/grade's buildOracle is the single mesh-only oracle and is not landed (adjudicate-grader-c2: landable=n). Seed both arrays from it in the lane that lands the grader; do not write a second fitter. Owed by the grader lane.",
@@ -42,7 +42,6 @@
   },
   "edge_class_gate": {
     "Body11": "D-130-23 / 082194b red lines not relaxed",
-    "Body244": "D-140-3 §4(b) first measure; overCap at seed (D-130-24)",
     "Body28": "D-130-23 / 082194b red lines not relaxed",
     "S03": "D-130-23 / 082194b red lines not relaxed",
     "S09": "D-130-23 / 082194b red lines not relaxed",

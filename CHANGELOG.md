@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Fourth increment of the fillet/chamfer work: tori and one-sided rounds. On the training files:
+the funnel part (Body244) now converts as 13 analytic faces — two funnel cones, a 45° neck
+chamfer cone, the rim lip and cone-to-neck blends as tori, three cylinders and three planes,
+no facets and no warnings — and the tray's last two vertical corner rounds (each tangent to
+one wall and cut off by another) ship as cylinders. No training file or test fixture reverts.
+
+### Added
+- Relational tori: a torus band about a certified donor axis is gathered by axis (rings of vertices equal in (ρ, z) within τ), certified as a chain of concyclic stations, absorbs whole stage-L regions that lie on it, and takes its closure (partial or full) from its own rails.
+- One-sided extrusion blend: a cylinder tangent to one certified plane and cut off by a certified plane it crosses (two free parameters after the anchors), certified at τ with a line-first refusal; a blend tangent to both trimming planes stays a two-sided fillet, and a hem stays deferred.
+
+### Fixed
+- One exact seam azimuth per revolution axis family: every closed rim circle of an axis family starts at the same exact circle point and its edges are built once, so a STEP written with tori and cones re-reads to the same volume (Body244 round-trip volume error 0.0068 % → 0.000002 %; largest vertex tolerance 0.19 mm → 0.000011 mm).
+- A torus face that fails after it was built falls back to the component's pre-torus state (cylinders and facets as before) instead of reverting the whole component to facets.
+
 ## [1.5.0] - 2026-10-16
 
 TrueForm now infers fillets and hole chamfers from their relationship to the planes and
