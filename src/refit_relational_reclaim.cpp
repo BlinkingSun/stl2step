@@ -20,6 +20,7 @@
 
 #include "refit_profile_cert.hpp"
 #include "refit_relational.hpp"
+#include "refit_relational_arc.hpp"
 #include "refit_relational_torus.hpp"
 
 #include <algorithm>
@@ -826,6 +827,147 @@ int healRefusedDonors(const RMesh& rm, const SegmentParams& p, const DerivedTols
     return healed;
 }
 
+// D-fc-4.4 fill and commit of one same-surface group: the Unclaimed I/Cover
+// triangles inside the group's extent fill it, and it commits only as ONE
+// edge-component that is a disk (one boundary loop); members[0] takes the
+// result, the others go to `erase`. False (deferred, unchanged) otherwise.
+bool closeGroup(const RMesh& rm, const DerivedTols& tol, double tau, int maxIt,
+                SegmentWork& work, const std::vector<int>& members,
+                const std::vector<int>& gtris, const Cyl& gs, std::vector<char>& unclaimed,
+                const char* mode, std::vector<int>& erase) {
+    const MeshView& mv = *rm.mv;
+    const int nTri = (int)mv.nTri;
+    const Cyl S = gs;
+    const Region& R0 = work.accepted[(std::size_t)members.front()];
+    gp_XYZ xd = R0.ax.XDirection().XYZ();
+    xd -= S.A * xd.Dot(S.A);
+    xd /= xd.Modulus();
+    // The group's own angular extent (largest-gap convention) and axial extent.
+    std::vector<double> chi;
+    double vlo, vhi;
+    axialRange(mv, gtris, S, vlo, vhi);
+    for (int t : gtris)
+        for (int k = 0; k < 3; ++k) chi.push_back(azimuthOf(vtxOf(mv, t, k), S, xd));
+    std::sort(chi.begin(), chi.end());
+    double maxGap = 0;
+    std::size_t gapAt = 0;
+    for (std::size_t i = 0; i + 1 < chi.size(); ++i)
+        if (chi[i + 1] - chi[i] > maxGap) {
+            maxGap = chi[i + 1] - chi[i];
+            gapAt = i;
+        }
+    const double wrap = chi.front() + kTwoPi - chi.back();
+    if (wrap > maxGap) {
+        maxGap = wrap;
+        gapAt = chi.size() - 1;
+    }
+    const double u0 = wrapPi(chi[(gapAt + 1) % chi.size()]);
+    const double u1 = u0 + (kTwoPi - maxGap);
+    const double s = claimChordSagitta(mv, gtris, gp_Ax1(gp_Pnt(S.C), gp_Dir(S.A)), S.R);
+
+    std::vector<int> I, Cv;
+    for (int t = 0; t < nTri; ++t) {
+        if (!unclaimed[(std::size_t)t]) continue;
+        int nin = 0;
+        double md = 0;
+        bool inside = true;
+        for (int k = 0; k < 3 && inside; ++k) {
+            const gp_XYZ pt = vtxOf(mv, t, k);
+            const double d = radialDev(pt, S);
+            md = std::max(md, d);
+            if (d <= tau) ++nin;
+            const double v = (pt - S.C).Dot(S.A);
+            if (v < vlo - tau || v > vhi + tau) inside = false;
+            if (!inArc(azimuthOf(pt, S, xd), u0, u1, tau / S.R)) inside = false;
+        }
+        if (!inside) continue;
+        if (nin == 3 && triLevels(mv, t, S, tau) >= kMinAxialLevels) I.push_back(t);
+        else if (nin >= 1 && md <= s) Cv.push_back(t);
+    }
+    std::vector<int> C = gtris;
+    C.insert(C.end(), I.begin(), I.end());
+    C.insert(C.end(), Cv.begin(), Cv.end());
+    std::sort(C.begin(), C.end());
+    C.erase(std::unique(C.begin(), C.end()), C.end());
+    std::vector<int> cert = gtris;
+    cert.insert(cert.end(), I.begin(), I.end());
+    std::sort(cert.begin(), cert.end());
+    gp_Dir fa;
+    gp_Pnt fc;
+    double fr = 0, fres = 0;
+    const bool fitOk = cylinderFitLS(mv, cert, gp_Dir(S.A), fa, fc, fr, fres, maxIt);
+    const auto cc = edgeComponents(rm, C);
+    const int loops = cc.size() == 1 ? boundaryLoops(rm, C) : -1;
+
+    BandDiag dg;
+    dg.mode = mode;
+    dg.seed = minTriOf(gtris);
+    dg.members = (int)members.size();
+    dg.nTri = (int)C.size();
+    dg.nV = (int)uniqueVerts(rm, C).size();
+    dg.nI = (int)I.size();
+    dg.nCover = (int)Cv.size();
+    dg.comps = (int)cc.size();
+    dg.loops = loops;
+    dg.sTau = s / tau;
+    dg.radius = fitOk ? fr : S.R;
+    dg.axis = fitOk ? fa.XYZ() : S.A;
+    dg.certDevTau = fres / tau;
+    int cols = 0, levels = 0;
+    stationsOf(rm, cert, fitOk ? Cyl{fc.XYZ(), fa.XYZ(), fr} : S, tau, cols, levels);
+    dg.stations = cols;
+    dg.levels = levels;
+    if (!fitOk || fres > tau) {
+        dg.why = "vertex-off";
+        printBand(dg);
+        return false;
+    }
+    // A result whose pieces the fill does not join stays separate faces (D-130-14);
+    // a result with an inner loop is the Seamed360/inner-wire build (owner seam).
+    if (cc.size() != 1) {
+        dg.why = "not-joined";
+        printBand(dg);
+        return false;
+    }
+    if (loops != 1) {
+        dg.why = "domain-not-disk";
+        printBand(dg);
+        return false;
+    }
+    const Cyl N{fc.XYZ(), fa.XYZ(), fr};
+    CylFields f;
+    if (!cylFields(rm, tol, C, N, f)) {
+        dg.why = "degenerate";
+        printBand(dg);
+        return false;
+    }
+    Region nr = R0;
+    nr.tris = C;
+    applyCylFields(nr, N, f);
+    std::vector<char> inC((std::size_t)nTri, 0);
+    for (int t : C) {
+        inC[(std::size_t)t] = 1;
+        unclaimed[(std::size_t)t] = 0;
+    }
+    dg.straddle = trimClaimed(rm, work, inC);
+    dg.maxDev = nr.maxVertexDev;
+    dg.maxDevTau = nr.maxVertexDev / tau;
+    dg.nSides = nr.nSides;
+    dg.dVol = nr.dVolPredicted;
+    if (diagOn())
+        for (int m : members)
+            std::fprintf(stderr, "DIAG_REL_CLOSURE_MEMBER seed=%d member=%d nTri=%zu nSides=%d dVol=%.6g\n",
+                         dg.seed, minTriOf(work.accepted[(std::size_t)m].tris),
+                         work.accepted[(std::size_t)m].tris.size(),
+                         work.accepted[(std::size_t)m].nSides,
+                         work.accepted[(std::size_t)m].dVolPredicted);
+    work.accepted[(std::size_t)members.front()] = std::move(nr);
+    for (std::size_t k = 1; k < members.size(); ++k) erase.push_back(members[k]);
+    dg.why = "accept";
+    printBand(dg);
+    return true;
+}
+
 // ---- D-fc-4.4: same-surface closure ---------------------------------------------
 int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols& tol,
                      double tau, SegmentWork& work, int& deferred) {
@@ -898,139 +1040,11 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
     std::vector<int> erase;
     for (Group& g : groups) {
         if (g.members.size() < 2) continue;  // one surface => one face triggers the fill
-        const Cyl S = g.s;
-        const Region& R0 = work.accepted[(std::size_t)g.members.front()];
-        gp_XYZ xd = R0.ax.XDirection().XYZ();
-        xd -= S.A * xd.Dot(S.A);
-        xd /= xd.Modulus();
-        // The group's own angular extent (largest-gap convention) and axial extent.
-        std::vector<double> chi;
-        double vlo, vhi;
-        axialRange(mv, g.tris, S, vlo, vhi);
-        for (int t : g.tris)
-            for (int k = 0; k < 3; ++k) chi.push_back(azimuthOf(vtxOf(mv, t, k), S, xd));
-        std::sort(chi.begin(), chi.end());
-        double maxGap = 0;
-        std::size_t gapAt = 0;
-        for (std::size_t i = 0; i + 1 < chi.size(); ++i)
-            if (chi[i + 1] - chi[i] > maxGap) {
-                maxGap = chi[i + 1] - chi[i];
-                gapAt = i;
-            }
-        const double wrap = chi.front() + kTwoPi - chi.back();
-        if (wrap > maxGap) {
-            maxGap = wrap;
-            gapAt = chi.size() - 1;
-        }
-        const double u0 = wrapPi(chi[(gapAt + 1) % chi.size()]);
-        const double u1 = u0 + (kTwoPi - maxGap);
-        const double s = claimChordSagitta(mv, g.tris, gp_Ax1(gp_Pnt(S.C), gp_Dir(S.A)), S.R);
-
-        std::vector<int> I, Cv;
-        for (int t = 0; t < nTri; ++t) {
-            if (!unclaimed[(std::size_t)t]) continue;
-            int nin = 0;
-            double md = 0;
-            bool inside = true;
-            for (int k = 0; k < 3 && inside; ++k) {
-                const gp_XYZ pt = vtxOf(mv, t, k);
-                const double d = radialDev(pt, S);
-                md = std::max(md, d);
-                if (d <= tau) ++nin;
-                const double v = (pt - S.C).Dot(S.A);
-                if (v < vlo - tau || v > vhi + tau) inside = false;
-                if (!inArc(azimuthOf(pt, S, xd), u0, u1, tau / S.R)) inside = false;
-            }
-            if (!inside) continue;
-            if (nin == 3 && triLevels(mv, t, S, tau) >= kMinAxialLevels) I.push_back(t);
-            else if (nin >= 1 && md <= s) Cv.push_back(t);
-        }
-        std::vector<int> C = g.tris;
-        C.insert(C.end(), I.begin(), I.end());
-        C.insert(C.end(), Cv.begin(), Cv.end());
-        std::sort(C.begin(), C.end());
-        C.erase(std::unique(C.begin(), C.end()), C.end());
-        std::vector<int> cert = g.tris;
-        cert.insert(cert.end(), I.begin(), I.end());
-        std::sort(cert.begin(), cert.end());
-        gp_Dir fa;
-        gp_Pnt fc;
-        double fr = 0, fres = 0;
-        const bool fitOk = cylinderFitLS(mv, cert, gp_Dir(S.A), fa, fc, fr, fres, maxIt);
-        const auto cc = edgeComponents(rm, C);
-        const int loops = cc.size() == 1 ? boundaryLoops(rm, C) : -1;
-
-        BandDiag dg;
-        dg.mode = "closure";
-        dg.seed = minTriOf(g.tris);
-        dg.members = (int)g.members.size();
-        dg.nTri = (int)C.size();
-        dg.nV = (int)uniqueVerts(rm, C).size();
-        dg.nI = (int)I.size();
-        dg.nCover = (int)Cv.size();
-        dg.comps = (int)cc.size();
-        dg.loops = loops;
-        dg.sTau = s / tau;
-        dg.radius = fitOk ? fr : S.R;
-        dg.axis = fitOk ? fa.XYZ() : S.A;
-        dg.certDevTau = fres / tau;
-        int cols = 0, levels = 0;
-        stationsOf(rm, cert, fitOk ? Cyl{fc.XYZ(), fa.XYZ(), fr} : S, tau, cols, levels);
-        dg.stations = cols;
-        dg.levels = levels;
-        if (!fitOk || fres > tau) {
-            dg.why = "vertex-off";
-            printBand(dg);
+        if (closeGroup(rm, tol, tau, maxIt, work, g.members, g.tris, g.s, unclaimed, "closure",
+                       erase))
+            ++committed;
+        else
             ++deferred;
-            continue;
-        }
-        // A result whose pieces the fill does not join stays separate faces (D-130-14);
-        // a result with an inner loop is the Seamed360/inner-wire build (owner seam).
-        if (cc.size() != 1) {
-            dg.why = "not-joined";
-            printBand(dg);
-            ++deferred;
-            continue;
-        }
-        if (loops != 1) {
-            dg.why = "domain-not-disk";
-            printBand(dg);
-            ++deferred;
-            continue;
-        }
-        const Cyl N{fc.XYZ(), fa.XYZ(), fr};
-        CylFields f;
-        if (!cylFields(rm, tol, C, N, f)) {
-            dg.why = "degenerate";
-            printBand(dg);
-            ++deferred;
-            continue;
-        }
-        Region nr = R0;
-        nr.tris = C;
-        applyCylFields(nr, N, f);
-        std::vector<char> inC((std::size_t)nTri, 0);
-        for (int t : C) {
-            inC[(std::size_t)t] = 1;
-            unclaimed[(std::size_t)t] = 0;
-        }
-        dg.straddle = trimClaimed(rm, work, inC);
-        dg.maxDev = nr.maxVertexDev;
-        dg.maxDevTau = nr.maxVertexDev / tau;
-        dg.nSides = nr.nSides;
-        dg.dVol = nr.dVolPredicted;
-        if (diagOn())
-            for (int m : g.members)
-                std::fprintf(stderr, "DIAG_REL_CLOSURE_MEMBER seed=%d member=%d nTri=%zu nSides=%d dVol=%.6g\n",
-                             dg.seed, minTriOf(work.accepted[(std::size_t)m].tris),
-                             work.accepted[(std::size_t)m].tris.size(),
-                             work.accepted[(std::size_t)m].nSides,
-                             work.accepted[(std::size_t)m].dVolPredicted);
-        work.accepted[(std::size_t)g.members.front()] = std::move(nr);
-        for (std::size_t k = 1; k < g.members.size(); ++k) erase.push_back(g.members[k]);
-        ++committed;
-        dg.why = "accept";
-        printBand(dg);
     }
     eraseRegions(work, erase);
     return committed;
@@ -1039,8 +1053,10 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
 // ---- Ring donor (lowfold F2): circular loops on identified planes ---------------
 // The closed boundary loops of one Unclaimed plane chart, in ascending vertex order.
 // A loop is a cycle of the chart's boundary-edge graph through vertices of degree 2.
+// nBoundary (optional) receives the number of vertices of the chart's boundary graph.
 std::vector<std::vector<int>> chartLoops(const RMesh& rm, const std::vector<int>& chartTris,
-                                         const std::vector<int>& triProv, int pi) {
+                                         const std::vector<int>& triProv, int pi,
+                                         std::size_t* nBoundary = nullptr) {
     const MeshView& mv = *rm.mv;
     std::map<int, std::vector<int>> g;
     for (int t : chartTris)
@@ -1053,6 +1069,7 @@ std::vector<std::vector<int>> chartLoops(const RMesh& rm, const std::vector<int>
             g[ev.first].push_back(ev.second);
             g[ev.second].push_back(ev.first);
         }
+    if (nBoundary) *nBoundary = g.size();
     std::vector<std::vector<int>> loops;
     std::set<int> used;
     for (const auto& kv : g) {
@@ -1895,6 +1912,161 @@ bool reclaimRelational(const MeshView& mv, const SegmentParams& p, const Derived
     } catch (...) {
         return true;
     }
+}
+
+bool certifyMeshRing(const std::vector<gp_XYZ>& pts, double tau, MeshRing& out) {
+    if (!(tau > 0.0) || (int)pts.size() < minStations(kParamsCircle)) return false;
+    if (!ringCircle(pts, out.n, out.c, out.R, out.planeDev, out.circDev)) return false;
+    if (!(out.planeDev <= tau) || !(out.circDev <= tau) || !(out.R > tau)) return false;
+    gp_XYZ e1 = std::abs(out.n.X()) < 0.9 ? gp_XYZ(1, 0, 0).Crossed(out.n)
+                                         : gp_XYZ(0, 1, 0).Crossed(out.n);
+    e1 /= e1.Modulus();
+    const gp_XYZ e2 = out.n.Crossed(e1);
+    std::vector<double> ps, rs;
+    for (const gp_XYZ& q : pts) {
+        const gp_XYZ d = q - out.c;
+        double psi = std::atan2(d.Dot(e2), d.Dot(e1));
+        if (psi < 0.0) psi += kTwoPi;
+        ps.push_back(psi);
+        rs.push_back(out.n.Crossed(d).Modulus());
+    }
+    out.stations = countColumns(ps, rs, tau);
+    return out.stations >= minStations(kParamsCircle);
+}
+
+std::vector<AnnulusRings> annulusRingCharts(const MeshView& mv, const SegmentWork& work,
+                                            double tau) {
+    std::vector<AnnulusRings> out;
+    if (!(tau > 0.0) || mv.nTri == 0 || !mv.triEdges || !mv.compEdges || !mv.compVtx) return out;
+    const RMesh rm = makeRMesh(mv);
+    const int nTri = (int)mv.nTri;
+    std::vector<int> triProv((std::size_t)nTri, -1);
+    std::vector<char> owned((std::size_t)nTri, 0);
+    for (int i = 0; i < (int)work.provisionals.size(); ++i)
+        for (int t : work.provisionals[(std::size_t)i].tris)
+            if (t >= 0 && t < nTri) triProv[(std::size_t)t] = i;
+    for (const Region& r : work.accepted)
+        for (int t : r.tris)
+            if (t >= 0 && t < nTri) owned[(std::size_t)t] = 1;
+    for (int pi = 0; pi < (int)work.provisionals.size(); ++pi) {
+        const Provisional& pr = work.provisionals[(std::size_t)pi];
+        if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) continue;
+        bool free = true;
+        for (int t : pr.tris)
+            if (t < 0 || t >= nTri || owned[(std::size_t)t]) free = false;
+        if (!free) continue;
+        std::size_t nB = 0;
+        const std::vector<std::vector<int>> loops = chartLoops(rm, pr.tris, triProv, pi, &nB);
+        // The chart's whole boundary is two simple loops: a planar annulus.
+        if ((int)loops.size() != kAnnulusLoops || loops[0].size() + loops[1].size() != nB)
+            continue;
+        AnnulusRings a;
+        a.chart = pi;
+        a.minTri = minTriOf(pr.tris);
+        bool ok = true;
+        std::vector<gp_XYZ> lp[kAnnulusLoops];
+        for (int k = 0; k < kAnnulusLoops && ok; ++k) {
+            for (int lv : loops[(std::size_t)k]) lp[k].push_back(mv.pts[mv.compVtx[lv]]);
+            a.ring[k].verts = loops[(std::size_t)k];
+            ok = certifyMeshRing(lp[k], tau, a.ring[k]);
+        }
+        // Planar: both rings lie in one plane within tau (each in the other's).
+        for (int k = 0; k < kAnnulusLoops && ok; ++k)
+            for (const gp_XYZ& q : lp[1 - k])
+                if (!(std::abs((q - a.ring[k].c).Dot(a.ring[k].n)) <= tau)) ok = false;
+        if (ok) out.push_back(std::move(a));
+    }
+    return out;
+}
+
+bool mergeSameSurfaceBand(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                          SegmentWork& work, int acc, const std::vector<int>& band,
+                          const gp_XYZ& origin, const gp_XYZ& axis, double radiusAcc,
+                          double radius) {
+    const double tau = tauOf(mv);
+    const int nTri = (int)mv.nTri;
+    if (!(tau > 0.0) || nTri == 0 || !mv.triEdges || band.empty() || acc < 0 ||
+        acc >= (int)work.accepted.size())
+        return false;
+    const Region& R = work.accepted[(std::size_t)acc];
+    // D-fc-4.4 members are partial cylinders; the joint least-squares fit below
+    // certifies the union (the donor's own refit already certified it, D-fc-1.4).
+    if (R.type != SurfType::Cylinder || R.closed360) {
+        if (diagOn())
+            std::fprintf(stderr, "DIAG_REL_MERGE seed=%d acc=%d type=%d closed=%d why=no-donor\n",
+                         minTriOf(band), acc, (int)R.type, (int)R.closed360);
+        return false;
+    }
+    const RMesh rm = makeRMesh(mv);
+    const int maxIt = std::max(1, p.maxRefineIters);
+    gp_XYZ a = axis;
+    a /= a.Modulus();
+    // Both surfaces as certified on the family axis: the member at its own
+    // radius about it (D-fc-4.8 (b)), the band at its.
+    const Cyl SR{origin, a, radiusAcc}, SB{origin, a, radius};
+    BandDiag dg;
+    dg.mode = "merge";
+    dg.seed = minTriOf(band);
+    dg.members = 1;
+    dg.radius = radius;
+    dg.axis = a;
+    // Mutual vertex containment at tau and strictly overlapping axial extents.
+    if (setDev(mv, band, SR) > tau || setDev(mv, R.tris, SB) > tau) {
+        dg.why = "vertex-off";
+        printBand(dg);
+        return false;
+    }
+    double li, hi, lj, hj;
+    axialRange(mv, R.tris, SR, li, hi);
+    axialRange(mv, band, SR, lj, hj);
+    if (!(li < hj && lj < hi)) {
+        dg.why = "not-joined";
+        printBand(dg);
+        return false;
+    }
+    std::vector<int> U = R.tris;
+    U.insert(U.end(), band.begin(), band.end());
+    std::sort(U.begin(), U.end());
+    U.erase(std::unique(U.begin(), U.end()), U.end());
+    gp_Dir fa;
+    gp_Pnt fc;
+    double fr = 0, fres = 0;
+    if (!cylinderFitLS(mv, U, gp_Dir(SR.A), fa, fc, fr, fres, maxIt) || fres > tau) {
+        dg.why = "vertex-off";
+        dg.certDevTau = fres / tau;
+        printBand(dg);
+        return false;
+    }
+    std::vector<char> unclaimed((std::size_t)nTri, 0);
+    for (const Provisional& pr : work.provisionals)
+        if (pr.claim == ProvClaim::Unclaimed)
+            for (int t : pr.tris)
+                if (t >= 0 && t < nTri) unclaimed[(std::size_t)t] = 1;
+    for (const Region& r : work.accepted)
+        for (int t : r.tris)
+            if (t >= 0 && t < nTri) unclaimed[(std::size_t)t] = 0;
+    for (int t : band)
+        if (t >= 0 && t < nTri) unclaimed[(std::size_t)t] = 0;
+    std::vector<int> erase;
+    return closeGroup(rm, tol, tau, maxIt, work, std::vector<int>{acc}, U,
+                      Cyl{fc.XYZ(), fa.XYZ(), fr}, unclaimed, "merge", erase);
+}
+
+std::vector<std::vector<int>> triSetLoops(const MeshView& mv, const std::vector<int>& tris) {
+    std::vector<std::vector<int>> loops;
+    if (mv.nTri == 0 || !mv.triEdges || !mv.compEdges) return loops;
+    const RMesh rm = makeRMesh(mv);
+    const int nTri = (int)mv.nTri;
+    // The set as one chart: chartLoops reads the edges whose other side is not in it.
+    std::vector<int> mark((std::size_t)nTri, -1);
+    for (int t : tris)
+        if (t >= 0 && t < nTri) mark[(std::size_t)t] = 0;
+    std::size_t nB = 0;
+    loops = chartLoops(rm, tris, mark, 0, &nB);
+    std::size_t sum = 0;
+    for (const auto& l : loops) sum += l.size();
+    if (sum != nB) loops.clear();
+    return loops;
 }
 
 JointAxisFit jointAxisAbout(const std::vector<std::vector<gp_XYZ>>& groups, const gp_XYZ& origin,

@@ -454,6 +454,7 @@ struct Donor {
     std::vector<int> gids;     // its own certified vertices (global ids)
     std::vector<int> members;  // D-fc-4.8 (b): accepted indices of its coaxial family
     std::vector<std::vector<gp_XYZ>> famPts;  // D-fc-4.9: each member's certified vertices
+    int fam = -1;  // D-fc-5.11 F1: a ring donor's (idx -1) Line-mode family
 };
 
 bool regionIsDonorClass(const Region& r) {
@@ -819,19 +820,27 @@ bool emitPartialCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, 
     const Frame f0 = makeFrame(origin, axis, donor.fr.e1);
     std::vector<gp_XYZ> pts;
     bandPoints(band, pts);
-    std::vector<Vtx> uniq;
+    std::vector<Vtx> uniq, rim;
     for (const gp_XYZ& p : pts) {
         Vtx v;
         v.p = p;
         v.pr = profOfPoint(p, f0, 0);
         uniq.push_back(v);
+        // D-fc-5.11 F4: the apex (rho <= tau) has no azimuth; the arc is its rims'.
+        if (v.pr.rho > wm.tau) rim.push_back(v);
     }
-    const ClosedM cl = closedOf(mv, f0, band.tris, uniq, wm.thetaBin);
+    const ClosedM cl = closedOf(mv, f0, band.tris, rim, wm.thetaBin);
     if (cl.closed || !(cl.span > 0.0)) return false;
-    const double RzMin = pc.rhoAt(pc.zLo);
-    const double RzMax = pc.rhoAt(pc.zHi);
-    // The face must not pass its apex (vertices on the axis are never members).
-    if (!(RzMin > 0.0) || !(RzMax > 0.0)) return false;
+    // D-fc-5.11 F4: an end of the profile line within tau of the axis is the
+    // apex (radius 0); otherwise the face must not pass it.
+    const double kSc = std::sqrt(1.0 + pc.k * pc.k);
+    auto endRadius = [&](double z) {
+        const double R = pc.rhoAt(z);
+        return (std::fabs(R) / kSc <= wm.tau) ? 0.0 : R;
+    };
+    const double RzMin = endRadius(pc.zLo);
+    const double RzMax = endRadius(pc.zHi);
+    if (!(RzMin >= 0.0) || !(RzMax >= 0.0) || !(RzMin > 0.0 || RzMax > 0.0)) return false;
     const bool loAtMin = RzMin <= RzMax;
     const double Rlo = loAtMin ? RzMin : RzMax;
     const double Rhi = loAtMin ? RzMax : RzMin;
@@ -1217,7 +1226,9 @@ struct CoaxFamily {
     gp_XYZ origin, axis;
     std::vector<std::vector<gp_XYZ>> groups;  // donors first, then claimed bands
     std::size_t nDonors = 0;
+    bool ring = false;  // D-fc-5.11 F1: the donor groups are rings, not surfaces
     std::vector<int> bandRegion;  // work.accepted index of each claimed band
+    std::vector<int> donorAcc;    // work.accepted index of each donor group (-1: a ring)
     bool moved = false;           // the axis changed after a band was placed on it
 };
 
@@ -1401,6 +1412,32 @@ bool sameSurfaceCyl(const WorkMesh& wm, const SegmentWork& work, const Band& ban
         if (all) return true;
     }
     return false;
+}
+
+// A closed band is one surface piece around the axis: one edge-connected
+// annulus whose boundary is its two rims (kAnnulusLoops). Triangles that only
+// stand on the rings each on their own (scattered columns pass the column
+// rule) are no wall.
+bool bandIsAnnulus(const WorkMesh& wm, const std::vector<int>& tris) {
+    const int nTri = (int)wm.mv->nTri;
+    if (tris.empty()) return false;
+    std::vector<char> in((std::size_t)nTri, 0), seen((std::size_t)nTri, 0);
+    for (int t : tris)
+        if (t >= 0 && t < nTri) in[(std::size_t)t] = 1;
+    std::vector<int> stack{tris.front()};
+    seen[(std::size_t)tris.front()] = 1;
+    std::size_t n = 0;
+    while (!stack.empty()) {
+        const int c = stack.back();
+        stack.pop_back();
+        ++n;
+        for (int w : wm.adj.nbr[(std::size_t)c])
+            if (w >= 0 && w < nTri && in[(std::size_t)w] && !seen[(std::size_t)w]) {
+                seen[(std::size_t)w] = 1;
+                stack.push_back(w);
+            }
+    }
+    return n == tris.size() && triSetLoops(*wm.mv, tris).size() == 2;
 }
 
 // D-fc-3.5 line mode. Rings are vertices at equal (ρ, z) within τ, ≥ 3.
@@ -1879,7 +1916,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
         // parameter (its radius) about the family axis, certified jointly with
         // the family's certified vertices. A chain that is not one goes on to
         // the cone below unchanged.
-        const int famId = (donor.idx >= 0 && donor.idx < (int)lf.famOfAcc.size())
+        const int famId = donor.fam >= 0 ? donor.fam
+                          : (donor.idx >= 0 && donor.idx < (int)lf.famOfAcc.size())
                               ? lf.famOfAcc[(std::size_t)donor.idx]
                               : -1;
         if (famId >= 0) {
@@ -1953,9 +1991,17 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             int anchorProv = -1;
             double anchorDist = -1;
             const ClosedM ccl = cc.ok ? closedOf(mv, fr, cb.tris, cb.verts, wm.thetaBin) : ClosedM();
+            // D-fc-5.11 F1: a ring family's donor groups are rings, not surfaces;
+            // only its claimed bands are surfaces a band can be the same as.
+            std::size_t sameFrom = 0;
+            if (fam.ring) sameFrom = fam.nDonors;
+            int sameG = -1;
+            if (cc.ok && cc.fit.radius.size() > fam.groups.size())
+                for (std::size_t g = sameFrom; g < fam.groups.size() && sameG < 0; ++g)
+                    if (std::fabs(cc.fit.radius[g] - Rb) <= tau) sameG = (int)g;
             if (cc.ok && !stable) why = "unstable";
             else if (cc.ok && ccl.closed) why = "closed-deferred";
-            else if (cc.ok && coaxialSameRadius(cc.fit, fam.groups.size(), tau)) why = "same-surface";
+            else if (cc.ok && sameG >= 0) why = "same-surface";
             else if (cc.ok && lf.tol && lf.sp &&
                      (anchorProv = coaxialTangentPlane(wm, work, *lf.sp, *lf.tol, cb.tris,
                                                        cc.fit.origin, cc.fit.axis, Rb,
@@ -1966,6 +2012,21 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             else if (cc.ok) why = "accept";
             const bool accept = std::strcmp(why, "accept") == 0;
             if (!accept && lineChainGeometric(cc.why)) chainGeom = true;
+            // D-fc-5.11 F2: the band is the rest of a family member's surface; it
+            // goes to the D-fc-4.4 closure with that member (merge, not refuse).
+            bool merged = false;
+            if (cc.ok && stable && !ccl.closed && sameG >= 0 && lf.tol && lf.sp) {
+                const std::size_t g = (std::size_t)sameG;
+                const int acc = g < fam.nDonors
+                                    ? (g < fam.donorAcc.size() ? fam.donorAcc[g] : -1)
+                                    : fam.bandRegion[g - fam.nDonors];
+                merged = acc >= 0 && mergeSameSurfaceBand(mv, *lf.sp, *lf.tol, work, acc, cb.tris,
+                                                          cc.fit.origin, cc.fit.axis,
+                                                          cc.fit.radius[g], Rb);
+                if (merged)
+                    for (int t : work.accepted[(std::size_t)acc].tris)
+                        if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+            }
             int straddle = 0;
             if (accept) {
                 Region r;
@@ -2020,7 +2081,7 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     std::fprintf(stderr, "\n");
                 }
             }
-            if (accept) continue;
+            if (accept || merged) continue;
         }
         if (stations < 2 || !fit.hatOk) {
             refuse("underdetermined");
@@ -2125,8 +2186,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     double zLo = 1e300, zHi = -1e300;
                     for (int k = 0; k < 3; ++k) {
                         const ProfPt pp = profOfPoint(triVert(mv, t, k), pf, 0);
-                        // A vertex on the axis (the apex) has no azimuth.
-                        if (!(pp.rho > tau)) return false;
+                        // D-fc-5.11 F4: a vertex on the axis (rho <= tau, the apex)
+                        // is a station of the same line; it passes the same test.
                         if (!(std::fabs(pp.rho - c.rhoAt(pp.z)) / sc <= tau)) return false;
                         zLo = std::min(zLo, pp.z);
                         zHi = std::max(zHi, pp.z);
@@ -2250,6 +2311,10 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                 const double em = e2.Modulus();
                 if (em > gp::Resolution()) donor.fr.e2 = e2 / em;
             }
+        }
+        if (!bandIsAnnulus(wm, band.tris)) {
+            refuse("domain-not-annulus");
+            continue;
         }
         double ang0 = 0, ang1 = 0;
         int straddle = 0;
@@ -2969,7 +3034,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                              "DIAG_REL_TORUS_BAND seed=%d nTri=%zu atoms=%zu chainRings=%zu donor=%d "
                              "donorR=%.6f donorClosed=%d\n",
                              band.seed, band.tris.size(), atoms.size(), chain.size(), donor.idx,
-                             donor.radius, work.accepted[(std::size_t)donor.idx].closed360 ? 1 : 0);
+                             donor.radius,
+                             (donor.idx >= 0 && work.accepted[(std::size_t)donor.idx].closed360) ? 1 : 0);
         }
         const bool consumes = claimedChain || chainGeomFail || bandGeomFail;
         if (consumes)
@@ -3006,6 +3072,104 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
     }
     scan.scanned = true;
     scans.push_back(scan);
+}
+
+// D-fc-5.11 F1. Ring donors: the two rings of each planar annulus chart
+// (annulusRingCharts) that jointly certify one axis at tau (D-fc-4.8 (b): every
+// vertex of each ring within tau of its own radius about it), grouped into
+// coaxial families in chart order. A family is one donor with no region
+// (idx -1): its frame is the family axis and its certified vertices are its
+// rings' vertices. Every band it donates passes the full revolve certificate.
+std::vector<Donor> ringDonors(const MeshView& mv, const SegmentWork& work, double tau,
+                              int maxIter) {
+    std::vector<Donor> out;
+    std::vector<AxisDonor> ad;
+    std::vector<int> adMinTri;
+    std::vector<std::vector<int>> adGids;
+    for (const AnnulusRings& a : annulusRingCharts(mv, work, tau)) {
+        std::vector<std::vector<gp_XYZ>> groups(2);
+        std::vector<std::vector<int>> gid(2);
+        for (int k = 0; k < 2; ++k)
+            for (int lv : a.ring[k].verts) {
+                const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                groups[(std::size_t)k].push_back(mv.pts[g]);
+                gid[(std::size_t)k].push_back(g);
+            }
+        JointAxisFit f = jointAxisAbout(groups, a.ring[0].c, a.ring[0].n);
+        if (!jointAxisCertifies(f, tau)) {
+            JointAxisFit g;
+            if (!jointAxisFit(groups, a.ring[0].c, a.ring[0].n, maxIter, g) ||
+                !jointAxisCertifies(g, tau))
+                continue;
+            f = g;
+        }
+        for (int k = 0; k < 2; ++k) {
+            AxisDonor d;
+            d.origin = f.origin;
+            d.axis = f.axis;
+            d.radius = f.radius[(std::size_t)k];
+            d.length = tau;  // a planar ring has no axial extent
+            d.pts = groups[(std::size_t)k];
+            ad.push_back(std::move(d));
+            adMinTri.push_back(a.minTri);
+            adGids.push_back(gid[(std::size_t)k]);
+        }
+    }
+    std::vector<int> order(ad.size());
+    for (std::size_t i = 0; i < ad.size(); ++i) order[i] = (int)i;
+    for (const CoaxialFamily& fam : coaxialFamilies(ad, order, tau, maxIter)) {
+        Donor d;
+        d.idx = -1;
+        d.fr = makeFrame(fam.fit.origin, fam.fit.axis, gp_XYZ(1, 0, 0));
+        d.radius = fam.fit.radius.front();
+        double zMin = 1e300, zMax = -1e300, sum2 = 0;
+        int nv = 0;
+        d.minTri = std::numeric_limits<int>::max();
+        for (std::size_t k = 0; k < fam.members.size(); ++k) {
+            const int m = fam.members[k];
+            d.maxDev = std::max(d.maxDev, fam.fit.maxDev[k]);
+            d.minTri = std::min(d.minTri, adMinTri[(std::size_t)m]);
+            d.famPts.push_back(ad[(std::size_t)m].pts);
+            for (int g : adGids[(std::size_t)m]) d.gids.push_back(g);
+            for (const gp_XYZ& pt : ad[(std::size_t)m].pts) {
+                const ProfPt pp = profOfPoint(pt, d.fr, 0);
+                zMin = std::min(zMin, pp.z);
+                zMax = std::max(zMax, pp.z);
+                const double dv = pp.rho - fam.fit.radius[k];
+                sum2 += dv * dv;
+                ++nv;
+            }
+        }
+        std::sort(d.gids.begin(), d.gids.end());
+        d.gids.erase(std::unique(d.gids.begin(), d.gids.end()), d.gids.end());
+        d.rms = nv ? std::sqrt(sum2 / nv) : 0;
+        d.length = (zMax > zMin) ? (zMax - zMin) : tau;
+        out.push_back(std::move(d));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const Donor& a, const Donor& b) { return a.minTri < b.minTri; });
+    if (diagOn())
+        for (const Donor& d : out) {
+            std::fprintf(stderr,
+                         "DIAG_REL_RINGDONOR seed=%d rings=%zu radius=%.9g maxDevTau=%.4f "
+                         "length=%.6g axis=%.9g,%.9g,%.9g origin=%.9g,%.9g,%.9g ringR=",
+                         d.minTri, d.famPts.size(), d.radius, d.maxDev / tau, d.length,
+                         d.fr.axis.X(), d.fr.axis.Y(), d.fr.axis.Z(), d.fr.origin.X(),
+                         d.fr.origin.Y(), d.fr.origin.Z());
+            for (std::size_t k = 0; k < d.famPts.size(); ++k) {
+                double sr = 0, sz = 0;
+                for (const gp_XYZ& pt : d.famPts[k]) {
+                    const ProfPt pp = profOfPoint(pt, d.fr, 0);
+                    sr += pp.rho;
+                    sz += pp.z;
+                }
+                const double n = (double)std::max<std::size_t>(d.famPts[k].size(), 1);
+                std::fprintf(stderr, "%s%.6g@z%.6g/n%zu", k ? "," : "", sr / n, sz / n,
+                             d.famPts[k].size());
+            }
+            std::fprintf(stderr, "\n");
+        }
+    return out;
 }
 
 }  // namespace
@@ -3177,6 +3341,7 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     for (int m : f.members) {
                         cf.groups.push_back(ad[(std::size_t)m].pts);
                         const int acc = donors[(std::size_t)m].idx;
+                        cf.donorAcc.push_back(acc);
                         if (acc >= 0 && acc < (int)lf.famOfAcc.size())
                             lf.famOfAcc[(std::size_t)acc] = (int)lf.fams.size();
                     }
@@ -3186,6 +3351,19 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
             }
             for (Donor& donor : donors)
                 gatherLines(wm, work, donor, axisScans, lf, claimed, refused);
+            // D-fc-5.11 F1: ring donors scan after every region donor, so an axis
+            // a region donor already scanned is not scanned again (sameAxis).
+            for (Donor& donor : ringDonors(mv, work, tau, wm.maxIter)) {
+                CoaxFamily cf;
+                cf.origin = donor.fr.origin;
+                cf.axis = donor.fr.axis;
+                cf.groups = donor.famPts;
+                cf.nDonors = cf.groups.size();
+                cf.ring = true;
+                donor.fam = (int)lf.fams.size();
+                lf.fams.push_back(std::move(cf));
+                gatherLines(wm, work, donor, axisScans, lf, claimed, refused);
+            }
             // One family, one axis: a band placed before a later band moved the
             // family axis takes the final one. The final joint certificate
             // already holds every band's vertices within tau of its radius on it.
@@ -3300,6 +3478,9 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 if (atomDead[(std::size_t)donor.idx]) continue;
                 gatherTori(wm, work, donor, axisScans, atomOf, atomDead, claimed, refused);
             }
+            // D-fc-5.11 F1: ring donors scan after every region family.
+            for (Donor& donor : ringDonors(mv, work, tau, wm.maxIter))
+                gatherTori(wm, work, donor, axisScans, atomOf, atomDead, claimed, refused);
             // An atom a withheld band would have absorbed stays (D-fc-4.11 (a)).
             for (std::size_t i = 0; i < atomDead.size() && i < wm.atomHeld.size(); ++i)
                 if (wm.atomHeld[i]) atomDead[i] = 0;
@@ -3426,6 +3607,8 @@ PartialConeCert certifyPartialCone(const std::vector<std::vector<gp_XYZ>>& famil
         const ProfPt pp = profOfPoint(p, fr, 0);
         pts.push_back(pp);
         zs.push_back(pp.z);
+        // D-fc-5.11 F4: a vertex on the axis (the apex) has no azimuth station.
+        if (!(pp.rho > tau)) continue;
         psis.push_back(pp.psi);
         rhos.push_back(pp.rho);
     }

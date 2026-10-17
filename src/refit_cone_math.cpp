@@ -162,7 +162,8 @@ bool coneFrustumVRangeFromRadii(const gp_Cone& cone, double rhoA, double rhoB, d
     double R, ta, ca, sa;
     if (!coneParams(cone, R, ta, ca, sa)) return false;
     if (!std::isfinite(rhoA) || !std::isfinite(rhoB)) return false;
-    if (!(rhoA > 0.0) || !(rhoB > 0.0)) return false;
+    // D-fc-5.11 F4: rim A may be the apex (radius 0) of a cone that reaches it.
+    if (!(rhoA >= 0.0) || !(rhoB > 0.0)) return false;
     if (!(std::fabs(rhoA - rhoB) > 0.0)) return false;
     const double a = (rhoA - R) / sa;
     const double b = (rhoB - R) / sa;
@@ -175,7 +176,8 @@ bool coneFrustumVRangeFromRadii(const gp_Cone& cone, double rhoA, double rhoB, d
 
 bool coneFromRims(const gp_Ax3& rimA, double rhoA, double rhoB, double height, gp_Cone& out) {
     if (!std::isfinite(rhoA) || !std::isfinite(rhoB) || !std::isfinite(height)) return false;
-    if (!(rhoA > 0.0) || !(rhoB > 0.0)) return false;
+    // D-fc-5.11 F4: rim A may be the apex (radius 0) of a cone that reaches it.
+    if (!(rhoA >= 0.0) || !(rhoB > 0.0)) return false;
     if (!(std::fabs(height) > 0.0)) return false;
     const double dR = rhoB - rhoA;
     if (!(std::fabs(dR) > 0.0)) return false;
