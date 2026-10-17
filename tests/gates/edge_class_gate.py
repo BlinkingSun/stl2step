@@ -23,6 +23,13 @@ the ratchet itself.
     not listed, or a listed fixture violating a line its entry does not name —
     is a hard FAIL.  Widening ``expectedRed`` to make a run green is a defect.
 
+    A listed line may also carry a COUNT ceiling in ``expectedRedCount``
+    (``{fixture: {line: {"macos": N, "linux": N, "windows": N}}}``, each the
+    measured value on that platform).  A count above the ceiling is a hard FAIL
+    (new red lines entered a listed class); a lower count prints the
+    re-baselining instruction.  A platform with no value of its own uses the
+    ``macos`` value, which every entry must carry.
+
     Process exit (D-130-23) is the recorded list in
     ``tests/gates/baseline/expected-red.json`` ``edge_class_gate``: exit 0 iff
     the red fixture set ⊆ that list; a listed fixture that is green prints
@@ -57,6 +64,19 @@ EXPECTED_RED_FILE = REPO / "tests" / "gates" / "baseline" / "expected-red.json"
 RATCHET_NAME = "edge-class-ratchet.json"
 
 RED_LINES = ("unhandled", "overTol", "overCap")
+PLATFORMS = ("macos", "linux", "windows")
+COUNT_FALLBACK_PLATFORM = "macos"
+
+
+def platform_key(plat: str = sys.platform) -> str:
+    """The expectedRedCount / platforms key for a sys.platform value."""
+    if plat == "darwin":
+        return "macos"
+    if plat.startswith("linux"):
+        return "linux"
+    if plat.startswith("win") or plat in ("cygwin", "msys"):
+        return "windows"
+    return plat
 
 
 class GateError(Exception):
@@ -171,16 +191,71 @@ def load_ratchet(path: Path) -> Dict[str, Any]:
         bad = [x for x in (lines or []) if x not in RED_LINES]
         if bad:
             raise GateError(f"{path}: expectedRed[{name}] names non-red-line(s) {bad}")
+    validate_red_counts(doc, str(path))
     return doc
 
 
+def validate_red_counts(doc: Mapping[str, Any], where: str) -> None:
+    """expectedRedCount may only count a line expectedRed admits, per platform."""
+    counts = doc.get("expectedRedCount")
+    if counts is None:
+        return
+    if not isinstance(counts, dict):
+        raise GateError(f"{where}: expectedRedCount must be an object")
+    expected_red = doc.get("expectedRed") or {}
+    for name, per_line in counts.items():
+        if not isinstance(per_line, dict):
+            raise GateError(f"{where}: expectedRedCount[{name}] must be an object")
+        allowed = set(expected_red.get(name) or [])
+        for line, per_plat in per_line.items():
+            if line not in allowed:
+                raise GateError(
+                    f"{where}: expectedRedCount[{name}][{line}] counts a line "
+                    f"expectedRed[{name}] does not admit {sorted(allowed)}"
+                )
+            if not isinstance(per_plat, dict) or COUNT_FALLBACK_PLATFORM not in per_plat:
+                raise GateError(
+                    f"{where}: expectedRedCount[{name}][{line}] needs a "
+                    f"{COUNT_FALLBACK_PLATFORM!r} value (the fallback for other platforms)"
+                )
+            for plat, val in per_plat.items():
+                if plat not in PLATFORMS:
+                    raise GateError(
+                        f"{where}: expectedRedCount[{name}][{line}] has unknown platform "
+                        f"{plat!r} (one of {list(PLATFORMS)})"
+                    )
+                if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+                    raise GateError(
+                        f"{where}: expectedRedCount[{name}][{line}][{plat}] must be a "
+                        f"non-negative integer, got {val!r}"
+                    )
+
+
+def red_count_ceiling(
+    counts: Mapping[str, Any], name: str, line: str, plat: str
+) -> Optional[Tuple[int, str]]:
+    """(ceiling, platform the value came from) or None when the line is uncounted."""
+    per_plat = (counts.get(name) or {}).get(line)
+    if not isinstance(per_plat, dict):
+        return None
+    if plat in per_plat:
+        return int(per_plat[plat]), plat
+    if COUNT_FALLBACK_PLATFORM in per_plat:
+        return int(per_plat[COUNT_FALLBACK_PLATFORM]), COUNT_FALLBACK_PLATFORM
+    return None
+
+
 def evaluate(
-    measured: Mapping[str, Any], ratchet: Mapping[str, Any]
+    measured: Mapping[str, Any],
+    ratchet: Mapping[str, Any],
+    platform: Optional[str] = None,
 ) -> Tuple[List[Check], Dict[str, Census]]:
     checks: List[Check] = []
     censuses: Dict[str, Census] = {}
     ceilings: Mapping[str, Any] = ratchet.get("tier2Ceiling") or {}
     expected_red: Mapping[str, Any] = ratchet.get("expectedRed") or {}
+    red_counts: Mapping[str, Any] = ratchet.get("expectedRedCount") or {}
+    plat = platform or platform_key()
 
     def add(name: str, ok: bool, message: str, group: str, **details: Any) -> None:
         checks.append(Check(name=name, ok=ok, message=message, group=group, details=details))
@@ -234,6 +309,57 @@ def evaluate(
                     f"RATCHET-CLEAR: {name} no longer violates {sorted(allowed)}; "
                     f"delete its expectedRed entry in tests/gates/baseline/{RATCHET_NAME}",
                     name,
+                )
+
+        # Count ceilings on admitted lines: a listed class may not grow.
+        for line in sorted(allowed):
+            got = red_count_ceiling(red_counts, name, line, plat)
+            n = getattr(c, line)
+            if got is None:
+                if n > 0:
+                    add(
+                        f"{name}.redcount.{line}",
+                        True,
+                        f"{name}: {line}={n} has no expectedRedCount ceiling — new red "
+                        f"lines in this class are not detected",
+                        name,
+                        count=n,
+                    )
+                continue
+            ceil, src = got
+            via = plat if src == plat else f"{plat}, {src} value"
+            if n > ceil:
+                add(
+                    f"{name}.redcount.{line}",
+                    False,
+                    f"{name}: {line}={n} > expectedRedCount ceiling={ceil} ({via}) — "
+                    f"{n - ceil} new red line(s) entered a listed class",
+                    name,
+                    count=n,
+                    ceiling=ceil,
+                    platform=plat,
+                )
+            elif n < ceil:
+                add(
+                    f"{name}.redcount.{line}",
+                    True,
+                    f"RATCHET-TIGHTEN: {name} {line}={n} < expectedRedCount {ceil} ({via}); "
+                    f"lower expectedRedCount[{name}][{line}][{plat}] in "
+                    f"tests/gates/baseline/{RATCHET_NAME} with a note",
+                    name,
+                    count=n,
+                    ceiling=ceil,
+                    platform=plat,
+                )
+            else:
+                add(
+                    f"{name}.redcount.{line}",
+                    True,
+                    f"{name}: {line}={n} == expectedRedCount ceiling ({via})",
+                    name,
+                    count=n,
+                    ceiling=ceil,
+                    platform=plat,
                 )
 
         if name not in ceilings:
@@ -345,7 +471,11 @@ def run_live(binary: Path, ratchet_path: Path, jobs: int) -> int:
     ratchet = load_ratchet(ratchet_path)
     measured = measure(binary, jobs)
     checks, censuses = evaluate(measured, ratchet)
-    print(f"edge_class_gate  ratchet={ratchet_path}  fixtures={len(measured)}", flush=True)
+    print(
+        f"edge_class_gate  ratchet={ratchet_path}  fixtures={len(measured)}  "
+        f"platform={platform_key()}",
+        flush=True,
+    )
     print(format_checks(checks), flush=True)
     t = totals(censuses)
     print(
@@ -385,6 +515,8 @@ def run_measure(binary: Path, jobs: int) -> int:
     measured = measure(binary, jobs)
     seed_ceiling: Dict[str, int] = {}
     seed_red: Dict[str, List[str]] = {}
+    seed_count: Dict[str, Dict[str, Dict[str, int]]] = {}
+    plat = platform_key()
     rows: Dict[str, Any] = {}
     bad = []
     for name in sorted(measured):
@@ -404,10 +536,12 @@ def run_measure(binary: Path, jobs: int) -> int:
         red = sorted(c.red())
         if red:
             seed_red[name] = red
+            seed_count[name] = {k: {plat: getattr(c, k)} for k in red}
     print("edge_class_gate --measure")
     print(json.dumps({"perFixture": rows}, indent=2, sort_keys=True))
     print("SEED tier2Ceiling = " + json.dumps(seed_ceiling, sort_keys=True))
     print("SEED expectedRed  = " + json.dumps(seed_red, sort_keys=True))
+    print("SEED expectedRedCount = " + json.dumps(seed_count, sort_keys=True))
     if bad:
         print(f"edge_class_gate FAIL: not measured on {bad}", file=sys.stderr)
         return 1
@@ -549,6 +683,93 @@ def _self_test() -> int:
             check(False, "expectedRed with a bogus line name must FAIL")
         except GateError:
             check(True, "expectedRed with a bogus line name FAIL")
+
+    # expectedRedCount: a listed class may not grow (audit-fc3-instruments F1).
+    rc = synthetic_ratchet(
+        expectedRed={"beta": ["overCap"]},
+        expectedRedCount={"beta": {"overCap": {"macos": 58, "linux": 60}}},
+    )
+
+    def beta_cap(n: int, plat: str) -> List[Check]:
+        got, _ = evaluate(
+            {"alpha": synthetic_result(), "beta": synthetic_result(tier2=0, over_cap=n)},
+            rc,
+            platform=plat,
+        )
+        return got
+
+    at = beta_cap(58, "macos")
+    check(failing_names(at) == [], "listed class at its count ceiling PASSES")
+    above = beta_cap(59, "macos")
+    check("beta.redcount.overCap" in failing_names(above), "listed class above its count ceiling FAILS")
+    check(
+        any("overCap=59" in c.message and "ceiling=58" in c.message for c in above),
+        "count failure names both numbers",
+    )
+    below = beta_cap(43, "macos")
+    check(failing_names(below) == [], "listed class below its count ceiling PASSES")
+    check(
+        any("RATCHET-TIGHTEN" in c.message and "expectedRedCount" in c.message for c in below),
+        "count decrease prints the re-baselining instruction",
+    )
+    check(failing_names(beta_cap(60, "linux")) == [], "a platform's own count is used (linux 60)")
+    check(
+        "beta.redcount.overCap" in failing_names(beta_cap(61, "linux")),
+        "above the platform's own count FAILS",
+    )
+    win = beta_cap(59, "windows")
+    check(
+        "beta.redcount.overCap" in failing_names(win),
+        "a platform without a value uses the macos value (windows 59 > 58 FAILS)",
+    )
+    check(any("macos value" in c.message for c in win), "fallback is named in the message")
+    check(failing_names(beta_cap(58, "windows")) == [], "fallback value at ceiling PASSES")
+    uncounted, _ = evaluate(
+        {"alpha": synthetic_result(), "beta": synthetic_result(tier2=0, unhandled=7)},
+        r,
+        platform="macos",
+    )
+    check(failing_names(uncounted) == [], "a listed line without a count keeps the old behaviour")
+    check(
+        any("no expectedRedCount ceiling" in c.message for c in uncounted),
+        "an uncounted listed line says so",
+    )
+    for plat_in, want in (("darwin", "macos"), ("linux", "linux"), ("win32", "windows"),
+                          ("cygwin", "windows")):
+        check(platform_key(plat_in) == want, f"platform_key({plat_in}) == {want}")
+
+    bad_counts = (
+        ({"beta": {"overTol": {"macos": 1}}}, "a count for a line expectedRed does not admit"),
+        ({"gamma": {"overCap": {"macos": 1}}}, "a count for a fixture expectedRed does not list"),
+        ({"beta": {"overCap": {"linux": 1}}}, "a count without the macos fallback"),
+        ({"beta": {"overCap": {"macos": -1}}}, "a negative count"),
+        ({"beta": {"overCap": {"macos": True}}}, "a boolean count"),
+        ({"beta": {"overCap": {"macos": 1, "bsd": 1}}}, "an unknown platform"),
+    )
+    for counts, what in bad_counts:
+        try:
+            validate_red_counts(
+                {"expectedRed": {"beta": ["overCap"]}, "expectedRedCount": counts}, "synthetic"
+            )
+            check(False, f"{what} must FAIL load")
+        except GateError:
+            check(True, f"{what} FAILS load")
+    try:
+        validate_red_counts(rc, "synthetic")
+        check(True, "a well-formed expectedRedCount loads")
+    except GateError as exc:
+        check(False, f"a well-formed expectedRedCount loads ({exc})")
+    try:
+        committed = load_ratchet(DEFAULT_RATCHET)
+        check(True, f"committed {RATCHET_NAME} loads (expectedRedCount validated)")
+        uncounted_cap = sorted(
+            n for n, lines in committed["expectedRed"].items()
+            if "overCap" in (lines or [])
+            and "overCap" not in ((committed.get("expectedRedCount") or {}).get(n) or {})
+        )
+        check(uncounted_cap == [], f"every committed expectedRed overCap carries a count {uncounted_cap}")
+    except GateError as exc:
+        check(False, f"committed {RATCHET_NAME} loads ({exc})")
 
     check(
         parse_result_line('RESULT {"ok":true}\n')["ok"] is True, "parse_result_line"
