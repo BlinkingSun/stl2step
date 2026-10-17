@@ -3,7 +3,9 @@
 // a smaller one. The step is taken from an equal-step boundary rail, and a
 // sample counts only when no non-N-gon witness rail already exceeds its bound.
 // An NgonWall that violates an admissible sample is removed and its walls
-// return to Unclaimed so A3 commits them as planes.
+// return to Unclaimed so A3 commits them as planes. D-fc-5.6: a FilletStrip
+// too short to certify its own circle is the same kind of polygon claim and
+// is refuted by the same law (a flat chamfer is not a coarse round).
 // SPDX-License-Identifier: MIT
 
 #include "refit_internal.hpp"
@@ -423,6 +425,20 @@ bool measureRef(const MeshView& mv, const SegmentParams& p, double tau, int accI
     return true;
 }
 
+// D-fc-5.6. A FilletStrip whose own vertices give fewer than
+// minStations(kParamsCircle) azimuth stations about its axis cannot certify
+// its circle: like an NgonWall it is a polygon claim with N = nSides, and the
+// same law refutes it. Its triangles return to Unclaimed (the plane stages).
+bool stripPolygonClaim(const MeshView& mv, const Region& r, double tau) {
+    if (r.origin != Origin::FilletStrip || r.type != SurfType::Cylinder || r.closed360)
+        return false;
+    if (r.nSides < 3 || !(r.radius > 0.0) || r.tris.empty()) return false;
+    std::vector<double> st;
+    if (!azimuthStations(mv, r.tris, r.ax.Direction(), r.ax.Location(), r.radius, tau, st))
+        return false;
+    return static_cast<int>(st.size()) < minStations(kParamsCircle);
+}
+
 // Witness reference: a certified cylinder, not this N-gon, not a refuted
 // N-gon, with r ≤ R_N. `hits` when 2π/N is at least the law bound.
 struct Witness {
@@ -740,9 +756,10 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
         return true;
     }
 
-    bool anyNgon = false;
+    bool anyNgon = false;  // or a D-fc-5.6 strip polygon claim
     for (const Region& r : work.accepted) {
-        if (r.origin == Origin::NgonWall && r.type == SurfType::Cylinder && !r.tris.empty()) {
+        if ((r.origin == Origin::NgonWall && r.type == SurfType::Cylinder && !r.tris.empty())
+            || stripPolygonClaim(mv, r, tau)) {
             anyNgon = true;
             break;
         }
@@ -914,6 +931,55 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
         }
     }
 
+    // D-fc-5.6. Strip polygon claims, after the N-gons. Witnesses are the
+    // certified non-N-gon references (never the strip itself).
+    std::vector<DiagLine> stripLines;
+    std::vector<int> stripDrop;
+    for (int i = 0; i < static_cast<int>(work.accepted.size()); ++i) {
+        const Region& r = work.accepted[static_cast<size_t>(i)];
+        if (!stripPolygonClaim(mv, r, tau)) continue;
+        Meas s;
+        s.minTri = minTriOf(r.tris);
+        s.N = r.nSides;
+        s.rStored = r.radius;
+        Witness w;
+        for (int u : nonNgon) {
+            if (meas[static_cast<size_t>(u)].minTri == s.minTri) continue;
+            consider(meas[static_cast<size_t>(u)], s, tau, w);
+        }
+        DiagLine line;
+        line.minTri = s.minTri;
+        line.accIdx = i;
+        line.N = s.N;
+        line.R = s.rStored;
+        line.step = kTwoPi / static_cast<double>(s.N);
+        if (w.any) {
+            line.verdict = w.hits ? "refute" : "keep";
+            line.refRid = w.minTri;
+            line.refR = w.r;
+            line.refTheta = w.theta;
+            line.refK = w.k;
+            line.bound = w.bound;
+        }
+        if (w.hits) stripDrop.push_back(i);
+        stripLines.push_back(line);
+    }
+    // Highest accepted index first; a chamfer cone's cylinder index follows.
+    for (int i = static_cast<int>(stripDrop.size()) - 1; i >= 0; --i) {
+        const int idx = stripDrop[static_cast<size_t>(i)];
+        if (!releaseToUnclaimed(mv, tau, work.accepted[static_cast<size_t>(idx)], work)) {
+            for (DiagLine& line : stripLines)
+                if (line.accIdx == idx) line.verdict = "keep";
+            continue;
+        }
+        work.accepted.erase(work.accepted.begin() + idx);
+        for (Region& r : work.accepted) {
+            if (r.origin != Origin::ChamferCone || r.filletNbrA < 0) continue;
+            if (r.filletNbrA == idx) r.filletNbrA = -1;
+            else if (r.filletNbrA > idx) --r.filletNbrA;
+        }
+    }
+
     if (diag) {
         int nRails = 0, nEqual = 0, nAdm = 0, nRej = 0;
         std::vector<const Rail*> rejected;
@@ -948,6 +1014,13 @@ bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTo
         for (const DiagLine& line : lines) {
             std::fprintf(stderr,
                          "DIAG_TESSLAW rid=%d N=%d R=%.8g step=%.8g refRid=%d refR=%.8g "
+                         "refThetaObs=%.8g refK=%d bound=%.8g verdict=%s\n",
+                         line.minTri, line.N, line.R, line.step, line.refRid, line.refR,
+                         line.refTheta, line.refK, line.bound, line.verdict);
+        }
+        for (const DiagLine& line : stripLines) {
+            std::fprintf(stderr,
+                         "DIAG_TESSLAW_STRIP rid=%d N=%d R=%.8g step=%.8g refRid=%d refR=%.8g "
                          "refThetaObs=%.8g refK=%d bound=%.8g verdict=%s\n",
                          line.minTri, line.N, line.R, line.step, line.refRid, line.refR,
                          line.refTheta, line.refK, line.bound, line.verdict);

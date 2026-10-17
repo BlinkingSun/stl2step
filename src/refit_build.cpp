@@ -16,6 +16,7 @@
 #include "refit_cone_math.hpp"
 #include "refit_torus_math.hpp"
 #include "refit_internal.hpp"
+#include "refit_relational_arc.hpp"
 #include "refit_axis_seam.hpp"
 
 #include <algorithm>
@@ -3049,7 +3050,10 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             const Region& pln = (A.type == SurfType::Plane) ? A : B;
             const Region& cn = isChamferConeR(A) ? A : B;
             AnalyticCurve c = constructedPlaneConeCap(pln, cn);
-            if (c.kind == AnalyticCurve::None)
+            // D-fc-5.5: a partial cone's side chains meet planes that are not
+            // its caps (a tangent roof plane, a cut); their mesh polyline is
+            // the edge, not an empty cap.
+            if (c.kind == AnalyticCurve::None && cn.closed360)
                 emit(warn, "smooth: plane|cone empty — keeping mesh polyline");
             return c;
         }
@@ -3057,6 +3061,10 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             (B.type == SurfType::Cylinder && isChamferConeR(A))) {
             const Region& cyl = (A.type == SurfType::Cylinder) ? A : B;
             const Region& cn = isChamferConeR(A) ? A : B;
+            // D-fc-5.5: a partial cone may touch a cylinder of another axis
+            // (a cap round at a wall end); only a coaxial cylinder carries its
+            // rim circle. Otherwise the mesh polyline is the edge.
+            if (!cn.closed360 && !partialConeRimCoaxial(cyl, cn, mv)) return {};
             AnalyticCurve c = constructedCylConeRim(cyl, cn);
             if (c.kind == AnalyticCurve::None)
                 emit(warn, "smooth: cyl|cone empty — keeping mesh polyline");
@@ -9352,7 +9360,7 @@ gp_Pnt probeArcMid(const AnalyticCurve& curve, const BoundaryChain& ch, const Me
     const bool full = ch.closedLoop;
     const bool partialCylArc =
         cylHint && !cylHint->closed360 && curve.kind == AnalyticCurve::Circ;
-    if (partialCylArc && ch.meshVerts.size() < 3)
+    if (partialCylArc && ch.meshVerts.size() < 3 && !partialConeSide(A, B))
         return partialCylCapArcMid(*cylHint, plnHint, curve.circ);
     if ((!full && curve.kind == AnalyticCurve::Circ && ch.meshVerts.size() >= 3) ||
         (partialCylArc && ch.meshVerts.size() >= 3)) {
@@ -12390,6 +12398,174 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         }
     }
     return false;
+}
+
+// D-fc-5.5. A partial coaxial cone (ChamferCone, !closed360) is bounded by ONE
+// outer loop: its rims (circles shared with coaxial cylinders / cap planes) and
+// its side chains (mesh polylines). The face is that wire on the region's own
+// ConeBase surface. The region's XDirection starts the admitted arc, so every
+// pcurve is put on the period branch nearest the arc's middle (u in [0, span],
+// span < 2 pi; a whole-period shift of a pcurve is exact on a cone). Validity
+// budget: partialFaceTolCap, the partial-cylinder rule.
+bool buildPartialCone(const Region& r, const RegionSet& rs, const MeshView& mv,
+                      const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
+                      const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
+                      double sewTol, TopoDS_Face& outF) {
+    auto fail = [&](const char* why) {
+        if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+            std::fprintf(stderr, "DIAG_PCONEFACE rid=%d nTri=%zu why=%s\n", r.id, r.tris.size(),
+                         why);
+        return false;
+    };
+    const Loop* outer = nullptr;
+    std::vector<TopoDS_Wire> inners;
+    for (const Loop& lp : r.loops) {
+        if (lp.role == LoopRole::Outer) {
+            outer = &lp;
+        } else if (lp.role == LoopRole::Inner) {
+            TopoDS_Wire iw;
+            if (!buildLoopWire(iw, lp, rs, mv, geom, collapsed, meshE, edgeOk, nullptr))
+                return fail("inner-wire");
+            inners.push_back(iw);
+        }
+    }
+    if (!outer) return fail("no-outer");
+    TopoDS_Wire ow;
+    if (!buildLoopWire(ow, *outer, rs, mv, geom, collapsed, meshE, edgeOk, nullptr))
+        return fail("outer-wire");
+    Handle(Geom_ConicalSurface) cs =
+        Handle(Geom_ConicalSurface)::DownCast(regionSurf(r, SurfVar::ConeBase));
+    if (cs.IsNull()) return fail("surface");
+    const double uMid = 0.5 * (r.uMin + r.uMax);
+    const double cap = partialFaceTolCap(mv, r);
+    auto onArcBranch = [&](TopoDS_Face& f) {
+        BRep_Builder Bb;
+        for (TopExp_Explorer it(f, TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge e = TopoDS::Edge(it.Current());
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+            if (pc.IsNull()) continue;
+            const double um = 0.5 * (pc->Value(a).X() + pc->Value(b).X());
+            const double shift = -std::round((um - uMid) / (2.0 * kPi)) * 2.0 * kPi;
+            if (shift == 0.0) continue;
+            Handle(Geom2d_Curve) moved =
+                Handle(Geom2d_Curve)::DownCast(pc->Translated(gp_Vec2d(shift, 0.0)));
+            if (moved.IsNull()) continue;
+            Bb.UpdateEdge(e, moved, f, std::max(BRep_Tool::Tolerance(e), sewTol));
+            Bb.Range(e, f, a, b);
+        }
+    };
+    // A vertex or edge off the cone by more than its tolerance (a mesh polyline
+    // chord) gets the measured distance, up to the cap.
+    auto coneTol = [&](TopoDS_Face& f) -> bool {
+        auto dev = [&](const gp_Pnt& p) {
+            GeomAPI_ProjectPointOnSurf pr(p, cs);
+            return pr.NbPoints() > 0 ? pr.LowerDistance() : 0.0;
+        };
+        try {
+            BRep_Builder B;
+            for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
+                const TopoDS_Vertex& vv = TopoDS::Vertex(vx.Current());
+                const double d = dev(BRep_Tool::Pnt(vv));
+                if (d > cap) return false;
+                if (d > BRep_Tool::Tolerance(vv))
+                    B.UpdateVertex(vv, std::min(d * 1.001 + Precision::Confusion(), cap));
+            }
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                Standard_Real fp = 0, lp = 0;
+                Handle(Geom_Curve) c = BRep_Tool::Curve(e, fp, lp);
+                if (c.IsNull()) continue;
+                const double d = dev(c->Value(0.5 * (fp + lp)));
+                if (d > cap) return false;
+                if (d > BRep_Tool::Tolerance(e))
+                    fireTolRewriteEdge(B, e, std::min(d * 1.001 + Precision::Confusion(), cap),
+                                       "other", cap);
+            }
+        } catch (const Standard_Failure&) {
+            return false;
+        }
+        return faceIsValid(f);
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+        TopoDS_Wire w = ow;
+        if (pass == 1) w.Reverse();
+        TopoDS_Face f;
+        const bool got = makeFaceCopy(cs, w, inners, r.outwardNormal, f) ||
+                         makeFaceKeep(cs, w, inners, r.outwardNormal, f);
+        if (!got || f.IsNull()) continue;
+        addPcurvesOnFace(f, sewTol, false);
+        onArcBranch(f);
+        setFaceOutward(f, r.outwardNormal);
+        if (!faceIsValid(f)) {
+            // A mesh chord's pcurve is its projection; the edge keeps its own
+            // TShape (shared with the neighbour) and takes the measured
+            // same-parameter tolerance in place.
+            try {
+                BRep_Builder Bs;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                    Bs.SameParameter(e, Standard_False);
+                    BRepLib::SameParameter(e, sewTol);
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+        if (faceIsValid(f) || coneTol(f)) {
+            if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_PCONEFACE rid=%d nTri=%zu why=BUILT pass=%d Rlo=%.6f Rhi=%.6f "
+                             "span=%.6f\n",
+                             r.id, r.tris.size(), pass, r.radius, chamferRhiOf(r),
+                             r.uMax - r.uMin);
+            outF = f;
+            return true;
+        }
+    }
+    if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
+        TopoDS_Face f;
+        if (makeFaceCopy(cs, ow, inners, r.outwardNormal, f)) {
+            addPcurvesOnFace(f, sewTol, false);
+            onArcBranch(f);
+            try {
+                BRep_Builder Bs;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                    Bs.SameParameter(e, Standard_False);
+                    BRepLib::SameParameter(e, sewTol);
+                }
+            } catch (const Standard_Failure&) {
+            }
+            try {
+                BRepCheck_Analyzer an(f, Standard_True);
+                char ctx[160];
+                formatStatusInContext(an.Result(f), f, ctx, sizeof(ctx));
+                std::fprintf(stderr, "DIAG_PCONEFACE rid=%d check=%s\n", r.id, ctx);
+                int wi = 0;
+                for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                    const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                    char wctx[160];
+                    formatStatusInContext(an.Result(w), f, wctx, sizeof(wctx));
+                    std::fprintf(stderr, "DIAG_PCONEFACE rid=%d wire=%d check=%s uvA=%.6f\n", r.id,
+                                 wi, wctx, pcurveSignedArea(f, w));
+                    int ei = 0;
+                    for (TopExp_Explorer ex(w, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+                        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                        char ectx[160];
+                        formatStatusInContext(an.Result(e), f, ectx, sizeof(ectx));
+                        Standard_Real a = 0, b = 0;
+                        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+                        std::fprintf(stderr, "DIAG_PCONEFACE rid=%d wire=%d edge=%d check=%s tol=%.3g uv0=(%.4f,%.4f) uv1=(%.4f,%.4f)\n",
+                                     r.id, wi, ei, ectx, BRep_Tool::Tolerance(e),
+                                     pc.IsNull() ? 0.0 : pc->Value(a).X(), pc.IsNull() ? 0.0 : pc->Value(a).Y(),
+                                     pc.IsNull() ? 0.0 : pc->Value(b).X(), pc.IsNull() ? 0.0 : pc->Value(b).Y());
+                    }
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
+    }
+    return fail("face-invalid");
 }
 
 // D-130-14 / D-fc-3.2.10. A relational FilletStrip is one surface and one face
@@ -16815,7 +16991,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 gp_Pnt mid = BRep_Tool::Pnt(verts[(size_t)ia]);
                 const bool partialCylArcMid =
                     cylHint && !cylHint->closed360 && curve.kind == AnalyticCurve::Circ;
-                if (partialCylArcMid && ch.meshVerts.size() < 3)
+                // D-fc-5.5: a rim shared with a partial cone is cut into pieces by
+                // the cone's own side chains; a 2-vertex piece is not the cylinder's
+                // whole cap, so its short arc's middle is the hint (below).
+                if (partialCylArcMid && ch.meshVerts.size() < 3 && !partialConeSide(A, B))
                     mid = partialCylCapArcMid(*cylHint, plnHint, curve.circ);
                 else if ((!full && curve.kind == AnalyticCurve::Circ &&
                           ch.meshVerts.size() >= 3) ||
@@ -17194,6 +17373,16 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // U-3: Sphere/Torus stay NYI. Other cones stay ConeNYI.
                 // ChamferCone: Geom_ConicalSurface from axis + two radii
                 // (radius / v range), MakeFace like cylinder Single.
+                if (r.type == SurfType::Cone && r.origin == Origin::ChamferCone && !r.closed360) {
+                    // D-fc-5.5: a partial coaxial cone. A face that fails returns
+                    // false: the R1 rung explodes this region, the component stays.
+                    TopoDS_Face f;
+                    if (!buildPartialCone(r, rs, mv, geom, collapsed, meshE, edgeOk, sewTol, f))
+                        return false;
+                    r.builtAs = BuiltAs::Single;
+                    acc.push_back(f);
+                    return true;
+                }
                 if (r.type == SurfType::Cone && r.origin == Origin::ChamferCone) {
                     // Diag only: name the step that refuses a chamfer frustum.
                     auto coneFail = [&](const char* why, double a, double b) {
@@ -20099,6 +20288,29 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         out.clear();
         return false;
     }
+}
+
+// D-fc-5.5. A cylinder carries a partial cone's rim circle when it is coaxial
+// with the cone and its radius is the radius of one of the cone's rims, each
+// within tau = 2q at the rim's arm: the rim vertices lie within tau of both
+// certified surfaces, so the two radii agree within tanDistTol(tau, tau) = 2 tau.
+bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshView& mv) {
+    const double tau = 2.0 * std::max(mv.quantFloor, 0.0);
+    if (!(tau > 0.0)) return false;
+    const gp_Vec ac(coneR.ax.Direction());
+    const gp_Vec ay(cylR.ax.Direction());
+    const double arm = std::max(std::max(coneR.radius, chamferRhiOf(coneR)), cylR.radius);
+    if (ac.Crossed(ay).Magnitude() * arm > tau) return false;
+    const gp_Vec d(cylR.ax.Location(), coneR.ax.Location());
+    if ((d - ay * d.Dot(ay)).Magnitude() > tau) return false;
+    const double dr = std::min(std::fabs(cylR.radius - coneR.radius),
+                               std::fabs(cylR.radius - chamferRhiOf(coneR)));
+    return dr <= tau + tau;
+}
+
+// D-fc-5.5: one side of the chain is a partial cone (ChamferCone, !closed360).
+bool partialConeSide(const Region* A, const Region* B) {
+    return (A && isChamferConeR(*A) && !A->closed360) || (B && isChamferConeR(*B) && !B->closed360);
 }
 
 }  // namespace refit

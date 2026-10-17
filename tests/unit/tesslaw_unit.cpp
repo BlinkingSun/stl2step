@@ -223,6 +223,8 @@ struct Outcome {
     int ngon64 = 0;
     int ngon126 = 0;
     int cylGrow = 0;
+    int filletStrip = 0;
+    int coneNbr = -2;
     int unclaimedTris = 0;
     int consumedWalls = 0;
     std::string sig;
@@ -246,6 +248,8 @@ static Outcome run(Synth& synth, SegmentWork& work, int threads, double q) {
         if (r.origin == Origin::NgonWall && r.nSides == 64) ++o.ngon64;
         if (r.origin == Origin::NgonWall && r.nSides == 126) ++o.ngon126;
         if (r.origin == Origin::CylGrow) ++o.cylGrow;
+        if (r.origin == Origin::FilletStrip) ++o.filletStrip;
+        if (r.origin == Origin::ChamferCone) o.coneNbr = r.filletNbrA;
     }
     std::sort(regs.begin(), regs.end());
     for (const Provisional& pr : work.provisionals) {
@@ -472,6 +476,84 @@ static void testTauZeroChangesNothing() {
     expect(o.ngon6 == 1 && o.cylGrow == 1 && o.unclaimedTris == 0, "tau 0 changes nothing");
 }
 
+// D-fc-5.6. A plane-plane fillet strip of `rows` equal rows over a quarter
+// turn (C1's FilletStrip: open, nSides = 4 * rows), held by one provisional.
+static Region addQuarterStrip(Synth& s, SegmentWork& w, double R, int rows, double cx) {
+    std::vector<double> ang;
+    for (int i = 0; i <= rows; ++i) ang.push_back(0.5 * kPi * i / rows);
+    const auto st = s.addStrip(R, ang, ang, 0.0, 10.0, cx, 0.0);
+    Region r = makeCyl(st, Origin::FilletStrip, false);
+    r.nSides = 4 * rows;
+    Provisional p;
+    p.claim = ProvClaim::ConsumedFillet;
+    for (int i = 0; i < st.nTri; ++i) p.tris.push_back(st.firstTri + i);
+    p.plane = gp_Ax3(gp_Pnt(cx + R, 0.0, 0.0), gp_Dir(1, 1, 0));
+    w.provisionals.push_back(p);
+    return r;
+}
+
+static void testOneRowStripRefutedByFinerRound() {
+    Synth s;
+    SegmentWork w;
+    w.accepted.push_back(addQuarterStrip(s, w, 1.0, 1, 0.0));
+    const auto fine = s.addTube(1.0, 48, 0.0, 5.0, 20.0, 0.0);
+    w.accepted.push_back(makeCyl(fine, Origin::CylGrow, true));
+    Region cone;
+    cone.type = SurfType::Cone;
+    cone.origin = Origin::ChamferCone;
+    cone.filletNbrA = 1;
+    w.accepted.push_back(cone);
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.filletStrip == 0, "case11 one-row strip refuted by a finer round of r <= R");
+    expect(o.unclaimedTris == 2, "case11 strip triangles back to Unclaimed");
+    expect(o.cylGrow == 1, "case11 reference kept");
+    expect(o.coneNbr == 0, "case11 chamfer cone index follows the erase");
+}
+
+static void testOneRowStripKeptWithoutReference() {
+    Synth s;
+    SegmentWork w;
+    w.accepted.push_back(addQuarterStrip(s, w, 1.0, 1, 0.0));
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.filletStrip == 1 && o.unclaimedTris == 0, "case12 one-row strip kept (no reference)");
+}
+
+static void testOneRowStripKeptWhenRefsAreLarger() {
+    Synth s;
+    SegmentWork w;
+    w.accepted.push_back(addQuarterStrip(s, w, 1.0, 1, 0.0));
+    const auto big = s.addTube(5.0, 96, 0.0, 5.0, 20.0, 0.0);
+    w.accepted.push_back(makeCyl(big, Origin::CylGrow, true));
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.filletStrip == 1 && o.unclaimedTris == 0, "case13 one-row strip kept (no smaller reference)");
+}
+
+static void testDeterminedStripNotAClaim() {
+    // Five rows give six azimuth stations >= minStations(kParamsCircle): the
+    // strip certifies its own circle and is not a polygon claim.
+    Synth s;
+    SegmentWork w;
+    w.accepted.push_back(addQuarterStrip(s, w, 1.0, 5, 0.0));
+    const auto fine = s.addTube(1.0, 48, 0.0, 5.0, 20.0, 0.0);
+    w.accepted.push_back(makeCyl(fine, Origin::CylGrow, true));
+    const Outcome o = run(s, w, 1, 1e-4);
+    expect(o.filletStrip == 1 && o.unclaimedTris == 0, "case14 five-row strip kept");
+}
+
+static void testStripThreadsAgree() {
+    Synth s1, s8;
+    SegmentWork w1, w8;
+    w1.accepted.push_back(addQuarterStrip(s1, w1, 1.0, 1, 0.0));
+    w8.accepted.push_back(addQuarterStrip(s8, w8, 1.0, 1, 0.0));
+    const auto f1 = s1.addTube(1.0, 48, 0.0, 5.0, 20.0, 0.0);
+    const auto f8 = s8.addTube(1.0, 48, 0.0, 5.0, 20.0, 0.0);
+    w1.accepted.push_back(makeCyl(f1, Origin::CylGrow, true));
+    w8.accepted.push_back(makeCyl(f8, Origin::CylGrow, true));
+    const Outcome a = run(s1, w1, 1, 1e-4);
+    const Outcome b = run(s8, w8, 8, 1e-4);
+    expect(a.sig == b.sig && a.filletStrip == 0, "case15 strip refutation: threads 1 and 8 agree");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_TESSLAW", "1", 1);
     testHexRefutedByFineRound();
@@ -485,6 +567,11 @@ int main() {
     testGuardRejectsSample();
     testRemainderAndGradedKeep126();
     testTauZeroChangesNothing();
+    testOneRowStripRefutedByFinerRound();
+    testOneRowStripKeptWithoutReference();
+    testOneRowStripKeptWhenRefsAreLarger();
+    testDeterminedStripNotAClaim();
+    testStripThreadsAgree();
     if (gFail) {
         std::fprintf(stderr, "tesslaw_unit %d FAILED\n", gFail);
         return 1;
