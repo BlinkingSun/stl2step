@@ -13462,9 +13462,17 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // closed wall whose blend stayed facets (180 facet chains on one cap) is
     // UnorientableShape on the plain split-cap path; its high cap runs +u.
     // Heal-not-revert for a certified surface (every vertex within tau of it,
-    // D-fc-1.4): an uncertified wall keeps the path it had.
+    // D-fc-1.4) that still shares one exact rim with an analytic neighbour. An
+    // uncertified wall, or one whose every rim is a mesh polyline (it gains no
+    // exact edge: each rim edge it would ship is a chord off its surface), keeps
+    // the path it had.
     const double tauWall = 2.0 * std::max(mv.quantFloor, 0.0);
-    if (!capsOneChain && !capHasPolyline && tauWall > 0.0 && r.maxVertexDev <= tauWall)
+    auto capExact = [&](const Loop* cp) {
+        return cp->chainIdx.size() == 1 &&
+               partnerBuildable(cp->chainIdx.front(), r, rs, eprimeFill, exploded);
+    };
+    if (!capsOneChain && !capHasPolyline && tauWall > 0.0 && r.maxVertexDev <= tauWall &&
+        (capExact(capL) || capExact(capH)))
         for (const Loop* cp : {capL, capH})
             for (int ci : cp->chainIdx)
                 if (!partnerBuildable(ci, r, rs, eprimeFill, exploded)) mintRefused = true;
