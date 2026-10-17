@@ -176,6 +176,32 @@ static void casePredicates() {
     expect(sectionConcentric(in, out), "concentric");
     out.cx = 1e-3;
     expect(!sectionConcentric(in, out), "not concentric");
+    // D-fc-5.17 (a). equalStepTol = 4τ/r. A rail needs minStations(kParamsCircle).
+    const double est = equalStepTol(kTau, 2.0);
+    expect(std::fabs(est - 2.0 * kTau) <= 1e-18, "equal step tol 4τ/r");
+    expect(equalStepTol(kTau, 0.0) == 0.0 && equalStepTol(0.0, 2.0) == 0.0, "equal step tol refuses");
+    // est + est - est is est, so the bound comparison does not depend on a
+    // decimal that is not a binary fraction.
+    expect(equalStepRail(minStations(kParamsCircle), est, est + est, kTau, 2.0),
+           "equal step rail at the bound");
+    expect(!equalStepRail(minStations(kParamsCircle) - 1, est, est, kTau, 2.0),
+           "equal step rail under stations");
+    expect(!equalStepRail(minStations(kParamsCircle), est, est + est + est, kTau, 2.0),
+           "equal step rail over the bound");
+    expect(sectionTangentLine(0.0, -2.0, 2.0, kTau, kTau, 4.0), "section tangent line");
+    expect(!sectionTangentLine(1.0, -2.0, 2.0, kTau, kTau, 4.0), "section line not parallel");
+    expect(!sectionTangentLine(0.0, -3.0, 2.0, kTau, kTau, 4.0), "section line not one radius off");
+    int side = 0;
+    expect(sectionTangentCircle(0.0, 12.0, 10.0, 2.0, kTau, kTau, 4.0, side) && side == 1,
+           "section tangent circle external");
+    expect(sectionTangentCircle(0.0, 8.0, 10.0, 2.0, kTau, kTau, 4.0, side) && side == -1,
+           "section tangent circle internal");
+    expect(!sectionTangentCircle(1.0, 12.0, 10.0, 2.0, kTau, kTau, 4.0, side),
+           "section circle axes not parallel");
+    double nx = 0, ny = 0, d = 0;
+    sectionTangentPlane(0.0, 0.0, 2.0, kPi / 2.0, nx, ny, d);
+    expect(std::fabs(nx) <= 1e-12 && std::fabs(ny - 1.0) <= 1e-12 && std::fabs(d - 2.0) <= 1e-12,
+           "section tangent plane");
 }
 
 static void caseCoaxialCert() {
@@ -570,6 +596,210 @@ static void caseGeomFailed() {
            "closure never takes a failed chain's triangle outside its own seed");
 }
 
+static int nFillet(const SegmentWork& w) {
+    int n = 0;
+    for (const Region& r : w.accepted)
+        if (r.origin == Origin::FilletStrip) ++n;
+    return n;
+}
+
+// D-fc-5.17 (a). Quarter circle, six equal 15° chords, one certified plane at
+// the 0° end, and a shatter-class strip in the tangent plane at the far end.
+// No torus atom. areaMin sits between the strip and the anchor.
+static void caseEqualStepOneAnchor() {
+    Synth s;
+    SegmentWork w;
+    const double h = 4, R = 2;
+    std::vector<int> arcTris, planeTris, stripTris;
+    const auto fc = arcCols(s, 0, 0, R, 0, kPi / 2, 6, h);
+    for (std::size_t i = 0; i + 1 < fc.size(); ++i)
+        s.quad(fc[i][0], fc[i][1], fc[i + 1][0], fc[i + 1][1], arcTris);
+    const int p0 = s.add(R, -6, 0), p1 = s.add(R, -6, h);
+    s.quad(fc.front()[0], fc.front()[1], p0, p1, planeTris);
+    const int q0 = s.add(-0.4, R, 0), q1 = s.add(-0.4, R, h);
+    s.quad(fc.back()[0], fc.back()[1], q0, q1, stripTris);
+    s.finish();
+    Provisional arc;
+    arc.claim = ProvClaim::Unclaimed;
+    arc.tris = arcTris;
+    arc.maxVertexDev = 1.0;
+    arc.plane = gp_Ax3(gp_Pnt(R, 0, h / 2), gp_Dir(1, 0, 0));
+    w.provisionals.push_back(arc);
+    Provisional pl;
+    pl.claim = ProvClaim::Unclaimed;
+    pl.tris = planeTris;
+    pl.area = 6 * h;
+    pl.maxVertexDev = 0;
+    pl.plane = gp_Ax3(gp_Pnt(R, -3, h / 2), gp_Dir(1, 0, 0));
+    w.provisionals.push_back(pl);
+    Provisional st;
+    st.claim = ProvClaim::Unclaimed;
+    st.tris = stripTris;
+    st.area = 0.4 * h;
+    st.maxVertexDev = 0;
+    st.plane = gp_Ax3(gp_Pnt(-0.2, R, h / 2), gp_Dir(0, 1, 0));
+    w.provisionals.push_back(st);
+    const MeshView mv = s.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol);
+    tol.epsPlane = 0.05;  // areaMin = 5: the strip is shatter, the anchor is not
+    claimSectionFillets(mv, sp, tol, w, {});
+    int got = 0;
+    for (const Region& r : w.accepted) {
+        if (r.origin != Origin::FilletStrip) continue;
+        ++got;
+        const gp_XYZ loc = r.ax.Location().XYZ();
+        expect(std::fabs(r.radius - R) <= kTau && r.maxVertexDev <= kTau, "one anchor: r within tau");
+        expect(std::hypot(loc.X(), loc.Y()) <= kTau, "one anchor: centre");
+        expect(r.tris.size() == arcTris.size(), "one anchor: the arc, not the strip");
+        expect((r.filletNbrA == 2 || r.filletNbrB == 2) && (r.filletNbrA == 1 || r.filletNbrB == 1),
+               "one anchor: names the plane and the far strip");
+    }
+    expect(got == 1, "one anchor: one section fillet");
+    expect(w.provisionals.size() >= 3 && w.provisionals[1].claim == ProvClaim::Unclaimed &&
+               w.provisionals[2].claim == ProvClaim::Unclaimed,
+           "one anchor: plane and strip stay unclaimed");
+    expect(!a3WouldCommit(mv, tol, w.provisionals[2], false) &&
+               a3WouldCommit(mv, tol, w.provisionals[2], true),
+           "one anchor: the strip commits only as a fillet flank");
+}
+
+// Graded chords on a true circle fail the equal-step law. No anchor at all
+// fails for lack of a certificate. Neither claims a fillet.
+static void caseEqualStepRefusals() {
+    auto graded = []() {
+        Synth s;
+        SegmentWork w;
+        const double h = 4, R = 2;
+        std::vector<double> az{0};
+        for (double deg : {8.0, 10.0, 12.0, 14.0, 16.0, 18.0})
+            az.push_back(az.back() + deg * kPi / 180.0);
+        std::vector<std::array<int, 2>> cols;
+        for (double a : az) {
+            cols.push_back({{s.add(R * std::cos(a), R * std::sin(a), 0.0),
+                             s.add(R * std::cos(a), R * std::sin(a), h)}});
+        }
+        std::vector<int> arcTris, planeTris;
+        for (std::size_t i = 0; i + 1 < cols.size(); ++i)
+            s.quad(cols[i][0], cols[i][1], cols[i + 1][0], cols[i + 1][1], arcTris);
+        const int p0 = s.add(R, -6, 0), p1 = s.add(R, -6, h);
+        s.quad(cols.front()[0], cols.front()[1], p0, p1, planeTris);
+        s.finish();
+        Provisional arc;
+        arc.claim = ProvClaim::Unclaimed;
+        arc.tris = arcTris;
+        arc.maxVertexDev = 1.0;
+        w.provisionals.push_back(arc);
+        Provisional pl;
+        pl.claim = ProvClaim::Unclaimed;
+        pl.tris = planeTris;
+        pl.area = 6 * h;
+        pl.maxVertexDev = 0;
+        pl.plane = gp_Ax3(gp_Pnt(R, -3, h / 2), gp_Dir(1, 0, 0));
+        w.provisionals.push_back(pl);
+        return std::make_pair(std::move(s), std::move(w));
+    };
+    {
+        auto sw = graded();
+        const MeshView mv = sw.first.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol);
+        tol.epsPlane = 0.05;
+        claimSectionFillets(mv, sp, tol, sw.second, {});
+        expect(nFillet(sw.second) == 0, "graded steps: no section fillet");
+    }
+    {
+        Synth s;
+        SegmentWork w;
+        const double h = 4, R = 2;
+        std::vector<int> arcTris;
+        const auto fc = arcCols(s, 0, 0, R, 0, kPi / 2, 6, h);
+        for (std::size_t i = 0; i + 1 < fc.size(); ++i)
+            s.quad(fc[i][0], fc[i][1], fc[i + 1][0], fc[i + 1][1], arcTris);
+        s.finish();
+        Provisional arc;
+        arc.claim = ProvClaim::Unclaimed;
+        arc.tris = arcTris;
+        arc.maxVertexDev = 1.0;
+        w.provisionals.push_back(arc);
+        const MeshView mv = s.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol);
+        claimSectionFillets(mv, sp, tol, w, {});
+        expect(nFillet(w) == 0, "equal steps with no certified anchor: no section fillet");
+    }
+}
+
+// D-fc-5.2 circle|circle with no atom. Internal to R10, external to R3.
+static void caseEqualStepCircleCircle() {
+    Synth s;
+    SegmentWork w;
+    const double h = 4, r = 2;
+    std::vector<int> arcTris, t10, t3;
+    const auto fc = arcCols(s, 8, 0, r, 0, kPi / 2, 6, h);
+    for (std::size_t i = 0; i + 1 < fc.size(); ++i)
+        s.quad(fc[i][0], fc[i][1], fc[i + 1][0], fc[i + 1][1], arcTris);
+    auto c10 = arcCols(s, 0, 0, 10, 0, kPi / 3, 6, h);
+    c10.front() = fc.front();
+    for (std::size_t i = 0; i + 1 < c10.size(); ++i)
+        s.quad(c10[i][0], c10[i][1], c10[i + 1][0], c10[i + 1][1], t10);
+    auto c3 = arcCols(s, 8, 5, 3, -kPi / 2, -kPi / 2 + kPi / 3, 6, h);
+    c3.front() = fc.back();
+    for (std::size_t i = 0; i + 1 < c3.size(); ++i)
+        s.quad(c3[i][0], c3[i][1], c3[i + 1][0], c3[i + 1][1], t3);
+    s.finish();
+    Region a10;
+    a10.type = SurfType::Cylinder;
+    a10.origin = Origin::FilletStrip;
+    a10.ax = gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    a10.radius = 10;
+    a10.tris = t10;
+    w.accepted.push_back(a10);
+    Region a3;
+    a3.type = SurfType::Cylinder;
+    a3.origin = Origin::FilletStrip;
+    a3.ax = gp_Ax3(gp_Pnt(8, 5, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    a3.radius = 3;
+    a3.tris = t3;
+    w.accepted.push_back(a3);
+    Provisional arc;
+    arc.claim = ProvClaim::Unclaimed;
+    arc.tris = arcTris;
+    arc.maxVertexDev = 1.0;
+    w.provisionals.push_back(arc);
+    SectionCircle s10, s3;
+    s10.origin = gp_XYZ(0, 0, 0);
+    s10.axis = gp_XYZ(0, 0, 1);
+    s10.radius = 10;
+    s10.tol = kTau;
+    s10.length = h;
+    s10.acc = 0;
+    s3.origin = gp_XYZ(8, 5, 0);
+    s3.axis = gp_XYZ(0, 0, 1);
+    s3.radius = 3;
+    s3.tol = kTau;
+    s3.length = h;
+    s3.acc = 1;
+    const MeshView mv = s.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol);
+    claimSectionFillets(mv, sp, tol, w, {s10, s3});
+    int got = 0;
+    for (int i = 2; i < (int)w.accepted.size(); ++i) {
+        const Region& r = w.accepted[(std::size_t)i];
+        if (r.origin != Origin::FilletStrip || r.tris.size() != arcTris.size()) continue;
+        ++got;
+        const gp_XYZ loc = r.ax.Location().XYZ();
+        expect(std::fabs(r.radius - 2.0) <= kTau && r.maxVertexDev <= kTau, "circle|circle: r within tau");
+        expect(std::hypot(loc.X() - 8.0, loc.Y()) <= kTau, "circle|circle: centre");
+    }
+    expect(got == 1, "circle|circle: one section fillet, no atom");
+}
+
 int main() {
     caseGeomFailed();
     casePredicates();
@@ -580,6 +810,9 @@ int main() {
     caseSectionFillet(false);
     caseSectionFillet(true);
     casePlaneAnchor();
+    caseEqualStepOneAnchor();
+    caseEqualStepRefusals();
+    caseEqualStepCircleCircle();
     std::fprintf(stderr, "relational_arc_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
 }

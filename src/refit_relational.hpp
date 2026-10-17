@@ -111,6 +111,59 @@ inline double tanDistTol(double tolA, double tau) { return tolA + tau; }
 // D-fc-1.6(7). |a·n_A| <= (anchorTol(A) + τ) / L.
 inline double tanAngTol(double tolA, double tau, double L) { return (tolA + tau) / L; }
 
+// D-fc-2.1 / D-fc-5.17 (a). Each azimuth is known to τ/r, a step to 2τ/r, so
+// two true-equal steps differ by at most 4τ/r. No other band.
+inline double equalStepTol(double tau, double r) {
+    return (r > 0.0 && tau > 0.0) ? (4.0 * tau / r) : 0.0;
+}
+
+// A rail of k chords is this section's equal-step law when k over-determines
+// a free circle and the steps agree within equalStepTol.
+inline bool equalStepRail(int k, double minStep, double maxStep, double tau, double r) {
+    return k >= minStations(kParamsCircle) && maxStep >= minStep &&
+           (maxStep - minStep) <= equalStepTol(tau, r);
+}
+
+// D-fc-5.17 (a) / D-fc-1.6.7. A section circle is tangent to one certified
+// line anchor when the extrusion is parallel to the plane and the centre
+// stands one radius off it.
+inline bool sectionTangentLine(double axisDotN, double centreDist, double r, double tolA,
+                               double tau, double L) {
+    if (!(r > 0.0) || !(L > 0.0)) return false;
+    return std::fabs(axisDotN) <= tanAngTol(tolA, tau, L) &&
+           std::fabs(std::fabs(centreDist) - r) <= tanDistTol(tolA, tau);
+}
+
+// Tangent to one certified circle. side is +1 when the centres are R + r
+// apart (external) and -1 when they are |R − r| apart (internal).
+inline bool sectionTangentCircle(double axisCross, double centreDist, double R, double r,
+                                 double tolA, double tau, double L, int& side) {
+    side = 0;
+    if (!(r > 0.0) || !(R > 0.0) || !(L > 0.0)) return false;
+    if (axisCross > tanAngTol(tolA, tau, L)) return false;
+    const double tol = tanDistTol(tolA, tau);
+    const double ext = std::fabs(centreDist - (R + r));
+    const double inn = std::fabs(centreDist - std::fabs(R - r));
+    if (ext <= tol && ext <= inn) {
+        side = 1;
+        return true;
+    }
+    if (inn <= tol) {
+        side = -1;
+        return true;
+    }
+    return false;
+}
+
+// Tangent plane of a section circle at azimuth phi: n · x = d, |n| = 1.
+// Zero free parameters (the circle and the end azimuth).
+inline void sectionTangentPlane(double cx, double cy, double r, double phi, double& nx,
+                                double& ny, double& d) {
+    nx = std::cos(phi);
+    ny = std::sin(phi);
+    d = nx * (cx + r * nx) + ny * (cy + r * ny);
+}
+
 }}  // namespace stl2step::refit
 
 #endif  // STL2STEP_REFIT_RELATIONAL_HPP
