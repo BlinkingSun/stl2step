@@ -353,7 +353,7 @@ static void caseClosureStackedAndRadius() {
 
 // ---- D-fc-4.5 narrow donor heal ---------------------------------------------------
 
-// R2.5 half-ring donor (sectors 0..17) with one interior top vertex `off` inside the
+// R3.5 half-ring donor (sectors 0..17) with one interior top vertex `off` inside the
 // surface (its triangles are the donor's cover); free sectors 18..23 on the surface;
 // sectors 24..29 a certified partner reached only through the gap (or a plane);
 // sectors 30..35 belong to a plane region.
@@ -365,11 +365,11 @@ struct Heal {
 
 static Heal healPart(double off, bool partner) {
     Heal h;
-    h.g = cylGrid(h.s, 2.5, 0.0, 10 * kDeg, 36, true, {0.0, 5.0});
+    h.g = cylGrid(h.s, 3.5, 0.0, 10 * kDeg, 36, true, {0.0, 5.0});
     if (off != 0.0) pushRadial(h.s, h.g.col[1][9], -off);
     h.s.finish();
-    h.w.accepted.push_back(cylRegion(sectors(h.g, 0, 17), 2.5, off));
-    if (partner) h.w.accepted.push_back(cylRegion(sectors(h.g, 24, 29), 2.5, 0.0));
+    h.w.accepted.push_back(cylRegion(sectors(h.g, 0, 17), 3.5, off));
+    if (partner) h.w.accepted.push_back(cylRegion(sectors(h.g, 24, 29), 3.5, 0.0));
     else h.w.accepted.push_back(planeRegion(sectors(h.g, 24, 29)));
     h.w.accepted.push_back(planeRegion(sectors(h.g, 30, 35)));
     addProv(h.w, sectors(h.g, 18, 23), ProvClaim::Unclaimed);
@@ -383,7 +383,7 @@ static void caseHealAccept() {
     const Region* r = firstCyl(h.w);
     expect(nCyl(h.w) == 1 && h.w.accepted.size() == 2, "heal_partner_merged");
     expect(r && r->tris.size() == 60, "heal_grows_over_gap");
-    expect(r && std::abs(r->radius - 2.5) <= tau, "heal_radius_within_tau");
+    expect(r && std::abs(r->radius - 3.5) <= tau, "heal_radius_within_tau");
     expect(r && r->maxVertexDev > tau, "heal_cover_dev_kept");
     expect(has(d, "mode=heal") && has(d, "why=accept"), "heal_diag_accept");
     expect(h.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "heal_gap_peeled");
@@ -408,7 +408,7 @@ static void caseHealNarrowTrigger() {
 
 static void caseHealNotCover() {
     // 2x the 10 degree chord sagitta: no chord bound admits it.
-    const double sag = 2.5 * (1 - std::cos(5 * kDeg));
+    const double sag = 3.5 * (1 - std::cos(5 * kDeg));
     Heal h = healPart(2 * sag, false);
     const std::string d = run(h.s, h.w);
     expect(h.w.accepted.size() == 3 && h.w.accepted[0].tris.size() == 36 &&
@@ -420,9 +420,10 @@ static void caseHealNotCover() {
 // ---- Ring donor (spike-fc3-lowfold F2) --------------------------------------------
 
 // A plate at z = 0 whose hole is a circular loop of nSect vertices at R (one Unclaimed
-// chart, outer rim at R + 4) over a closed peg wall down to z = -20, one Unclaimed
-// chart per wall sector. capFan closes the peg's end with a fan on its rim vertices
-// only (every vertex on the cylinder, one axial level).
+// chart, outer rim at R + 5) over a peg wall at the levels zs (down to z = -20 by
+// default), one Unclaimed chart per wall sector. The wall hangs under the first nWall
+// sectors only (0: all of them, a closed wall). capFan closes the peg's end with a fan
+// on its rim vertices only (every vertex on the cylinder, one axial level).
 struct Ring {
     Synth s;
     SegmentWork w;
@@ -430,39 +431,61 @@ struct Ring {
     std::vector<int> plate, cap;
 };
 
-static Ring ringPart(double R, int nSect, bool capFan) {
+static Ring ringPart(double R, int nSect, bool capFan, int nWall = 0,
+                     const std::vector<double>& zs = {0.0, -20.0}) {
     Ring r;
     const double step = 2 * kPi / nSect;
-    r.peg = cylGrid(r.s, R, 0.0, step, nSect, true, {0.0, -20.0});
+    const bool closed = nWall <= 0 || nWall >= nSect;
+    const int nW = closed ? nSect : nWall;
+    r.peg = cylGrid(r.s, R, 0.0, step, nW, closed, zs);
+    std::vector<int> hole = r.peg.col[0];
+    for (int i = (int)hole.size(); i < nSect; ++i)
+        hole.push_back(r.s.add(gp_XYZ(R * std::cos(step * i), R * std::sin(step * i), 0.0)));
     std::vector<int> outer;
     for (int i = 0; i < nSect; ++i)
-        outer.push_back(r.s.add(gp_XYZ((R + 4) * std::cos(step * i), (R + 4) * std::sin(step * i), 0.0)));
+        outer.push_back(r.s.add(gp_XYZ((R + 5) * std::cos(step * i), (R + 5) * std::sin(step * i), 0.0)));
     for (int i = 0; i < nSect; ++i) {
         const int i1 = (i + 1) % nSect;
-        const int h0 = r.peg.col[0][(std::size_t)i], h1 = r.peg.col[0][(std::size_t)i1];
+        const int h0 = hole[(std::size_t)i], h1 = hole[(std::size_t)i1];
         r.plate.push_back(r.s.addTri(h0, outer[(std::size_t)i1], h1));
         r.plate.push_back(r.s.addTri(h0, outer[(std::size_t)i], outer[(std::size_t)i1]));
     }
     if (capFan) {
-        const std::vector<int>& b = r.peg.col[1];
+        const std::vector<int>& b = r.peg.col.back();
         for (int i = 1; i + 1 < nSect; ++i)
             r.cap.push_back(r.s.addTri(b[0], b[(std::size_t)i + 1], b[(std::size_t)i]));
     }
     r.s.finish();
     addProv(r.w, r.plate, ProvClaim::Unclaimed);
-    for (int i = 0; i < nSect; ++i) addProv(r.w, sectors(r.peg, i, i), ProvClaim::Unclaimed);
+    for (int i = 0; i < nW; ++i) addProv(r.w, sectors(r.peg, i, i), ProvClaim::Unclaimed);
     if (capFan) addProv(r.w, r.cap, ProvClaim::Unclaimed);
     return r;
 }
 
+// The why= of every DIAG_REL_RING line on a loop of n vertices, comma-joined in order.
+static std::string ringWhys(const std::string& diag, int n) {
+    std::string out;
+    std::istringstream in(diag);
+    const std::string key = " loop=" + std::to_string(n) + " ";
+    for (std::string ln; std::getline(in, ln);) {
+        if (ln.rfind("DIAG_REL_RING", 0) != 0 || ln.find(key) == std::string::npos) continue;
+        const std::size_t w = ln.find("why=");
+        if (w == std::string::npos) continue;
+        if (!out.empty()) out += ",";
+        out += ln.substr(w + 4);
+    }
+    return out;
+}
+
 static void caseRingAccept() {
-    Ring r = ringPart(6.0, 120, false);
+    const double R = 7.5;
+    Ring r = ringPart(R, 120, false);
     const double tau = 2 * r.s.q;
     const std::string d = run(r.s, r.w);
     const Region* c = firstCyl(r.w);
     expect(nCyl(r.w) == 1 && c && c->tris.size() == 240, "ring_peg_one_closed_cylinder");
     expect(c && c->closed360 && c->origin == Origin::CylGrow, "ring_peg_closed360_cylgrow");
-    expect(c && std::abs(c->radius - 6.0) <= tau && c->maxVertexDev <= tau, "ring_peg_certified_tau");
+    expect(c && std::abs(c->radius - R) <= tau && c->maxVertexDev <= tau, "ring_peg_certified_tau");
     expect(has(d, "mode=ring") && has(d, "why=accept"), "ring_diag_accept");
     expect(r.w.provisionals[0].claim == ProvClaim::Unclaimed && r.w.provisionals[0].tris.size() == 240 &&
                r.w.provisionals[1].claim == ProvClaim::ConsumedCylinder,
@@ -478,7 +501,7 @@ static void caseRingPrismRefused() {
 
 // A fan on the rim vertices: every vertex on the cylinder, one axial level.
 static void caseRingCapChordExcluded() {
-    Ring r = ringPart(6.0, 120, true);
+    Ring r = ringPart(7.5, 120, true);
     run(r.s, r.w);
     const Region* c = firstCyl(r.w);
     expect(nCyl(r.w) == 1 && c && c->tris.size() == 240, "ring_cap_chords_not_in_wall");
@@ -508,18 +531,105 @@ static void caseRingNotJoined() {
 
 // The loop's chart is already another stage's: no anchor, nothing claimed.
 static void caseRingClaimedAnchor() {
-    Ring r = ringPart(6.0, 120, false);
+    Ring r = ringPart(7.5, 120, false);
     r.w.provisionals[0].claim = ProvClaim::ConsumedCylinder;
     const std::string d = run(r.s, r.w);
     expect(nCyl(r.w) == 0 && has(d, "why=no-anchor"), "ring_claimed_chart_is_no_anchor");
 }
 
+// The loop is only a hypothesis source. One hole vertex 3 tau off the circle, or off
+// the plane: the loop names no axis, no band is grown and no ring line is printed.
+static void caseRingLoopNotCircle() {
+    for (int k = 0; k < 2; ++k) {
+        Ring r = ringPart(7.5, 120, false);
+        const double tau = 2 * r.s.q;
+        const int v = r.peg.col[0][0];
+        if (k == 0) pushRadial(r.s, v, 3 * tau);
+        else r.s.pts[(std::size_t)v].SetZ(3 * tau);
+        const std::string d = run(r.s, r.w);
+        expect(nCyl(r.w) == 0 && ringWhys(d, 120).empty(),
+               k == 0 ? "ring_loop_not_circular_no_hypothesis" : "ring_loop_not_planar_no_hypothesis");
+    }
+}
+
+// Every wall vertex is within tau of the loop's circle, but no cylinder fits them all
+// at tau: the far rim stands 0.95 tau out and one of its vertices 0.95 tau in.
+static void caseRingVertexOff() {
+    Ring r = ringPart(7.5, 120, false);
+    const double tau = 2 * r.s.q;
+    for (std::size_t i = 0; i < r.peg.col[1].size(); ++i)
+        pushRadial(r.s, r.peg.col[1][i], (i == 0 ? -0.95 : 0.95) * tau);
+    const std::string d = run(r.s, r.w);
+    expect(nCyl(r.w) == 0 && ringWhys(d, 120) == "vertex-off", "ring_band_refit_off_tau_refused");
+}
+
+// A third of the wall is already a certified cylinder: the band reaches it on its own
+// surface, so the wall is that region's surface (one face per surface).
+static void caseRingSameSurface() {
+    Ring r = ringPart(7.5, 120, false);
+    r.w.accepted.push_back(cylRegion(sectors(r.peg, 0, 39), 7.5, 0.0));
+    for (std::size_t i = 1; i <= 40; ++i) r.w.provisionals[i].claim = ProvClaim::ConsumedCylinder;
+    const std::string d = run(r.s, r.w);
+    expect(nCyl(r.w) == 1 && r.w.accepted[0].tris.size() == 80 && ringWhys(d, 120) == "same-surface",
+           "ring_band_on_claimed_surface_refused");
+    expect(r.w.provisionals[41].claim == ProvClaim::Unclaimed, "ring_same_surface_claims_nothing");
+}
+
+// A wall under two sectors of the hole: three stations cannot over-determine the
+// circle (minStations(kParamsCircle)).
+static void caseRingUnderdetermined() {
+    Ring r = ringPart(7.5, 120, false, 2);
+    const std::string d = run(r.s, r.w);
+    expect(nCyl(r.w) == 0 && ringWhys(d, 120) == "underdetermined", "ring_short_wall_underdetermined");
+}
+
+// The wall levels of the dent cases: a dent on the middle level is an interior hole.
+static const std::vector<double> kDentLevels{0.0, -5.0, -10.0, -15.0, -20.0};
+
+// A dent 5 tau into a closed wall: the triangles on the dented vertex leave the band,
+// whose hole is a third boundary loop.
+static void caseRingNotAnnulus() {
+    Ring r = ringPart(7.5, 120, false, 0, kDentLevels);
+    const double tau = 2 * r.s.q;
+    pushRadial(r.s, r.peg.col[2][60], -5 * tau);
+    const std::string d = run(r.s, r.w);
+    expect(nCyl(r.w) == 0 && ringWhys(d, 120) == "domain-not-annulus", "ring_band_with_hole_refused");
+}
+
+// A C-shaped wall (100 of 120 sectors) is a disk: one boundary loop. With a dent it
+// has the two loops of an annulus but does not close round the axis.
+static void caseRingOpenWall() {
+    {
+        Ring r = ringPart(7.5, 120, false, 100, kDentLevels);
+        const std::string d = run(r.s, r.w);
+        expect(nCyl(r.w) == 0 && ringWhys(d, 120) == "domain-not-annulus", "ring_open_wall_is_a_disk");
+    }
+    {
+        Ring r = ringPart(7.5, 120, false, 100, kDentLevels);
+        const double tau = 2 * r.s.q;
+        pushRadial(r.s, r.peg.col[2][50], -5 * tau);
+        const std::string d = run(r.s, r.w);
+        expect(nCyl(r.w) == 0 && ringWhys(d, 120) == "degenerate", "ring_open_annulus_not_closed360");
+    }
+}
+
 // ---- Torus mode: cap chords leave the torus (F10) ---------------------------------
 
-static void caseTorusCapPeel() {
+// A closed quarter torus (v from -90 to 0 degrees) and a fan cap on its v = -90 degree
+// ring. The TorusBlend region and its charts hold the band and / or the cap.
+struct TorusCap {
     Synth s;
     SegmentWork w;
-    const double Rm = 4.0, rm = 2.0;
+    std::vector<int> band, cap;
+};
+
+static TorusCap torusCapPart(bool withBand, bool withCap) {
+    TorusCap tc;
+    Synth& s = tc.s;
+    SegmentWork& w = tc.w;
+    std::vector<int>& band = tc.band;
+    std::vector<int>& cap = tc.cap;
+    const double Rm = 5.5, rm = 1.5;
     const int nU = 72;
     const double vs[4] = {-90 * kDeg, -60 * kDeg, -30 * kDeg, 0.0};
     std::vector<std::vector<int>> ring(4);
@@ -529,7 +639,6 @@ static void caseTorusCapPeel() {
             ring[(std::size_t)j].push_back(
                 s.add(gp_XYZ(rho * std::cos(u), rho * std::sin(u), rm * std::sin(vs[j]))));
         }
-    std::vector<int> band, cap;
     for (int j = 0; j + 1 < 4; ++j)
         for (int i = 0; i < nU; ++i) {
             const int i1 = (i + 1) % nU;
@@ -554,17 +663,36 @@ static void caseTorusCapPeel() {
     T.vMax = 0.0;
     T.nSides = nU;
     T.outwardNormal = true;
-    T.tris = band;
-    T.tris.insert(T.tris.end(), cap.begin(), cap.end());
+    if (withBand) T.tris = band;
+    if (withCap) T.tris.insert(T.tris.end(), cap.begin(), cap.end());
     w.accepted.push_back(T);
-    addProv(w, band, ProvClaim::ConsumedTorus);
-    addProv(w, cap, ProvClaim::ConsumedTorus);
-    const std::string d = run(s, w, RelRevolveMode::Torus);
-    expect(w.accepted.size() == 1 && w.accepted[0].tris.size() == band.size(), "torus_cap_chords_peeled");
-    expect(w.provisionals[1].claim == ProvClaim::Unclaimed && w.provisionals[1].tris.size() == cap.size(),
+    if (withBand) addProv(w, band, ProvClaim::ConsumedTorus);
+    if (withCap) addProv(w, cap, ProvClaim::ConsumedTorus);
+    return tc;
+}
+
+static void caseTorusCapPeel() {
+    TorusCap tc = torusCapPart(true, true);
+    SegmentWork& w = tc.w;
+    const std::string d = run(tc.s, w, RelRevolveMode::Torus);
+    expect(w.accepted.size() == 1 && w.accepted[0].tris.size() == tc.band.size(), "torus_cap_chords_peeled");
+    expect(w.provisionals[1].claim == ProvClaim::Unclaimed && w.provisionals[1].tris.size() == tc.cap.size(),
            "torus_cap_chart_unclaimed");
     expect(w.provisionals[0].claim == ProvClaim::ConsumedTorus, "torus_band_chart_kept");
     expect(has(d, "DIAG_REL_TORUS_CAP"), "torus_cap_diag");
+}
+
+// F10 peels cap chords only off a torus that keeps a band: a region of cap chords
+// alone, or of band triangles alone, stays as it stood.
+static void caseTorusCapGuards() {
+    for (int k = 0; k < 2; ++k) {
+        TorusCap tc = torusCapPart(k == 1, k == 0);
+        const std::size_t n = (k == 0 ? tc.cap : tc.band).size();
+        const std::string d = run(tc.s, tc.w, RelRevolveMode::Torus);
+        expect(tc.w.accepted.size() == 1 && tc.w.accepted[0].tris.size() == n &&
+                   tc.w.provisionals[0].claim == ProvClaim::ConsumedTorus && !has(d, "DIAG_REL_TORUS_CAP"),
+               k == 0 ? "torus_all_cap_region_kept" : "torus_no_cap_region_kept");
+    }
 }
 
 // ---- gates ------------------------------------------------------------------------
@@ -597,7 +725,14 @@ int main() {
     caseRingCapChordExcluded();
     caseRingNotJoined();
     caseRingClaimedAnchor();
+    caseRingLoopNotCircle();
+    caseRingVertexOff();
+    caseRingSameSurface();
+    caseRingUnderdetermined();
+    caseRingNotAnnulus();
+    caseRingOpenWall();
     caseTorusCapPeel();
+    caseTorusCapGuards();
     caseNoQuantum();
     caseTorusModeIsNotLine();
     if (gFail) std::fprintf(stderr, "relational_reclaim_unit: %d FAIL\n", gFail);

@@ -150,6 +150,7 @@ int main() {
         expect(rimRunsWithSurfaceU(with, 0.0, tor, 0.0, v), "rim sense: coaxial circle runs with u");
         expect(!rimRunsWithSurfaceU(against, 0.0, tor, 0.0, v), "rim sense: antiparallel circle runs -u");
         expect(rimRunsWithSurfaceU(Handle(Geom_Curve)(), 0.0, tor, 0.0, v), "rim sense: no curve keeps +u");
+        expect(rimRunsWithSurfaceU(against, 0.0, Handle(Geom_Surface)(), 0.0, v), "rim sense: no surface keeps +u");
     }
 
     // splitCapHealApplies: certified at tau and one exact rim, both required.
@@ -157,6 +158,9 @@ int main() {
     expect(!splitCapHealApplies(2.0 * kTau, kTau, true), "split-cap: uncertified wall keeps its path");
     expect(!splitCapHealApplies(0.5 * kTau, kTau, false), "split-cap: all-polyline rims keep their path");
     expect(!splitCapHealApplies(0.0, 0.0, true), "split-cap: tau 0 admits nothing");
+    expect(!splitCapHealApplies(0.0, -kTau, true), "split-cap: tau < 0 admits nothing");
+    expect(splitCapHealApplies(kTau, kTau, true), "split-cap: every vertex within tau, bound inclusive");
+    expect(!splitCapHealApplies(std::nextafter(kTau, 1.0), kTau, true), "split-cap: just past tau refused");
 
     // capLoopUnshareable: every chain of the cap loop must border a face that can carry
     // the rim circle; only the first chain can hand over a built rim edge.
@@ -175,6 +179,8 @@ int main() {
                "cap loop: a facet partner after the first chain");
         expect(capLoopUnshareable(std::vector<int>{4, 3}, true, ok) == false,
                "cap loop: reused front, buildable rest");
+        expect(capLoopUnshareable(std::vector<int>{4, 4}, true, ok),
+               "cap loop: a reused front does not excuse a later facet partner");
         expect(capLoopUnshareable(std::vector<int>{3, 5, 7}, false, ok),
                "cap loop: the last chain decides too");
         expect(!capLoopUnshareable(std::vector<int>{3, -1, 5}, false, ok),
