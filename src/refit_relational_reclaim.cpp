@@ -1989,9 +1989,10 @@ bool mergeSameSurfaceBand(const MeshView& mv, const SegmentParams& p, const Deri
         acc >= (int)work.accepted.size())
         return false;
     const Region& R = work.accepted[(std::size_t)acc];
-    // D-fc-4.4 members are partial cylinders; the joint least-squares fit below
-    // certifies the union (the donor's own refit already certified it, D-fc-1.4).
-    if (R.type != SurfType::Cylinder || R.closed360) {
+    // D-fc-4.4 members are partial CylGrow cylinders (closeSameSurface's class);
+    // the joint least-squares fit below certifies the union (the donor's own
+    // refit already certified it, D-fc-1.4). A FilletStrip keeps its anchors.
+    if (!isCylGrowCylinder(R) || R.closed360) {
         if (diagOn())
             std::fprintf(stderr, "DIAG_REL_MERGE seed=%d acc=%d type=%d closed=%d why=no-donor\n",
                          minTriOf(band), acc, (int)R.type, (int)R.closed360);

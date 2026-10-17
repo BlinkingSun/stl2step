@@ -1067,6 +1067,15 @@ static void caseSameSurfaceMerge() {
                                      gp_XYZ(0, 0, 1), 10.0, 10.0),
                "merge: closed member refused");
     }
+    {
+        MergePart p = halfWall(10.0, 0.0, false);
+        p.work.accepted[0].origin = Origin::FilletStrip;
+        const MeshView mv = p.mesh.view();
+        expect(!mergeSameSurfaceBand(mv, sp, tol, p.work, 0, p.band, gp_XYZ(0, 0, 0),
+                                     gp_XYZ(0, 0, 1), 10.0, 10.0) &&
+                   p.work.accepted[0].tris.size() == p.member.size(),
+               "merge: FilletStrip member refused (D-fc-4.4 class is CylGrow)");
+    }
 }
 
 int main() {

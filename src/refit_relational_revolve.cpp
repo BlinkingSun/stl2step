@@ -1232,7 +1232,18 @@ struct CoaxFamily {
     bool moved = false;           // the axis changed after a band was placed on it
 };
 
+// D-fc-5.11 F2: a same-radius coaxial band and the member whose surface it
+// continues, merged by the D-fc-4.4 closure once the Line stage (and its
+// section fillets) is done.
+struct PendingMerge {
+    std::vector<int> member;  // the member's triangles when the band was found
+    std::vector<int> band;
+    gp_XYZ origin, axis;
+    double radiusMember = 0, radiusBand = 0;
+};
+
 struct LineFamilies {
+    std::vector<PendingMerge> merges;
     std::vector<CoaxFamily> fams;
     std::vector<int> famOfAcc;  // work.accepted index -> family, -1 when not a donor
     const DerivedTols* tol = nullptr;
@@ -2013,19 +2024,23 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             const bool accept = std::strcmp(why, "accept") == 0;
             if (!accept && lineChainGeometric(cc.why)) chainGeom = true;
             // D-fc-5.11 F2: the band is the rest of a family member's surface; it
-            // goes to the D-fc-4.4 closure with that member (merge, not refuse).
-            bool merged = false;
-            if (cc.ok && stable && !ccl.closed && sameG >= 0 && lf.tol && lf.sp) {
+            // goes to the D-fc-4.4 closure with that member (merge, not refuse),
+            // after the Line stage.
+            if (cc.ok && stable && !ccl.closed && sameG >= 0) {
                 const std::size_t g = (std::size_t)sameG;
                 const int acc = g < fam.nDonors
                                     ? (g < fam.donorAcc.size() ? fam.donorAcc[g] : -1)
                                     : fam.bandRegion[g - fam.nDonors];
-                merged = acc >= 0 && mergeSameSurfaceBand(mv, *lf.sp, *lf.tol, work, acc, cb.tris,
-                                                          cc.fit.origin, cc.fit.axis,
-                                                          cc.fit.radius[g], Rb);
-                if (merged)
-                    for (int t : work.accepted[(std::size_t)acc].tris)
-                        if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+                if (acc >= 0 && acc < (int)work.accepted.size()) {
+                    PendingMerge pm;
+                    pm.member = work.accepted[(std::size_t)acc].tris;
+                    pm.band = cb.tris;
+                    pm.origin = cc.fit.origin;
+                    pm.axis = cc.fit.axis;
+                    pm.radiusMember = cc.fit.radius[g];
+                    pm.radiusBand = Rb;
+                    lf.merges.push_back(std::move(pm));
+                }
             }
             int straddle = 0;
             if (accept) {
@@ -2081,7 +2096,7 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     std::fprintf(stderr, "\n");
                 }
             }
-            if (accept || merged) continue;
+            if (accept) continue;
         }
         if (stations < 2 || !fit.hatOk) {
             refuse("underdetermined");
@@ -3402,6 +3417,24 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     circles.push_back(c);
                 }
             claimSectionFillets(mv, p, tol, work, circles);
+            // D-fc-5.11 F2: each same-radius band still wholly free joins the
+            // member it continues, if that member stands as it was.
+            for (const PendingMerge& pm : lf.merges) {
+                std::vector<char> held((std::size_t)nTri, 0);
+                for (const Region& r : work.accepted)
+                    for (int t : r.tris)
+                        if (t >= 0 && t < nTri) held[(std::size_t)t] = 1;
+                bool free = true;
+                for (int t : pm.band)
+                    if (t < 0 || t >= nTri || held[(std::size_t)t]) free = false;
+                if (!free) continue;
+                for (int i = 0; i < (int)work.accepted.size(); ++i)
+                    if (work.accepted[(std::size_t)i].tris == pm.member) {
+                        mergeSameSurfaceBand(mv, p, tol, work, i, pm.band, pm.origin, pm.axis,
+                                             pm.radiusMember, pm.radiusBand);
+                        break;
+                    }
+            }
         } else {
             // D-fc-4.6 F2/F3. Atoms are candidate units of every scan but their
             // own; an atom a band absorbed leaves later scans and stops donating.

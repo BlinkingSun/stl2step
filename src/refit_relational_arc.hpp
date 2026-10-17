@@ -183,7 +183,7 @@ std::vector<AnnulusRings> annulusRingCharts(const MeshView& mv, const SegmentWor
                                             double tau);
 
 // D-fc-5.11 F2: a certified coaxial band refused same-surface against the
-// accepted partial cylinder `acc` (radiusAcc: its radius about the family axis)
+// accepted partial CylGrow cylinder `acc` (radiusAcc: its radius about the family axis)
 // is merged into it by the D-fc-4.4 closure -- mutual vertex containment at tau,
 // strictly overlapping axial extents, one joint least-squares cylinder within
 // tau, the Unclaimed I/Cover triangles inside the union's extent filled -- and
