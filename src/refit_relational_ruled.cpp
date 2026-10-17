@@ -210,26 +210,37 @@ void ruledInverseStart(const RuledPoles& P, const gp_XYZ& x, double& u, double& 
 }  // namespace
 
 double ruledDistance(const RuledPoles& P, const gp_XYZ& x, int maxIters, bool clampDomain,
-                     double* uOut, double* vOut) {
+                     double* uOut, double* vOut, bool* converged) {
     const gp_XYZ a = P[1] - P[0], b = P[2] - P[0], c = P[3] - P[1] - P[2] + P[0];
     double u = 0.5, v = 0.5;
     ruledInverseStart(P, x, u, v);
     // Gauss-Newton on |S(u, v) - x|^2: J^T J is positive semi-definite, so a
     // step never heads for the saddle the full Hessian can point at.
+    // Converged means a critical point: the gradient is the zero vector, or
+    // the step does not change (u, v) in double. Both are exact. A singular
+    // Jacobian or an exhausted iteration cap is non-convergence (D-fc-5.18 F-2).
+    bool ok = false;
     for (int it = 0; it < std::max(1, maxIters); ++it) {
         const gp_XYZ S = P[0] + a * u + b * v + c * (u * v);
         const gp_XYZ Su = a + c * v, Sv = b + c * u;
         const gp_XYZ r = S - x;
         const double fu = r.Dot(Su), fv = r.Dot(Sv);
+        if (fu == 0.0 && fv == 0.0) {
+            ok = true;
+            break;
+        }
         const double juu = Su.Dot(Su), jvv = Sv.Dot(Sv), juv = Su.Dot(Sv);
         const double det = juu * jvv - juv * juv;
         if (!(det > 0) || !std::isfinite(det)) break;
         const double du = (jvv * fu - juv * fv) / det;
         const double dv = (juu * fv - juv * fu) / det;
         if (!std::isfinite(du) || !std::isfinite(dv)) break;
+        if (u - du == u && v - dv == v) {
+            ok = true;
+            break;
+        }
         u -= du;
         v -= dv;
-        if (du == 0.0 && dv == 0.0) break;
     }
     if (clampDomain) {
         u = std::min(1.0, std::max(0.0, u));
@@ -237,6 +248,7 @@ double ruledDistance(const RuledPoles& P, const gp_XYZ& x, int maxIters, bool cl
     }
     if (uOut) *uOut = u;
     if (vOut) *vOut = v;
+    if (converged) *converged = ok;
     return (ruledPoint(P, u, v) - x).Modulus();
 }
 
@@ -257,8 +269,13 @@ RuledVertexCert certifyRuledVertices(const RuledPoles& P, const std::vector<gp_X
 bool ruledSameSurface(const RuledPoles& P, const std::vector<gp_XYZ>& pts, double tau,
                       int maxIters) {
     if (pts.empty()) return false;
-    for (const gp_XYZ& x : pts)
-        if (!(ruledDistance(P, x, maxIters, false) <= tau)) return false;
+    for (const gp_XYZ& x : pts) {
+        bool conv = false;
+        const double d = ruledDistance(P, x, maxIters, false, nullptr, nullptr, &conv);
+        // D-fc-5.18 F-2: non-convergence refuses, even when the upper bound
+        // happens to sit within tau.
+        if (!ruledDistanceCertifies(d, conv, tau)) return false;
+    }
     return true;
 }
 

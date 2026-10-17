@@ -3016,10 +3016,17 @@ AnalyticCurve ruledContactLine(const Region& A, const Region& B, const MeshView&
     const int iters = SegmentParams{}.maxRefineIters;
     for (int lv : {ch.meshVerts.front(), ch.meshVerts.back()}) {
         const gp_Pnt q = ElCLib::Value(ElCLib::Parameter(lin, pntOf(mv, lv)), lin);
-        const double dX = X.type == SurfType::Plane
-                              ? std::fabs(gp_Vec(X.ax.Location(), q).Dot(X.ax.Direction()))
-                              : ruledDistance(X.ruledPoles, q.XYZ(), iters, false);
-        if (!(dX <= tolX)) return out;
+        if (X.type == SurfType::Plane) {
+            const double dX = std::fabs(gp_Vec(X.ax.Location(), q).Dot(X.ax.Direction()));
+            if (!(dX <= tolX)) return out;
+        } else {
+            // D-fc-5.18 F-2: a ruled|ruled contact refuses when the
+            // closest-point iteration did not converge (fail closed).
+            bool conv = false;
+            const double dX = ruledDistance(X.ruledPoles, q.XYZ(), iters, false, nullptr, nullptr,
+                                            &conv);
+            if (!ruledDistanceCertifies(dX, conv, tolX)) return out;
+        }
     }
     out.kind = AnalyticCurve::Lin;
     out.lin = lin;
@@ -19539,6 +19546,42 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             uncollapseRegionChains(id, rs, collapsed, geom);
             restoreShared();
         };
+        // D-fc-5.18. A ruled quad must not let the rest of its component ship
+        // an uncertified A3 plane. Every PlaneGrow whose own residual exceeds
+        // τ is R1-exploded before the first collapse, so its boundary stays a
+        // mesh polyline and the component is not reverted. Certified planes
+        // (residual ≤ τ) stay. The refused plane's predicted volume is dropped
+        // so the shell budget is the volume that actually ships.
+        if (holdsRuled) {
+            const double tauR = tauOf(mv);
+            double devMax = 0.0;
+            bool sawAnalytic = false;
+            for (Region& rg : rs.regions) {
+                if (!a3PlaneFacetsBesideRuled(true,
+                                              rg.origin == Origin::PlaneGrow &&
+                                                  rg.type == SurfType::Plane,
+                                              rg.maxVertexDev, tauR))
+                    continue;
+                if (diagRelEnabled()) {
+                    std::fprintf(stderr,
+                                 "DIAG_REL_BAND stage=ruled mode=a3-facets rid=%d nTri=%zu "
+                                 "maxDev=%.6g maxDevTau=%.4f why=exploded\n",
+                                 rg.id, rg.tris.size(), rg.maxVertexDev,
+                                 (tauR > 0.0) ? rg.maxVertexDev / tauR : 0.0);
+                }
+                rs.stats.dVolPredicted -= rg.dVolPredicted;
+                rs.stats.facetTriangles += (int)rg.tris.size();
+                rg.dVolPredicted = 0.0;
+                explodeRegion(rg.id);
+            }
+            for (const Region& rg : rs.regions) {
+                if (regionExploded(exploded, rg.id)) continue;
+                if (!std::isfinite(rg.maxVertexDev)) continue;
+                devMax = std::max(devMax, rg.maxVertexDev);
+                sawAnalytic = true;
+            }
+            if (sawAnalytic) rs.stats.maxVertexDev = devMax;
+        }
         auto explodeNonSeamed = [&]() -> bool {
             bool any = false;
             for (const Region& r : rs.regions) {

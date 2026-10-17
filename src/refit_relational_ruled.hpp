@@ -63,10 +63,30 @@ gp_XYZ ruledNormal(const RuledPoles& P, double u, double v);
 // steps. With clampDomain the
 // distance is measured to the face (u, v clamped to [0, 1]); otherwise to the
 // unbounded surface. The value is the distance to an actual surface point, so
-// it never understates the true distance (an unconverged step refuses, it
-// never admits).
+// it never understates the true distance. D-fc-5.18 F-2: `converged`, when
+// given, is set false unless the iteration reached a critical point (a zero
+// gradient, or a step that does not change the parameter). An unconverged
+// value stays an upper bound and is not a certificate.
 double ruledDistance(const RuledPoles& P, const gp_XYZ& x, int maxIters, bool clampDomain,
-                     double* uOut = nullptr, double* vOut = nullptr);
+                     double* uOut = nullptr, double* vOut = nullptr,
+                     bool* converged = nullptr);
+
+// D-fc-5.18 F-2. Same-surface and a ruled|ruled contact accept a distance
+// only when the closest-point iteration converged and the distance is within
+// tol. Non-convergence refuses (fail closed): the upper bound must not be
+// read as a certificate.
+inline bool ruledDistanceCertifies(double dist, bool converged, double tol) {
+    return converged && dist <= tol;
+}
+
+// D-fc-5.18. In a component that holds a RuledQuad, an A3 plane
+// (Origin::PlaneGrow) whose own maxVertexDev exceeds τ ships as facets
+// (R1 explode, heal-not-revert). A certified plane stays. A component with
+// no ruled quad is unchanged.
+inline bool a3PlaneFacetsBesideRuled(bool holdsRuled, bool isA3Plane, double maxVertexDev,
+                                     double tau) {
+    return holdsRuled && isA3Plane && !anchorCertified(tau, maxVertexDev);
+}
 
 // Vertex certificate (D-fc-1.6.5): every point within tau of the face. Max,
 // not RMS.

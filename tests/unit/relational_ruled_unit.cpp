@@ -266,7 +266,9 @@ static void predicateCases() {
     const RuledPoles twisted{gp_XYZ(0, 0, 0), gp_XYZ(10, 0, 0), gp_XYZ(0, 1, 10),
                              gp_XYZ(10, -1, 10)};
     // z = h x y over [-1, 1]^2: the corners sit +-h off their LS plane z = 0.
-    const double h = 0.7;
+    // h stays below the patch half-width so that plane is the thin axis.
+    // It is this fixture's saddle amplitude, not a length taken from a part.
+    const double h = 0.25;
     const RuledPoles saddle{gp_XYZ(-1, -1, h), gp_XYZ(1, -1, -h), gp_XYZ(-1, 1, -h),
                             gp_XYZ(1, 1, h)};
     expect(ruledCornerPlanarity(flat) <= 1e-12, "line-first.planar-corners");
@@ -311,6 +313,37 @@ static void predicateCases() {
         expect(std::fabs(dVolRuledTriangle(flat, ruledPoint(flat, 0, 0), ruledPoint(flat, 1, 0),
                                            ruledPoint(flat, 1, 1), kIters)) <= 1e-12,
                "dvol.planar-patch-zero");
+    }
+    // D-fc-5.18. An A3 plane beside a ruled quad ships as facets when its own
+    // residual exceeds tau. A certified plane, and any plane in a component
+    // with no ruled quad, stays.
+    expect(a3PlaneFacetsBesideRuled(true, true, 2 * kTau, kTau), "a3.over-tau-beside-ruled-facets");
+    expect(!a3PlaneFacetsBesideRuled(true, true, kTau, kTau), "a3.at-tau-stays");
+    expect(!a3PlaneFacetsBesideRuled(true, true, 0.0, kTau), "a3.certified-stays");
+    expect(!a3PlaneFacetsBesideRuled(false, true, 100 * kTau, kTau), "a3.no-ruled-quad-stays");
+    expect(!a3PlaneFacetsBesideRuled(true, false, 100 * kTau, kTau), "a3.not-a-plane-stays");
+    // D-fc-5.18 F-2. A degenerate line patch: the centre-tangent start sits
+    // 0.5 tau from a point that lies on the unbounded line, the gradient is
+    // not zero, and the Jacobian is singular, so the iteration does not
+    // converge. The upper bound is still within tau. Same-surface and a
+    // ruled contact must refuse it.
+    {
+        const RuledPoles line{gp_XYZ(0, 0, 0), gp_XYZ(1, 0, 0), gp_XYZ(0, 0, 0), gp_XYZ(1, 0, 0)};
+        const gp_XYZ x(0.5 + 0.5 * kTau, 0, 0);
+        bool conv = true;
+        const double d = ruledDistance(line, x, kIters, false, nullptr, nullptr, &conv);
+        expect(!conv && d <= kTau, "distance.singular-start-does-not-converge");
+        expect(!ruledDistanceCertifies(d, conv, kTau), "distance.nonconverged-does-not-certify");
+        expect(ruledDistanceCertifies(0.5 * kTau, true, kTau), "distance.converged-within-tau-certifies");
+        expect(!ruledSameSurface(line, {x}, kTau, kIters), "same-surface.nonconverged-refuses");
+        bool onConv = false;
+        const double onD = ruledDistance(line, gp_XYZ(0.5, 0, 0), kIters, false, nullptr, nullptr,
+                                         &onConv);
+        expect(onConv && onD <= 1e-15, "distance.on-patch-converges");
+        bool faceConv = false;
+        const gp_XYZ onTw = ruledPoint(twisted, 0.3, 0.6);
+        const double faceD = ruledDistance(twisted, onTw, kIters, true, nullptr, nullptr, &faceConv);
+        expect(faceConv && faceD <= 1e-9, "distance.twisted-on-face-converges");
     }
 }
 
@@ -457,11 +490,72 @@ static void endToEnd(const std::string& dir) {
            "e2e.volume-is-mesh-plus-predicted");
 }
 
+// D-fc-5.18. One wall's interior is pushed off its bilinear patch. That wall
+// is not a ruled quad and its A3 plane is not certified, so it ships as
+// facets. The other three walls stay ruled. The component does not revert.
+static void endToEndBump(const std::string& dir) {
+    Synth s;
+    const Prism P = buildPrism(s, 10, 20, 20 * kPi / 180, 6, 8);
+    const RuledPoles W = P.wall(0);
+    gp_XYZ n = ruledNormal(W, 0.5, 0.5);
+    n /= n.Modulus();
+    for (int v : P.wallInterior[0]) s.pts[(std::size_t)v] += n * (30 * kTau);
+    const std::string stl = dir + "/ruled_bump.stl", step = dir + "/ruled_bump.step";
+    {
+        std::ofstream f(stl, std::ios::binary);
+        char hdr[80] = {};
+        f.write(hdr, 80);
+        const uint32_t nTri = (uint32_t)(s.triFlat.size() / 3);
+        f.write(reinterpret_cast<const char*>(&nTri), 4);
+        for (uint32_t t = 0; t < nTri; ++t) {
+            const gp_XYZ& a = s.pts[(std::size_t)s.triFlat[3 * t]];
+            const gp_XYZ& b = s.pts[(std::size_t)s.triFlat[3 * t + 1]];
+            const gp_XYZ& c = s.pts[(std::size_t)s.triFlat[3 * t + 2]];
+            gp_XYZ nn = (b - a).Crossed(c - a);
+            nn /= nn.Modulus();
+            const float rec[12] = {(float)nn.X(), (float)nn.Y(), (float)nn.Z(),
+                                   (float)a.X(),  (float)a.Y(),  (float)a.Z(),
+                                   (float)b.X(),  (float)b.Y(),  (float)b.Z(),
+                                   (float)c.X(),  (float)c.Y(),  (float)c.Z()};
+            f.write(reinterpret_cast<const char*>(rec), sizeof rec);
+            const uint16_t attr = 0;
+            f.write(reinterpret_cast<const char*>(&attr), 2);
+        }
+    }
+    stl2step::Options opt;
+    opt.input = stl;
+    opt.output = step;
+    opt.smooth = true;
+    opt.verify = true;
+    opt.threads = 1;
+    const stl2step::Result r = stl2step::convert(opt);
+    std::fprintf(stderr,
+                 "e2e-bump ok=%d solids=%d reverted=%d faces=%d maxDev=%.6g mesh=%.6f step=%.6f "
+                 "pred=%.6f\n",
+                 r.ok ? 1 : 0, r.solids, r.smoothRevertedComponents, r.facesAfterUnify,
+                 r.smoothMaxDevMM, r.meshVolumeMM3, r.stepVolumeMM3, r.smoothVolPredictedMM3);
+    expect(r.ok && r.solids == 1 && r.openShells == 0, "e2e-bump.one-solid");
+    expect(r.smoothRevertedComponents == 0, "e2e-bump.no-component-revert");
+    std::ifstream in(step);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+    int nb = 0;
+    for (std::size_t at = text.find("B_SPLINE_SURFACE_WITH_KNOTS"); at != std::string::npos;
+         at = text.find("B_SPLINE_SURFACE_WITH_KNOTS", at + 1))
+        ++nb;
+    expect(nb == 3, "e2e-bump.three-ruled-walls");
+    expect(r.facesAfterUnify > 6, "e2e-bump.bumped-wall-is-facets");
+    expect(r.smoothMaxDevMM < 1e-3, "e2e-bump.no-millimetre-plane");
+}
+
 int main(int argc, char** argv) {
     predicateCases();
     stageCases();
-    if (argc > 1) endToEnd(argv[1]);
-    else expect(false, "e2e.work-directory-argument");
+    if (argc > 1) {
+        endToEnd(argv[1]);
+        endToEndBump(argv[1]);
+    } else expect(false, "e2e.work-directory-argument");
     std::fprintf(stderr, "relational_ruled_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS",
                  gFail);
     return gFail ? 1 : 0;
