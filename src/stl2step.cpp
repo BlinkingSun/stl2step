@@ -22,6 +22,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "stl2step/stl2step.hpp"
+#include "mesh_heal.hpp"
 #include "parallel.hpp"
 #include "refit.hpp"
 #include "stl_quant.hpp"
@@ -38,6 +39,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -216,6 +218,301 @@ int absorbZeroAreaTJunctions(std::vector<std::array<int, 3>>& tris,
     }
     summary(absorbed);
     return absorbed;
+}
+
+// Stitch open boundaries before the edge graph (D-fc-5.10). The caller runs it
+// on the TrueForm path only, and only when Pass A sees an edge used once.
+//   tau       = 2·quantFloor (D-130-12)
+//   sMin      = shortest edge longer than tau (an edge <= tau is itself a
+//               sub-quantum duplicate)
+//   stitchTol = min(sewTol, sMin / 2): the repair path's own sewing tolerance,
+//               capped so no edge longer than tau can collapse
+// (1) Weld boundary vertices within stitchTol (union-find). A cluster wider
+//     than stitchTol is refused whole. Representative = lowest vertex id, one
+//     of the file's own points. Interior vertices never move. A triangle that
+//     collapses is dropped.
+// (2) Split: a boundary vertex within tau of a boundary edge's open segment
+//     splits the owning triangle, keeping its winding. The vertex must lie
+//     farther than max(stitchTol, tau) from both ends (closer is a duplicate of
+//     that end), so every split edge is strictly shorter than its parent and
+//     the fixed point terminates. Order: owning triangle, then edge.
+// Certificate per stitched cluster (input triangles joined by a shared vertex,
+// a weld or a split): the healed cluster has no edge used more than twice, no
+// winding conflict, and strictly fewer open edges. A cluster that fails keeps
+// its input triangles. No capping: a loop with no partner stays open.
+HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
+                             const std::vector<std::array<double, 3>>& pts,
+                             double quantFloor, double sewTol, bool diag) {
+    HealStats st;
+    const double tau = 2.0 * quantFloor; // D-130-12
+    if (!(quantFloor > 0.0) || tris.empty()) return st;
+
+    auto ekey = [](int a, int b) -> uint64_t {
+        return a < b ? ((uint64_t)(uint32_t)a << 32) | (uint32_t)b
+                     : ((uint64_t)(uint32_t)b << 32) | (uint32_t)a;
+    };
+    auto keyLo = [](uint64_t k) { return (int)(k >> 32); };
+    auto keyHi = [](uint64_t k) { return (int)(k & 0xffffffffu); };
+    auto dist = [&](int a, int b) {
+        const double dx = pts[(size_t)a][0] - pts[(size_t)b][0];
+        const double dy = pts[(size_t)a][1] - pts[(size_t)b][1];
+        const double dz = pts[(size_t)a][2] - pts[(size_t)b][2];
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+
+    struct EdgeUse { int cnt = 0, fwd = 0, t0 = -1; };
+    std::vector<std::array<int, 3>> work = tris;
+    std::vector<char> dead(work.size(), 0);
+    auto census = [&](std::unordered_map<uint64_t, EdgeUse>& E) {
+        E.clear();
+        E.reserve(work.size() * 2);
+        for (int t = 0; t < (int)work.size(); ++t) {
+            if (dead[(size_t)t]) continue;
+            for (int s = 0; s < 3; ++s) {
+                const int a = work[(size_t)t][s], b = work[(size_t)t][(s + 1) % 3];
+                EdgeUse& e = E[ekey(a, b)];
+                if (e.cnt == 0) e.t0 = t;
+                e.cnt++;
+                if (a < b) e.fwd++;
+            }
+        }
+    };
+    std::unordered_map<uint64_t, EdgeUse> E0;
+    census(E0);
+    for (const auto& kv : E0)
+        if (kv.second.cnt == 1) st.boundaryBefore++;
+    if (st.boundaryBefore == 0) return st;
+
+    st.sMin = std::numeric_limits<double>::infinity();
+    for (const auto& kv : E0) {
+        const double d = dist(keyLo(kv.first), keyHi(kv.first));
+        if (d > tau) st.sMin = std::min(st.sMin, d);
+    }
+    if (!std::isfinite(st.sMin)) return st;
+    st.stitchTol = std::min(sewTol, 0.5 * st.sMin);
+    const double tol = st.stitchTol;
+    const double endGap = std::max(tol, tau);
+
+    // Stitched clusters: vertex union-find over the input triangles, joined
+    // again by every weld and split. Root = lowest vertex id.
+    std::vector<int> cl(pts.size());
+    for (size_t i = 0; i < cl.size(); ++i) cl[i] = (int)i;
+    auto clFind = [&](int x) {
+        while (cl[(size_t)x] != x) { cl[(size_t)x] = cl[(size_t)cl[(size_t)x]]; x = cl[(size_t)x]; }
+        return x;
+    };
+    auto clJoin = [&](int a, int b) {
+        a = clFind(a);
+        b = clFind(b);
+        if (a != b) cl[(size_t)std::max(a, b)] = std::min(a, b);
+    };
+    for (const auto& t : tris) { clJoin(t[0], t[1]); clJoin(t[1], t[2]); }
+
+    // ---- (1) weld boundary vertices ------------------------------------------
+    std::vector<int> bv;
+    for (const auto& kv : E0)
+        if (kv.second.cnt == 1) { bv.push_back(keyLo(kv.first)); bv.push_back(keyHi(kv.first)); }
+    std::sort(bv.begin(), bv.end());
+    bv.erase(std::unique(bv.begin(), bv.end()), bv.end());
+    // Union-find over positions in bv (ascending id, so the root is the lowest id).
+    std::vector<int> wp(bv.size());
+    for (size_t i = 0; i < wp.size(); ++i) wp[i] = (int)i;
+    auto wpFind = [&](int x) {
+        while (wp[(size_t)x] != x) { wp[(size_t)x] = wp[(size_t)wp[(size_t)x]]; x = wp[(size_t)x]; }
+        return x;
+    };
+    std::vector<int> byX(bv.size());
+    for (size_t i = 0; i < byX.size(); ++i) byX[i] = (int)i;
+    std::sort(byX.begin(), byX.end(), [&](int i, int j) {
+        const double xi = pts[(size_t)bv[(size_t)i]][0], xj = pts[(size_t)bv[(size_t)j]][0];
+        return xi != xj ? xi < xj : i < j;
+    });
+    for (size_t i = 0; i < byX.size(); ++i) {
+        const int vi = bv[(size_t)byX[i]];
+        for (size_t j = i + 1; j < byX.size(); ++j) {
+            const int vj = bv[(size_t)byX[j]];
+            if (pts[(size_t)vj][0] - pts[(size_t)vi][0] > tol) break;
+            if (dist(vi, vj) > tol) continue;
+            const int a = wpFind(byX[i]), b = wpFind(byX[j]);
+            if (a != b) wp[(size_t)std::max(a, b)] = std::min(a, b);
+        }
+    }
+    std::vector<std::vector<int>> members(bv.size());
+    for (size_t i = 0; i < bv.size(); ++i) members[(size_t)wpFind((int)i)].push_back((int)i);
+    struct OpRec { int vertex; double d; };
+    std::vector<OpRec> weldRec, splitRec;
+    std::vector<int> repOf(pts.size(), -1);
+    for (size_t root = 0; root < members.size(); ++root) {
+        const std::vector<int>& c = members[root];
+        if (c.size() < 2) continue;
+        double diam = 0;
+        for (size_t i = 0; i < c.size(); ++i)
+            for (size_t j = i + 1; j < c.size(); ++j)
+                diam = std::max(diam, dist(bv[(size_t)c[i]], bv[(size_t)c[j]]));
+        if (diam > tol) { st.refusedWeldClusters++; continue; }
+        const int rep = bv[root];
+        for (int p : c) {
+            const int v = bv[(size_t)p];
+            if (v == rep) continue;
+            repOf[(size_t)v] = rep;
+            weldRec.push_back({ v, dist(v, rep) });
+            clJoin(v, rep);
+        }
+    }
+    for (size_t t = 0; t < work.size(); ++t) {
+        for (int& x : work[t])
+            if (repOf[(size_t)x] >= 0) x = repOf[(size_t)x];
+        if (work[t][0] == work[t][1] || work[t][1] == work[t][2] || work[t][0] == work[t][2])
+            dead[t] = 1;
+    }
+
+    // ---- (2) split boundary edges at boundary vertices on their open segment ----
+    std::unordered_map<uint64_t, EdgeUse> E;
+    for (;;) {
+        census(E);
+        std::vector<int> bvx;
+        std::vector<std::pair<int, int>> bes;   // directed boundary edge a->b in its triangle
+        std::vector<int> beT;
+        for (const auto& kv : E) {
+            if (kv.second.cnt != 1) continue;
+            const int t = kv.second.t0;
+            const int lo = keyLo(kv.first), hi = keyHi(kv.first);
+            for (int s = 0; s < 3; ++s) {
+                const int a = work[(size_t)t][s], b = work[(size_t)t][(s + 1) % 3];
+                if ((a == lo && b == hi) || (a == hi && b == lo)) { bes.push_back({ a, b }); beT.push_back(t); }
+            }
+            bvx.push_back(lo);
+            bvx.push_back(hi);
+        }
+        if (bes.empty()) break;
+        std::sort(bvx.begin(), bvx.end());
+        bvx.erase(std::unique(bvx.begin(), bvx.end()), bvx.end());
+        std::sort(bvx.begin(), bvx.end(), [&](int a, int b) {
+            return pts[(size_t)a][0] != pts[(size_t)b][0] ? pts[(size_t)a][0] < pts[(size_t)b][0] : a < b;
+        });
+        std::vector<size_t> ord(bes.size());
+        for (size_t i = 0; i < ord.size(); ++i) ord[i] = i;
+        std::sort(ord.begin(), ord.end(), [&](size_t x, size_t y) {
+            return beT[x] != beT[y] ? beT[x] < beT[y] : bes[x] < bes[y];
+        });
+        std::vector<char> touched(work.size(), 0);
+        int did = 0;
+        for (size_t oi : ord) {
+            const int a = bes[oi].first, b = bes[oi].second, t = beT[oi];
+            if (touched[(size_t)t]) continue;
+            const double lo = std::min(pts[(size_t)a][0], pts[(size_t)b][0]) - tau;
+            const double hi = std::max(pts[(size_t)a][0], pts[(size_t)b][0]) + tau;
+            auto it = std::lower_bound(bvx.begin(), bvx.end(), lo,
+                                       [&](int v, double x) { return pts[(size_t)v][0] < x; });
+            const double abx = pts[(size_t)b][0] - pts[(size_t)a][0];
+            const double aby = pts[(size_t)b][1] - pts[(size_t)a][1];
+            const double abz = pts[(size_t)b][2] - pts[(size_t)a][2];
+            const double L2 = abx * abx + aby * aby + abz * abz, L = std::sqrt(L2);
+            int best = -1;
+            double bestT = 2, bestD = 0;
+            for (; it != bvx.end() && pts[(size_t)*it][0] <= hi; ++it) {
+                const int v = *it;
+                if (v == a || v == b) continue;
+                const double px = pts[(size_t)v][0] - pts[(size_t)a][0];
+                const double py = pts[(size_t)v][1] - pts[(size_t)a][1];
+                const double pz = pts[(size_t)v][2] - pts[(size_t)a][2];
+                const double tt = (px * abx + py * aby + pz * abz) / L2;
+                if (!(tt * L > endGap && (1 - tt) * L > endGap)) continue;
+                const double cx = px - tt * abx, cy = py - tt * aby, cz = pz - tt * abz;
+                const double d = std::sqrt(cx * cx + cy * cy + cz * cz);
+                if (d <= tau && tt < bestT) { best = v; bestT = tt; bestD = d; }
+            }
+            if (best < 0) continue;
+            int s = 0;
+            for (; s < 3; ++s)
+                if (work[(size_t)t][s] == a && work[(size_t)t][(s + 1) % 3] == b) break;
+            const int c = work[(size_t)t][(s + 2) % 3];
+            if (best == c) continue;
+            work[(size_t)t] = { a, best, c };
+            work.push_back({ best, b, c });
+            dead.push_back(0);
+            touched[(size_t)t] = 1;
+            touched.push_back(1);
+            clJoin(best, a);
+            splitRec.push_back({ best, bestD });
+            did++;
+        }
+        if (!did) break;
+    }
+
+    // ---- certificate, per stitched cluster ------------------------------------
+    census(E);
+    struct ClusterCount { int open0 = 0, nm0 = 0, conf0 = 0, open1 = 0, nm1 = 0, conf1 = 0; };
+    std::unordered_map<int, ClusterCount> cc;
+    for (const auto& kv : E0) {
+        ClusterCount& c = cc[clFind(keyLo(kv.first))];
+        if (kv.second.cnt == 1) c.open0++;
+        else if (kv.second.cnt > 2) c.nm0++;
+        else if (kv.second.fwd != 1) c.conf0++;
+    }
+    for (const auto& kv : E) {
+        ClusterCount& c = cc[clFind(keyLo(kv.first))];
+        if (kv.second.cnt == 1) c.open1++;
+        else if (kv.second.cnt > 2) c.nm1++;
+        else if (kv.second.fwd != 1) c.conf1++;
+    }
+    std::vector<int> roots;
+    for (const auto& kv : cc)
+        if (kv.second.open0 > 0) roots.push_back(kv.first);
+    std::sort(roots.begin(), roots.end());
+    std::unordered_map<int, char> healed;
+    for (int root : roots) {
+        const ClusterCount& c = cc.at(root);
+        const bool ok = c.nm1 == 0 && c.conf1 == 0 && c.open1 < c.open0;
+        healed[root] = ok ? 1 : 0;
+        if (ok) { st.clustersHealed++; st.boundaryAfter += c.open1; }
+        else { st.clustersRefused++; st.boundaryAfter += c.open0; }
+    }
+    auto isHealed = [&](int v) {
+        auto it = healed.find(clFind(v));
+        return it != healed.end() && it->second;
+    };
+    for (const OpRec& w : weldRec)
+        if (isHealed(w.vertex)) { st.welds++; st.weldMax = std::max(st.weldMax, w.d); }
+    for (const OpRec& s : splitRec)
+        if (isHealed(s.vertex)) { st.splits++; st.splitMax = std::max(st.splitMax, s.d); }
+
+    if (st.clustersHealed > 0) {
+        // Healed clusters take the stitched triangles; every other cluster keeps
+        // its input triangles at their input positions.
+        const size_t n0 = tris.size();
+        std::vector<std::array<int, 3>> out;
+        out.reserve(work.size());
+        for (size_t k = 0; k < work.size(); ++k) {
+            if (isHealed(k < n0 ? tris[k][0] : work[k][0])) {
+                if (!dead[k]) out.push_back(work[k]);
+                else st.collapsed++;
+            } else if (k < n0) {
+                out.push_back(tris[k]);
+            }
+        }
+        tris.swap(out);
+    }
+
+    if (diag) {
+        std::fprintf(stderr,
+                     "DIAG_HEAL boundaryBefore=%d boundaryAfter=%d welds=%d weldMaxTau=%.4f "
+                     "collapsed=%d splits=%d splitMaxTau=%.4f refusedWeldClusters=%d "
+                     "clustersHealed=%d clustersRefused=%d sMin=%.9g sMinTau=%.4g sewTolTau=%.4g "
+                     "stitchTol=%.9g stitchTolTau=%.4g tau=%.9g\n",
+                     st.boundaryBefore, st.boundaryAfter, st.welds, st.weldMax / tau, st.collapsed,
+                     st.splits, st.splitMax / tau, st.refusedWeldClusters, st.clustersHealed,
+                     st.clustersRefused, st.sMin, st.sMin / tau, sewTol / tau, tol, tol / tau, tau);
+        for (int root : roots) {
+            const ClusterCount& c = cc.at(root);
+            std::fprintf(stderr,
+                         "DIAG_HEAL_CLUSTER root=%d open=%d->%d nonManifold=%d->%d "
+                         "conflicts=%d->%d healed=%d\n",
+                         root, c.open0, c.open1, c.nm0, c.nm1, c.conf0, c.conf1,
+                         healed.at(root) ? 1 : 0);
+        }
+    }
+    return st;
 }
 
 }  // namespace detail
@@ -488,6 +785,7 @@ Result Converter::run() {
     int solidsOut = 0, openShellsOut = 0, facesBefore = 0, facesAfter = 0;
     int nTri = 0, nVert = 0, nComp = 0;
     int meshTJunctionsAbsorbed = 0;
+    long long healTriDelta = 0;   // stitched triangles minus input (D-fc-5.10)
     double meshVolume = 0, brepVolume = 0, stepVolume = 0, volDeltaPct = -1;
     bool watertight = true;
 
@@ -599,20 +897,53 @@ Result Converter::run() {
         // used exactly twice, so components split at non-manifold junctions: two
         // solids glued along an edge become two clean manifold bodies (direct path)
         // instead of one dirty component that would need the slow sewing repair.
-        UnionFind uf((int)tris.size());
+        UnionFind uf(0);
         {
             struct EdgeStat { uint32_t cnt = 0; int t1 = -1, t2 = -1; };
             std::unordered_map<uint64_t, EdgeStat> edges;
-            edges.reserve(tris.size() * 2);
-            for (int t = 0; t < (int)tris.size(); t++) {
-                int v[4] = { tris[t].a, tris[t].b, tris[t].c, tris[t].a };
-                for (int s = 0; s < 3; s++) {
-                    EdgeStat& e = edges[ekey(v[s], v[s + 1])];
-                    e.cnt++;
-                    if (e.t1 < 0) e.t1 = t;
-                    else if (e.t2 < 0) e.t2 = t;
+            auto passA = [&]() {
+                edges = std::unordered_map<uint64_t, EdgeStat>();
+                edges.reserve(tris.size() * 2);
+                for (int t = 0; t < (int)tris.size(); t++) {
+                    int v[4] = { tris[t].a, tris[t].b, tris[t].c, tris[t].a };
+                    for (int s = 0; s < 3; s++) {
+                        EdgeStat& e = edges[ekey(v[s], v[s + 1])];
+                        e.cnt++;
+                        if (e.t1 < 0) e.t1 = t;
+                        else if (e.t2 < 0) e.t2 = t;
+                    }
+                }
+            };
+            passA();
+
+            // Stitch open boundaries (D-fc-5.10), TrueForm path only: Verbatim
+            // stays byte-identical and --force-sew stays a diagnostic. Runs only
+            // when Pass A sees an edge used once, so a closed mesh does no more work.
+            if (smooth && !forceSew
+                && std::any_of(edges.begin(), edges.end(),
+                               [](const auto& kv) { return kv.second.cnt == 1; })) {
+                std::vector<std::array<int, 3>> raw;
+                raw.reserve(tris.size());
+                for (const Tri& t : tris) raw.push_back({ t.a, t.b, t.c });
+                std::vector<std::array<double, 3>> xyz;
+                xyz.reserve(pts.size());
+                for (const gp_XYZ& p : pts) xyz.push_back({ p.X(), p.Y(), p.Z() });
+                const char* envRel = std::getenv("STL2STEP_DIAG_REL");
+                const bool healDiag = envRel && envRel[0] && envRel[0] != '0';
+                const detail::HealStats hs =
+                    detail::healOpenBoundaries(raw, xyz, quantFloor, sewTol, healDiag);
+                if (hs.clustersHealed > 0) {
+                    healTriDelta = (long long)raw.size() - (long long)tris.size();
+                    tris.clear();
+                    tris.reserve(raw.size());
+                    for (const auto& t : raw) tris.push_back({ t[0], t[1], t[2] });
+                    passA();
+                    note("  heal      %d open edges -> %d (%d welds, %d splits, stitch %.2g mm)\n",
+                         hs.boundaryBefore, hs.boundaryAfter, hs.welds, hs.splits, hs.stitchTol);
                 }
             }
+
+            uf = UnionFind((int)tris.size());
             for (auto& kv : edges)
                 if (kv.second.cnt == 2) uf.unite(kv.second.t1, kv.second.t2);
         }
@@ -1156,7 +1487,7 @@ Result Converter::run() {
             dVolPredAbs += o.refitDVolAbs;
         }
         {
-            long long idxDegen = (long long)nTri - (long long)tris.size();
+            long long idxDegen = (long long)nTri + healTriDelta - (long long)tris.size();
             note("  build     %s faces (%s degenerate skipped), %d manifold component%s (%u threads)  [%.2fs]\n",
                  fmtInt((long long)tris.size() - skipped).c_str(),
                  fmtInt(idxDegen + skipped).c_str(), nComp, nComp == 1 ? "" : "s",
