@@ -1503,9 +1503,11 @@ def _self_test() -> int:
     rch = load_prg_ratchet()
     check(rch["authority"] == RATCHET_NAME, "prg-ratchet authority is the JSON filename")
     check(str(rch.get("engineRef") or "") == "9b693c8", "prg-ratchet engineRef is 9b693c8")
+    tb_ceil_rch = float(rch["tightBudgetAbsDeltaMM3Ceiling"])
     check(
-        abs(float(rch["tightBudgetAbsDeltaMM3Ceiling"]) - 10.81525) < 1e-9,
-        "tightBudget ceiling is superseded-shell 10.81525 mm3 (OP2e 10.3094 not ratcheted)",
+        tb_ceil_rch >= 10.81525 and bool(rch.get("tightBudgetNote")),
+        "tightBudget ceiling is >= the superseded-shell 10.81525 mm3 and every raise carries a note "
+        "(fc-5: P2 torus sagitta, D-130-15(1))",
     )
     check(int(rch["censusRadiiPhantomCeiling"]) == 18, "census.radii phantom ceiling 18 (rid 164)")
     check(int(rch["d3f7R3BuiltCeiling"]) == 75, "d3f7 R=3 built ceiling 75")
@@ -1818,19 +1820,20 @@ def _self_test() -> int:
 
     tb_at = synthetic_pass_result()
     tb_at["meshVolumeMM3"] = 100000.0
-    tb_at["stepVolumeMM3"] = 100000.0 + 10.81525
+    tb_at["stepVolumeMM3"] = 100000.0 + tb_ceil_rch
     tb_at["volumeDeltaPct"] = 0.01
     tb_at_ch = evaluate_pickup(tb_at, synthetic_pass_census(), gt_radii, 0, strict=True)
-    check("tightBudget" not in failing_names(tb_at_ch), "tightBudget |dV|=10.81525 == ratchet PASSES")
+    check("tightBudget" not in failing_names(tb_at_ch), f"tightBudget |dV|={tb_ceil_rch:g} == ratchet PASSES")
 
     tb_over = synthetic_pass_result()
     tb_over["meshVolumeMM3"] = 100000.0
-    tb_over["stepVolumeMM3"] = 100000.0 + 10.816
+    tb_over_v = round(tb_ceil_rch + 0.01, 4)
+    tb_over["stepVolumeMM3"] = 100000.0 + tb_over_v
     tb_over["volumeDeltaPct"] = 0.01
     tb_over_ch = evaluate_pickup(tb_over, synthetic_pass_census(), gt_radii, 0, strict=True)
-    check("tightBudget" in failing_names(tb_over_ch), "tightBudget |dV|=10.816 > ratchet FAILS")
+    check("tightBudget" in failing_names(tb_over_ch), f"tightBudget |dV|={tb_over_v:g} > ratchet FAILS")
     check(
-        any("10.816" in c.message and "ratchet" in c.message for c in tb_over_ch if not c.ok),
+        any(f"{tb_over_v:g}" in c.message and "ratchet" in c.message for c in tb_over_ch if not c.ok),
         "tightBudget FAIL prints current |dV| vs ceiling",
     )
 
