@@ -11,6 +11,7 @@
 #include "refit_cone_math.hpp"
 #include "refit_relational_arc.hpp"
 #include "refit_relational_torus.hpp"
+#include "refit_band_volume.hpp"
 
 #include <algorithm>
 #include <array>
@@ -726,6 +727,20 @@ void trimProvisionals(const MeshView& mv, SegmentWork& work, const std::vector<i
     }
 }
 
+// D-fc-5.7 O-3. The chord volume of a cone band from its own triangles
+// (revolvedChordTerm), not from one side count: a revolved mesh can carry a
+// different number of vertices on each ring (S26's cone: 180 on its rims, 91 on
+// its rows), and a density that assumes one N understates that band. f.origin is
+// on the R_lo rim, so rho_S(u) = Rlo + slope * u.
+double coneBandChordVolume(const MeshView& mv, const std::vector<int>& tris, const Frame& f,
+                           double Rlo, double slope) {
+    double v = 0;
+    for (int t : tris)
+        v += revolvedChordTerm(triVert(mv, t, 0), triVert(mv, t, 1), triVert(mv, t, 2), f.origin,
+                               f.axis, f.e1, f.e2, Rlo, slope);
+    return std::isfinite(v) ? v : 0.0;
+}
+
 bool emitCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const Band& band,
               const SurfaceFit& fit, const ClosedM& cl, double& ang0, double& ang1, int& straddle) {
     const MeshView& mv = *wm.mv;
@@ -758,16 +773,7 @@ bool emitCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const B
         if (rm > gp::Resolution()) sigma += a * n.Dot(rad / rm);
     }
     const int nSides = std::max(cl.nSides, 3);
-    double dVol = 0;
-    for (int t : band.tris) {
-        gp_XYZ n;
-        const double a = triAreaNormal(mv, t, n);
-        if (!(a > 0.0)) continue;
-        const double u = (triCentroid(mv, t) - loc).Dot(placed.axis);
-        const double rhoC = Rlo + (std::abs(hSigned) > gp::Resolution() ? (u / hSigned) : 0.0) * (Rhi - Rlo);
-        dVol += a * coneFrustumDVolDensity(rhoC, Rlo, Rhi, hSigned, nSides);
-    }
-    if (!std::isfinite(dVol)) dVol = 0;
+    const double dVol = coneBandChordVolume(mv, band.tris, placed, Rlo, (Rhi - Rlo) / hSigned);
     double maxD = 0, sum2 = 0;
     for (const ProfPt& p : band.pts) {
         const double d = linePerp(fit, p);
@@ -852,16 +858,7 @@ bool emitPartialCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, 
         if (rm > gp::Resolution()) sigma += a * n.Dot(rad / rm);
     }
     const int nSides = std::max(cl.nSides, 3);
-    double dVol = 0;
-    for (int t : band.tris) {
-        gp_XYZ n;
-        const double a = triAreaNormal(mv, t, n);
-        if (!(a > 0.0)) continue;
-        const double u = (triCentroid(mv, t) - loc).Dot(placed.axis);
-        const double rhoC = Rlo + (std::abs(hSigned) > gp::Resolution() ? (u / hSigned) : 0.0) * (Rhi - Rlo);
-        dVol += a * coneFrustumDVolDensity(rhoC, Rlo, Rhi, hSigned, nSides);
-    }
-    if (!std::isfinite(dVol)) dVol = 0;
+    const double dVol = coneBandChordVolume(mv, band.tris, placed, Rlo, (Rhi - Rlo) / hSigned);
     const double kScale = std::sqrt(1.0 + pc.k * pc.k);
     double sum2 = 0;
     for (const Vtx& v : uniq) {
