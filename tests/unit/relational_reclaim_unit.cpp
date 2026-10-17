@@ -1,5 +1,5 @@
-// Synthetic relational-reclaim cases: Line mode (D-fc-4.4, D-fc-4.5, the ring donor of
-// spike-fc3-lowfold F2) and the Torus-mode cap-chord peel. No training mesh.
+// Synthetic relational-reclaim cases: Line mode (D-fc-4.4 with its ring closure, D-fc-4.5,
+// the ring donor of spike-fc3-lowfold F2) and the Torus-mode cap-chord peel. No training mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -324,6 +324,94 @@ static void caseClosureNotDisk() {
     expect(has(d, "why=domain-not-disk"), "closure_diag_domain_not_disk");
 }
 
+// Ring closure (fx-plater10). A closed R10 wall of 36 sectors x 5 level gaps, two
+// windows held by other faces, two certified partial members that meet on one side
+// and an Unclaimed strip of three sectors between them on the other (one strip
+// vertex 20 tau inside the surface: cover). blocked => four windows whose azimuths
+// cover every generator, so no seam can stand clear of them.
+struct RingClose {
+    Synth s;
+    SegmentWork w;
+    Grid g;
+    std::vector<int> windowTris, stripTris;
+};
+
+static RingClose ringClosePart(bool blocked) {
+    RingClose c;
+    const double tau = 2 * c.s.q;
+    c.g = cylGrid(c.s, 10.0, 0.0, 10 * kDeg, 36, true, {0.0, 4.0, 8.0, 12.0, 16.0, 20.0});
+    pushRadial(c.s, c.g.col[3][17], -20 * tau);
+    c.s.finish();
+    // sect[i] lists its triangles level gap by level gap, two per gap.
+    auto atGap = [&](int i, int j) {
+        return std::vector<int>{c.g.sect[(std::size_t)i][(std::size_t)(2 * j)],
+                                c.g.sect[(std::size_t)i][(std::size_t)(2 * j + 1)]};
+    };
+    std::vector<char> inWin(c.s.triFlat.size() / 3, 0);
+    auto window = [&](int i0, int i1, int j) {
+        for (int i = i0; i <= i1; ++i)
+            for (int t : atGap(((i % 36) + 36) % 36, j)) {
+                inWin[(std::size_t)t] = 1;
+                c.windowTris.push_back(t);
+            }
+    };
+    if (blocked) {
+        // Four staggered windows (level gaps 1 and 3 never touch) whose arcs overlap
+        // round the whole turn.
+        window(1, 12, 1);
+        window(11, 24, 3);
+        window(23, 35, 1);
+        window(35, 38, 3);
+    } else {
+        window(8, 9, 2);
+        window(26, 27, 2);
+    }
+    std::vector<int> a, b;
+    for (int i = 0; i < 36; ++i)
+        for (int t : c.g.sect[(std::size_t)i]) {
+            if (inWin[(std::size_t)t]) continue;
+            if (i >= 16 && i <= 18) c.stripTris.push_back(t);
+            else if (i < 16) a.push_back(t);
+            else b.push_back(t);
+        }
+    std::sort(c.windowTris.begin(), c.windowTris.end());
+    c.w.accepted.push_back(cylRegion(a, 10.0, 0.0));
+    c.w.accepted.push_back(cylRegion(b, 10.0, 0.0));
+    c.w.accepted.push_back(planeRegion(c.windowTris));
+    addProv(c.w, c.stripTris, ProvClaim::Unclaimed);
+    return c;
+}
+
+static void caseRingClosureAccept() {
+    RingClose c = ringClosePart(false);
+    const double tau = 2 * c.s.q;
+    const std::string d = run(c.s, c.w);
+    const Region* r = firstCyl(c.w);
+    const std::size_t nAll = c.s.triFlat.size() / 3;
+    expect(nCyl(c.w) == 1 && r && r->tris.size() == nAll - c.windowTris.size(),
+           "ring_closure_one_region_all_but_windows");
+    expect(r && r->closed360 && r->uMin == 0.0 && std::abs(r->uMax - 2 * kPi) < 1e-12 &&
+               r->nSides == 36,
+           "ring_closure_closed360_fields");
+    expect(r && std::abs(r->radius - 10.0) <= tau, "ring_closure_radius_within_tau");
+    expect(r && r->maxVertexDev > tau && r->maxVertexDev <= 21 * tau, "ring_closure_cover_dev_measured");
+    expect(r && r->dVolPredicted != 0.0, "ring_closure_dvol_over_committed_set");
+    expect(c.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "ring_closure_strip_peeled");
+    expect(has(d, "DIAG_REL_RING_CLOSURE") && has(d, "windows=2") && has(d, "closedWall=1"),
+           "ring_closure_diag_two_windows");
+    expect(has(d, "loops=4") && has(d, "why=accept") && !has(d, "why=domain-not-disk"),
+           "ring_closure_diag_accept");
+}
+
+static void caseRingClosureSeamBlocked() {
+    RingClose c = ringClosePart(true);
+    const std::string d = run(c.s, c.w);
+    expect(nCyl(c.w) == 2 && c.w.provisionals[0].claim == ProvClaim::Unclaimed,
+           "ring_closure_blocked_seam_unchanged");
+    expect(has(d, "closedWall=0") && has(d, "why=domain-not-disk"),
+           "ring_closure_blocked_seam_deferred");
+}
+
 // Stacked coaxial walls (no strict axial overlap) and a different radius never join.
 static void caseClosureStackedAndRadius() {
     {
@@ -587,6 +675,8 @@ int main() {
     caseClosureNotJoined();
     caseClosureUncertified();
     caseClosureNotDisk();
+    caseRingClosureAccept();
+    caseRingClosureSeamBlocked();
     caseClosureStackedAndRadius();
     caseHealAccept();
     caseHealNoPartner();

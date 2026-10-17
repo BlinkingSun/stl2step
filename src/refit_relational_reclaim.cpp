@@ -18,6 +18,7 @@
 // then every torus takes its closure from its own rails (F4). Never throws.
 // Every threshold is tau = 2q or a quantity measured on the certified set.
 
+#include "refit_axis_seam.hpp"
 #include "refit_profile_cert.hpp"
 #include "refit_relational.hpp"
 #include "refit_relational_torus.hpp"
@@ -240,6 +241,7 @@ struct CylFields {
     double uMin = 0, uMax = 0, vMin = 0, vMax = 0;
     bool closed360 = false;
     int nSides = 0;
+    int nBands = 0;
     bool outward = true;
     double area = 0;
     double maxDev = 0, rmsDev = 0;
@@ -319,6 +321,7 @@ bool cylFields(const RMesh& rm, const DerivedTols& tol, const std::vector<int>& 
     }
     const double bandArc = kTwoPi / (double)nBands;
     f.closed360 = nBands >= 3 && maxGap <= 1.5 * bandArc;
+    f.nBands = nBands;
     const double span = f.closed360 ? kTwoPi : (kTwoPi - maxGap);
     if (!(span > 0)) return false;
     f.nSides = (int)std::llround(kTwoPi * nBands / span);
@@ -360,6 +363,15 @@ bool cylFields(const RMesh& rm, const DerivedTols& tol, const std::vector<int>& 
     f.outward = sigma > 0.0;
     f.area = totalArea;
     return true;
+}
+
+// A ring closed by its rails (D-fc-4.6 F4) takes the D2 rule's closed-360 fields:
+// the whole turn, nSides from its normal-azimuth bands over that turn.
+void closeRingFields(CylFields& f) {
+    f.closed360 = true;
+    f.uMin = 0.0;
+    f.uMax = kTwoPi;
+    f.nSides = f.nBands;
 }
 
 void applyCylFields(Region& r, const Cyl& s, const CylFields& f) {
@@ -499,6 +511,66 @@ int boundaryLoops(const RMesh& rm, const std::vector<int>& ts) {
         }
     }
     return loops;
+}
+
+double azimuthOf(const gp_XYZ& p, const Cyl& s, const gp_XYZ& xd);
+
+// The boundary loops of a triangle set (components of its boundary-edge graph, as
+// boundaryLoops counts them), each with its winding number about the cylinder's
+// axis and its vertices' azimuths. Every boundary edge is taken in its own
+// triangle's sense and its azimuth step wrapped to (-pi, pi]; a loop's steps sum
+// to 2pi times its winding. Loops come in ascending order of their lowest vertex.
+struct WindLoop {
+    int winding = 0;
+    std::vector<double> azimuths;
+};
+std::vector<WindLoop> windingLoops(const RMesh& rm, const std::vector<int>& ts, const Cyl& s,
+                                   const gp_XYZ& xd) {
+    const MeshView& mv = *rm.mv;
+    std::vector<WindLoop> out;
+    if (!mv.compEdges || !mv.compVtx) return out;
+    std::map<int, int> cnt;
+    for (int t : ts)
+        for (int k = 0; k < 3; ++k) ++cnt[mv.triEdges[t][k]];
+    std::map<int, std::vector<int>> adj;
+    std::vector<std::pair<int, int>> directed;
+    for (int t : ts)
+        for (int k = 0; k < 3; ++k) {
+            const int e = mv.triEdges[t][k];
+            if (cnt[e] != 1) continue;
+            const auto& ev = mv.compEdges[e];
+            int a = ev.first, b = ev.second;
+            for (int c = 0; c < 3; ++c)
+                if (rm.localVtx(t, c) == ev.second && rm.localVtx(t, (c + 1) % 3) == ev.first)
+                    std::swap(a, b);
+            directed.emplace_back(a, b);
+            adj[a].push_back(b);
+            adj[b].push_back(a);
+        }
+    std::map<int, int> comp;
+    for (const auto& kv : adj) {
+        if (comp.count(kv.first)) continue;
+        const int id = (int)out.size();
+        out.emplace_back();
+        std::vector<int> st{kv.first};
+        comp[kv.first] = id;
+        while (!st.empty()) {
+            const int x = st.back();
+            st.pop_back();
+            out[(std::size_t)id].azimuths.push_back(azimuthOf(mv.pts[mv.compVtx[x]], s, xd));
+            for (int y : adj[x])
+                if (comp.emplace(y, id).second) st.push_back(y);
+        }
+    }
+    std::vector<double> turn(out.size(), 0.0);
+    for (const auto& d : directed) {
+        const double ua = azimuthOf(mv.pts[mv.compVtx[d.first]], s, xd);
+        const double ub = azimuthOf(mv.pts[mv.compVtx[d.second]], s, xd);
+        turn[(std::size_t)comp[d.first]] += wrapPi(ub - ua);
+    }
+    for (std::size_t i = 0; i < out.size(); ++i)
+        out[i].winding = (int)std::lround(turn[i] / kTwoPi);
+    return out;
 }
 
 // Partial-arc membership with the largest-gap convention of Region::uMin/uMax.
@@ -926,40 +998,112 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
         const double u1 = u0 + (kTwoPi - maxGap);
         const double s = claimChordSagitta(mv, g.tris, gp_Ax1(gp_Pnt(S.C), gp_Dir(S.A)), S.R);
 
-        std::vector<int> I, Cv;
-        for (int t = 0; t < nTri; ++t) {
-            if (!unclaimed[(std::size_t)t]) continue;
-            int nin = 0;
-            double md = 0;
-            bool inside = true;
-            for (int k = 0; k < 3 && inside; ++k) {
-                const gp_XYZ pt = vtxOf(mv, t, k);
-                const double d = radialDev(pt, S);
-                md = std::max(md, d);
-                if (d <= tau) ++nin;
-                const double v = (pt - S.C).Dot(S.A);
-                if (v < vlo - tau || v > vhi + tau) inside = false;
-                if (!inArc(azimuthOf(pt, S, xd), u0, u1, tau / S.R)) inside = false;
+        // The fill: Unclaimed I/Cover triangles inside the group's axial extent and,
+        // for a partial result, inside its angular extent (D-fc-3.2.7). A ring has
+        // no angular extent to exceed: its extent is the whole turn.
+        std::vector<int> I, Cv, C, cert;
+        auto fill = [&](bool wholeTurn) {
+            I.clear();
+            Cv.clear();
+            for (int t = 0; t < nTri; ++t) {
+                if (!unclaimed[(std::size_t)t]) continue;
+                int nin = 0;
+                double md = 0;
+                bool inside = true;
+                for (int k = 0; k < 3 && inside; ++k) {
+                    const gp_XYZ pt = vtxOf(mv, t, k);
+                    const double d = radialDev(pt, S);
+                    md = std::max(md, d);
+                    if (d <= tau) ++nin;
+                    const double v = (pt - S.C).Dot(S.A);
+                    if (v < vlo - tau || v > vhi + tau) inside = false;
+                    if (!wholeTurn && !inArc(azimuthOf(pt, S, xd), u0, u1, tau / S.R))
+                        inside = false;
+                }
+                if (!inside) continue;
+                if (nin == 3 && triLevels(mv, t, S, tau) >= kMinAxialLevels) I.push_back(t);
+                else if (nin >= 1 && md <= s) Cv.push_back(t);
             }
-            if (!inside) continue;
-            if (nin == 3 && triLevels(mv, t, S, tau) >= kMinAxialLevels) I.push_back(t);
-            else if (nin >= 1 && md <= s) Cv.push_back(t);
-        }
-        std::vector<int> C = g.tris;
-        C.insert(C.end(), I.begin(), I.end());
-        C.insert(C.end(), Cv.begin(), Cv.end());
-        std::sort(C.begin(), C.end());
-        C.erase(std::unique(C.begin(), C.end()), C.end());
-        std::vector<int> cert = g.tris;
-        cert.insert(cert.end(), I.begin(), I.end());
-        std::sort(cert.begin(), cert.end());
+            C = g.tris;
+            C.insert(C.end(), I.begin(), I.end());
+            C.insert(C.end(), Cv.begin(), Cv.end());
+            std::sort(C.begin(), C.end());
+            C.erase(std::unique(C.begin(), C.end()), C.end());
+            cert = g.tris;
+            cert.insert(cert.end(), I.begin(), I.end());
+            std::sort(cert.begin(), cert.end());
+        };
+        fill(false);
         gp_Dir fa;
         gp_Pnt fc;
         double fr = 0, fres = 0;
-        const bool fitOk = cylinderFitLS(mv, cert, gp_Dir(S.A), fa, fc, fr, fres, maxIt);
-        const auto cc = edgeComponents(rm, C);
-        const int loops = cc.size() == 1 ? boundaryLoops(rm, C) : -1;
-
+        bool fitOk = cylinderFitLS(mv, cert, gp_Dir(S.A), fa, fc, fr, fres, maxIt);
+        auto cc = edgeComponents(rm, C);
+        int loops = cc.size() == 1 ? boundaryLoops(rm, C) : -1;
+        // Ring closure: a partial result that is not one disk may be a closed wall.
+        // The whole-turn fill is taken only when its result is one edge-component,
+        // re-certified at tau on members + I, closed by the D2 rule or by its own
+        // rails (D-fc-4.6 F4: no vertex-azimuth gap wider than one of its boundary
+        // edges), and its loops are the two rims plus windows that one seam
+        // generator clears (the Seamed360 build with inner wires). Otherwise the
+        // partial result stands and is deferred below.
+        bool ring = false;
+        int windows = 0;
+        if (fitOk && fres <= tau && !(cc.size() == 1 && loops == 1)) {
+            const std::vector<int> I0 = I, Cv0 = Cv, C0 = C, cert0 = cert;
+            fill(true);
+            gp_Dir ra;
+            gp_Pnt rc;
+            double rr = 0, rres = 0;
+            const bool rOk = C.size() > C0.size() &&
+                             cylinderFitLS(mv, cert, gp_Dir(S.A), ra, rc, rr, rres, maxIt) &&
+                             rres <= tau;
+            const Cyl RN{rc.XYZ(), ra.XYZ(), rr};
+            CylFields rf;
+            auto rcc = rOk ? edgeComponents(rm, C) : decltype(cc){};
+            bool closedWall = false;
+            double seamU = 0;
+            TorusRails rails;
+            if (rOk && rcc.size() == 1 && cylFields(rm, tol, C, RN, rf)) {
+                Region probe;
+                probe.ax = rf.ax;
+                probe.tris = C;
+                rails = torusRails(mv, probe);
+            }
+            if (rOk && rcc.size() == 1 && (rf.closed360 || rails.full)) {
+                const gp_XYZ rx = rf.ax.XDirection().XYZ();
+                std::vector<int> wind;
+                std::vector<std::vector<double>> winU;
+                for (const WindLoop& wl : windingLoops(rm, C, RN, rx)) {
+                    wind.push_back(wl.winding);
+                    if (wl.winding == 0) winU.push_back(wl.azimuths);
+                }
+                closedWall = closedWallWithWindows(wind) && seamClearOfWindows(winU, seamU);
+                windows = (int)winU.size();
+                if (diagOn())
+                    std::fprintf(stderr,
+                                 "DIAG_REL_RING_CLOSURE seed=%d nTri=%zu loops=%zu windows=%d "
+                                 "seamU=%.6f certDevTau=%.4f d2Closed=%d railGap=%.6f "
+                                 "railStep=%.6f closedWall=%d\n",
+                                 minTriOf(g.tris), C.size(), wind.size(), windows, seamU,
+                                 rres / tau, (int)rf.closed360, rails.gap, rails.maxStep,
+                                 (int)closedWall);
+            }
+            if (closedWall) {
+                ring = true;
+                fa = ra;
+                fc = rc;
+                fr = rr;
+                fres = rres;
+                cc = std::move(rcc);
+                loops = boundaryLoops(rm, C);
+            } else {
+                I = I0;
+                Cv = Cv0;
+                C = C0;
+                cert = cert0;
+            }
+        }
         BandDiag dg;
         dg.mode = "closure";
         dg.seed = minTriOf(g.tris);
@@ -992,7 +1136,7 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
             ++deferred;
             continue;
         }
-        if (loops != 1) {
+        if (loops != 1 && !ring) {
             dg.why = "domain-not-disk";
             printBand(dg);
             ++deferred;
@@ -1006,6 +1150,7 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
             ++deferred;
             continue;
         }
+        if (ring) closeRingFields(f);
         Region nr = R0;
         nr.tris = C;
         applyCylFields(nr, N, f);
