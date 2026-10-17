@@ -12,6 +12,7 @@
 #include <BRepBuilderAPI_MakeEdge.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <ElCLib.hxx>
 #include <ElSLib.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
@@ -249,12 +250,34 @@ inline Handle(Geom_Curve) rimBasisCurve(const Handle(Geom_Curve)& c) {
     return (!t.IsNull() && !t->BasisCurve().IsNull()) ? t->BasisCurve() : c;
 }
 
+// The point half a turn on from a closed ellipse edge's vertex (its antipode); false
+// when the edge is not one full turn of an ellipse.
+inline bool closedEllipseAntipode(const TopoDS_Edge& e, gp_Pnt& p) {
+    const double kHalfTurn = 3.14159265358979323846;
+    if (e.IsNull()) return false;
+    try {
+        Standard_Real f = 0, l = 0;
+        const Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+        if (c.IsNull()) return false;
+        const Handle(Geom_Ellipse) ge = Handle(Geom_Ellipse)::DownCast(rimBasisCurve(c));
+        if (ge.IsNull() || std::fabs((l - f) - 2.0 * kHalfTurn) > Precision::PConfusion())
+            return false;
+        p = ge->Value(f + kHalfTurn);
+        return true;
+    } catch (const Standard_Failure&) {
+    }
+    return false;
+}
+
 // D-fc-5.13 (the D-fc-5.7 O-1 construction): a closed ellipse edge as two half-turn
-// arcs of its own curve, from its vertex to the antipode (the curve point half a turn
-// on, minted exact) and back, in the edge's own traversal. A full-turn ellipse has no
-// certified bind class (refit_ellipse_bind's range clause); a half-turn arc has. Empty
-// when the edge is not one full turn of an ellipse closed at one vertex.
-inline std::vector<TopoDS_Edge> closedEllipseHalves(const TopoDS_Edge& e) {
+// arcs of its own curve, from its vertex to the antipode and back, in the edge's own
+// traversal. The antipode is `atAntipode` when the caller has a vertex standing there
+// (the chain's own mesh vertex, D-130-16: a second vertex at a mesh vertex's place is
+// a twin), else the exact curve point half a turn on, minted. A full-turn ellipse has
+// no certified bind class (refit_ellipse_bind's range clause); a half-turn arc has.
+// Empty when the edge is not one full turn of an ellipse closed at one vertex.
+inline std::vector<TopoDS_Edge> closedEllipseHalves(const TopoDS_Edge& e,
+                                                    const TopoDS_Vertex& atAntipode = TopoDS_Vertex()) {
     const double kHalfTurn = 3.14159265358979323846;
     if (e.IsNull()) return {};
     try {
@@ -266,12 +289,22 @@ inline std::vector<TopoDS_Edge> closedEllipseHalves(const TopoDS_Edge& e) {
             return {};
         TopoDS_Vertex V, V2;
         TopExp::Vertices(e, V, V2, Standard_False);
-        if (V.IsNull() || !V.IsSame(V2)) return {};
+        if (V.IsNull() || !V.IsSame(V2) || atAntipode.IsSame(V)) return {};
         V.Orientation(TopAbs_FORWARD);
         TopoDS_Vertex VA;
-        BRep_Builder().MakeVertex(VA, ge->Value(f + kHalfTurn), Precision::Confusion());
-        BRepBuilderAPI_MakeEdge m1(ge, V, VA, f, f + kHalfTurn);
-        BRepBuilderAPI_MakeEdge m2(ge, VA, V, f + kHalfTurn, l);
+        double tA = f + kHalfTurn;
+        if (!atAntipode.IsNull()) {
+            // The vertex's own parameter on the curve, on the edge's turn [f, l).
+            VA = TopoDS::Vertex(atAntipode.Oriented(TopAbs_FORWARD));
+            tA = ElCLib::Parameter(ge->Elips(), BRep_Tool::Pnt(VA));
+            while (tA < f) tA += 2.0 * kHalfTurn;
+            while (tA >= l) tA -= 2.0 * kHalfTurn;
+            if (!(tA > f + Precision::PConfusion() && tA < l - Precision::PConfusion())) return {};
+        } else {
+            BRep_Builder().MakeVertex(VA, ge->Value(tA), Precision::Confusion());
+        }
+        BRepBuilderAPI_MakeEdge m1(ge, V, VA, f, tA);
+        BRepBuilderAPI_MakeEdge m2(ge, VA, V, tA, l);
         if (!m1.IsDone() || !m2.IsDone()) return {};
         const TopoDS_Edge a1 = m1.Edge(), a2 = m2.Edge();
         if (e.Orientation() == TopAbs_REVERSED)

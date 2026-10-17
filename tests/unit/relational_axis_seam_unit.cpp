@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Ellipse.hxx>
@@ -291,9 +292,34 @@ int main() {
                   edgeSampledSignedAreaUV(hR[0], up) < 0.0 && edgeSampledSignedAreaUV(hR[1], up) < 0.0;
         }
         expect(rev, "halves: a REVERSED ellipse keeps its traversal (clockwise halves)");
+        // The antipode a caller already has a vertex for (the chain's own mesh vertex):
+        // the halves meet AT that vertex, on its own parameter, and mint nothing.
+        gp_Pnt pA;
+        expect(closedEllipseAntipode(full, pA) && pA.Distance(gp_Pnt(-a, 0, 0)) < 1e-12,
+               "antipode: half a turn from the edge's vertex");
+        {
+            TopoDS_Vertex mesh;
+            BRep_Builder().MakeVertex(mesh, gp_Pnt(-a, 2e-7, 0), 1e-6);
+            const std::vector<TopoDS_Edge> hm = closedEllipseHalves(full, mesh);
+            bool meet = hm.size() == 2;
+            if (meet) {
+                TopoDS_Vertex m0f, m0l, m1f, m1l;
+                TopExp::Vertices(hm[0], m0f, m0l, Standard_True);
+                TopExp::Vertices(hm[1], m1f, m1l, Standard_True);
+                Standard_Real f0 = 0, l0 = 0;
+                BRep_Tool::Range(hm[0], f0, l0);
+                meet = m0l.IsSame(mesh) && m1f.IsSame(mesh) && m0f.IsSame(V0) && m1l.IsSame(V0) &&
+                       std::fabs((l0 - f0) - kPi) < 1e-6 && closedAnalyticRim(hm);
+            }
+            expect(meet, "halves: meet at the caller's vertex standing at the antipode");
+            TopoDS_Vertex v0f = V0;
+            expect(closedEllipseHalves(full, v0f).empty(),
+                   "halves: the edge's own vertex cannot be its antipode");
+        }
         const TopoDS_Edge circ =
             BRepBuilderAPI_MakeEdge(gp_Circ(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)), 4.0)).Edge();
         expect(closedEllipseHalves(circ).empty(), "halves: a circle ships whole");
+        expect(!closedEllipseAntipode(circ, pA), "antipode: a circle has none here");
         const TopoDS_Edge arc = BRepBuilderAPI_MakeEdge(el, 0.0, kPi).Edge();
         expect(closedEllipseHalves(arc).empty(), "halves: an ellipse arc is not a closed rim");
         expect(closedEllipseHalves(TopoDS_Edge()).empty(), "halves: a null edge");
