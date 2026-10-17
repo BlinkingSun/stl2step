@@ -2199,8 +2199,9 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     d.straddle = pstraddle;
                     d.side0 = sideBuf0;
                     d.side1 = sideBuf1;
-                    d.why = paccept ? "accept"
-                                    : (std::strcmp(why, "accept") == 0 ? "partial-cone" : why);
+                    // The band line keeps the established refusal label; the
+                    // partial-cone certificate's reason is on DIAG_REL_PCONE.
+                    d.why = paccept ? "accept" : "partial-cone";
                     printBand(d);
                     std::fprintf(stderr,
                                  "DIAG_REL_PCONE seed=%d donor=%d family=%d nTri=%zu comps=%zu "
