@@ -353,7 +353,7 @@ static void caseClosureStackedAndRadius() {
 
 // ---- D-fc-4.5 narrow donor heal ---------------------------------------------------
 
-// R2.5 half-ring donor (sectors 0..17) with one interior top vertex `off` inside the
+// R3.5 half-ring donor (sectors 0..17) with one interior top vertex `off` inside the
 // surface (its triangles are the donor's cover); free sectors 18..23 on the surface;
 // sectors 24..29 a certified partner reached only through the gap (or a plane);
 // sectors 30..35 belong to a plane region.
@@ -365,11 +365,11 @@ struct Heal {
 
 static Heal healPart(double off, bool partner) {
     Heal h;
-    h.g = cylGrid(h.s, 2.5, 0.0, 10 * kDeg, 36, true, {0.0, 5.0});
+    h.g = cylGrid(h.s, 3.5, 0.0, 10 * kDeg, 36, true, {0.0, 5.0});
     if (off != 0.0) pushRadial(h.s, h.g.col[1][9], -off);
     h.s.finish();
-    h.w.accepted.push_back(cylRegion(sectors(h.g, 0, 17), 2.5, off));
-    if (partner) h.w.accepted.push_back(cylRegion(sectors(h.g, 24, 29), 2.5, 0.0));
+    h.w.accepted.push_back(cylRegion(sectors(h.g, 0, 17), 3.5, off));
+    if (partner) h.w.accepted.push_back(cylRegion(sectors(h.g, 24, 29), 3.5, 0.0));
     else h.w.accepted.push_back(planeRegion(sectors(h.g, 24, 29)));
     h.w.accepted.push_back(planeRegion(sectors(h.g, 30, 35)));
     addProv(h.w, sectors(h.g, 18, 23), ProvClaim::Unclaimed);
@@ -383,7 +383,7 @@ static void caseHealAccept() {
     const Region* r = firstCyl(h.w);
     expect(nCyl(h.w) == 1 && h.w.accepted.size() == 2, "heal_partner_merged");
     expect(r && r->tris.size() == 60, "heal_grows_over_gap");
-    expect(r && std::abs(r->radius - 2.5) <= tau, "heal_radius_within_tau");
+    expect(r && std::abs(r->radius - 3.5) <= tau, "heal_radius_within_tau");
     expect(r && r->maxVertexDev > tau, "heal_cover_dev_kept");
     expect(has(d, "mode=heal") && has(d, "why=accept"), "heal_diag_accept");
     expect(h.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "heal_gap_peeled");
@@ -408,7 +408,7 @@ static void caseHealNarrowTrigger() {
 
 static void caseHealNotCover() {
     // 2x the 10 degree chord sagitta: no chord bound admits it.
-    const double sag = 2.5 * (1 - std::cos(5 * kDeg));
+    const double sag = 3.5 * (1 - std::cos(5 * kDeg));
     Heal h = healPart(2 * sag, false);
     const std::string d = run(h.s, h.w);
     expect(h.w.accepted.size() == 3 && h.w.accepted[0].tris.size() == 36 &&
@@ -420,7 +420,7 @@ static void caseHealNotCover() {
 // ---- Ring donor (spike-fc3-lowfold F2) --------------------------------------------
 
 // A plate at z = 0 whose hole is a circular loop of nSect vertices at R (one Unclaimed
-// chart, outer rim at R + 4) over a closed peg wall down to z = -20, one Unclaimed
+// chart, outer rim at R + 5) over a closed peg wall down to z = -20, one Unclaimed
 // chart per wall sector. capFan closes the peg's end with a fan on its rim vertices
 // only (every vertex on the cylinder, one axial level).
 struct Ring {
@@ -436,7 +436,7 @@ static Ring ringPart(double R, int nSect, bool capFan) {
     r.peg = cylGrid(r.s, R, 0.0, step, nSect, true, {0.0, -20.0});
     std::vector<int> outer;
     for (int i = 0; i < nSect; ++i)
-        outer.push_back(r.s.add(gp_XYZ((R + 4) * std::cos(step * i), (R + 4) * std::sin(step * i), 0.0)));
+        outer.push_back(r.s.add(gp_XYZ((R + 5) * std::cos(step * i), (R + 5) * std::sin(step * i), 0.0)));
     for (int i = 0; i < nSect; ++i) {
         const int i1 = (i + 1) % nSect;
         const int h0 = r.peg.col[0][(std::size_t)i], h1 = r.peg.col[0][(std::size_t)i1];
@@ -456,13 +456,14 @@ static Ring ringPart(double R, int nSect, bool capFan) {
 }
 
 static void caseRingAccept() {
-    Ring r = ringPart(6.0, 120, false);
+    const double R = 7.5;
+    Ring r = ringPart(R, 120, false);
     const double tau = 2 * r.s.q;
     const std::string d = run(r.s, r.w);
     const Region* c = firstCyl(r.w);
     expect(nCyl(r.w) == 1 && c && c->tris.size() == 240, "ring_peg_one_closed_cylinder");
     expect(c && c->closed360 && c->origin == Origin::CylGrow, "ring_peg_closed360_cylgrow");
-    expect(c && std::abs(c->radius - 6.0) <= tau && c->maxVertexDev <= tau, "ring_peg_certified_tau");
+    expect(c && std::abs(c->radius - R) <= tau && c->maxVertexDev <= tau, "ring_peg_certified_tau");
     expect(has(d, "mode=ring") && has(d, "why=accept"), "ring_diag_accept");
     expect(r.w.provisionals[0].claim == ProvClaim::Unclaimed && r.w.provisionals[0].tris.size() == 240 &&
                r.w.provisionals[1].claim == ProvClaim::ConsumedCylinder,
@@ -478,7 +479,7 @@ static void caseRingPrismRefused() {
 
 // A fan on the rim vertices: every vertex on the cylinder, one axial level.
 static void caseRingCapChordExcluded() {
-    Ring r = ringPart(6.0, 120, true);
+    Ring r = ringPart(7.5, 120, true);
     run(r.s, r.w);
     const Region* c = firstCyl(r.w);
     expect(nCyl(r.w) == 1 && c && c->tris.size() == 240, "ring_cap_chords_not_in_wall");
@@ -508,7 +509,7 @@ static void caseRingNotJoined() {
 
 // The loop's chart is already another stage's: no anchor, nothing claimed.
 static void caseRingClaimedAnchor() {
-    Ring r = ringPart(6.0, 120, false);
+    Ring r = ringPart(7.5, 120, false);
     r.w.provisionals[0].claim = ProvClaim::ConsumedCylinder;
     const std::string d = run(r.s, r.w);
     expect(nCyl(r.w) == 0 && has(d, "why=no-anchor"), "ring_claimed_chart_is_no_anchor");
@@ -519,7 +520,7 @@ static void caseRingClaimedAnchor() {
 static void caseTorusCapPeel() {
     Synth s;
     SegmentWork w;
-    const double Rm = 4.0, rm = 2.0;
+    const double Rm = 5.5, rm = 1.5;
     const int nU = 72;
     const double vs[4] = {-90 * kDeg, -60 * kDeg, -30 * kDeg, 0.0};
     std::vector<std::vector<int>> ring(4);
