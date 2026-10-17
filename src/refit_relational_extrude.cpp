@@ -5,6 +5,7 @@
 
 #include "refit_relational.hpp"
 #include "refit_profile_cert.hpp"
+#include "refit_relational_arc.hpp"
 #include "parallel.hpp"
 
 #include <algorithm>
@@ -3602,6 +3603,895 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         return true;
     } catch (...) {
         return false;
+    }
+}
+
+bool planeAnchorOf(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                   const Provisional& pr, PlaneAnchor& A) {
+    A = PlaneAnchor();
+    const double tau = tauOf(mv);
+    const int nTri = (int)mv.nTri;
+    if (!(tau > 0.0) || pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return false;
+    if (!a3WouldCommit(mv, tol, pr, false)) return false;
+    A.n = pr.plane.Direction().XYZ();
+    const double nm = A.n.Modulus();
+    if (!(nm > 1e-15)) return false;
+    A.n.Divide(nm);
+    A.p0 = pr.plane.Location().XYZ();
+    A.body = pr.tris;
+    A.dev = pr.maxVertexDev;
+    A.tol = anchorTol(tau, pr.maxVertexDev);
+    A.certified = anchorCertified(tau, pr.maxVertexDev);
+    if (A.certified) return true;
+    auto triOnPlane = [&](int t, const gp_XYZ& n, const gp_XYZ& p0) -> bool {
+        if (t < 0 || t >= nTri) return false;
+        for (int k = 0; k < 3; ++k)
+            if (std::abs((cornerPt(mv, t, k) - p0).Dot(n)) > tau) return false;
+        return true;
+    };
+    std::vector<int> cur = pr.tris;
+    gp_XYZ n = A.n;
+    gp_XYZ p0 = A.p0;
+    const int seedT = maxAreaFacet(mv, pr.tris, nTri);
+    if (seedT >= 0) {
+        gp_XYZ sn;
+        triAreaNormal(mv, seedT, sn);
+        if (sn.Dot(A.n) < 0.0) sn.Reverse();
+        n = sn;
+        p0 = cornerPt(mv, seedT, 0);
+    }
+    bool peeled = false;
+    const int itCap = std::max(1, p.maxRefineIters);
+    for (int it = 0; it < itCap; ++it) {
+        std::vector<int> in;
+        for (int t : cur)
+            if (triOnPlane(t, n, p0)) in.push_back(t);
+        if (in.empty()) {
+            peeled = false;
+            break;
+        }
+        if (in.size() == cur.size()) break;
+        peeled = true;
+        gp_Ax3 np;
+        if (!pcaPlane(mv, in, np)) break;
+        gp_XYZ nn = np.Direction().XYZ();
+        const double nnm = nn.Modulus();
+        if (!(nnm > 1e-15)) break;
+        nn.Divide(nnm);
+        if (nn.Dot(A.n) < 0.0) nn.Reverse();
+        n = nn;
+        p0 = np.Location().XYZ();
+        cur.swap(in);
+    }
+    if (!peeled) return true;
+    double dev = 0.0;
+    for (int t : cur)
+        for (int k = 0; k < 3; ++k) dev = std::max(dev, std::abs((cornerPt(mv, t, k) - p0).Dot(n)));
+    Provisional body = pr;
+    body.tris = cur;
+    body.area = areaOfTris(mv, cur);
+    body.maxVertexDev = dev;
+    if (anchorCertified(tau, dev) && a3WouldCommit(mv, tol, body, false)) {
+        A.n = n;
+        A.p0 = p0;
+        A.body.swap(cur);
+        A.dev = dev;
+        A.tol = anchorTol(tau, dev);
+        A.certified = true;
+    }
+    return true;
+}
+
+// D-fc-5.2. Section fillets between two certified extruded anchors.
+
+bool sectionFilletCentre(const SectionAnchor& A, const SectionAnchor& B, double r, double hx,
+                         double hy, double& px, double& py) {
+    if (!(r > 0.0)) return false;
+    if (!A.circle && !B.circle) return false;  // plane|plane: the extrude pair walk
+    double qx[2] = {0, 0}, qy[2] = {0, 0};
+    if (!A.circle || !B.circle) {
+        const SectionAnchor& L = A.circle ? B : A;
+        const SectionAnchor& C = A.circle ? A : B;
+        const double rho = C.R + C.side * r;
+        if (!(rho > 0.0)) return false;
+        const double tx = -L.ny, ty = L.nx;
+        const double h = L.d + L.side * r - (L.nx * C.cx + L.ny * C.cy);
+        const double disc = rho * rho - h * h;
+        if (disc < 0.0) return false;
+        const double s = std::sqrt(disc);
+        for (int k = 0; k < 2; ++k) {
+            const double sg = k ? 1.0 : -1.0;
+            qx[k] = C.cx + h * L.nx + sg * s * tx;
+            qy[k] = C.cy + h * L.ny + sg * s * ty;
+        }
+    } else {
+        const double r1 = A.R + A.side * r, r2 = B.R + B.side * r;
+        if (!(r1 > 0.0) || !(r2 > 0.0)) return false;
+        const double dx = B.cx - A.cx, dy = B.cy - A.cy;
+        const double d = std::hypot(dx, dy);
+        if (!(d > 0.0)) return false;
+        const double a = (r1 * r1 - r2 * r2 + d * d) / (2.0 * d);
+        const double h2 = r1 * r1 - a * a;
+        if (h2 < 0.0) return false;
+        const double h = std::sqrt(h2);
+        const double ux = dx / d, uy = dy / d;
+        for (int k = 0; k < 2; ++k) {
+            const double sg = k ? 1.0 : -1.0;
+            qx[k] = A.cx + a * ux - sg * h * uy;
+            qy[k] = A.cy + a * uy + sg * h * ux;
+        }
+    }
+    const int k = std::hypot(qx[1] - hx, qy[1] - hy) < std::hypot(qx[0] - hx, qy[0] - hy) ? 1 : 0;
+    px = qx[k];
+    py = qy[k];
+    return true;
+}
+
+bool sectionConcentric(const SectionAnchor& A, const SectionAnchor& B) {
+    if (!A.circle || !B.circle) return false;
+    return std::hypot(A.cx - B.cx, A.cy - B.cy) <= A.tol + B.tol;
+}
+
+namespace {
+
+struct SecFrame {
+    gp_XYZ o, a, e1, e2;
+};
+
+SecFrame secFrame(const gp_XYZ& o, const gp_XYZ& axisIn) {
+    SecFrame f;
+    f.o = o;
+    f.a = axisIn / axisIn.Modulus();
+    gp_XYZ w = (std::abs(f.a.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+    f.e1 = w - f.a * w.Dot(f.a);
+    f.e1 /= f.e1.Modulus();
+    f.e2 = f.a.Crossed(f.e1);
+    return f;
+}
+
+struct Sec {
+    double x = 0, y = 0, z = 0;
+};
+
+Sec toSec(const SecFrame& f, const gp_XYZ& p) {
+    const gp_XYZ d = p - f.o;
+    Sec s;
+    s.x = d.Dot(f.e1);
+    s.y = d.Dot(f.e2);
+    s.z = d.Dot(f.a);
+    return s;
+}
+
+// The fillet model: two anchors in section with their sides. Concentric
+// circle anchors fix r at half their gap; the parameter is then the centre's
+// azimuth on the mid circle. Otherwise the parameter is r.
+struct FilletModel {
+    SectionAnchor A, B;
+    bool conc = false;
+    double rConc = 0, rhoMid = 0, cx = 0, cy = 0;
+};
+
+bool modelAt(const FilletModel& m, double param, double hx, double hy, double& r, double& px,
+             double& py) {
+    if (m.conc) {
+        r = m.rConc;
+        px = m.cx + m.rhoMid * std::cos(param);
+        py = m.cy + m.rhoMid * std::sin(param);
+        return true;
+    }
+    r = param;
+    return sectionFilletCentre(m.A, m.B, param, hx, hy, px, py);
+}
+
+double modelCost(const FilletModel& m, double param, double hx, double hy,
+                 const std::vector<Sec>& q, double& r, double& px, double& py, bool& ok) {
+    ok = modelAt(m, param, hx, hy, r, px, py);
+    if (!ok) return 0.0;
+    double e = 0;
+    for (const Sec& v : q) {
+        const double f = std::hypot(v.x - px, v.y - py) - r;
+        e += f * f;
+    }
+    return e;
+}
+
+// Least squares on the one free parameter (Gauss-Newton, derivative by a
+// central difference at the quantum: tau for r, tau / rho for an azimuth),
+// keeping only steps that lower the cost, capped at maxIter.
+bool fitModel(const FilletModel& m, const std::vector<Sec>& q, double tau, int maxIter,
+              double& param, double& hx, double& hy) {
+    double r = 0, px = 0, py = 0;
+    bool ok = false;
+    double e = modelCost(m, param, hx, hy, q, r, px, py, ok);
+    if (!ok) return false;
+    hx = px;
+    hy = py;
+    const double h = m.conc ? tau / m.rhoMid : tau;
+    for (int it = 0; it < maxIter; ++it) {
+        double r1, p1x, p1y, r2, p2x, p2y;
+        if (!modelAt(m, param - h, hx, hy, r1, p1x, p1y) ||
+            !modelAt(m, param + h, hx, hy, r2, p2x, p2y))
+            break;
+        double jj = 0, jf = 0;
+        for (const Sec& v : q) {
+            const double f = std::hypot(v.x - px, v.y - py) - r;
+            const double f1 = std::hypot(v.x - p1x, v.y - p1y) - r1;
+            const double f2 = std::hypot(v.x - p2x, v.y - p2y) - r2;
+            const double j = (f2 - f1) / (2.0 * h);
+            jj += j * j;
+            jf += j * f;
+        }
+        if (!(jj > 0.0)) break;
+        const double next = param - jf / jj;
+        double rn, pnx, pny;
+        bool okn = false;
+        const double en = modelCost(m, next, hx, hy, q, rn, pnx, pny, okn);
+        if (!okn || !(en < e)) break;
+        param = next;
+        e = en;
+        r = rn;
+        px = pnx;
+        py = pny;
+        hx = px;
+        hy = py;
+    }
+    return true;
+}
+
+// The anchors' corner in section: their intersection nearest (px, py). A
+// blend rounds that corner, so its arc runs between the two contacts on the
+// side facing it (D-fc-1.6.7: span = the anchors' dihedral). False when the
+// anchors do not meet (concentric circles: the hem, whose two arcs are both pi).
+bool sectionCorner(const SectionAnchor& A, const SectionAnchor& B, double px, double py,
+                   double& kx, double& ky) {
+    std::vector<std::pair<double, double>> K;
+    if (!A.circle && !B.circle) return false;
+    if (!A.circle || !B.circle) {
+        const SectionAnchor& L = A.circle ? B : A;
+        const SectionAnchor& C = A.circle ? A : B;
+        const double h = L.d - (L.nx * C.cx + L.ny * C.cy);
+        const double disc = C.R * C.R - h * h;
+        if (disc < 0.0) return false;
+        const double s = std::sqrt(disc);
+        for (int k = 0; k < 2; ++k) {
+            const double sg = k ? 1.0 : -1.0;
+            K.emplace_back(C.cx + h * L.nx - sg * s * L.ny, C.cy + h * L.ny + sg * s * L.nx);
+        }
+    } else {
+        const double dx = B.cx - A.cx, dy = B.cy - A.cy;
+        const double d = std::hypot(dx, dy);
+        if (!(d > 0.0)) return false;
+        const double a = (A.R * A.R - B.R * B.R + d * d) / (2.0 * d);
+        const double h2 = A.R * A.R - a * a;
+        if (h2 < 0.0) return false;
+        const double h = std::sqrt(h2), ux = dx / d, uy = dy / d;
+        for (int k = 0; k < 2; ++k) {
+            const double sg = k ? 1.0 : -1.0;
+            K.emplace_back(A.cx + a * ux - sg * h * uy, A.cy + a * uy + sg * h * ux);
+        }
+    }
+    const int k = std::hypot(K[1].first - px, K[1].second - py) <
+                          std::hypot(K[0].first - px, K[0].second - py)
+                      ? 1
+                      : 0;
+    kx = K[(std::size_t)k].first;
+    ky = K[(std::size_t)k].second;
+    return true;
+}
+
+double wrapTwoPi(double a) {
+    while (a < 0.0) a += kTwoPi;
+    while (a >= kTwoPi) a -= kTwoPi;
+    return a;
+}
+
+struct LineAnc {
+    gp_XYZ n;
+    double d = 0, tol = 0;
+    int prov = -1;
+};
+
+bool diagSectionOn() { return diagOn(); }
+
+}  // namespace
+
+bool claimSectionFillets(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                         SegmentWork& work, const std::vector<SectionCircle>& circles) {
+    try {
+        const double tau = tauOf(mv);
+        if (!(tau > 0.0) || !mv.pts || !mv.tris || !mv.triEdges || mv.nTri == 0) return true;
+        const int nTri = (int)mv.nTri;
+        const int nVtx = (int)mv.nVtx;
+        const int maxIter = p.maxRefineIters > 0 ? p.maxRefineIters : 1;
+        std::vector<int> g2l;
+        {
+            int maxG = 0;
+            for (int t = 0; t < nTri; ++t) {
+                const int gt = mv.compTris ? mv.compTris[t] : t;
+                for (int k = 0; k < 3; ++k) maxG = std::max(maxG, mv.tris[gt][k]);
+            }
+            for (int lv = 0; lv < nVtx; ++lv)
+                maxG = std::max(maxG, mv.compVtx ? mv.compVtx[lv] : lv);
+            g2l.assign((std::size_t)maxG + 1, -1);
+            for (int lv = 0; lv < nVtx; ++lv) {
+                const int g = mv.compVtx ? mv.compVtx[lv] : lv;
+                if (g >= 0) g2l[(std::size_t)g] = lv;
+            }
+        }
+        std::vector<std::vector<int>> nbr((std::size_t)nTri);
+        {
+            std::vector<std::array<int, 2>> et((std::size_t)std::max((int)mv.nEdge, 0),
+                                               std::array<int, 2>{{-1, -1}});
+            for (int t = 0; t < nTri; ++t)
+                for (int s = 0; s < 3; ++s) {
+                    const int e = mv.triEdges[t][s];
+                    if (e < 0 || e >= (int)mv.nEdge) continue;
+                    if (et[(std::size_t)e][0] < 0) et[(std::size_t)e][0] = t;
+                    else if (et[(std::size_t)e][0] != t) et[(std::size_t)e][1] = t;
+                }
+            for (const auto& e : et)
+                if (e[0] >= 0 && e[1] >= 0) {
+                    nbr[(std::size_t)e[0]].push_back(e[1]);
+                    nbr[(std::size_t)e[1]].push_back(e[0]);
+                }
+        }
+        // Candidates: Unclaimed provisional triangles held by no region.
+        std::vector<char> freeTri((std::size_t)nTri, 0);
+        for (const Provisional& pr : work.provisionals) {
+            if (pr.claim != ProvClaim::Unclaimed) continue;
+            for (int t : pr.tris)
+                if (t >= 0 && t < nTri) freeTri[(std::size_t)t] = 1;
+        }
+        std::vector<int> atomOf((std::size_t)nTri, -1);
+        for (int i = 0; i < (int)work.accepted.size(); ++i) {
+            const Region& r = work.accepted[(std::size_t)i];
+            for (int t : r.tris)
+                if (t >= 0 && t < nTri) {
+                    freeTri[(std::size_t)t] = 0;
+                    if (torusAtom(r)) atomOf[(std::size_t)t] = i;
+                }
+        }
+        // Line anchors (D-fc-1.4): certified planes A3 would commit.
+        std::vector<LineAnc> lines;
+        std::vector<std::vector<int>> lineBody;
+        for (int pi = 0; pi < (int)work.provisionals.size(); ++pi) {
+            PlaneAnchor pa;
+            if (!planeAnchorOf(mv, p, tol, work.provisionals[(std::size_t)pi], pa) || !pa.certified)
+                continue;
+            LineAnc L;
+            L.n = pa.n;
+            L.d = pa.n.Dot(pa.p0);
+            L.tol = pa.tol;
+            L.prov = pi;
+            lines.push_back(L);
+            lineBody.push_back(pa.body);
+        }
+        auto vertsOf = [&](const std::vector<int>& tris) {
+            std::vector<int> g;
+            for (int t : tris) {
+                if (t < 0 || t >= nTri) continue;
+                const int gt = mv.compTris ? mv.compTris[t] : t;
+                for (int k = 0; k < 3; ++k) g.push_back(mv.tris[gt][k]);
+            }
+            std::sort(g.begin(), g.end());
+            g.erase(std::unique(g.begin(), g.end()), g.end());
+            return g;
+        };
+        std::vector<char> dead(work.accepted.size(), 0);
+        int nAccept = 0, nEval = 0;
+        const int nAcc0 = (int)work.accepted.size();
+        for (int ai = 0; ai < nAcc0; ++ai) {
+            if (dead[(std::size_t)ai]) continue;
+            const Region& atom = work.accepted[(std::size_t)ai];
+            if (!torusAtom(atom)) continue;
+            std::vector<int> atris = atom.tris;
+            std::sort(atris.begin(), atris.end());
+            gp_Dir axOut = atom.ax.Direction();
+            gp_Pnt cen;
+            double rAtom = 0, devAtom = 0;
+            if (!cylinderFitLS(mv, atris, atom.ax.Direction(), axOut, cen, rAtom, devAtom, maxIter))
+                continue;
+            if (!(rAtom > tau)) continue;
+            const gp_XYZ aAtom = axOut.XYZ();
+            const double tolR = anchorTol(tau, devAtom);
+            const std::vector<int> agids = vertsOf(atris);
+            double zLo = 1e300, zHi = -1e300;
+            for (int g : agids) {
+                const double z = (mv.pts[g] - cen.XYZ()).Dot(aAtom);
+                zLo = std::min(zLo, z);
+                zHi = std::max(zHi, z);
+            }
+            const double Lat = std::max(zHi - zLo, tau);
+            // Anchors tangent to the atom's circle, in a fixed order: circles,
+            // then lines. Each records its side.
+            struct Tan {
+                bool circle = false;
+                int idx = -1;
+                int side = 1;
+            };
+            std::vector<Tan> tans;
+            for (int ci = 0; ci < (int)circles.size(); ++ci) {
+                const SectionCircle& C = circles[(std::size_t)ci];
+                if (C.acc == ai) continue;
+                // Hypothesis: tangency within both fits' own tolerances.
+                if (C.axis.Crossed(aAtom).Modulus() > (C.tol + tolR) / Lat) continue;
+                const SecFrame f = secFrame(C.origin, C.axis);
+                const Sec sc = toSec(f, cen.XYZ());
+                const double dc = std::hypot(sc.x, sc.y);
+                if (dc <= C.tol + tolR) continue;  // coaxial with the atom
+                Tan t;
+                t.circle = true;
+                t.idx = ci;
+                if (std::fabs(dc - (C.radius + rAtom)) <= C.tol + tolR) t.side = 1;
+                else if (std::fabs(dc - (C.radius - rAtom)) <= C.tol + tolR) t.side = -1;
+                else continue;
+                tans.push_back(t);
+            }
+            if (tans.empty()) continue;  // plane|plane belongs to the extrude pair walk
+            for (int li = 0; li < (int)lines.size(); ++li) {
+                const LineAnc& L = lines[(std::size_t)li];
+                if (std::fabs(L.n.Dot(aAtom)) > (L.tol + tolR) / Lat) continue;
+                const double dl = L.n.Dot(cen.XYZ()) - L.d;
+                if (std::fabs(std::fabs(dl) - rAtom) > L.tol + tolR) continue;
+                Tan t;
+                t.idx = li;
+                t.side = dl >= 0.0 ? 1 : -1;
+                tans.push_back(t);
+            }
+            bool done = false;
+            for (std::size_t ia = 0; ia < tans.size() && !done; ++ia) {
+                if (!tans[ia].circle) continue;
+                for (std::size_t ib = ia + 1; ib < tans.size() && !done; ++ib) {
+                    ++nEval;
+                    const SectionCircle& C0 = circles[(std::size_t)tans[ia].idx];
+                    const SecFrame f = secFrame(C0.origin, C0.axis);
+                    auto toAnchor = [&](const Tan& t) {
+                        SectionAnchor s;
+                        s.side = t.side;
+                        if (t.circle) {
+                            const SectionCircle& C = circles[(std::size_t)t.idx];
+                            const Sec sc = toSec(f, C.origin);
+                            s.circle = true;
+                            s.cx = sc.x;
+                            s.cy = sc.y;
+                            s.R = C.radius;
+                            s.tol = C.tol;
+                        } else {
+                            const LineAnc& L = lines[(std::size_t)t.idx];
+                            double nx = L.n.Dot(f.e1), ny = L.n.Dot(f.e2);
+                            const double nm = std::hypot(nx, ny);
+                            nx /= nm;
+                            ny /= nm;
+                            s.nx = nx;
+                            s.ny = ny;
+                            s.d = (L.d - L.n.Dot(f.o)) / nm;
+                            s.tol = L.tol;
+                        }
+                        return s;
+                    };
+                    // Both anchors parallel to the certified extrusion axis over
+                    // the atom's length (tanAngTol, D-fc-1.6.7).
+                    const Tan& tb = tans[ib];
+                    if (tb.circle) {
+                        const SectionCircle& C1 = circles[(std::size_t)tb.idx];
+                        if (C1.axis.Crossed(C0.axis).Modulus() > tanAngTol(C1.tol, tau, Lat)) continue;
+                    } else if (std::fabs(lines[(std::size_t)tb.idx].n.Dot(C0.axis)) >
+                               tanAngTol(lines[(std::size_t)tb.idx].tol, tau, Lat)) {
+                        continue;
+                    }
+                    FilletModel m;
+                    m.A = toAnchor(tans[ia]);
+                    m.B = toAnchor(tans[ib]);
+                    const Sec hc = toSec(f, cen.XYZ());
+                    double param = rAtom;
+                    if (sectionConcentric(m.A, m.B)) {
+                        // The fillet lies outside the inner circle and inside the
+                        // outer one; any other pair of sides has no tangent circle.
+                        const SectionAnchor& in = (m.A.R < m.B.R) ? m.A : m.B;
+                        const SectionAnchor& out = (m.A.R < m.B.R) ? m.B : m.A;
+                        if (in.side != 1 || out.side != -1) continue;
+                        m.conc = true;
+                        m.cx = in.cx;
+                        m.cy = in.cy;
+                        m.rConc = 0.5 * (out.R - in.R);
+                        m.rhoMid = in.R + m.rConc;
+                        if (!(m.rConc > tau)) continue;
+                        param = std::atan2(hc.y - m.cy, hc.x - m.cx);
+                    }
+                    const char* why = "accept";
+                    double hx = hc.x, hy = hc.y;
+                    std::vector<int> band, joined;
+                    double r = 0, px = 0, py = 0, phiS = 0, span = 0;
+                    double maxDev = 0, rms = 0, lineRes = 0, vSpan = 0, spanTolV = 0;
+                    int stations = 0, levels = 0;
+                    bool stable = false;
+                    {
+                        std::vector<Sec> q;
+                        for (int g : agids) q.push_back(toSec(f, mv.pts[g]));
+                        if (!fitModel(m, q, tau, maxIter, param, hx, hy)) why = "degenerate";
+                    }
+                    auto contactAngle = [&](const SectionAnchor& s, double cpx, double cpy) {
+                        double qx, qy;
+                        if (s.circle) {
+                            const double dx = cpx - s.cx, dy = cpy - s.cy;
+                            const double dm = std::hypot(dx, dy);
+                            qx = s.cx + dx / dm * s.R;
+                            qy = s.cy + dy / dm * s.R;
+                        } else {
+                            qx = cpx - s.side * r * s.nx;
+                            qy = cpy - s.side * r * s.ny;
+                        }
+                        return std::atan2(qy - cpy, qx - cpx);
+                    };
+                    for (int it = 0; it < maxIter && std::strcmp(why, "accept") == 0; ++it) {
+                        if (!modelAt(m, param, hx, hy, r, px, py)) {
+                            why = "degenerate";
+                            break;
+                        }
+                        // The fillet arc runs between its two contact points, on
+                        // the side of the atom's vertices.
+                        const double phA = contactAngle(m.A, px, py);
+                        const double phB = contactAngle(m.B, px, py);
+                        // The blend arc faces the anchors' corner. Concentric
+                        // anchors (a hem) have no corner and two arcs of pi:
+                        // the side is the atom's (from the data).
+                        double psiM = 0;
+                        double kx = 0, ky = 0;
+                        if (sectionCorner(m.A, m.B, px, py, kx, ky)) {
+                            psiM = std::atan2(ky - py, kx - px);
+                        } else if (m.conc) {
+                            double sx = 0, sy = 0;
+                            for (int g : agids) {
+                                const Sec s = toSec(f, mv.pts[g]);
+                                const double dm = std::hypot(s.x - px, s.y - py);
+                                if (dm > 0.0) {
+                                    sx += (s.x - px) / dm;
+                                    sy += (s.y - py) / dm;
+                                }
+                            }
+                            psiM = std::atan2(sy, sx);
+                        } else {
+                            why = "not-blend";
+                            break;
+                        }
+                        const double sAB = wrapTwoPi(phB - phA);
+                        const bool fromA = wrapTwoPi(psiM - phA) <= sAB;
+                        phiS = fromA ? phA : phB;
+                        span = fromA ? sAB : kTwoPi - sAB;
+                        const double slackS = sectionContactSlack(fromA ? m.A.tol : m.B.tol, tau, r);
+                        const double slackE = sectionContactSlack(fromA ? m.B.tol : m.A.tol, tau, r);
+                        auto inSlab = [&](const gp_XYZ& pt, double& dev, double& z) {
+                            const Sec s = toSec(f, pt);
+                            z = s.z;
+                            dev = std::fabs(std::hypot(s.x - px, s.y - py) - r);
+                            double u = wrapTwoPi(std::atan2(s.y - py, s.x - px) - phiS + slackS);
+                            return u <= span + slackS + slackE;
+                        };
+                        auto member = [&](int t) {
+                            double zl = 1e300, zh = -1e300;
+                            for (int k = 0; k < 3; ++k) {
+                                double dev, z;
+                                if (!inSlab(cornerPt(mv, t, k), dev, z) || !(dev <= tau)) return false;
+                                zl = std::min(zl, z);
+                                zh = std::max(zh, z);
+                            }
+                            return zh - zl > tau;
+                        };
+                        std::vector<int> I;
+                        for (int t = 0; t < nTri; ++t)
+                            if (freeTri[(std::size_t)t] && member(t)) I.push_back(t);
+                        // Atoms join only whole, every vertex in the slab within tau.
+                        std::vector<int> J;
+                        std::vector<char> tested(work.accepted.size(), 0);
+                        for (int t = 0; t < nTri; ++t) {
+                            const int aj = atomOf[(std::size_t)t];
+                            if (aj < 0 || dead[(std::size_t)aj] || tested[(std::size_t)aj]) continue;
+                            tested[(std::size_t)aj] = 1;
+                            double dev, z;
+                            if (!inSlab(cornerPt(mv, t, 0), dev, z) || !(dev <= tau)) continue;
+                            bool all = true;
+                            for (int g : vertsOf(work.accepted[(std::size_t)aj].tris)) {
+                                if (!inSlab(mv.pts[g], dev, z) || !(dev <= tau)) {
+                                    all = false;
+                                    break;
+                                }
+                            }
+                            if (all) J.push_back(aj);
+                        }
+                        std::sort(J.begin(), J.end());
+                        if (std::find(J.begin(), J.end(), ai) == J.end()) {
+                            why = "vertex-off";
+                            break;
+                        }
+                        std::vector<int> B = I;
+                        for (int aj : J)
+                            for (int t : work.accepted[(std::size_t)aj].tris) B.push_back(t);
+                        std::sort(B.begin(), B.end());
+                        B.erase(std::unique(B.begin(), B.end()), B.end());
+                        if (B == band && J == joined) {
+                            stable = true;
+                            break;
+                        }
+                        band = B;
+                        joined = J;
+                        std::vector<Sec> q;
+                        for (int g : vertsOf(band)) q.push_back(toSec(f, mv.pts[g]));
+                        if (!fitModel(m, q, tau, maxIter, param, hx, hy)) why = "degenerate";
+                    }
+                    if (std::strcmp(why, "accept") == 0 && !stable) why = "unstable";
+                    // A band of joined atoms alone claims nothing new: merging
+                    // same-surface regions is reclaim's (D-fc-1.6.11, D-fc-4.4).
+                    if (std::strcmp(why, "accept") == 0) {
+                        bool anyFree = false;
+                        for (int t : band)
+                            if (freeTri[(std::size_t)t]) anyFree = true;
+                        if (!anyFree) why = "same-surface";
+                    }
+                    std::vector<int> bgids;
+                    std::vector<double> psis, rhos, zs;
+                    if (std::strcmp(why, "accept") == 0) {
+                        bgids = vertsOf(band);
+                        double s2 = 0;
+                        for (int g : bgids) {
+                            const Sec s = toSec(f, mv.pts[g]);
+                            const double dm = std::hypot(s.x - px, s.y - py);
+                            const double d = std::fabs(dm - r);
+                            maxDev = std::max(maxDev, d);
+                            s2 += d * d;
+                            psis.push_back(wrapTwoPi(std::atan2(s.y - py, s.x - px)));
+                            rhos.push_back(dm);
+                            zs.push_back(s.z);
+                        }
+                        rms = bgids.empty() ? 0.0 : std::sqrt(s2 / (double)bgids.size());
+                        stations = countColumns(psis, rhos, tau);
+                        levels = countLevels(zs, tau);
+                        // D-fc-4.6 F2: over-determination counted leave-one-atom-out.
+                        bool det = stations >= minStations(kParamsAnchored);
+                        for (int aj : joined) {
+                            if (!det) break;
+                            std::vector<char> inA((std::size_t)nTri, 0);
+                            for (int t : work.accepted[(std::size_t)aj].tris)
+                                if (t >= 0 && t < nTri) inA[(std::size_t)t] = 1;
+                            std::vector<int> rest;
+                            for (int t : band)
+                                if (!inA[(std::size_t)t]) rest.push_back(t);
+                            std::vector<double> ps2, rs2;
+                            for (int g : vertsOf(rest)) {
+                                const Sec s = toSec(f, mv.pts[g]);
+                                ps2.push_back(wrapTwoPi(std::atan2(s.y - py, s.x - px)));
+                                rs2.push_back(std::hypot(s.x - px, s.y - py));
+                            }
+                            if (countColumns(ps2, rs2, tau) < minStations(kParamsAnchored)) det = false;
+                        }
+                        std::vector<gp_XYZ> bp;
+                        for (int g : bgids) bp.push_back(mv.pts[g]);
+                        lineRes = sectionLineResid(bp, f.a);
+                        if (!det) why = "underdetermined";
+                        else if (lineRes <= tau) why = "line";
+                        else if (!(maxDev <= tau)) why = "vertex-off";
+                    }
+                    if (std::strcmp(why, "accept") == 0) {
+                        // Contact: the band shares a vertex with each anchor on it.
+                        for (int side = 0; side < 2 && std::strcmp(why, "accept") == 0; ++side) {
+                            const Tan& t = side ? tans[ib] : tans[ia];
+                            const SectionAnchor& s = side ? m.B : m.A;
+                            const std::vector<int> atrisX =
+                                t.circle ? work.accepted[(std::size_t)circles[(std::size_t)t.idx].acc].tris
+                                         : lineBody[(std::size_t)t.idx];
+                            const std::vector<int> xg = vertsOf(atrisX);
+                            bool touch = false;
+                            for (int g : bgids) {
+                                if (!std::binary_search(xg.begin(), xg.end(), g)) continue;
+                                const Sec sp = toSec(f, mv.pts[g]);
+                                const double dx = s.circle ? std::fabs(std::hypot(sp.x - s.cx, sp.y - s.cy) - s.R)
+                                                           : std::fabs(s.nx * sp.x + s.ny * sp.y - s.d);
+                                if (dx <= tanDistTol(s.tol, tau)) {
+                                    touch = true;
+                                    break;
+                                }
+                            }
+                            if (!touch) why = "no-anchor";
+                        }
+                    }
+                    if (std::strcmp(why, "accept") == 0) {
+                        // Normals span the tangent-to-tangent arc (D-fc-1.6.7).
+                        std::vector<double> ps = psis;
+                        std::sort(ps.begin(), ps.end());
+                        double gap = ps.empty() ? kTwoPi : (ps.front() + kTwoPi) - ps.back();
+                        for (std::size_t i = 0; i + 1 < ps.size(); ++i) gap = std::max(gap, ps[i + 1] - ps[i]);
+                        vSpan = kTwoPi - gap;
+                        spanTolV = spanTol(m.A.tol, m.B.tol, r);
+                        if (std::fabs(vSpan - span) > spanTolV ||
+                            !normalsSpanDihedral(maxFacetNormalSep(mv, band), spanTolV))
+                            why = "not-blend";
+                    }
+                    if (std::strcmp(why, "accept") == 0) {
+                        // D-fc-1.6.11 on the claimed set.
+                        std::vector<char> inB((std::size_t)nTri, 0);
+                        for (int t : band) inB[(std::size_t)t] = 1;
+                        for (int ri = 0; ri < (int)work.accepted.size() && std::strcmp(why, "accept") == 0; ++ri) {
+                            if (dead[(std::size_t)ri] || std::binary_search(joined.begin(), joined.end(), ri)) continue;
+                            const Region& rr = work.accepted[(std::size_t)ri];
+                            bool touch = false;
+                            for (int t : rr.tris) {
+                                if (t < 0 || t >= nTri) continue;
+                                for (int n : nbr[(std::size_t)t])
+                                    if (inB[(std::size_t)n]) touch = true;
+                                if (touch) break;
+                            }
+                            if (!touch || rr.tris.empty()) continue;
+                            bool all = true;
+                            for (int g : vertsOf(rr.tris)) {
+                                const Sec s = toSec(f, mv.pts[g]);
+                                if (!(std::fabs(std::hypot(s.x - px, s.y - py) - r) <= tau)) {
+                                    all = false;
+                                    break;
+                                }
+                            }
+                            if (all) why = "same-surface";
+                        }
+                    }
+                    const bool accept = std::strcmp(why, "accept") == 0;
+                    int straddle = 0;
+                    if (accept) {
+                        const gp_XYZ P = f.o + f.e1 * px + f.e2 * py;
+                        std::vector<char> inB((std::size_t)nTri, 0);
+                        for (int t : band) inB[(std::size_t)t] = 1;
+                        gp_XYZ cent(0, 0, 0);
+                        double area = 0, sigma = 0;
+                        for (int t : band) {
+                            gp_XYZ nt;
+                            const double at = triAreaNormal(mv, t, nt);
+                            const gp_XYZ c3 = (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) / 3.0;
+                            area += at;
+                            cent += c3 * at;
+                        }
+                        if (area > 0.0) cent /= area;
+                        const gp_XYZ loc = P + f.a * ((cent - P).Dot(f.a));
+                        for (int t : band) {
+                            gp_XYZ nt;
+                            const double at = triAreaNormal(mv, t, nt);
+                            gp_XYZ rad = (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) / 3.0 - loc;
+                            rad -= f.a * rad.Dot(f.a);
+                            const double rm = rad.Modulus();
+                            if (rm > 0.0) sigma += at * nt.Dot(rad / rm);
+                        }
+                        std::vector<Vert> verts;
+                        uniqueVerts(mv, g2l, band, verts);
+                        const gp_XYZ xdir = lowestXDir(verts, loc, f.a);
+                        const SpanInfo sp = measureSpan(mv, g2l, band, verts, loc, f.a, xdir, tol.thetaBin);
+                        const bool outward = sigma > 0.0;
+                        const double useSpan = std::max(sp.span, 1e-12);
+                        int nSides = (int)std::llround(kTwoPi * (double)std::max(sp.nBands, 1) / useSpan);
+                        if (nSides < 1) nSides = 1;
+                        for (const Provisional& pr : work.provisionals) {
+                            if (pr.claim != ProvClaim::Unclaimed) continue;
+                            int nin = 0, nout = 0;
+                            for (int t : pr.tris) (t >= 0 && t < nTri && inB[(std::size_t)t]) ? ++nin : ++nout;
+                            if (nin > 0 && nout > 0) ++straddle;
+                        }
+                        const int host = joined.front();
+                        Region& R = work.accepted[(std::size_t)host];
+                        R.type = SurfType::Cylinder;
+                        R.origin = Origin::FilletStrip;
+                        R.ax = gp_Ax3(gp_Pnt(loc), gp_Dir(f.a), gp_Dir(xdir));
+                        R.radius = r;
+                        R.uMin = sp.uMin;
+                        R.uMax = sp.uMax;
+                        R.vMin = sp.vMin;
+                        R.vMax = sp.vMax;
+                        R.closed360 = false;
+                        R.outwardNormal = outward;
+                        R.tris = band;
+                        R.maxVertexDev = maxDev;
+                        R.rmsVertexDev = rms;
+                        R.nSides = nSides;
+                        R.chordSagitta = chordSagitta(r, nSides);
+                        R.dVolPredicted = dVolCylinderSector(area, r, nSides, outward);
+                        R.maxVertexSnap = 0.0;
+                        R.reject = Reject::None;
+                        R.builtAs = BuiltAs::NotBuilt;
+                        R.filletNbrA = tans[ia].circle ? -1 : lines[(std::size_t)tans[ia].idx].prov;
+                        R.filletNbrB = tans[ib].circle ? -1 : lines[(std::size_t)tans[ib].idx].prov;
+                        for (std::size_t k = 1; k < joined.size(); ++k) {
+                            dead[(std::size_t)joined[k]] = 1;
+                            work.accepted[(std::size_t)joined[k]].tris.clear();
+                        }
+                        for (int t : band) {
+                            freeTri[(std::size_t)t] = 0;
+                            atomOf[(std::size_t)t] = -1;
+                        }
+                        // The unclaimed triangles leave their provisionals; a
+                        // remainder is refit and split into its components.
+                        const int nProvNow = (int)work.provisionals.size();
+                        for (int pi = 0; pi < nProvNow; ++pi) {
+                            Provisional& pr = work.provisionals[(std::size_t)pi];
+                            if (pr.claim != ProvClaim::Unclaimed) continue;
+                            std::vector<int> keep;
+                            bool hit = false;
+                            for (int t : pr.tris) {
+                                if (t >= 0 && t < nTri && inB[(std::size_t)t]) hit = true;
+                                else keep.push_back(t);
+                            }
+                            if (!hit) continue;
+                            if (keep.empty()) {
+                                pr.claim = ProvClaim::ConsumedFillet;
+                                continue;
+                            }
+                            std::vector<char> inK((std::size_t)nTri, 0);
+                            for (int t : keep) inK[(std::size_t)t] = 1;
+                            std::vector<char> seen((std::size_t)nTri, 0);
+                            std::vector<std::vector<int>> comps;
+                            for (int t0 : keep) {
+                                if (seen[(std::size_t)t0]) continue;
+                                std::vector<int> comp, st{t0};
+                                seen[(std::size_t)t0] = 1;
+                                while (!st.empty()) {
+                                    const int c = st.back();
+                                    st.pop_back();
+                                    comp.push_back(c);
+                                    for (int n : nbr[(std::size_t)c])
+                                        if (inK[(std::size_t)n] && !seen[(std::size_t)n]) {
+                                            seen[(std::size_t)n] = 1;
+                                            st.push_back(n);
+                                        }
+                                }
+                                std::sort(comp.begin(), comp.end());
+                                comps.push_back(std::move(comp));
+                            }
+                            std::sort(comps.begin(), comps.end());
+                            pr.tris = comps[0];
+                            refitPlaneProv(mv, g2l, pr);
+                            for (std::size_t c = 1; c < comps.size(); ++c) {
+                                Provisional np = pr;
+                                np.tris = comps[c];
+                                refitPlaneProv(mv, g2l, np);
+                                work.provisionals.push_back(std::move(np));
+                            }
+                        }
+                        ++nAccept;
+                        done = true;
+                    }
+                    if (diagSectionOn()) {
+                        diagPrintf("DIAG_REL_BAND stage=extrude mode=section seed=%d nTri=%zu nV=%zu "
+                                   "stations=%d levels=%d params=%d fit=anchored radius=%.9g "
+                                   "axis=%.6g,%.6g,%.6g maxDevMM=%.6g maxDevTau=%.6g lineResTau=%.6g "
+                                   "span=%.9g dihedral=%.9g spanTol=%.6g straddle=%d atom=%d "
+                                   "atoms=%zu kindA=%s kindB=%s sideA=%d sideB=%d hem=%d why=%s\n",
+                                   minTriOf(band.empty() ? atris : band), band.size(), bgids.size(),
+                                   stations, levels, kParamsAnchored, r, f.a.X(), f.a.Y(), f.a.Z(),
+                                   maxDev, maxDev / tau, lineRes / tau, vSpan, span, spanTolV,
+                                   straddle, ai, joined.size(), tans[ia].circle ? "circle" : "line",
+                                   tans[ib].circle ? "circle" : "line", tans[ia].side, tans[ib].side,
+                                   m.conc ? 1 : 0, why);
+                    }
+                }
+            }
+        }
+        if (diagSectionOn())
+            diagPrintf("DIAG_REL_SUM stage=section pairs=%d accept=%d circles=%zu lines=%zu\n", nEval,
+                       nAccept, circles.size(), lines.size());
+        // A joined atom other than the host leaves the accepted list (D-fc-4.6
+        // F2). A chamfer cone names its cylinder by accepted index.
+        bool anyDead = false;
+        for (char c : dead) anyDead = anyDead || c;
+        if (anyDead) {
+            const int nAcc = (int)work.accepted.size();
+            std::vector<int> newIdx((std::size_t)nAcc, -1);
+            std::vector<Region> keep;
+            for (int i = 0; i < nAcc; ++i) {
+                if (i < (int)dead.size() && dead[(std::size_t)i]) continue;
+                newIdx[(std::size_t)i] = (int)keep.size();
+                keep.push_back(std::move(work.accepted[(std::size_t)i]));
+            }
+            for (Region& r : keep)
+                if (r.origin == Origin::ChamferCone && r.filletNbrA >= 0 && r.filletNbrA < nAcc)
+                    r.filletNbrA = newIdx[(std::size_t)r.filletNbrA];
+            work.accepted.swap(keep);
+        }
+        return true;
+    } catch (...) {
+        return true;
     }
 }
 

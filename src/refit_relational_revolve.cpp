@@ -9,6 +9,7 @@
 #include "refit_relational.hpp"
 #include "refit_profile_cert.hpp"
 #include "refit_cone_math.hpp"
+#include "refit_relational_arc.hpp"
 #include "refit_relational_torus.hpp"
 
 #include <algorithm>
@@ -1115,11 +1116,205 @@ bool sideIsProfileCircle(const SideFit& s, double tau) {
     return s.have && std::isfinite(s.circDev) && s.circDev <= tau && s.lineRes > tau;
 }
 
+// D-fc-5.1. A coaxial family in Line mode: its donors' certified vertices
+// (D-fc-4.8 (b)) and every band claimed on it, all on one axis.
+struct CoaxFamily {
+    gp_XYZ origin, axis;
+    std::vector<std::vector<gp_XYZ>> groups;  // donors first, then claimed bands
+    std::size_t nDonors = 0;
+    std::vector<int> bandRegion;  // work.accepted index of each claimed band
+    bool moved = false;           // the axis changed after a band was placed on it
+};
+
+struct LineFamilies {
+    std::vector<CoaxFamily> fams;
+    std::vector<int> famOfAcc;  // work.accepted index -> family, -1 when not a donor
+    const DerivedTols* tol = nullptr;
+    const SegmentParams* sp = nullptr;
+};
+
+// D-fc-5.1 anchor ("planes define the arcs"): a certified plane (D-fc-1.4)
+// parallel to the family axis over the band's length (tanAngTol), tangent to
+// the band's cylinder (tanDistTol) and sharing a contact vertex with the band
+// on it. A vertex test alone cannot tell an arc from an inscribed polygon
+// (concyclic corners), so a band that no plane anchors is refused (no-anchor).
+// Returns the plane's provisional index, -1 when none.
+int coaxialTangentPlane(const WorkMesh& wm, const SegmentWork& work, const SegmentParams& sp,
+                        const DerivedTols& tol, const std::vector<int>& bandTris,
+                        const gp_XYZ& o, const gp_XYZ& a, double R, double& tanDist) {
+    const MeshView& mv = *wm.mv;
+    const int nTri = (int)mv.nTri;
+    std::vector<int> bg;
+    double zLo = 1e300, zHi = -1e300;
+    for (int t : bandTris) {
+        if (t < 0 || t >= nTri) continue;
+        const int gt = mv.compTris ? mv.compTris[t] : t;
+        for (int k = 0; k < 3; ++k) {
+            const int g = mv.tris[gt][k];
+            bg.push_back(g);
+            const double z = (mv.pts[g] - o).Dot(a);
+            zLo = std::min(zLo, z);
+            zHi = std::max(zHi, z);
+        }
+    }
+    std::sort(bg.begin(), bg.end());
+    bg.erase(std::unique(bg.begin(), bg.end()), bg.end());
+    const double L = std::max(zHi - zLo, wm.tau);
+    tanDist = -1;
+    for (int pi = 0; pi < (int)work.provisionals.size(); ++pi) {
+        PlaneAnchor pa;
+        if (!planeAnchorOf(mv, sp, tol, work.provisionals[(std::size_t)pi], pa) || !pa.certified)
+            continue;
+        const double tolT = pa.tol;
+        const gp_XYZ n = pa.n;
+        if (std::fabs(n.Dot(a)) > tanAngTol(tolT, wm.tau, L)) continue;
+        const double d = n.Dot(pa.p0);
+        const double td = std::fabs(std::fabs(n.Dot(o) - d) - R);
+        if (td > tanDistTol(tolT, wm.tau)) continue;
+        bool contact = false;
+        for (int t : pa.body) {
+            if (t < 0 || t >= nTri) continue;
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3 && !contact; ++k) {
+                const int g = mv.tris[gt][k];
+                if (std::binary_search(bg.begin(), bg.end(), g) &&
+                    std::fabs(n.Dot(mv.pts[g]) - d) <= tanDistTol(tolT, wm.tau))
+                    contact = true;
+            }
+            if (contact) break;
+        }
+        if (!contact) continue;
+        tanDist = td;
+        return pi;
+    }
+    return -1;
+}
+
+// The cylinder fields of a coaxial band about (origin, axis): radius = the mean
+// rho of its own vertices, frame XDirection = the radial direction of its
+// first vertex, u span by the existing column rule (closedOf), v relative to
+// the frame's location (the band's area centroid on the axis).
+void placeCoaxial(const MeshView& mv, Region& r, const std::vector<int>& tris,
+                  const std::vector<gp_XYZ>& pts, const gp_XYZ& origin, const gp_XYZ& axisIn,
+                  double thetaBin) {
+    gp_XYZ axis = axisIn;
+    axis /= axis.Modulus();
+    double sum = 0;
+    for (const gp_XYZ& p : pts) {
+        const gp_XYZ d = p - origin;
+        sum += (d - axis * d.Dot(axis)).Modulus();
+    }
+    const double R = pts.empty() ? 0.0 : sum / (double)pts.size();
+    gp_XYZ cent(0, 0, 0);
+    double areaSum = 0;
+    for (int t : tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        areaSum += a;
+        cent += triCentroid(mv, t) * a;
+    }
+    if (areaSum > 0.0) cent /= areaSum;
+    const gp_XYZ loc = origin + axis * ((cent - origin).Dot(axis));
+    gp_XYZ xHint(1, 0, 0);
+    for (const gp_XYZ& p : pts) {
+        gp_XYZ rad = p - loc;
+        rad -= axis * rad.Dot(axis);
+        if (rad.Modulus() > gp::Resolution()) {
+            xHint = rad;
+            break;
+        }
+    }
+    const Frame fr = makeFrame(loc, axis, xHint);
+    std::vector<Vtx> uniq;
+    uniq.reserve(pts.size());
+    double vMin = 1e300, vMax = -1e300, maxD = 0, sum2 = 0;
+    for (const gp_XYZ& p : pts) {
+        Vtx v;
+        v.p = p;
+        v.pr = profOfPoint(p, fr, 0);
+        uniq.push_back(v);
+        vMin = std::min(vMin, v.pr.z);
+        vMax = std::max(vMax, v.pr.z);
+        const double d = std::fabs(v.pr.rho - R);
+        maxD = std::max(maxD, d);
+        sum2 += d * d;
+    }
+    const ClosedM cl = closedOf(mv, fr, tris, uniq, thetaBin);
+    double sigma = 0;
+    for (int t : tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        gp_XYZ rad = triCentroid(mv, t) - loc;
+        rad -= axis * rad.Dot(axis);
+        const double rm = rad.Modulus();
+        if (rm > gp::Resolution()) sigma += a * n.Dot(rad / rm);
+    }
+    const bool outward = sigma > 0.0;
+    const int nSides = std::max(cl.nSides, 1);
+    r.type = SurfType::Cylinder;
+    r.origin = Origin::FilletStrip;
+    r.ax = gp_Ax3(gp_Pnt(loc.X(), loc.Y(), loc.Z()), gp_Dir(axis.X(), axis.Y(), axis.Z()),
+                  gp_Dir(fr.e1.X(), fr.e1.Y(), fr.e1.Z()));
+    r.radius = R;
+    r.uMin = cl.closed ? 0.0 : cl.uMin;
+    r.uMax = cl.closed ? kTwoPi : cl.uMax;
+    r.vMin = (vMin > vMax) ? 0.0 : vMin;
+    r.vMax = (vMin > vMax) ? 0.0 : vMax;
+    r.closed360 = cl.closed;
+    r.outwardNormal = outward;
+    r.tris = tris;
+    r.maxVertexDev = maxD;
+    r.rmsVertexDev = pts.empty() ? 0.0 : std::sqrt(sum2 / (double)pts.size());
+    r.nSides = nSides;
+    r.chordSagitta = chordSagitta(R, nSides);
+    r.dVolPredicted = dVolCylinderSector(areaSum, R, nSides, outward);
+    r.maxVertexSnap = 0.0;
+    r.reject = Reject::None;
+    r.builtAs = BuiltAs::NotBuilt;
+    r.filletNbrA = -1;
+    r.filletNbrB = -1;
+}
+
+// D-fc-1.6.11 for a coaxial band: an accepted region beside the band whose
+// every vertex is within tau of the band's cylinder is a second face of it.
+bool sameSurfaceCyl(const WorkMesh& wm, const SegmentWork& work, const Band& band,
+                    const gp_XYZ& origin, const gp_XYZ& axis, double R) {
+    const int nTri = (int)wm.mv->nTri;
+    std::vector<char> bandTri((std::size_t)nTri, 0);
+    for (int t : band.tris)
+        if (t >= 0 && t < nTri) bandTri[(std::size_t)t] = 1;
+    for (const Region& r : work.accepted) {
+        if (r.tris.empty()) continue;
+        bool touch = false;
+        for (int t : r.tris) {
+            if (t < 0 || t >= nTri) continue;
+            for (int n : wm.adj.nbr[(std::size_t)t])
+                if (n >= 0 && n < nTri && bandTri[(std::size_t)n]) touch = true;
+            if (touch) break;
+        }
+        if (!touch) continue;
+        bool all = true;
+        for (int t : r.tris) {
+            if (t < 0 || t >= nTri) continue;
+            for (int k = 0; k < 3 && all; ++k) {
+                const gp_XYZ d = triVert(*wm.mv, t, k) - origin;
+                const double rho = (d - axis * d.Dot(axis)).Modulus();
+                if (!(std::fabs(rho - R) <= wm.tau)) all = false;
+            }
+            if (!all) break;
+        }
+        if (all) return true;
+    }
+    return false;
+}
+
 // D-fc-3.5 line mode. Rings are vertices at equal (ρ, z) within τ, ≥ 3.
 // A band is a maximal collinear chain of those rings. Edge adjacency to the
-// donor is not required.
+// donor is not required. D-fc-5.1: a chain is first tested as a cylinder on
+// its donor's coaxial family (one parameter, the radius, about the family
+// axis); only a chain that is not one goes on to the cone (fewest parameters).
 void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisScan>& scans,
-                 int& claimed, int& refused) {
+                 LineFamilies& lf, int& claimed, int& refused) {
     const MeshView& mv = *wm.mv;
     const int nTri = (int)mv.nTri;
     const double tau = wm.tau;
@@ -1576,6 +1771,151 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
         if (two && (sideIsProfileCircle(s0, tau) || sideIsProfileCircle(s1, tau))) {
             refuse("profile-row");
             continue;
+        }
+        // D-fc-5.1. A cylinder on the donor's coaxial family first: one free
+        // parameter (its radius) about the family axis, certified jointly with
+        // the family's certified vertices. A chain that is not one goes on to
+        // the cone below unchanged.
+        const int famId = (donor.idx >= 0 && donor.idx < (int)lf.famOfAcc.size())
+                              ? lf.famOfAcc[(std::size_t)donor.idx]
+                              : -1;
+        if (famId >= 0) {
+            CoaxFamily& fam = lf.fams[(std::size_t)famId];
+            // The claimed set is the complete tau-preimage of the certified
+            // cylinder that is edge-connected to the chain (D-fc-3.2.4: every
+            // free triangle with 3 vertices within tau and >= 2 axial levels),
+            // refit and re-certified to a fixed point (D-fc-3.2.5). Rings split
+            // at tau leave such triangles outside every chain. A refused
+            // cylinder leaves `band` as the chain for the cone below.
+            Band cb;
+            cb.tris = band.tris;
+            cb.verts = band.verts;
+            cb.pts = band.pts;
+            cb.sheet = band.sheet;
+            cb.seed = band.seed;
+            const int nChain = (int)cb.tris.size();
+            auto member = [&](int t, const gp_XYZ& o, const gp_XYZ& a, double R) {
+                if (t < 0 || t >= nTri || !wm.freeTri[(std::size_t)t]) return false;
+                double zLo = 1e300, zHi = -1e300;
+                for (int k = 0; k < 3; ++k) {
+                    const gp_XYZ d = triVert(mv, t, k) - o;
+                    const double z = d.Dot(a);
+                    if (!(std::fabs((d - a * z).Modulus() - R) <= tau)) return false;
+                    zLo = std::min(zLo, z);
+                    zHi = std::max(zHi, z);
+                }
+                return zHi - zLo > tau;
+            };
+            std::vector<gp_XYZ> bpts;
+            bandPoints(cb, bpts);
+            CoaxialCert cc =
+                certifyCoaxialBand(fam.groups, bpts, fam.origin, fam.axis, tau, wm.maxIter);
+            bool stable = false;
+            int iters = 0;
+            while (cc.ok && iters < wm.maxIter) {
+                ++iters;
+                const double R = cc.fit.radius.back();
+                std::vector<char> inI((std::size_t)nTri, 0);
+                std::vector<int> I, stack;
+                for (int t : cb.tris)
+                    if (member(t, cc.fit.origin, cc.fit.axis, R)) {
+                        inI[(std::size_t)t] = 1;
+                        stack.push_back(t);
+                    }
+                while (!stack.empty()) {
+                    const int c = stack.back();
+                    stack.pop_back();
+                    I.push_back(c);
+                    for (int n : wm.adj.nbr[(std::size_t)c]) {
+                        if (n < 0 || n >= nTri || inI[(std::size_t)n]) continue;
+                        if (!member(n, cc.fit.origin, cc.fit.axis, R)) continue;
+                        inI[(std::size_t)n] = 1;
+                        stack.push_back(n);
+                    }
+                }
+                std::sort(I.begin(), I.end());
+                if (I == cb.tris) {
+                    stable = true;
+                    break;
+                }
+                cb.tris = I;
+                cb.seed = minTriOf(I);
+                collectBand(mv, fr, wm.g2l, cb);
+                bandPoints(cb, bpts);
+                cc = certifyCoaxialBand(fam.groups, bpts, fam.origin, fam.axis, tau, wm.maxIter);
+            }
+            const double Rb = cc.fit.radius.empty() ? 0.0 : cc.fit.radius.back();
+            const char* why = cc.why;
+            int anchorProv = -1;
+            double anchorDist = -1;
+            const ClosedM ccl = cc.ok ? closedOf(mv, fr, cb.tris, cb.verts, wm.thetaBin) : ClosedM();
+            if (cc.ok && !stable) why = "unstable";
+            else if (cc.ok && ccl.closed) why = "closed-deferred";
+            else if (cc.ok && coaxialSameRadius(cc.fit, fam.groups.size(), tau)) why = "same-surface";
+            else if (cc.ok && lf.tol && lf.sp &&
+                     (anchorProv = coaxialTangentPlane(wm, work, *lf.sp, *lf.tol, cb.tris,
+                                                       cc.fit.origin, cc.fit.axis, Rb,
+                                                       anchorDist)) < 0)
+                why = "no-anchor";
+            else if (cc.ok && sameSurfaceCyl(wm, work, cb, cc.fit.origin, cc.fit.axis, Rb))
+                why = "same-surface";
+            else if (cc.ok) why = "accept";
+            const bool accept = std::strcmp(why, "accept") == 0;
+            int straddle = 0;
+            if (accept) {
+                Region r;
+                r.id = 0;
+                placeCoaxial(mv, r, cb.tris, bpts, cc.fit.origin, cc.fit.axis, wm.thetaBin);
+                straddle = countStraddle(work, cb.tris, nTri);
+                std::vector<int> touched;
+                trimProvisionals(mv, work, cb.tris, nTri, ProvClaim::ConsumedFillet, touched);
+                if (cc.refit && !fam.bandRegion.empty()) fam.moved = true;
+                fam.origin = cc.fit.origin;
+                fam.axis = cc.fit.axis;
+                fam.groups.push_back(bpts);
+                fam.bandRegion.push_back((int)work.accepted.size());
+                work.accepted.push_back(std::move(r));
+                for (int t : cb.tris)
+                    if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+                ++claimed;
+            }
+            if (diagOn()) {
+                double famDev = 0;
+                for (std::size_t g = 0; g + 1 < cc.fit.maxDev.size(); ++g)
+                    famDev = std::max(famDev, cc.fit.maxDev[g]);
+                const double bandDev = cc.fit.maxDev.empty() ? 0.0 : cc.fit.maxDev.back();
+                DiagRec d = baseDiag("coaxial", donor, cb, tau);
+                d.stations = cc.stations;
+                d.levels = cc.levels;
+                d.params = kParamsAnchored;
+                d.fit = cc.refit ? "joint-ls" : "family";
+                d.r0 = Rb;
+                d.axis = cc.fit.axis;
+                d.maxDev = bandDev;
+                d.maxDevTau = bandDev / tau;
+                d.lineResTau = cc.lineRes / tau;
+                d.straddle = straddle;
+                d.why = why;
+                printBand(d);
+                const gp_XYZ off = cc.fit.origin - donor.fr.origin;
+                std::fprintf(stderr,
+                             "DIAG_REL_COAX seed=%d donor=%d family=%d groups=%zu donors=%zu "
+                             "refit=%d familyDevTau=%.4f bandDevTau=%.4f radius=%.9g "
+                             "tilt=%.4g offset=%.4g nChain=%d nTri=%zu iters=%d anchorProv=%d "
+                             "anchorDistTau=%.4f closed=%d why=%s\n",
+                             cb.seed, donor.idx, famId, fam.groups.size() - (accept ? 1 : 0),
+                             fam.nDonors, cc.refit ? 1 : 0, famDev / tau, bandDev / tau, Rb,
+                             cc.fit.axis.Crossed(donor.fr.axis).Modulus(),
+                             (off - donor.fr.axis * off.Dot(donor.fr.axis)).Modulus(),
+                             nChain, cb.tris.size(), iters, anchorProv,
+                             anchorDist >= 0 ? anchorDist / tau : -1.0, ccl.closed ? 1 : 0, why);
+                if (accept) {
+                    std::fprintf(stderr, "DIAG_REL_COAX_TRIS seed=%d tris=", cb.seed);
+                    for (int t : cb.tris) std::fprintf(stderr, "%d,", t);
+                    std::fprintf(stderr, "\n");
+                }
+            }
+            if (accept) continue;
         }
         if (stations < 2 || !fit.hatOk) {
             refuse("underdetermined");
@@ -2561,7 +2901,79 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
         std::vector<AxisScan> axisScans;
 
         if (mode != RelRevolveMode::Torus) {
-            for (Donor& donor : donors) gatherLines(wm, work, donor, axisScans, claimed, refused);
+            // D-fc-5.1 / D-fc-4.8 (b): the coaxial families of the Line donors,
+            // formed once in scan order. They carry the joint certificate of a
+            // coaxial band; the cone gather keeps each donor's own frame.
+            LineFamilies lf;
+            lf.famOfAcc.assign(work.accepted.size(), -1);
+            lf.tol = &tol;
+            lf.sp = &p;
+            {
+                std::vector<AxisDonor> ad(donors.size());
+                std::vector<int> scanOrder;
+                for (std::size_t i = 0; i < donors.size(); ++i) {
+                    const Donor& d = donors[i];
+                    ad[i].origin = d.fr.origin;
+                    ad[i].axis = d.fr.axis;
+                    ad[i].radius = d.radius;
+                    ad[i].length = d.length;
+                    for (int g : d.gids) ad[i].pts.push_back(mv.pts[g]);
+                    scanOrder.push_back((int)i);
+                }
+                for (const CoaxialFamily& f : coaxialFamilies(ad, scanOrder, tau, wm.maxIter)) {
+                    CoaxFamily cf;
+                    cf.origin = f.fit.origin;
+                    cf.axis = f.fit.axis;
+                    for (int m : f.members) {
+                        cf.groups.push_back(ad[(std::size_t)m].pts);
+                        const int acc = donors[(std::size_t)m].idx;
+                        if (acc >= 0 && acc < (int)lf.famOfAcc.size())
+                            lf.famOfAcc[(std::size_t)acc] = (int)lf.fams.size();
+                    }
+                    cf.nDonors = cf.groups.size();
+                    lf.fams.push_back(std::move(cf));
+                }
+            }
+            for (Donor& donor : donors)
+                gatherLines(wm, work, donor, axisScans, lf, claimed, refused);
+            // One family, one axis: a band placed before a later band moved the
+            // family axis takes the final one. The final joint certificate
+            // already holds every band's vertices within tau of its radius on it.
+            for (CoaxFamily& fam : lf.fams) {
+                if (!fam.moved) continue;
+                for (std::size_t k = 0; k < fam.bandRegion.size(); ++k) {
+                    Region& r = work.accepted[(std::size_t)fam.bandRegion[k]];
+                    const std::vector<int> tris = r.tris;
+                    placeCoaxial(mv, r, tris, fam.groups[fam.nDonors + k], fam.origin, fam.axis,
+                                 wm.thetaBin);
+                }
+            }
+            // D-fc-5.2: section fillets need the circles certified above (the
+            // donors and the coaxial bands), so they follow the Line gather.
+            std::vector<SectionCircle> circles;
+            for (const Donor& d : donors) {
+                SectionCircle c;
+                c.origin = d.fr.origin;
+                c.axis = d.fr.axis;
+                c.radius = d.radius;
+                c.tol = anchorTol(tau, d.maxDev);
+                c.length = d.length;
+                c.acc = d.idx;
+                circles.push_back(c);
+            }
+            for (const CoaxFamily& fam : lf.fams)
+                for (int ri : fam.bandRegion) {
+                    const Region& r = work.accepted[(std::size_t)ri];
+                    SectionCircle c;
+                    c.origin = fam.origin;
+                    c.axis = fam.axis;
+                    c.radius = r.radius;
+                    c.tol = anchorTol(tau, r.maxVertexDev);
+                    c.length = std::max(r.vMax - r.vMin, tau);
+                    c.acc = ri;
+                    circles.push_back(c);
+                }
+            claimSectionFillets(mv, p, tol, work, circles);
         } else {
             // D-fc-4.6 F2/F3. Atoms are candidate units of every scan but their
             // own; an atom a band absorbed leaves later scans and stops donating.
@@ -2665,6 +3077,95 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
     } catch (...) {
         return true;
     }
+}
+
+double sectionLineResid(const std::vector<gp_XYZ>& pts, const gp_XYZ& axisIn) {
+    if (pts.size() < 2) return 0.0;
+    gp_XYZ axis = axisIn;
+    const double am = axis.Modulus();
+    if (!(am > gp::Resolution())) return 0.0;
+    axis /= am;
+    const Frame f = makeFrame(gp_XYZ(0, 0, 0), axis, gp_XYZ(1, 0, 0));
+    double mx = 0, my = 0;
+    for (const gp_XYZ& p : pts) {
+        mx += p.Dot(f.e1);
+        my += p.Dot(f.e2);
+    }
+    mx /= (double)pts.size();
+    my /= (double)pts.size();
+    double sxx = 0, sxy = 0, syy = 0;
+    for (const gp_XYZ& p : pts) {
+        const double dx = p.Dot(f.e1) - mx, dy = p.Dot(f.e2) - my;
+        sxx += dx * dx;
+        sxy += dx * dy;
+        syy += dy * dy;
+    }
+    // Principal direction by its angle (no eigenvalue cancellation); the line
+    // normal is perpendicular to it.
+    const double th = 0.5 * std::atan2(2.0 * sxy, sxx - syy);
+    const double nx = -std::sin(th), ny = std::cos(th);
+    double m = 0;
+    for (const gp_XYZ& p : pts)
+        m = std::max(m, std::fabs((p.Dot(f.e1) - mx) * nx + (p.Dot(f.e2) - my) * ny));
+    return m;
+}
+
+CoaxialCert certifyCoaxialBand(const std::vector<std::vector<gp_XYZ>>& family,
+                               const std::vector<gp_XYZ>& band, const gp_XYZ& origin,
+                               const gp_XYZ& axisIn, double tau, int maxIters) {
+    CoaxialCert c;
+    if (!(tau > 0.0) || band.empty() || family.empty()) return c;
+    gp_XYZ axis = axisIn;
+    const double am = axis.Modulus();
+    if (!(am > gp::Resolution())) return c;
+    axis /= am;
+    const Frame fr = makeFrame(origin, axis, gp_XYZ(1, 0, 0));
+    std::vector<double> zs, psis, rhos;
+    for (const gp_XYZ& p : band) {
+        const ProfPt pp = profOfPoint(p, fr, 0);
+        zs.push_back(pp.z);
+        psis.push_back(pp.psi);
+        rhos.push_back(pp.rho);
+    }
+    c.levels = countLevels(zs, tau);
+    c.stations = countColumns(psis, rhos, tau);
+    if (c.levels < 2 || c.stations < minStations(kParamsCircle)) {
+        c.why = "underdetermined";
+        return c;
+    }
+    c.lineRes = sectionLineResid(band, axis);
+    if (c.lineRes <= tau) {
+        c.why = "line";
+        return c;
+    }
+    std::vector<std::vector<gp_XYZ>> groups = family;
+    groups.push_back(band);
+    c.fit = jointAxisAbout(groups, origin, axis);
+    if (jointAxisCertifies(c.fit, tau)) {
+        c.ok = true;
+        c.why = "accept";
+        return c;
+    }
+    JointAxisFit g;
+    if (jointAxisFit(groups, origin, axis, maxIters, g)) {
+        c.fit = g;
+        c.refit = true;
+        if (jointAxisCertifies(g, tau)) {
+            c.ok = true;
+            c.why = "accept";
+            return c;
+        }
+    }
+    c.why = "vertex-off";
+    return c;
+}
+
+bool coaxialSameRadius(const JointAxisFit& fit, std::size_t nFamily, double tau) {
+    if (fit.radius.size() <= nFamily) return false;
+    const double R = fit.radius.back();
+    for (std::size_t g = 0; g < nFamily; ++g)
+        if (std::fabs(fit.radius[g] - R) <= tau) return true;
+    return false;
 }
 
 }  // namespace refit
