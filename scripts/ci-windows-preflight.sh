@@ -10,12 +10,17 @@
 # Host is required ($1 or STL2STEP_WIN_HOST). No baked-in user, hostname,
 # or LAN address.
 #
-# One-time prep on the PC (already done 2026-08-26): VS 2022 Build Tools
-# with MSVC + SDK + bundled CMake, and D:\stl2step-ci\install-occt.cmd
-# (vcpkg + opencascade x64-windows into D:\vcpkg).
+# Node roots (Windows paths, no spaces; defaults are the original D: layout):
+#   STL2STEP_WIN_ROOT   CI root          (default D:\stl2step-ci)
+#   STL2STEP_WIN_VCPKG  vcpkg checkout   (default D:\vcpkg)
+# The node lock is <drive of STL2STEP_WIN_ROOT>\team-node-lock.
 #
-# Repo lands wholesale in D:\stl2step-ci\repo each run (no rsync on
-# Windows); the build tree D:\stl2step-ci\build persists for incremental
+# One-time prep on the PC (already done 2026-08-26): VS 2022 Build Tools
+# with MSVC + SDK + bundled CMake, and <root>\install-occt.cmd
+# (vcpkg + opencascade x64-windows into <vcpkg>).
+#
+# Repo lands wholesale in <root>\repo each run (no rsync on
+# Windows); the build tree <root>\build persists for incremental
 # rebuilds. Mirrors ci.yml (windows job): vcpkg toolchain, VS multi-config
 # generator, Release, ctest -C Release.
 #
@@ -44,13 +49,20 @@ if [ -z "$HOST" ]; then
 fi
 REPO_ROOT="$(cd "$(dirname "$ORIG_SCRIPT")/.." && pwd)"
 
+_win_root_default='D:\stl2step-ci'
+_win_vcpkg_default='D:\vcpkg'
+WIN_ROOT="${STL2STEP_WIN_ROOT:-$_win_root_default}"
+WIN_VCPKG="${STL2STEP_WIN_VCPKG:-$_win_vcpkg_default}"
+WIN_ROOT_FWD="${WIN_ROOT//\\//}"                    # scp wants D:/stl2step-ci
+WIN_LOCK="${WIN_ROOT%%:*}:"'\team-node-lock'
+
 # Record the exact local HEAD the tree is synced from.
 SYNC_SHA="$(git -C "$REPO_ROOT" rev-parse HEAD)"
 SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
 SYNC_SHA_SHORT="${SYNC_SHA:0:7}"
 
 # Single-tenant node lock (NODE_LOCK_PROTOCOL=1; scripts/node-lock.sh).
-# --windows lock dir D:\team-node-lock. Owner is this preflight (local
+# --windows lock dir $WIN_LOCK (D:\team-node-lock by default). Owner is this preflight (local
 # hostname + pid). Equivalent to:
 #   scripts/node-lock.sh acquire --node "$HOST" --windows --name "windows-preflight-$SYNC_SHA_SHORT" --wait 1800
 LOCK_NAME="windows-preflight-${SYNC_SHA_SHORT}"
@@ -70,7 +82,7 @@ _nl_owner() {
     "$LOCK_NAME" "$(hostname 2>/dev/null || echo unknown)" "$$" "$(date +%s)" "$LOCK_TTL"
 }
 _nl_read() {
-  _nl_ssh 'cmd /c "if exist D:\team-node-lock\owner type D:\team-node-lock\owner"' 2>/dev/null | tr -d '\r' | head -1 || true
+  _nl_ssh "cmd /c \"if exist ${WIN_LOCK}\\owner type ${WIN_LOCK}\\owner\"" 2>/dev/null | tr -d '\r' | head -1 || true
 }
 _nl_stale() {
   local line="$1" started ttl age host pid now
@@ -97,13 +109,13 @@ _nl_acquire() {
   start=$(date +%s)
   while :; do
     owner="$(_nl_owner)"
-    if _nl_ssh "cmd /c \"mkdir D:\\team-node-lock 2>nul && echo ${owner}>D:\\team-node-lock\\owner\""; then
+    if _nl_ssh "cmd /c \"mkdir ${WIN_LOCK} 2>nul && echo ${owner}>${WIN_LOCK}\\owner\""; then
       echo "acquired ${HOST} ${LOCK_NAME}"
       return 0
     fi
     owner="$(_nl_read)"
     if [ -n "$owner" ] && _nl_stale "$owner" && [ "$retry" -eq 0 ]; then
-      _nl_ssh 'cmd /c "rmdir /s /q D:\team-node-lock"' || true
+      _nl_ssh "cmd /c \"rmdir /s /q ${WIN_LOCK}\"" || true
       retry=1
       continue
     fi
@@ -126,7 +138,7 @@ _nl_release() {
   [ -n "$owner" ] || return 0
   name="$(_nl_parse "$owner" name)"
   [ "$name" = "$LOCK_NAME" ] || return 4
-  _nl_ssh 'cmd /c "rmdir /s /q D:\team-node-lock"'
+  _nl_ssh "cmd /c \"rmdir /s /q ${WIN_LOCK}\""
 }
 _nl_status() {
   local owner
@@ -164,8 +176,8 @@ if [ "$_pf_head" != "$SYNC_SHA" ]; then
 fi
 SYNC_DIRTY="$(git -C "$REPO_ROOT" status --porcelain || true)"
 
-echo "== preflight: sync repo -> $HOST D:\\stl2step-ci\\repo (HEAD $SYNC_SHA)"
-ssh "$HOST" "cmd /c (if exist D:\\stl2step-ci\\repo rmdir /s /q D:\\stl2step-ci\\repo) & mkdir D:\\stl2step-ci\\repo"
+echo "== preflight: sync repo -> $HOST ${WIN_ROOT}\\repo (HEAD $SYNC_SHA)"
+ssh "$HOST" "cmd /c (if exist ${WIN_ROOT}\\repo rmdir /s /q ${WIN_ROOT}\\repo) & mkdir ${WIN_ROOT}\\repo"
 # tar on both ends. NO --exclude patterns: bsdtar matches them against
 # nested path components, which silently drops tests/gates/build_fixtures
 # and build_local.cpp (proven 2026-08-26, twice). Instead, enumerate the
@@ -194,7 +206,7 @@ done < <(ls -A "$REPO_ROOT")
 # COPYFILE_DISABLE: stop macOS bsdtar emitting AppleDouble ._* companions —
 # they extract as literal files on Windows and corrupt *.expected.json globs.
 COPYFILE_DISABLE=1 tar -czf - -C "$REPO_ROOT" "${entries[@]}" \
-  | ssh "$HOST" "cmd /c tar -xzf - -C D:\\stl2step-ci\\repo"
+  | ssh "$HOST" "cmd /c tar -xzf - -C ${WIN_ROOT}\\repo"
 if [ -f "$REPO_ROOT/.git" ]; then
   echo "== preflight: worktree .git is a pointer file; shipping a standalone gitdir detached at $SYNC_SHA_SHORT"
   GIT_SYNC_TMP="$(mktemp -d "${TMPDIR:-/tmp}/ci-preflight-git-XXXXXX")"
@@ -204,7 +216,7 @@ if [ -f "$REPO_ROOT/.git" ]; then
     "$(git -C "$REPO_ROOT" rev-parse --git-common-dir)/" "$GIT_SYNC_TMP/.git/"
   printf '%s\n' "$SYNC_SHA" > "$GIT_SYNC_TMP/.git/HEAD"
   COPYFILE_DISABLE=1 tar -czf - -C "$GIT_SYNC_TMP" .git \
-    | ssh "$HOST" "cmd /c tar -xzf - -C D:\\stl2step-ci\\repo"
+    | ssh "$HOST" "cmd /c tar -xzf - -C ${WIN_ROOT}\\repo"
 fi
 
 echo "== preflight: build + ctest (Release)"
@@ -230,7 +242,9 @@ if [[ -f repo/tests/gates/baseline/.build/CMakeCache.txt ]] \
   rm -rf repo/tests/gates/baseline/.build
 fi
 EOF
-cat > /tmp/stl2step-win-preflight.cmd <<'EOF'
+# Unquoted heredoc so the node roots expand: keep the body free of $, backticks,
+# and backslashes before \ $ ` or a newline, or cmd receives mangled text.
+cat > /tmp/stl2step-win-preflight.cmd <<EOF
 @echo off
 set BT=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools
 set CMAKE=%BT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
@@ -241,19 +255,19 @@ rem diff for the corpus determinism check). Appended, so nothing is shadowed.
 set PATH=%PATH%;C:\Program Files\Git\bin;C:\Program Files\Git\usr\bin
 rem Windows Python defaults stdout to cp1252; the gate runner prints U+2264.
 set "PYTHONUTF8=1"
-cd /d D:\stl2step-ci
+cd /d ${WIN_ROOT}
 "%CMAKE%" -S repo -B build ^
-  -DCMAKE_TOOLCHAIN_FILE=D:\vcpkg\scripts\buildsystems\vcpkg.cmake ^
+  -DCMAKE_TOOLCHAIN_FILE=${WIN_VCPKG}\scripts\buildsystems\vcpkg.cmake ^
   -DSTL2STEP_BUILD_EXAMPLES=ON -DSTL2STEP_BUILD_TESTS=ON || exit /b 1
 "%CMAKE%" --build build --config Release -j 14 || exit /b 1
 bash baseline-cleanup.sh || exit /b 1
 "%CTEST%" --test-dir build -C Release --output-on-failure
 EOF
-scp -q /tmp/stl2step-baseline-cleanup.sh "$HOST:D:/stl2step-ci/baseline-cleanup.sh"
-scp -q /tmp/stl2step-win-preflight.cmd "$HOST:D:/stl2step-ci/preflight.cmd"
+scp -q /tmp/stl2step-baseline-cleanup.sh "$HOST:${WIN_ROOT_FWD}/baseline-cleanup.sh"
+scp -q /tmp/stl2step-win-preflight.cmd "$HOST:${WIN_ROOT_FWD}/preflight.cmd"
 
 LOG="$(mktemp)"
-if ! ssh "$HOST" "cmd /c D:\\stl2step-ci\\preflight.cmd" 2>&1 | tee "$LOG"; then
+if ! ssh "$HOST" "cmd /c ${WIN_ROOT}\\preflight.cmd" 2>&1 | tee "$LOG"; then
   rm -f "$LOG"
   exit 1
 fi
