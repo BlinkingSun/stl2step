@@ -230,6 +230,28 @@ int main() {
     expect(torusRoundDecided(true, 4, 4), "round decided: every naming region built");
     expect(torusRoundDecided(true, 7, 4), "round decided: later regions cannot name a torus");
 
+    // closedTorusPartnerFailed: a failed region beside a closed torus built whole
+    // decides the round like a failed torus.
+    {
+        auto besideBuilt = [](int id) { return id == 5 || id == 9; };
+        expect(!closedTorusPartnerFailed(std::vector<int>{}, besideBuilt),
+               "partner failed: no failed region");
+        expect(!closedTorusPartnerFailed(std::vector<int>{1, 2, 7}, besideBuilt),
+               "partner failed: no failed region beside a built closed torus");
+        expect(closedTorusPartnerFailed(std::vector<int>{1, 9}, besideBuilt),
+               "partner failed: the last failed region is a cap partner");
+        expect(closedTorusPartnerFailed(std::vector<int>{5}, besideBuilt),
+               "partner failed: a single cap partner");
+        const bool partner = closedTorusPartnerFailed(std::vector<int>{3, 5}, besideBuilt);
+        expect(!torusRoundDecided(false || partner, 3, 4),
+               "partner failed: a naming region is still unbuilt");
+        expect(torusRoundDecided(false || partner, 4, 4),
+               "partner failed: every naming region built");
+        expect(!torusRoundDecided(false || closedTorusPartnerFailed(std::vector<int>{3}, besideBuilt),
+                                  9, 4),
+               "partner failed: no partner, no failed torus, the round builds on");
+    }
+
     // closedWallWithWindows: two rims winding once in opposite senses, every other
     // loop a window that does not wind.
     expect(closedWallWithWindows(std::vector<int>{1, -1}), "wall: two rims, no window");

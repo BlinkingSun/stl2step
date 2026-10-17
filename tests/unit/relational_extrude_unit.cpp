@@ -1066,29 +1066,33 @@ struct RobFixture {
     int strayCone = -1;
 };
 
-static RobFixture makeRob(double robDevTau) {
+static RobFixture makeRob(double robDevTau,
+                          stl2step::refit::Origin robOrigin = stl2step::refit::Origin::CylGrow) {
     using namespace stl2step::refit;
     RobFixture f;
     f.m = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
     const double tau = 2.0 * 1e-4;
     auto& provs = f.m.work.provisionals;
+    // A prior fillet strip stamps its provisionals ConsumedFillet.
+    const ProvClaim robStamp =
+        robOrigin == Origin::FilletStrip ? ProvClaim::ConsumedFillet : ProvClaim::ConsumedCylinder;
     for (int k = 10; k <= 11; ++k) {
-        provs[(std::size_t)k].claim = ProvClaim::ConsumedCylinder;
+        provs[(std::size_t)k].claim = robStamp;
         for (int t : provs[(std::size_t)k].tris) f.stolen.push_back(t);
     }
-    auto stray = [&](double x) {
+    auto stray = [&](double x, ProvClaim stamp) {
         const int a = f.m.synth.addV(gp_XYZ(x, 0, 50));
         const int b = f.m.synth.addV(gp_XYZ(x + 1, 0, 50));
         const int c = f.m.synth.addV(gp_XYZ(x, 1, 51));
         const int t = f.m.synth.tri(a, b, c);
         addStrip(f.m.work, {t});
-        provs.back().claim = ProvClaim::ConsumedCylinder;
+        provs.back().claim = stamp;
         return t;
     };
-    f.strayRob = stray(50.0);
+    f.strayRob = stray(50.0, robStamp);
     f.strayRobProv = (int)provs.size() - 1;
-    f.strayKeep = stray(60.0);
-    f.strayCone = stray(70.0);
+    f.strayKeep = stray(60.0, ProvClaim::ConsumedCylinder);
+    f.strayCone = stray(70.0, ProvClaim::ConsumedCylinder);
     auto region = [&](Origin o, std::vector<int> tris, double dev) {
         Region r;
         r.id = 0;
@@ -1101,7 +1105,7 @@ static RobFixture makeRob(double robDevTau) {
     };
     std::vector<int> robTris = f.stolen;
     robTris.push_back(f.strayRob);
-    f.m.work.accepted.push_back(region(Origin::CylGrow, robTris, robDevTau * tau));
+    f.m.work.accepted.push_back(region(robOrigin, robTris, robDevTau * tau));
     f.m.work.accepted.push_back(region(Origin::CylGrow, {f.strayKeep}, 0.5 * tau));
     Region cone = region(Origin::ChamferCone, {f.strayCone}, 0.0);
     cone.filletNbrA = 1;
@@ -1166,6 +1170,54 @@ static void case22() {
                  (int)r.work.accepted.size());
     if (!ok) dumpFail("case22", r);
     expect(ok, "case22 certified CylGrow region is not robbed");
+}
+
+static void case29() {
+    using namespace stl2step::refit;
+    // D-fc-4.3 with the segment's fillet strips: a prior FilletStrip at 100 τ
+    // (uncertified, D-fc-1.4) is robbed by the certified band and dissolves
+    // like an uncertified CylGrow. Its stray provisional (fillet
+    // stamp) is Unclaimed again; one FilletStrip -- the band -- remains.
+    RobFixture f = makeRob(100.0, Origin::FilletStrip);
+    const std::vector<int> band = f.m.bandTris;
+    Run r = runClaim(f.m.synth, std::move(f.m.work), 1e-4, 1);
+    int nFil = 0;
+    const Region* fil = nullptr;
+    for (const Region& a : r.work.accepted)
+        if (a.origin == Origin::FilletStrip) {
+            ++nFil;
+            fil = &a;
+        }
+    const std::string rob = [&] {
+        std::istringstream is(r.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_ROB", 0) == 0) return line;
+        return std::string();
+    }();
+    const bool ok = nFil == 1 && fil != nullptr && fil->tris.size() == band.size() &&
+                    r.work.accepted.size() == 3 &&
+                    r.work.provisionals[(std::size_t)f.strayRobProv].claim == ProvClaim::Unclaimed &&
+                    fieldNum(rob, "stolen") == 4.0 && fieldNum(rob, "released") == 1.0;
+    std::fprintf(stderr, "case29 nFil=%d filTris=%d %s\n", nFil, fil ? (int)fil->tris.size() : -1,
+                 rob.c_str());
+    if (!ok) dumpFail("case29", r);
+    expect(ok, "case29 uncertified prior FilletStrip robbed by a certified band dissolves");
+}
+
+static void case30() {
+    using namespace stl2step::refit;
+    // A prior FilletStrip within τ is a certified surface: never robbed.
+    RobFixture f = makeRob(0.5, Origin::FilletStrip);
+    Run r = runClaim(f.m.synth, std::move(f.m.work), 1e-4, 1);
+    bool kept = false;
+    for (const Region& a : r.work.accepted)
+        if (a.origin == Origin::FilletStrip && a.tris.size() == f.stolen.size() + 1) kept = true;
+    const bool ok = kept && r.diag.find("DIAG_REL_ROB") == std::string::npos;
+    std::fprintf(stderr, "case30 kept=%d accepted=%d\n", kept ? 1 : 0,
+                 (int)r.work.accepted.size());
+    if (!ok) dumpFail("case30", r);
+    expect(ok, "case30 certified prior FilletStrip is not robbed");
 }
 
 static void case23() {
@@ -1447,6 +1499,8 @@ int main() {
     case26();
     case27();
     case28();
+    case29();
+    case30();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;

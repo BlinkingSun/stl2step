@@ -194,6 +194,19 @@ inline bool torusRoundDecided(bool torusFailed, std::size_t built, std::size_t n
     return torusFailed && built >= namingEnd;
 }
 
+// The cap-partner rule ends a round with no failed torus the same way: a failed
+// region beside a closed torus built whole (builtClosedTorusBeside) leaves that
+// torus's 2π rim beside a mesh polyline, so the round ships nothing and names the
+// torus. Every region beside a closed torus names one, so once the naming regions
+// are built the regions after them cannot change the outcome (torusRoundDecided).
+template <class BuiltClosedTorusBeside>
+inline bool closedTorusPartnerFailed(const std::vector<int>& failedIds,
+                                     BuiltClosedTorusBeside&& builtClosedTorusBeside) {
+    for (int id : failedIds)
+        if (builtClosedTorusBeside(id)) return true;
+    return false;
+}
+
 // A closed rim chain read from its terminal (D-130-16 two-arc rim collapse). The
 // chain's terminal is the seam column of the wall it bounds, which need not be
 // its first mesh vertex; the loop is rotated to start there and closed by
