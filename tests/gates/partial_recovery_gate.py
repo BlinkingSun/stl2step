@@ -806,17 +806,26 @@ def evaluate_pickup(
         floor=0,
     )
 
+    # DECISION A1 (tori remain faceted) is superseded for the certified
+    # relational tori (D-fc-4.9 / D-fc-4.11): the shipped torus count is an
+    # EXACT ratchet (a drop is a regression, a rise is an unrecorded claim) and
+    # can never exceed the ground truth's torus faces.
     cen_torus = census_surface_count(dict(census), "torus")
+    tor_expected = int(rch.get("censusTorusExpected", 0))
+    tor_gt = int(rch.get("censusTorusGtCount", 0))
+    tor_ok = cen_torus == tor_expected and cen_torus <= tor_gt
     add(
         "census.torus",
-        cen_torus == 0,
+        tor_ok,
         (
-            f"census.torus={cen_torus} != 0 (DECISION A1: tori remain faceted)"
-            if cen_torus != 0
-            else f"census.torus={cen_torus} (must remain faceted)"
+            f"census.torus={cen_torus} == expected {tor_expected} (<= GT {tor_gt})"
+            if tor_ok
+            else f"census.torus={cen_torus} != expected {tor_expected} or > GT {tor_gt} "
+            "(prg-ratchet censusTorusExpected / censusTorusGtCount)"
         ),
         got=cen_torus,
-        floor=0,
+        expected=tor_expected,
+        gt=tor_gt,
     )
 
     radii = census_radii(dict(census))
@@ -1046,7 +1055,7 @@ def synthetic_pass_census() -> Dict[str, Any]:
             "plane": FLOOR_PLANES,
             "cylinder": FLOOR_CYLINDERS,
             "sphere": 0,
-            "torus": 0,
+            "torus": _expected_torus(),
         },
         "cylinder_radii": radii,
     }
@@ -1071,10 +1080,15 @@ def synthetic_head_fail_result() -> Dict[str, Any]:
     }
 
 
+def _expected_torus() -> int:
+    """The ratcheted shipped-torus count (prg-ratchet censusTorusExpected)."""
+    return int(load_prg_ratchet().get("censusTorusExpected", 0))
+
+
 def synthetic_head_fail_census() -> Dict[str, Any]:
     return {
         "ok": True,
-        "surfaces": {"plane": 0, "cylinder": 0, "sphere": 0, "torus": 0},
+        "surfaces": {"plane": 0, "cylinder": 0, "sphere": 0, "torus": _expected_torus()},
         "cylinder_radii": [],
     }
 
@@ -1580,7 +1594,7 @@ def _self_test() -> int:
     check(
         any(c.name == "census.sphere" and c.ok for c in pass_checks)
         and any(c.name == "census.torus" and c.ok for c in pass_checks),
-        "synthetic-pass asserts census.sphere==0 and census.torus==0",
+        "synthetic-pass asserts census.sphere==0 and census.torus==expected",
     )
 
     head_checks = evaluate_pickup(
@@ -1599,7 +1613,7 @@ def _self_test() -> int:
     check("census.plane" in named, "HEAD-red names census.plane")
     check("census.cylinder" in named, "HEAD-red names census.cylinder")
     check("census.sphere" not in named, "HEAD-red does not fail census.sphere (0 at HEAD)")
-    check("census.torus" not in named, "HEAD-red does not fail census.torus (0 at HEAD)")
+    check("census.torus" not in named, "HEAD-red does not fail census.torus (expected count)")
     msgs = " ".join(c.message for c in head_checks if not c.ok)
     check("smoothBuiltPlanes=0 < floor 18" in msgs, "HEAD-red message cites plane floor 18")
     check("smoothBuiltCylinders=0 < floor 30" in msgs, "HEAD-red message cites cylinder floor 30")
@@ -1762,13 +1776,25 @@ def _self_test() -> int:
         "census.sphere leak is UNEXPECTED (not PASS_REGEX inverted)",
     )
 
+    for delta, label in ((1, "an unrecorded extra torus"), (-1, "a lost certified torus")):
+        torus_cen = synthetic_pass_census()
+        torus_cen["surfaces"] = dict(torus_cen["surfaces"])
+        torus_cen["surfaces"]["torus"] = max(0, _expected_torus() + delta)
+        if torus_cen["surfaces"]["torus"] == _expected_torus():
+            continue
+        tor = evaluate_pickup(
+            synthetic_pass_result(), torus_cen, gt_radii, 0, strict=True
+        )
+        check("census.torus" in failing_names(tor), f"{label} fails census.torus")
+    over_gt = dict(load_prg_ratchet())
+    over_gt["censusTorusExpected"] = int(over_gt.get("censusTorusGtCount", 0)) + 1
     torus_cen = synthetic_pass_census()
     torus_cen["surfaces"] = dict(torus_cen["surfaces"])
-    torus_cen["surfaces"]["torus"] = 1
+    torus_cen["surfaces"]["torus"] = over_gt["censusTorusExpected"]
     tor = evaluate_pickup(
-        synthetic_pass_result(), torus_cen, gt_radii, 0, strict=True
+        synthetic_pass_result(), torus_cen, gt_radii, 0, strict=True, ratchet=over_gt
     )
-    check("census.torus" in failing_names(tor), "analytic torus fails census.torus")
+    check("census.torus" in failing_names(tor), "a torus count above the GT fails census.torus")
 
     head_exp, head_unexp = split_hard_fails(head_checks)
     check(

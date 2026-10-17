@@ -59,9 +59,7 @@
   "gate_130": {
     "cyl_meets_chamfer": "D-130-23 (B6 deferred)"
   },
-  "partial_recovery_gate": {
-    "d3f7.radiiMultiset": "USER 2026-10-15 01:50 approved exception: relational R3 fillet beside B1 slivers; cleared by W1.3 b1-reclaim"
-  },
+  "partial_recovery_gate": {},
   "p1_compose_gate": {
     "S24_hem_uturn": "D-fc-2 / D-fc-1.14. Recoverable cylinders R=1 and R=3 axis +X have no accepted region. Hem-deferred.",
     "S25_peg_fillet": "D-fc-1.14. Cylinder R=6 at (25,25,8) and torus Rmaj=8 Rmin=2 at (25,25,10) have no accepted region.",

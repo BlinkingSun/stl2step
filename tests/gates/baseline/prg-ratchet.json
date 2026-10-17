@@ -3,9 +3,13 @@
   "authority": "prg-ratchet.json",
   "fixtureId": "handle-pickup",
   "engineRef": "9b693c8",
-  "tightBudgetAbsDeltaMM3Ceiling": 10.81525,
+  "tightBudgetAbsDeltaMM3Ceiling": 12.8305,
+  "tightBudgetNote": "fc-5 (D-fc-4.12 F-3, fx-tori-r4 7d5187a; ORCHESTRATOR RULING 2026-10-17, audit-fx-tori-r4 PASS): the two P2 partial tori ship with true torus|plane contact circles, so the pickup volume move is the analytic sagitta only (-15.50 mm3, matched to 0.3 % by the audit; the chord-edge lunes are gone). |V_step-V_mesh| measured 12.8305 mm3 on macOS (formula budget 43.7823); D-130-15(1): a mesh-referenced volume cell cannot be reached by a correct analytic recovery. Ceiling = measured max over macOS/Linux/Windows (D-130-24).",
   "censusRadiiPhantomCeiling": 18,
   "d3f7R3BuiltCeiling": 75,
+  "censusTorusExpected": 2,
+  "censusTorusGtCount": 6,
+  "censusTorusNote": "fc-4 (D-fc-4.9/4.11, fx-tori-r3 4afada3, ORCHESTRATOR RULING 2026-10-17): the two P2 arc-rib-to-base fillets ship as certified partial tori (joint donor+chain family certificate, donors <=0.283 tau, chain <=0.337 tau); DECISION A1 (tori remain faceted) superseded for certified relational tori. Exact count; GT has 6 torus faces (tests/diag/handle-pickup/ground-truth.json surfaces.torus).",
   "d3f7R3GtMultiplicity": 21,
   "d3f7ExtraClassCeilings": {
     "2.55": 2

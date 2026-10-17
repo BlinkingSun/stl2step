@@ -192,10 +192,9 @@
       "overCap"
     ]
   },
-  "expectedRedCountNote": "D-fc-5.4 (audit-fc3-instruments F1; lane fx-tooling, 2026-10-17): a per-platform COUNT ceiling on a line expectedRed admits, so new red lines cannot enter a listed class silently. Seeded at the overCap counts measured by `edge_class_gate.py --measure --binary build-wip/stl2step` on macOS / Homebrew OCCT 7.9.3 at 37710e6 (fc-4 integration). A platform with no value of its own uses the macos value; the orchestrator adds linux/windows values from their next preflight measures. Body244 measures overCap=0 (its expectedRed overCap entry is already RATCHET-CLEAR) and is counted at its measured 0. An increase FAILS; a decrease prints RATCHET-TIGHTEN.",
+  "expectedRedCountNote": "D-fc-5.4 (audit-fc3-instruments F1; lane fx-tooling, 2026-10-17): a per-platform COUNT ceiling on a line expectedRed admits, so new red lines cannot enter a listed class silently. Seeded at the overCap counts measured by `edge_class_gate.py --measure --binary build-wip/stl2step` on macOS / Homebrew OCCT 7.9.3 at 37710e6 (fc-4 integration). A platform with no value of its own uses the macos value; the orchestrator adds linux/windows values from their next preflight measures. Body244 has no entry: its expectedRed overCap admission was deleted in fc-4 (RATCHET-CLEAR, 41aba62), so a Body244 overCap is a hard FAIL. An increase FAILS; a decrease prints RATCHET-TIGHTEN.",
   "expectedRedCount": {
     "Body11": {"overCap": {"macos": 3029}},
-    "Body244": {"overCap": {"macos": 0}},
     "Body28": {"overCap": {"macos": 477}},
     "S03": {"overCap": {"macos": 52}},
     "S09": {"overCap": {"macos": 4}},
