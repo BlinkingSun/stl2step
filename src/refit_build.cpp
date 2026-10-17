@@ -16227,6 +16227,41 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         }
                     }
                 }
+                // F-3 (D-fc-4.12): an OPEN chain between a partial torus blend and a
+                // plane perpendicular to its axis at the tube's top or bottom, or a
+                // coaxial cylinder at its outer or inner equator, is their tangent
+                // contact -- the torus's own v-iso there, which the partner holds
+                // within anchorTol(partner) + tau (D-fc-1.4, D-fc-1.6.7) -- not the
+                // mesh chords: one arc both faces share.
+                if (curve.kind == AnalyticCurve::None && anaPair && !ch.closedLoop &&
+                    !coneRimPartner && ch.meshVerts.size() >= 3) {
+                    const Region* tor = (A && isTorusBlendR(*A)) ? A
+                                       : (B && isTorusBlendR(*B)) ? B
+                                                                 : nullptr;
+                    const Region* oth = (tor == A) ? B : A;
+                    const double tauC = 2.0 * std::max(mv.quantFloor, 0.0);
+                    if (tor && oth && !tor->closed360 && tauC > 0.0) {
+                        const gp_Torus gt(tor->ax, tor->radius, tor->radius2);
+                        const double tolC = std::max(tauC, oth->maxVertexDev) + tauC;
+                        gp_Circ cc;
+                        const bool on =
+                            (oth->type == SurfType::Plane &&
+                             torusPlaneContactCircle(gt, gp_Pln(oth->ax), tolC, cc)) ||
+                            (oth->type == SurfType::Cylinder &&
+                             torusCylinderContactCircle(gt, gp_Cylinder(oth->ax, oth->radius),
+                                                        tolC, cc));
+                        if (on) {
+                            curve.kind = AnalyticCurve::Circ;
+                            curve.circ = cc;
+                        }
+                        if (diagRelEnabled())
+                            std::fprintf(stderr,
+                                         "DIAG_TORUS_CONTACT ci=%d tor=%d oth=%d othType=%d "
+                                         "nV=%zu tol=%.6g on=%d\n",
+                                         (int)ci, tor->id, oth->id, (int)oth->type,
+                                         ch.meshVerts.size(), tolC, on ? 1 : 0);
+                    }
+                }
                 // Detector B: a plane-loop CIRCLE answers where IntAna has no
                 // answer at all. It never overrides a curve IntAna derived from
                 // the two shipped surfaces -- a shared edge has to lie on both,

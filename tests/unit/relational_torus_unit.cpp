@@ -6,6 +6,7 @@
 #include "posix_compat.hpp"
 #include "refit_relational.hpp"
 #include "refit_relational_torus.hpp"
+#include "refit_torus_math.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,10 @@
 #include <vector>
 
 #include <gp_Ax1.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Torus.hxx>
 #include <gp_Lin.hxx>
 
 using namespace stl2step::refit;
@@ -824,6 +829,45 @@ static void caseStationCands() {
            "stationCands: no chain, no stations");
 }
 
+// F-3 (D-fc-4.12): the tangent contact of a partial torus with a plane
+// perpendicular to its axis at the tube's top, and with a coaxial cylinder at
+// the tube's outer equator, is that v-iso circle; a plane or cylinder that does
+// not hold the circle within tol is no contact.
+static void caseContactCircle() {
+    const double tol = 2e-4;
+    const gp_Ax3 frame(gp_Pnt(10, -5, 3), gp_Dir(0, 1, 0), gp_Dir(1, 0, 0));
+    const gp_Torus tor(frame, 89.5, 3.0);
+    gp_Circ c;
+    // Base plane at the tube's top (y = -5 + 3), tilted 1e-6 rad: |offset| + R sin.
+    const gp_Pln top(gp_Ax3(gp_Pnt(0, -2, 0), gp_Dir(1e-6, 1, 0)));
+    expect(torusPlaneContactCircle(tor, top, tol, c) && std::fabs(c.Radius() - 89.5) < 1e-12 &&
+               std::fabs(c.Location().Y() - (-2.0)) < 1e-12,
+           "contact: a perpendicular plane at the tube's top holds the v = pi/2 iso");
+    const gp_Pln bottom(gp_Ax3(gp_Pnt(0, -8, 0), gp_Dir(0, 1, 0)));
+    expect(torusPlaneContactCircle(tor, bottom, tol, c) && std::fabs(c.Location().Y() - (-8.0)) < 1e-12,
+           "contact: ... and at the bottom the v = -pi/2 iso");
+    const gp_Pln mid(gp_Ax3(gp_Pnt(0, -5, 0), gp_Dir(0, 1, 0)));
+    expect(!torusPlaneContactCircle(tor, mid, tol, c), "contact: a plane through the tube is no contact");
+    const gp_Pln tilted(gp_Ax3(gp_Pnt(0, -2, 0), gp_Dir(1e-5, 1, 0)));
+    expect(!torusPlaneContactCircle(tor, tilted, tol, c),
+           "contact: a plane tilted R*sin > tol off the axis is no contact");
+    // Wall cylinder R 92.5 coaxial, tilted 1e-6 rad and moved 5e-5 off axis:
+    // the tilt only squashes the circle to second order.
+    const gp_Cylinder wall(gp_Ax3(gp_Pnt(10 + 5e-5, 0, 3), gp_Dir(1e-6, 1, 0)), 92.5 + 5e-5);
+    expect(torusCylinderContactCircle(tor, wall, tol, c) && std::fabs(c.Radius() - 92.5) < 1e-12,
+           "contact: a coaxial cylinder at the outer equator holds the v = 0 iso");
+    const gp_Cylinder inner(gp_Ax3(gp_Pnt(10, 0, 3), gp_Dir(0, 1, 0)), 86.5);
+    expect(torusCylinderContactCircle(tor, inner, tol, c) && std::fabs(c.Radius() - 86.5) < 1e-12,
+           "contact: ... and at the inner equator the v = pi iso");
+    const gp_Cylinder fat(gp_Ax3(gp_Pnt(10, 0, 3), gp_Dir(0, 1, 0)), 92.5 + 3 * tol);
+    expect(!torusCylinderContactCircle(tor, fat, tol, c),
+           "contact: a cylinder whose radius misses the equator by > tol is no contact");
+    const gp_Cylinder skew(gp_Ax3(gp_Pnt(10, 0, 3), gp_Dir(0.05, 1, 0)), 92.5);
+    expect(!torusCylinderContactCircle(tor, skew, tol, c),
+           "contact: a cylinder tilted to first order is no contact");
+    expect(!torusPlaneContactCircle(tor, top, -1.0, c), "contact: a negative tol admits nothing");
+}
+
 // D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
 // its triangles and its atom keep their pre-T state.
 static void caseWithheld() {
@@ -984,6 +1028,7 @@ int main(int argc, char** argv) {
     caseBridgeChain();
     caseRingsOf();
     caseStationCands();
+    caseContactCircle();
     caseWithheld();
     caseWindowOverlap();
     caseJointTorus();

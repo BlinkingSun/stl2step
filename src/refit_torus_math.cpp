@@ -38,7 +38,9 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Torus.hxx>
 #include <gp_Vec.hxx>
@@ -72,6 +74,7 @@ double distToInterval(double x, double lo, double hi) {
 }
 
 constexpr double kTorusNaN = std::numeric_limits<double>::quiet_NaN();
+constexpr double kTorusPi = 3.14159265358979323846264338327950288;
 
 }  // namespace
 
@@ -121,6 +124,47 @@ bool torusVIsoCircle(const gp_Torus& torus, double v, gp_Circ& out) {
     const gp_Pnt c = torus.Location().Translated(gp_Vec(za) * offset);
     out = gp_Circ(gp_Ax2(c, za, torus.Position().XDirection()), radius);
     return true;
+}
+
+bool torusPlaneContactCircle(const gp_Torus& torus, const gp_Pln& pln, double tol, gp_Circ& out) {
+    double R, r;
+    if (!torusParams(torus, R, r) || !(tol >= 0.0)) return false;
+    const gp_Vec a(torus.Axis().Direction());
+    const gp_Vec n(pln.Axis().Direction());
+    const double tilt = a.Crossed(n).Magnitude();
+    for (const double v : {0.5 * kTorusPi, -0.5 * kTorusPi}) {
+        gp_Circ c;
+        if (!torusVIsoCircle(torus, v, c)) continue;
+        const double sup = std::fabs(gp_Vec(pln.Location(), c.Location()).Dot(n)) + c.Radius() * tilt;
+        if (std::isfinite(sup) && sup <= tol) {
+            out = c;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool torusCylinderContactCircle(const gp_Torus& torus, const gp_Cylinder& cyl, double tol,
+                                gp_Circ& out) {
+    double R, r;
+    if (!torusParams(torus, R, r) || !(tol >= 0.0)) return false;
+    const gp_Vec a(torus.Axis().Direction());
+    const gp_Vec b(cyl.Axis().Direction());
+    // Seen along the cylinder axis the circle is an ellipse of semi-axes radius
+    // and radius |a.b| about its centre's projection.
+    const double squash = 1.0 - std::min(1.0, std::fabs(a.Dot(b)));
+    const gp_Vec d(cyl.Location(), torus.Location());
+    const double off = (d - b * d.Dot(b)).Magnitude();
+    for (const double v : {0.0, kTorusPi}) {
+        gp_Circ c;
+        if (!torusVIsoCircle(torus, v, c)) continue;
+        const double sup = off + std::fabs(c.Radius() - cyl.Radius()) + c.Radius() * squash;
+        if (std::isfinite(sup) && sup <= tol) {
+            out = c;
+            return true;
+        }
+    }
+    return false;
 }
 
 double pointTorusDist(const gp_Torus& torus, const gp_Pnt& p) {
