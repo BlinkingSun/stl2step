@@ -807,6 +807,101 @@ bool emitCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const B
     return true;
 }
 
+// D-fc-5.5. A partial cone (a ChamferCone that does not close) about the
+// family axis (origin, axis): Location on the R_lo rim, XDirection the radial
+// direction of the band's first azimuth (closedOf's uMin), so the admitted arc
+// is u in [0, span] and the face never crosses the surface's period. Radii from
+// the certified profile line; nSides by the partial column rule.
+bool emitPartialCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const Band& band,
+                     const gp_XYZ& origin, const gp_XYZ& axis, const PartialConeCert& pc,
+                     double& spanOut, int& straddle) {
+    const MeshView& mv = *wm.mv;
+    const Frame f0 = makeFrame(origin, axis, donor.fr.e1);
+    std::vector<gp_XYZ> pts;
+    bandPoints(band, pts);
+    std::vector<Vtx> uniq;
+    for (const gp_XYZ& p : pts) {
+        Vtx v;
+        v.p = p;
+        v.pr = profOfPoint(p, f0, 0);
+        uniq.push_back(v);
+    }
+    const ClosedM cl = closedOf(mv, f0, band.tris, uniq, wm.thetaBin);
+    if (cl.closed || !(cl.span > 0.0)) return false;
+    const double RzMin = pc.rhoAt(pc.zLo);
+    const double RzMax = pc.rhoAt(pc.zHi);
+    // The face must not pass its apex (vertices on the axis are never members).
+    if (!(RzMin > 0.0) || !(RzMax > 0.0)) return false;
+    const bool loAtMin = RzMin <= RzMax;
+    const double Rlo = loAtMin ? RzMin : RzMax;
+    const double Rhi = loAtMin ? RzMax : RzMin;
+    const double zLo = loAtMin ? pc.zLo : pc.zHi;
+    const double height = std::abs(pc.zHi - pc.zLo);
+    const double hSigned = loAtMin ? height : -height;
+    if (!(Rhi - Rlo > wm.tau)) return false;
+    const gp_XYZ loc = f0.origin + f0.axis * zLo;
+    const gp_XYZ xDir = f0.e1 * std::cos(cl.uMin) + f0.e2 * std::sin(cl.uMin);
+    const Frame placed = makeFrame(loc, f0.axis, xDir);
+    double sigma = 0;
+    for (int t : band.tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        gp_XYZ rad = triCentroid(mv, t) - loc;
+        rad -= placed.axis * rad.Dot(placed.axis);
+        const double rm = rad.Modulus();
+        if (rm > gp::Resolution()) sigma += a * n.Dot(rad / rm);
+    }
+    const int nSides = std::max(cl.nSides, 3);
+    double dVol = 0;
+    for (int t : band.tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        if (!(a > 0.0)) continue;
+        const double u = (triCentroid(mv, t) - loc).Dot(placed.axis);
+        const double rhoC = Rlo + (std::abs(hSigned) > gp::Resolution() ? (u / hSigned) : 0.0) * (Rhi - Rlo);
+        dVol += a * coneFrustumDVolDensity(rhoC, Rlo, Rhi, hSigned, nSides);
+    }
+    if (!std::isfinite(dVol)) dVol = 0;
+    const double kScale = std::sqrt(1.0 + pc.k * pc.k);
+    double sum2 = 0;
+    for (const Vtx& v : uniq) {
+        const ProfPt pp = profOfPoint(v.p, f0, 0);
+        const double d = std::fabs(pp.rho - pc.rhoAt(pp.z)) / kScale;
+        sum2 += d * d;
+    }
+    Region r;
+    r.id = 0;
+    r.type = SurfType::Cone;
+    r.origin = Origin::ChamferCone;
+    r.ax = gp_Ax3(gp_Pnt(loc.X(), loc.Y(), loc.Z()),
+                  gp_Dir(placed.axis.X(), placed.axis.Y(), placed.axis.Z()),
+                  gp_Dir(placed.e1.X(), placed.e1.Y(), placed.e1.Z()));
+    r.radius = Rlo;
+    r.uMin = 0;
+    r.uMax = cl.span;
+    r.vMin = Rlo;
+    r.vMax = Rhi;
+    r.closed360 = false;
+    r.outwardNormal = sigma > 0.0;
+    r.tris = band.tris;
+    r.maxVertexDev = pc.lineRes;
+    r.rmsVertexDev = uniq.empty() ? 0 : std::sqrt(sum2 / (double)uniq.size());
+    r.chordSagitta = chordSagitta(Rlo, nSides);
+    r.nSides = nSides;
+    r.dVolPredicted = (sigma > 0.0 ? 1.0 : -1.0) * dVol;
+    r.maxVertexSnap = hSigned;
+    r.reject = Reject::None;
+    r.builtAs = BuiltAs::NotBuilt;
+    r.filletNbrA = donor.idx;
+    r.filletNbrB = -1;
+    straddle = countStraddle(work, band.tris, (int)mv.nTri);
+    std::vector<int> touched;
+    trimProvisionals(mv, work, band.tris, (int)mv.nTri, ProvClaim::ConsumedCylinder, touched);
+    work.accepted.push_back(std::move(r));
+    spanOut = cl.span;
+    return true;
+}
+
 void arcExtent(std::vector<double> a, double& lo, double& hi, double& maxGap) {
     lo = hi = maxGap = 0;
     if (a.empty()) return;
@@ -1953,7 +2048,165 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             continue;
         }
         if (!cl.closed) {
-            refuse("partial-cone");
+            // D-fc-5.5. A band that does not close is a PARTIAL cone when it
+            // certifies about its donor's certified coaxial family axis.
+            if (famId < 0) {
+                refuse("partial-cone");
+                continue;
+            }
+            const CoaxFamily& fam = lf.fams[(std::size_t)famId];
+            // Each edge-connected component of the band is certified and
+            // claimed on its own (one surface piece, one outer loop), in
+            // min-triangle order.
+            std::vector<std::vector<int>> comps;
+            {
+                std::vector<char> seen((std::size_t)nTri, 0);
+                for (int t0 : band.tris) {
+                    if (t0 < 0 || t0 >= nTri || seen[(std::size_t)t0]) continue;
+                    std::vector<int> comp, stack{t0};
+                    seen[(std::size_t)t0] = 1;
+                    while (!stack.empty()) {
+                        const int c = stack.back();
+                        stack.pop_back();
+                        comp.push_back(c);
+                        for (int n : wm.adj.nbr[(std::size_t)c]) {
+                            if (n < 0 || n >= nTri || seen[(std::size_t)n] || !band.in[(std::size_t)n])
+                                continue;
+                            seen[(std::size_t)n] = 1;
+                            stack.push_back(n);
+                        }
+                    }
+                    std::sort(comp.begin(), comp.end());
+                    comps.push_back(std::move(comp));
+                }
+                std::sort(comps.begin(), comps.end(),
+                          [](const std::vector<int>& x, const std::vector<int>& y) {
+                              return x.front() < y.front();
+                          });
+            }
+            for (const std::vector<int>& comp : comps) {
+                bool live = true;
+                for (int t : comp)
+                    if (t < 0 || t >= nTri || !wm.freeTri[(std::size_t)t]) live = false;
+                if (!live) continue;  // an earlier component's preimage took it
+                Band cb;
+                cb.in.assign((std::size_t)nTri, 0);
+                cb.tris = comp;
+                cb.sheet = band.sheet;
+                cb.seed = minTriOf(comp);
+                for (int t : comp) cb.in[(std::size_t)t] = 1;
+                collectBand(mv, fr, wm.g2l, cb);
+                std::vector<gp_XYZ> bpts;
+                bandPoints(cb, bpts);
+                PartialConeCert pc =
+                    certifyPartialCone(fam.groups, bpts, fam.origin, fam.axis, tau);
+                // The claimed set is the complete tau-preimage of the certified
+                // cone edge-connected to the chain (free triangles, 3 vertices
+                // within tau of it, >= 2 axial levels), refit and re-certified to
+                // a fixed point (D-fc-3.2.4/3.2.5, as D-fc-5.1): ring chains split
+                // one surface into pieces.
+                const Frame pf = makeFrame(fam.origin, fam.axis, gp_XYZ(1, 0, 0));
+                auto onCone = [&](int t, const PartialConeCert& c) {
+                    if (t < 0 || t >= nTri || !wm.freeTri[(std::size_t)t]) return false;
+                    const double sc = std::sqrt(1.0 + c.k * c.k);
+                    double zLo = 1e300, zHi = -1e300;
+                    for (int k = 0; k < 3; ++k) {
+                        const ProfPt pp = profOfPoint(triVert(mv, t, k), pf, 0);
+                        // A vertex on the axis (the apex) has no azimuth.
+                        if (!(pp.rho > tau)) return false;
+                        if (!(std::fabs(pp.rho - c.rhoAt(pp.z)) / sc <= tau)) return false;
+                        zLo = std::min(zLo, pp.z);
+                        zHi = std::max(zHi, pp.z);
+                    }
+                    return zHi - zLo > tau;
+                };
+                bool pstable = !pc.ok;
+                for (int it = 0; pc.ok && it < wm.maxIter; ++it) {
+                    std::vector<char> inI((std::size_t)nTri, 0);
+                    std::vector<int> I, stack;
+                    for (int t : cb.tris)
+                        if (onCone(t, pc)) {
+                            inI[(std::size_t)t] = 1;
+                            stack.push_back(t);
+                        }
+                    while (!stack.empty()) {
+                        const int c = stack.back();
+                        stack.pop_back();
+                        I.push_back(c);
+                        for (int n : wm.adj.nbr[(std::size_t)c]) {
+                            if (n < 0 || n >= nTri || inI[(std::size_t)n] || !onCone(n, pc)) continue;
+                            inI[(std::size_t)n] = 1;
+                            stack.push_back(n);
+                        }
+                    }
+                    std::sort(I.begin(), I.end());
+                    if (I == cb.tris) {
+                        pstable = true;
+                        break;
+                    }
+                    if (I.empty()) break;
+                    cb.tris = I;
+                    cb.in.assign((std::size_t)nTri, 0);
+                    for (int t : I) cb.in[(std::size_t)t] = 1;
+                    cb.seed = minTriOf(I);
+                    collectBand(mv, fr, wm.g2l, cb);
+                    bandPoints(cb, bpts);
+                    pc = certifyPartialCone(fam.groups, bpts, fam.origin, fam.axis, tau);
+                }
+                const char* why = pc.why;
+                if (pc.ok && !pstable) why = "unstable";
+                Frame ff = makeFrame(fam.origin, fam.axis, donor.fr.e1);
+                if (pc.ok && pstable) {
+                    Band fb = cb;
+                    collectBand(mv, ff, wm.g2l, fb);
+                    const SurfaceFit ffit = fitSurface(fb.pts, tau);
+                    if (sameSurfaceFr(wm, work, ff, fb, ffit, false)) why = "same-surface";
+                }
+                double pspan = 0;
+                int pstraddle = 0;
+                const bool paccept = pc.ok && pstable && std::strcmp(why, "accept") == 0 &&
+                                     emitPartialCone(wm, work, donor, cb, fam.origin, fam.axis,
+                                                     pc, pspan, pstraddle);
+                if (pc.ok && std::strcmp(why, "accept") == 0 && !paccept) why = "degenerate";
+                if (diagOn()) {
+                    DiagRec d = baseDiag("line", donor, cb, tau);
+                    d.stations = pc.stations;
+                    d.levels = pc.levels;
+                    d.params = kParamsLine;
+                    d.fit = "family";
+                    d.axis = fam.axis;
+                    d.maxDev = pc.lineRes;
+                    d.maxDevTau = pc.lineRes / tau;
+                    d.lineResTau = pc.planeRes / tau;
+                    d.span = pspan;
+                    d.halfAng = std::atan(std::fabs(pc.k)) * 180.0 / kPi;
+                    d.dihedral = d.halfAng;
+                    d.r0 = pc.rhoAt(pc.zLo);
+                    d.r1 = pc.rhoAt(pc.zHi);
+                    d.straddle = pstraddle;
+                    d.side0 = sideBuf0;
+                    d.side1 = sideBuf1;
+                    d.why = paccept ? "accept"
+                                    : (std::strcmp(why, "accept") == 0 ? "partial-cone" : why);
+                    printBand(d);
+                    std::fprintf(stderr,
+                                 "DIAG_REL_PCONE seed=%d donor=%d family=%d nTri=%zu comps=%zu "
+                                 "stations=%d levels=%d cols=%d famDevTau=%.4f lineResTau=%.4f "
+                                 "planeResTau=%.4g r=%.9g/%.9g z=%.6f/%.6f span=%.6f why=%s\n",
+                                 cb.seed, donor.idx, famId, cb.tris.size(), comps.size(),
+                                 pc.stations, pc.levels, pc.cols, pc.famDev / tau,
+                                 pc.lineRes / tau, pc.planeRes / tau, pc.rhoAt(pc.zLo),
+                                 pc.rhoAt(pc.zHi), pc.zLo, pc.zHi, pspan,
+                                 paccept ? "accept" : why);
+                }
+                if (!paccept) {
+                    ++refused;
+                    continue;
+                }
+                for (int t : cb.tris)
+                    if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+                ++claimed;
+            }
             continue;
         }
         {
@@ -3157,6 +3410,111 @@ CoaxialCert certifyCoaxialBand(const std::vector<std::vector<gp_XYZ>>& family,
         }
     }
     c.why = "vertex-off";
+    return c;
+}
+
+PartialConeCert certifyPartialCone(const std::vector<std::vector<gp_XYZ>>& family,
+                                   const std::vector<gp_XYZ>& band, const gp_XYZ& origin,
+                                   const gp_XYZ& axisIn, double tau) {
+    PartialConeCert c;
+    if (!(tau > 0.0) || band.empty() || family.empty()) return c;
+    gp_XYZ axis = axisIn;
+    const double am = axis.Modulus();
+    if (!(am > gp::Resolution())) return c;
+    axis /= am;
+    const Frame fr = makeFrame(origin, axis, gp_XYZ(1, 0, 0));
+    std::vector<ProfPt> pts;
+    std::vector<double> zs, psis, rhos;
+    for (const gp_XYZ& p : band) {
+        const ProfPt pp = profOfPoint(p, fr, 0);
+        pts.push_back(pp);
+        zs.push_back(pp.z);
+        psis.push_back(pp.psi);
+        rhos.push_back(pp.rho);
+    }
+    // The profile line (total least squares in (rho, z)).
+    double sr = 0, sz = 0;
+    for (const ProfPt& pp : pts) {
+        sr += pp.rho;
+        sz += pp.z;
+    }
+    c.rm = sr / (double)pts.size();
+    c.zm = sz / (double)pts.size();
+    double srr = 0, srz = 0, szz = 0;
+    for (const ProfPt& pp : pts) {
+        const double dr = pp.rho - c.rm, dz = pp.z - c.zm;
+        srr += dr * dr;
+        srz += dr * dz;
+        szz += dz * dz;
+    }
+    const double th = 0.5 * std::atan2(2.0 * srz, srr - szz);
+    const double ur = std::cos(th), uz = std::sin(th);  // the line's direction
+    // Stations of a line profile: the band's positions ALONG the line merged at
+    // tau (countLevels on the line parameter); scatter across the line is the
+    // residual, not a station.
+    std::vector<double> ts;
+    for (const ProfPt& pp : pts) ts.push_back((pp.rho - c.rm) * ur + (pp.z - c.zm) * uz);
+    c.levels = countLevels(zs, tau);
+    c.stations = countLevels(ts, tau);
+    c.cols = countColumns(psis, rhos, tau);
+    if (c.levels < 2 || c.stations < minStations(kParamsLine) ||
+        c.cols < minStations(kParamsCircle)) {
+        c.why = "underdetermined";
+        return c;
+    }
+    // Line first: the vertices on one plane (least squares) within tau.
+    {
+        gp_XYZ m(0, 0, 0);
+        for (const gp_XYZ& p : band) m += p;
+        m /= (double)band.size();
+        std::array<std::array<double, 3>, 3> cov{{{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}};
+        for (const gp_XYZ& p : band) {
+            const double d[3] = {p.X() - m.X(), p.Y() - m.Y(), p.Z() - m.Z()};
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j) cov[(std::size_t)i][(std::size_t)j] += d[i] * d[j];
+        }
+        std::array<double, 3> ev{};
+        std::array<std::array<double, 3>, 3> evec{};
+        if (!jacobiEigenSymmetric3(cov, ev, evec)) return c;
+        const gp_XYZ n(evec[0][0], evec[0][1], evec[0][2]);
+        for (const gp_XYZ& p : band) c.planeRes = std::max(c.planeRes, std::fabs((p - m).Dot(n)));
+        if (c.planeRes <= tau) {
+            c.why = "line";
+            return c;
+        }
+    }
+    double rLo = 1e300, rHi = -1e300;
+    c.zLo = 1e300;
+    c.zHi = -1e300;
+    for (const ProfPt& pp : pts) {
+        c.zLo = std::min(c.zLo, pp.z);
+        c.zHi = std::max(c.zHi, pp.z);
+        rLo = std::min(rLo, pp.rho);
+        rHi = std::max(rHi, pp.rho);
+    }
+    if (c.zHi - c.zLo <= tau) {
+        c.why = "line";
+        return c;
+    }
+    if (rHi - rLo <= tau || !(std::fabs(uz) > 0.0)) {
+        c.why = "same-surface";
+        return c;
+    }
+    c.k = ur / uz;
+    for (const ProfPt& pp : pts)
+        c.lineRes = std::max(c.lineRes, std::fabs(-(pp.rho - c.rm) * uz + (pp.z - c.zm) * ur));
+    if (c.lineRes > tau) {
+        c.why = "vertex-off";
+        return c;
+    }
+    const JointAxisFit f = jointAxisAbout(family, origin, axis);
+    for (double d : f.maxDev) c.famDev = std::max(c.famDev, d);
+    if (!jointAxisCertifies(f, tau)) {
+        c.why = "vertex-off";
+        return c;
+    }
+    c.ok = true;
+    c.why = "accept";
     return c;
 }
 

@@ -416,9 +416,150 @@ static void caseOsbGuards() {
            "band holds an anchor body triangle");
 }
 
+// D-fc-5.5 partial cones. Family: one R10 arc (0..60 deg, z 0..20). Cone:
+// rho = 10 - (z - 20) over z 20..21 (45 deg), the same azimuths.
+static std::vector<gp_XYZ> coneRingPts(double a0, double a1, int n, std::vector<double> zs,
+                                       double r0 = 10, double z0 = 20) {
+    std::vector<gp_XYZ> v;
+    for (int i = 0; i <= n; ++i) {
+        const double a = a0 + (a1 - a0) * (double)i / (double)n;
+        for (double z : zs) {
+            const double r = r0 - (z - z0);
+            v.emplace_back(r * std::cos(a), r * std::sin(a), z);
+        }
+    }
+    return v;
+}
+
+static void casePartialCone() {
+    const gp_XYZ o(0, 0, 0), a(0, 0, 1);
+    const std::vector<std::vector<gp_XYZ>> fam{arcPts(10, 0, kPi / 3, 12, 20)};
+    PartialConeCert c = certifyPartialCone(fam, coneRingPts(0, kPi / 3, 12, {20, 20.5, 21}), o, a, kTau);
+    expect(c.ok && std::strcmp(c.why, "accept") == 0, "partial cone accept on family axis");
+    expect(std::fabs(c.k + 1.0) <= 1e-9 && std::fabs(c.rhoAt(20) - 10) <= kTau &&
+               std::fabs(c.rhoAt(21) - 9) <= kTau,
+           "partial cone profile line rho = 30 - z");
+    c = certifyPartialCone(fam, coneRingPts(0, kPi / 3, 12, {20, 21}), o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "underdetermined") == 0, "partial cone 2 profile stations underdetermined");
+    // Two rings whose vertices scatter 1.7 tau across the profile line: four
+    // tau-merged profile points, but two stations along the line.
+    std::vector<gp_XYZ> noisy = coneRingPts(0, kPi / 3, 12, {20, 21});
+    for (std::size_t i = 0; i < noisy.size(); ++i) {
+        const double dn = ((i / 2) % 2 ? 0.85 : -0.85) * kTau / std::sqrt(2.0);
+        noisy[i] += gp_XYZ(dn * std::cos(kPi / 36 * (double)(i / 2)), dn * std::sin(kPi / 36 * (double)(i / 2)), dn);
+    }
+    c = certifyPartialCone(fam, noisy, o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "underdetermined") == 0 && c.stations == 2,
+           "partial cone: scatter across the line is not a station");
+    c = certifyPartialCone(fam, coneRingPts(0, kPi / 3, 2, {20, 20.5, 21}), o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "underdetermined") == 0, "partial cone 3 azimuth stations underdetermined");
+    // 1e-3 rad at R ~10: columns 2.5e-3 mm apart, sagitta 1.25e-6 mm < tau.
+    c = certifyPartialCone(fam, coneRingPts(0, 1e-3, 4, {20, 20.5, 21}), o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "line") == 0, "partial cone planar strip is a line");
+    std::vector<gp_XYZ> off = coneRingPts(0, kPi / 3, 12, {20, 20.5, 21});
+    off[10] = off[10] * (1.0 + 3 * kTau / off[10].Modulus());
+    c = certifyPartialCone(fam, off, o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "vertex-off") == 0, "partial cone vertex off tau refused");
+    std::vector<std::vector<gp_XYZ>> famOff = fam;
+    famOff[0][5] = famOff[0][5] * (1.0 + 3 * kTau / 10.0);
+    c = certifyPartialCone(famOff, coneRingPts(0, kPi / 3, 12, {20, 20.5, 21}), o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "vertex-off") == 0, "partial cone family vertex off tau refused");
+    std::vector<gp_XYZ> cyl8;
+    for (int i = 0; i <= 12; ++i)
+        for (double z : {0.0, 10.0, 20.0})
+            cyl8.emplace_back(8 * std::cos(kPi / 36 * i), 8 * std::sin(kPi / 36 * i), z);
+    c = certifyPartialCone(fam, cyl8, o, a, kTau);
+    expect(!c.ok && std::strcmp(c.why, "same-surface") == 0, "partial cone of no radius span is a cylinder");
+
+    // Builder predicates.
+    Synth s0;
+    s0.add(0, 0, 0);
+    s0.finish();
+    const MeshView mv0 = s0.view();
+    Region cone;
+    cone.type = SurfType::Cone;
+    cone.origin = Origin::ChamferCone;
+    cone.ax = gp_Ax3(gp_Pnt(0, 0, 21), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    cone.radius = 9;
+    cone.vMin = 9;
+    cone.vMax = 10;
+    cone.maxVertexSnap = -1;
+    cone.closed360 = false;
+    Region cyl;
+    cyl.type = SurfType::Cylinder;
+    cyl.origin = Origin::FilletStrip;
+    cyl.ax = gp_Ax3(gp_Pnt(0, 0, 10), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    cyl.radius = 10 + kTau;
+    expect(partialConeRimCoaxial(cyl, cone, mv0), "partial cone rim on a coaxial cylinder");
+    Region cylR = cyl;
+    cylR.radius = 10.5;
+    expect(!partialConeRimCoaxial(cylR, cone, mv0), "partial cone rim: other radius");
+    Region cylS = cyl;
+    cylS.ax = gp_Ax3(gp_Pnt(3 * kTau, 0, 10), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    expect(!partialConeRimCoaxial(cylS, cone, mv0), "partial cone rim: shifted axis");
+    Region cylT = cyl;
+    cylT.ax = gp_Ax3(gp_Pnt(0, 0, 10), gp_Dir(0.001, 0, 1), gp_Dir(1, 0, -0.001));
+    expect(!partialConeRimCoaxial(cylT, cone, mv0), "partial cone rim: tilted axis");
+    Region closedCone = cone;
+    closedCone.closed360 = true;
+    expect(partialConeSide(&cyl, &cone) && partialConeSide(&cone, nullptr) &&
+               !partialConeSide(&cyl, &closedCone) && !partialConeSide(&cyl, nullptr),
+           "partial cone side");
+
+    // Line mode end to end: donor R10 arc band, a 45 deg roof above it.
+    Synth s;
+    SegmentWork w;
+    const double h = 20;
+    std::vector<int> donorTris, coneTris;
+    const auto dc = arcCols(s, 0, 0, 10, 0, kPi / 3, 12, h);
+    for (std::size_t i = 0; i + 1 < dc.size(); ++i)
+        s.quad(dc[i][0], dc[i][1], dc[i + 1][0], dc[i + 1][1], donorTris);
+    std::vector<std::array<int, 3>> rings;
+    for (int i = 0; i <= 12; ++i) {
+        const double ang = kPi / 3 * (double)i / 12.0;
+        rings.push_back({{dc[(std::size_t)i][1], s.add(9.5 * std::cos(ang), 9.5 * std::sin(ang), 20.5),
+                          s.add(9 * std::cos(ang), 9 * std::sin(ang), 21)}});
+    }
+    for (int i = 0; i < 12; ++i)
+        for (int k = 0; k < 2; ++k)
+            s.quad(rings[(std::size_t)i][(std::size_t)k], rings[(std::size_t)i][(std::size_t)k + 1],
+                   rings[(std::size_t)i + 1][(std::size_t)k], rings[(std::size_t)i + 1][(std::size_t)k + 1],
+                   coneTris);
+    s.finish();
+    Region d;
+    d.type = SurfType::Cylinder;
+    d.origin = Origin::CylGrow;
+    d.ax = gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    d.radius = 10;
+    d.tris = donorTris;
+    w.accepted.push_back(d);
+    Provisional roof;
+    roof.claim = ProvClaim::Unclaimed;
+    roof.tris = coneTris;
+    roof.plane = gp_Ax3(gp_Pnt(9.5, 0, 20.5), gp_Dir(0.7071, 0, 0.7071));
+    roof.maxVertexDev = 1.0;
+    w.provisionals.push_back(roof);
+    const MeshView mv = s.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol);
+    claimRelRevolve(mv, sp, tol, w, RelRevolveMode::Line);
+    int nCone = 0;
+    for (const Region& r : w.accepted) {
+        if (r.type != SurfType::Cone || r.origin != Origin::ChamferCone) continue;
+        ++nCone;
+        expect(!r.closed360 && std::fabs(r.radius - 9.0) <= kTau && std::fabs(r.vMax - 10.0) <= kTau &&
+                   std::fabs((r.uMax - r.uMin) - kPi / 3) <= 1e-6 && r.tris.size() == coneTris.size() &&
+                   r.maxVertexDev <= kTau,
+               "partial cone region: Rlo 9, Rhi 10, span 60 deg, every roof triangle");
+    }
+    expect(nCone == 1, "partial cone claimed in Line mode");
+}
+
 int main() {
     casePredicates();
     caseOsbGuards();
+    casePartialCone();
     caseCoaxialCert();
     caseLineMode();
     caseSectionFillet(false);

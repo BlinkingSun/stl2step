@@ -96,6 +96,37 @@ struct SectionCircle {
     int acc = -1;  // work.accepted index
 };
 
+// D-fc-5.5. The certificate of a band that does not close as a PARTIAL cone
+// about a coaxial family's axis (the D-fc-5.1 joint certificate, the axis
+// fixed by the family). In order: under-determined (fewer than 2 axial levels,
+// fewer than minStations(kParamsLine) stations ALONG the fitted (rho, z) line
+// -- positions on the line merged at tau, scatter across it is residual -- or
+// fewer than minStations(kParamsCircle) azimuth stations: the band alone must
+// over-determine a section circle); line (the band's vertices lie on one
+// plane within tau -- a planar strip -- or its profile spans no height: an
+// annulus); same-surface (its profile spans no radius: a cylinder, D-fc-5.1's);
+// vertex-off (a vertex more than tau off the profile line, or a family vertex
+// more than tau off its own radius about the axis). rho(z) = rm + (z - zm) * k.
+struct PartialConeCert {
+    bool ok = false;
+    const char* why = "underdetermined";
+    int stations = 0, levels = 0, cols = 0;
+    double rm = 0, zm = 0, k = 0;  // the profile line about (origin, axis)
+    double zLo = 0, zHi = 0;       // the band's axial extent about origin
+    double lineRes = 0, planeRes = 0, famDev = 0;
+    double rhoAt(double z) const { return rm + (z - zm) * k; }
+};
+PartialConeCert certifyPartialCone(const std::vector<std::vector<gp_XYZ>>& family,
+                                   const std::vector<gp_XYZ>& band, const gp_XYZ& origin,
+                                   const gp_XYZ& axis, double tau);
+
+// D-fc-5.5 builder predicates (refit_build.cpp). A cylinder carries a partial
+// cone's rim circle only when it is coaxial with the cone (axis direction and
+// line within tau at the rims' arm) and its radius is one rim's within
+// tanDistTol(tau, tau). partialConeSide: either region is a partial cone.
+bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshView& mv);
+bool partialConeSide(const Region* A, const Region* B);
+
 // D-fc-5.5 F-2 (D-fc-1.11(ii)(a), the D-fc-4.6 leave-one-out). The fewest
 // section stations (points merged at tau in the plane normal to axis) of a
 // band left after removing the triangles of any one source -- the provisional
