@@ -7,7 +7,9 @@
 //  - a weld that would make an edge of valence 3 is refused, and only that
 //    cluster keeps its input (a healable cluster beside it still heals);
 //  - a lid offset by more than stitchTol stays open;
-//  - a T-vertex 3·tau off the edge is not split.
+//  - a T-vertex 3·tau off the edge is not split;
+//  - an unwelded sheet whose boundary vertices all share one x (the case an
+//    x-sorted sweep handles in quadratic time) gets every weld and T split.
 // tau = 2·quantFloor (D-130-12); stitchTol = min(sewTol, sMin / 2).
 // SPDX-License-Identifier: MIT
 
@@ -273,6 +275,50 @@ int main(int argc, char** argv) {
         off.smooth = false;
         const stl2step::Result v = stl2step::convert(off);
         check(v.ok && v.components == 2 && !v.watertight, "convert Verbatim: unchanged (no heal)");
+    }
+
+    // ---- 8. unwelded sheet in one x slab: every weld and every T split -------
+    // An open sheet on x = 0 (lower half n x n/2 cells, upper half with the y
+    // step halved, so the seam carries n T-vertices) where every triangle owns
+    // its vertex copies, jittered by up to tau/8 in y and z. All boundary
+    // vertices share one x, so an x-window holds every one of them; the grid
+    // index must still find each weld partner and each T-vertex.
+    {
+        const int n = 32;
+        const double h = 1.0 / n;
+        uint32_t lcg = 12345u;
+        auto jitter = [&]() {
+            lcg = lcg * 1664525u + 1013904223u;
+            return (((double)(lcg >> 8) / (double)(1u << 24)) * 2.0 - 1.0) * (tau / 8);
+        };
+        Pts pts;
+        Tris tris;
+        auto addTri = [&](std::array<double, 2> a, std::array<double, 2> b, std::array<double, 2> c) {
+            const int base = (int)pts.size();
+            for (const auto& p : { a, b, c }) pts.push_back({ 0.0, p[0] + jitter(), p[1] + jitter() });
+            tris.push_back({ base, base + 1, base + 2 });
+        };
+        auto addGrid = [&](int ni, double hy, int j0, int j1) {
+            for (int i = 0; i < ni; ++i)
+                for (int j = j0; j < j1; ++j) {
+                    const std::array<double, 2> a{ i * hy, j * h }, b{ (i + 1) * hy, j * h },
+                        c{ (i + 1) * hy, (j + 1) * h }, d{ i * hy, (j + 1) * h };
+                    addTri(a, c, b);
+                    addTri(a, d, c);
+                }
+        };
+        addGrid(n, h, 0, n / 2);
+        addGrid(2 * n, h / 2, n / 2, n);
+        const int distinct = (n + 1) * (n / 2 + 1) + (2 * n + 1) * (n / 2 + 1) - (n + 1);
+        const HealStats st = healOpenBoundaries(tris, pts, q, sewTol, false);
+        const EdgeHealth after = health(tris);
+        check(st.boundaryBefore == 3 * 3 * n * n, "slab: every edge of the unwelded sheet is open");
+        check(st.welds == 3 * 3 * n * n - distinct, "slab: every copy welds onto its lowest-id twin");
+        check(st.splits == n, "slab: every seam T-vertex splits its edge");
+        check(st.clustersHealed == 1 && st.clustersRefused == 0, "slab: one stitched cluster heals");
+        check(after.boundary == 5 * n && st.boundaryAfter == 5 * n,
+              "slab: only the sheet's outer rim stays open (no capping)");
+        check(after.nonManifold == 0 && after.conflict == 0, "slab: 2-manifold, consistent winding");
     }
 
     if (gFail) {

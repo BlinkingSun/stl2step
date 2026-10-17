@@ -220,6 +220,40 @@ int absorbZeroAreaTJunctions(std::vector<std::array<int, 3>>& tris,
     return absorbed;
 }
 
+// Sorted uniform-grid index over a vertex subset (cell edge h) for the heal's
+// neighbour queries. It only bounds which vertices a query looks at; every
+// query keeps its exact distance test, so no heal result depends on h. An
+// x-sorted sweep is quadratic when many boundary vertices share an x slab (an
+// unwelded mesh with a face normal to x); the grid stays near-linear.
+class HealCellIndex {
+public:
+    using Cell = std::array<int64_t, 3>;
+    // Indexes positions 0..verts.size()-1 of verts.
+    HealCellIndex(const std::vector<std::array<double, 3>>& pts, const std::vector<int>& verts,
+                  double h)
+        : h_(h) {
+        entries_.reserve(verts.size());
+        for (int i = 0; i < (int)verts.size(); ++i)
+            entries_.push_back({ cellOf(pts[(size_t)verts[(size_t)i]]), i });
+        std::sort(entries_.begin(), entries_.end());
+    }
+    Cell cellOf(const std::array<double, 3>& p) const {
+        Cell c;
+        for (int k = 0; k < 3; ++k) c[k] = (int64_t)std::floor(p[(size_t)k] / h_);
+        return c;
+    }
+    // f(position) for every indexed position in cell c, ascending position.
+    template <class F> void visit(const Cell& c, F&& f) const {
+        auto it = std::lower_bound(entries_.begin(), entries_.end(),
+                                   std::make_pair(c, std::numeric_limits<int>::min()));
+        for (; it != entries_.end() && it->first == c; ++it) f(it->second);
+    }
+
+private:
+    double h_;
+    std::vector<std::pair<Cell, int>> entries_;
+};
+
 // Stitch open boundaries before the edge graph (D-fc-5.10). The caller runs it
 // on the TrueForm path only, and only when Pass A sees an edge used once.
 //   tau       = 2·quantFloor (D-130-12)
@@ -321,20 +355,22 @@ HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
         while (wp[(size_t)x] != x) { wp[(size_t)x] = wp[(size_t)wp[(size_t)x]]; x = wp[(size_t)x]; }
         return x;
     };
-    std::vector<int> byX(bv.size());
-    for (size_t i = 0; i < byX.size(); ++i) byX[i] = (int)i;
-    std::sort(byX.begin(), byX.end(), [&](int i, int j) {
-        const double xi = pts[(size_t)bv[(size_t)i]][0], xj = pts[(size_t)bv[(size_t)j]][0];
-        return xi != xj ? xi < xj : i < j;
-    });
-    for (size_t i = 0; i < byX.size(); ++i) {
-        const int vi = bv[(size_t)byX[i]];
-        for (size_t j = i + 1; j < byX.size(); ++j) {
-            const int vj = bv[(size_t)byX[j]];
-            if (pts[(size_t)vj][0] - pts[(size_t)vi][0] > tol) break;
-            if (dist(vi, vj) > tol) continue;
-            const int a = wpFind(byX[i]), b = wpFind(byX[j]);
-            if (a != b) wp[(size_t)std::max(a, b)] = std::min(a, b);
+    // Every pair within tol: with cell edge tol such a pair lies in the same or
+    // an adjacent cell. The partition (components of the within-tol graph) and
+    // its lowest-position roots do not depend on the order pairs are found.
+    {
+        const HealCellIndex grid(pts, bv, tol);
+        for (int i = 0; i < (int)bv.size(); ++i) {
+            const int vi = bv[(size_t)i];
+            const HealCellIndex::Cell c = grid.cellOf(pts[(size_t)vi]);
+            for (int64_t dx = -1; dx <= 1; ++dx)
+                for (int64_t dy = -1; dy <= 1; ++dy)
+                    for (int64_t dz = -1; dz <= 1; ++dz)
+                        grid.visit({ c[0] + dx, c[1] + dy, c[2] + dz }, [&](int j) {
+                            if (j <= i || dist(vi, bv[(size_t)j]) > tol) return;
+                            const int a = wpFind(i), b = wpFind(j);
+                            if (a != b) wp[(size_t)std::max(a, b)] = std::min(a, b);
+                        });
         }
     }
     std::vector<std::vector<int>> members(bv.size());
@@ -395,23 +431,66 @@ HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
         std::sort(ord.begin(), ord.end(), [&](size_t x, size_t y) {
             return beT[x] != beT[y] ? beT[x] < beT[y] : bes[x] < bes[y];
         });
+        // A vertex that can split an edge lies within tau of its open segment, so
+        // two candidate sources each hold every such vertex: the x window
+        // [min x - tau, max x + tau] of bvx (sorted by x, id), and the cells of a
+        // grid over bvx positions within reach of samples along the edge (cell
+        // edge = this round's median boundary edge length, never below endGap so
+        // it is positive and >= tau; samples sampleGap apart leave every point of
+        // the edge within sampleGap / 2 of one). Each edge scans the smaller
+        // source, in bvx order with a strict minimum, so the winner is the same
+        // either way; the window alone is quadratic when many boundary vertices
+        // share an x slab, the grid alone is slow on edges much longer than h.
+        std::vector<double> lens(bes.size());
+        for (size_t i = 0; i < bes.size(); ++i) lens[i] = dist(bes[i].first, bes[i].second);
+        std::nth_element(lens.begin(), lens.begin() + (long)(lens.size() / 2), lens.end());
+        const double cellH = std::max(lens[lens.size() / 2], endGap);
+        const double sampleGap = cellH;
+        const HealCellIndex grid(pts, bvx, cellH);
+        const int64_t reach = (int64_t)std::ceil((tau + 0.5 * sampleGap) / cellH);
+        const int64_t cellsPerSample = (2 * reach + 1) * (2 * reach + 1) * (2 * reach + 1);
+        std::vector<HealCellIndex::Cell> cells;
+        std::vector<int> cand;
         std::vector<char> touched(work.size(), 0);
         int did = 0;
         for (size_t oi : ord) {
             const int a = bes[oi].first, b = bes[oi].second, t = beT[oi];
             if (touched[(size_t)t]) continue;
-            const double lo = std::min(pts[(size_t)a][0], pts[(size_t)b][0]) - tau;
-            const double hi = std::max(pts[(size_t)a][0], pts[(size_t)b][0]) + tau;
-            auto it = std::lower_bound(bvx.begin(), bvx.end(), lo,
-                                       [&](int v, double x) { return pts[(size_t)v][0] < x; });
             const double abx = pts[(size_t)b][0] - pts[(size_t)a][0];
             const double aby = pts[(size_t)b][1] - pts[(size_t)a][1];
             const double abz = pts[(size_t)b][2] - pts[(size_t)a][2];
             const double L2 = abx * abx + aby * aby + abz * abz, L = std::sqrt(L2);
+            const double lo = std::min(pts[(size_t)a][0], pts[(size_t)b][0]) - tau;
+            const double hi = std::max(pts[(size_t)a][0], pts[(size_t)b][0]) + tau;
+            auto wLo = std::lower_bound(bvx.begin(), bvx.end(), lo,
+                                        [&](int v, double x) { return pts[(size_t)v][0] < x; });
+            auto wHi = std::upper_bound(wLo, bvx.end(), hi,
+                                        [&](double x, int v) { return x < pts[(size_t)v][0]; });
+            const int64_t m = std::max<int64_t>(1, (int64_t)std::ceil(L / sampleGap));
+            cand.clear();
+            if ((int64_t)(wHi - wLo) <= (m + 1) * cellsPerSample) {
+                for (auto it = wLo; it != wHi; ++it) cand.push_back((int)(it - bvx.begin()));
+            } else {
+                cells.clear();
+                for (int64_t k = 0; k <= m; ++k) {
+                    const double f = (double)k / (double)m;
+                    const HealCellIndex::Cell c = grid.cellOf({ pts[(size_t)a][0] + f * abx,
+                                                                pts[(size_t)a][1] + f * aby,
+                                                                pts[(size_t)a][2] + f * abz });
+                    for (int64_t dx = -reach; dx <= reach; ++dx)
+                        for (int64_t dy = -reach; dy <= reach; ++dy)
+                            for (int64_t dz = -reach; dz <= reach; ++dz)
+                                cells.push_back({ c[0] + dx, c[1] + dy, c[2] + dz });
+                }
+                std::sort(cells.begin(), cells.end());
+                cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+                for (const HealCellIndex::Cell& c : cells) grid.visit(c, [&](int p) { cand.push_back(p); });
+                std::sort(cand.begin(), cand.end());
+            }
             int best = -1;
             double bestT = 2, bestD = 0;
-            for (; it != bvx.end() && pts[(size_t)*it][0] <= hi; ++it) {
-                const int v = *it;
+            for (int p : cand) {
+                const int v = bvx[(size_t)p];
                 if (v == a || v == b) continue;
                 const double px = pts[(size_t)v][0] - pts[(size_t)a][0];
                 const double py = pts[(size_t)v][1] - pts[(size_t)a][1];
