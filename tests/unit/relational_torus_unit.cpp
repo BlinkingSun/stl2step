@@ -1,6 +1,8 @@
 // Synthetic torus-relation cases (D-fc-4.6 F1/F2/F4). No training mesh.
 // SPDX-License-Identifier: MIT
 
+#include "mesh_harness.hpp"
+#include "mesh_harness_refit.hpp"
 #include "posix_compat.hpp"
 #include "refit_relational.hpp"
 #include "refit_relational_torus.hpp"
@@ -10,6 +12,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -505,7 +508,317 @@ static void caseChainSuperset() {
            "superset: the band that is the whole set is not a subset");
 }
 
-int main() {
+// D-fc-4.9: points of a partial torus (Rmaj, r) about (origin, axis), azimuth
+// [u0, u1] in nu steps, tube angle [v0, v1] in nv steps, each pushed along the
+// tube normal by a deterministic +-amp pattern.
+static std::vector<gp_XYZ> torusPts(const gp_XYZ& o, const gp_XYZ& axisIn, double Rmaj, double r,
+                                    double u0, double u1, int nu, double v0, double v1, int nv,
+                                    double amp) {
+    gp_XYZ a = axisIn / axisIn.Modulus();
+    const gp_XYZ tmp = std::fabs(a.X()) < 0.9 ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+    gp_XYZ x = a.Crossed(tmp);
+    x /= x.Modulus();
+    const gp_XYZ y = a.Crossed(x);
+    std::vector<gp_XYZ> out;
+    int k = 0;
+    for (int i = 0; i <= nu; ++i)
+        for (int j = 0; j <= nv; ++j, ++k) {
+            const double u = u0 + (u1 - u0) * i / nu, v = v0 + (v1 - v0) * j / nv;
+            const double rr = r + ((k % 2) ? amp : -amp);
+            const gp_XYZ radial = x * std::cos(u) + y * std::sin(u);
+            out.push_back(o + radial * (Rmaj + rr * std::cos(v)) + a * (rr * std::sin(v)));
+        }
+    return out;
+}
+
+static void caseJointTorus() {
+    const double tau = 1e-4;
+    const gp_XYZ o(10, -5, 3), ax(0, 1, 0);
+    // Short donor arcs about the true axis (the arc ribs and their walls) and a
+    // partial fillet torus R 89.5 / r 3 on the same axis, 1 rad of azimuth.
+    const std::vector<std::vector<gp_XYZ>> donors = {
+        cylPts(o, ax, 92.5, 0.2, 0.25, 0, 3, 0.3 * tau),
+        cylPts(o, ax, 72.5, 1.0, 1.05, -1, 2, 0.3 * tau),
+        cylPts(o, ax, 100.0, 4.0, 4.04, 0, 3, 0.3 * tau)};
+    const std::vector<gp_XYZ> chain =
+        torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, kPi, 6, 0.3 * tau);
+    // The seed axis is tilted by 4e-6 rad (0.36 mm at rho 89.5 ... 3.6 tau): the
+    // chain does not certify on it, the donors' short arcs do not notice.
+    const gp_XYZ seedAx(4e-6, 1, 0);
+    const gp_XYZ xHint(1, 0, 0);
+    const TorusCert onSeed = certifyTorus(profileAbout(chain, o, seedAx, xHint), tau);
+    expect(!onSeed.ok, "joint torus: the chain does not certify on the tilted seed axis");
+    expect(jointAxisCertifies(jointAxisAbout(donors, o, seedAx), tau),
+           "joint torus: the donors alone certify the tilted seed axis");
+    const JointTorusCert jc = jointTorusCertify(donors, chain, o, seedAx, xHint, tau, 16);
+    expect(jc.fitted && jc.ok, "joint torus: donors + chain certify on the joint axis");
+    expect(jc.ok && std::fabs(jc.chain.Rmaj - 89.5) < tau && std::fabs(jc.chain.Rmin - 3.0) < tau,
+           "joint torus: the chain's torus radii are recovered");
+    expect(jc.ok && std::fabs(jc.family.axis.X()) < 5e-7 && jc.family.axis.Y() > 0.0,
+           "joint torus: the joint axis is the true axis, in the seed's hemisphere");
+    expect(jc.ok && std::fabs(jc.tilt - 4e-6) < 5e-7, "joint torus: tilt reported vs the seed");
+    expect(jc.family.radius.size() == 3 && jc.family.maxDev.size() == 3,
+           "joint torus: one radius and deviation per donor");
+    // The same torus on an axis tilted 1e-4 rad from the donors' certifies alone
+    // (a band-only refit would take it); with the donors in the fit it cannot.
+    const gp_XYZ tiltAx(1e-4, 1, 0);
+    const std::vector<gp_XYZ> tilted =
+        torusPts(o, tiltAx, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, kPi, 6, 0.3 * tau);
+    expect(certifyTorus(profileAbout(tilted, o, tiltAx, xHint), tau).ok,
+           "joint torus: the tilted chain certifies on its own axis");
+    const JointTorusCert jt = jointTorusCertify(donors, tilted, o, ax, xHint, tau, 16);
+    expect(!jt.ok, "joint torus: never a band-only refit (donors pin the axis)");
+    // A chain whose tube radius drifts by 4 tau is not one torus on any axis.
+    std::vector<gp_XYZ> drift =
+        torusPts(o, ax, 89.5, 3.0, 0.1, 0.6, 10, 0.5 * kPi, kPi, 6, 0.0);
+    const std::vector<gp_XYZ> drift2 =
+        torusPts(o, ax, 89.5, 3.0 + 4 * tau, 0.6, 1.1, 10, 0.5 * kPi, kPi, 6, 0.0);
+    drift.insert(drift.end(), drift2.begin(), drift2.end());
+    expect(!jointTorusCertify(donors, drift, o, ax, xHint, tau, 16).ok,
+           "joint torus: a variable-radius chain is refused");
+    expect(!jointTorusCertify(donors, chain, o, seedAx, xHint, 0.0, 16).ok,
+           "joint torus: tau 0 admits nothing");
+    expect(!jointTorusCertify({}, chain, o, seedAx, xHint, tau, 16).ok,
+           "joint torus: no donor, no family certificate");
+}
+
+static void caseProfileAbout() {
+    const gp_XYZ o(1, 2, 3), ax(0, 0, 2), xHint(1, 1, 0);
+    const std::vector<ProfPt> p = profileAbout({gp_XYZ(1, 2, 3) + gp_XYZ(0, -2, 5)}, o, ax, xHint);
+    const double expPsi = 2.0 * kPi - 0.75 * kPi;  // -135 deg about (1,1,0)/sqrt2, in [0, 2pi)
+    expect(p.size() == 1 && std::fabs(p[0].z - 5.0) < 1e-12 && std::fabs(p[0].rho - 2.0) < 1e-12 &&
+               std::fabs(p[0].psi - expPsi) < 1e-12,
+           "profileAbout: rho, z, psi in the scan frame");
+}
+
+static void caseTorusSides() {
+    expect(torusSidesOf(48, 2.0 * kPi, true) == 48, "torusSides: a closed band keeps its cols");
+    expect(torusSidesOf(21, 1.0, false) == (int)std::lround(2.0 * kPi * 20.0),
+           "torusSides: a partial band's steps over its own span");
+    expect(torusSidesOf(1, 0.5, false) == 1, "torusSides: one column is one side");
+    expect(torusSidesOf(9, 0.0, false) == 9, "torusSides: no span keeps cols");
+}
+
+static void caseWindowOverlap() {
+    std::vector<char> failed(10, 0);
+    failed[4] = failed[5] = 1;
+    expect(torusWindowOverlapsRefused({3, 5, 7}, failed),
+           "F1: a window sharing a triangle with a refused chain set is refused");
+    expect(!torusWindowOverlapsRefused({0, 1, 2}, failed),
+           "F1: a disjoint window is not refused");
+    expect(!torusWindowOverlapsRefused({0, 12}, failed), "F1: out-of-range ids are ignored");
+}
+
+// D-fc-4.11 (F1 refined): which certifyTorus refusals are geometric.
+static void caseRefusalGeometric() {
+    const double tau = 1e-4;
+    const gp_XYZ o(0, 0, 0), ax(0, 0, 1), xHint(1, 0, 0);
+    const std::vector<gp_XYZ> good =
+        torusPts(o, ax, 20.0, 3.0, 0.0, 1.0, 12, 0.5 * kPi, kPi, 6, 0.0);
+    const TorusCert ok = certifyTorus(profileAbout(good, o, ax, xHint), tau);
+    expect(ok.ok && !torusRefusalGeometric(ok), "F1 refined: a certified band is not a refusal");
+    // Two tube stations: below certifyTorus's levels / profPts -> over-determination.
+    const std::vector<gp_XYZ> thin =
+        torusPts(o, ax, 20.0, 3.0, 0.0, 1.0, 12, 0.5 * kPi, 0.6 * kPi, 1, 0.0);
+    const TorusCert under = certifyTorus(profileAbout(thin, o, ax, xHint), tau);
+    expect(!under.ok && !under.determinate && !torusRefusalGeometric(under),
+           "F1 refined: an under-determined band is not a geometric refusal");
+    // One vertex 10 tau off the tube: vertex-off on determinate evidence.
+    std::vector<gp_XYZ> off = good;
+    off[off.size() / 2] += gp_XYZ(0, 0, 10.0 * tau);
+    const TorusCert voff = certifyTorus(profileAbout(off, o, ax, xHint), tau);
+    expect(!voff.ok && voff.determinate && torusRefusalGeometric(voff),
+           "F1 refined: a vertex off tau is a geometric refusal");
+    // A cone frustum's profile is a line: line-first on determinate evidence.
+    std::vector<gp_XYZ> cone;
+    for (int i = 0; i <= 12; ++i)
+        for (int j = 0; j <= 6; ++j) {
+            const double u = (double)i / 12.0, rr = 10.0 + 0.5 * j;
+            cone.emplace_back(rr * std::cos(u), rr * std::sin(u), 0.5 * j);
+        }
+    const TorusCert line = certifyTorus(profileAbout(cone, o, ax, xHint), tau);
+    expect(!line.ok && line.determinate && torusRefusalGeometric(line),
+           "F1 refined: line-first on determinate evidence is a geometric refusal");
+    TorusCert sing;
+    sing.determinate = true;
+    sing.why = "fit-singular";
+    expect(!torusRefusalGeometric(sing),
+           "F1 refined: a singular circle fit is not a geometric refusal");
+}
+
+// D-fc-4.11 (F1 refined): the chain-level verdict -- the joint certificate decides
+// when it ran on a finite axis, the family certificate otherwise.
+static void caseChainFailsGeometric() {
+    const double tau = 1e-4;
+    const gp_XYZ o(10, -5, 3), ax(0, 1, 0), xHint(1, 0, 0);
+    const std::vector<std::vector<gp_XYZ>> donors = {
+        cylPts(o, ax, 92.5, 0.2, 0.25, 0, 3, 0.3 * tau),
+        cylPts(o, ax, 72.5, 1.0, 1.05, -1, 2, 0.3 * tau)};
+    const std::vector<gp_XYZ> chain =
+        torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, kPi, 6, 0.3 * tau);
+    const gp_XYZ seedAx(4e-6, 1, 0);
+    const TorusCert onSeed = certifyTorus(profileAbout(chain, o, seedAx, xHint), tau);
+    const TorusCert onTrue = certifyTorus(profileAbout(chain, o, ax, xHint), tau);
+    expect(onTrue.ok && !torusChainFailsGeometric(onTrue, nullptr, tau),
+           "F1 refined: a chain the family axis certifies does not fail");
+    expect(!onSeed.ok && onSeed.determinate && torusChainFailsGeometric(onSeed, nullptr, tau),
+           "F1 refined: vertex-off on the family axis fails when no joint fit ran");
+    const JointTorusCert jc = jointTorusCertify(donors, chain, o, seedAx, xHint, tau, 16);
+    expect(jc.ok && !torusChainFailsGeometric(onSeed, &jc, tau),
+           "F1 refined: a chain that certifies jointly does not fail (it may still be "
+           "refused for over-determination, and then consumes nothing)");
+    // Under-determined on the joint axis: the deviations of the donors about an
+    // axis the chain cannot determine refuse nothing.
+    JointTorusCert und = jc;
+    und.ok = false;
+    und.chain = certifyTorus(
+        profileAbout(torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, 0.5 * kPi, 0.6 * kPi, 1, 0.0), o, ax,
+                     xHint),
+        tau);
+    for (double& m : und.family.maxDev) m = 1e3 * tau;
+    expect(!und.chain.determinate && !torusChainFailsGeometric(onSeed, &und, tau),
+           "F1 refined: a chain under-determined on the joint axis does not fail");
+    // Determinate on the joint axis but a donor vertex off tau: geometric.
+    JointTorusCert don = jc;
+    don.ok = false;
+    don.family.maxDev.front() = 2.0 * tau;
+    expect(torusChainFailsGeometric(onSeed, &don, tau),
+           "F1 refined: a donor vertex off tau under the joint axis fails");
+    // A tube radius drifting by 4 tau is vertex-off on the joint axis: geometric.
+    std::vector<gp_XYZ> drift = torusPts(o, ax, 89.5, 3.0, 0.1, 0.6, 10, 0.5 * kPi, kPi, 6, 0.0);
+    const std::vector<gp_XYZ> drift2 =
+        torusPts(o, ax, 89.5, 3.0 + 4 * tau, 0.6, 1.1, 10, 0.5 * kPi, kPi, 6, 0.0);
+    drift.insert(drift.end(), drift2.begin(), drift2.end());
+    const JointTorusCert jd = jointTorusCertify(donors, drift, o, seedAx, xHint, tau, 16);
+    const TorusCert dSeed = certifyTorus(profileAbout(drift, o, seedAx, xHint), tau);
+    expect(jd.fitted && !jd.ok && jd.chain.determinate && torusChainFailsGeometric(dSeed, &jd, tau),
+           "F1 refined: a variable-radius chain fails geometrically on the joint axis");
+    JointTorusCert unfit;
+    expect(torusChainFailsGeometric(onSeed, &unfit, tau),
+           "F1 refined: without a finite joint axis the family verdict decides");
+}
+
+// D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
+// its triangles and its atom keep their pre-T state.
+static void caseWithheld() {
+    for (int variant = 0; variant < 2; ++variant) {
+        Part p = ringTorus(24, 6);
+        Provisional pr;
+        for (int j = 0; j < 4; ++j)
+            pr.tris.insert(pr.tris.end(), p.rows[(std::size_t)j].begin(),
+                           p.rows[(std::size_t)j].end());
+        std::sort(pr.tris.begin(), pr.tris.end());
+        p.work.provisionals.push_back(pr);
+        std::vector<int> at;
+        for (int j = 4; j < 6; ++j)
+            at.insert(at.end(), p.rows[(std::size_t)j].begin(), p.rows[(std::size_t)j].end());
+        p.work.accepted.push_back(atomOf(at));
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol);
+        // variant 0: a triangle of the band; variant 1: a donor triangle (not a band).
+        sp.torusWithheldTris = {variant == 0 ? p.rows[2][5] : p.donorTris[3]};
+        expect(claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Torus), "withheld call");
+        if (variant == 0) {
+            expect(torusOf(p.work) == nullptr, "withheld: the band is not emitted");
+            expect(countOrigin(p.work, Origin::CylGrow, false) == 1,
+                   "withheld: its atom stays accepted");
+            expect(p.work.provisionals[0].claim == ProvClaim::Unclaimed,
+                   "withheld: its free triangles stay unclaimed (pre-T)");
+            expect(!p.work.torusAdmitted && p.work.torusPending.empty(),
+                   "withheld: no torus admitted, no pending pack");
+        } else {
+            expect(torusOf(p.work) != nullptr, "withheld: a band without the triangle still ships");
+        }
+    }
+}
+
+static bool sameRegionSet(const RegionSet& a, const RegionSet& b) {
+    if (a.regions.size() != b.regions.size() || a.chains.size() != b.chains.size() ||
+        a.triRegion != b.triRegion || a.triIsland != b.triIsland ||
+        a.torusRevertValid != b.torusRevertValid ||
+        a.torusRevert.regions.size() != b.torusRevert.regions.size() ||
+        a.torusRevert.triRegion != b.torusRevert.triRegion)
+        return false;
+    for (std::size_t i = 0; i < a.regions.size(); ++i) {
+        const Region& x = a.regions[i];
+        const Region& y = b.regions[i];
+        if (x.type != y.type || x.origin != y.origin || x.tris != y.tris || x.radius != y.radius ||
+            x.radius2 != y.radius2 || x.closed360 != y.closed360 ||
+            x.dVolPredicted != y.dVolPredicted)
+            return false;
+        // Bit-for-bit (gp_Dir::IsEqual measures an angle, never exactly 0).
+        const gp_XYZ lx = x.ax.Location().XYZ(), ly = y.ax.Location().XYZ();
+        const gp_XYZ dx = x.ax.Direction().XYZ(), dy = y.ax.Direction().XYZ();
+        if (lx.X() != ly.X() || lx.Y() != ly.Y() || lx.Z() != ly.Z() || dx.X() != dy.X() ||
+            dx.Y() != dy.Y() || dx.Z() != dy.Z())
+            return false;
+    }
+    for (std::size_t i = 0; i < a.chains.size(); ++i)
+        if (a.chains[i].regA != b.chains[i].regA || a.chains[i].regB != b.chains[i].regB ||
+            a.chains[i].meshVerts != b.chains[i].meshVerts)
+            return false;
+    return true;
+}
+
+// D-fc-4.11 (a): resegmentTorus (the stages from T on, from segment()'s pre-T
+// state) equals a full segment() with the same withheld triangles. On the corpus
+// pickup the two R12 hub tori are withheld; the two R89.5 arc tori stay.
+static void caseResegment(const char* stl) {
+    stl2step::harness::HarnessMesh mesh;
+    std::string err;
+    if (!stl2step::harness::loadMesh(stl, 1.0, 0.0, 0.0, mesh, err) || mesh.comps.empty()) {
+        expect(false, "reseg: corpus mesh loads");
+        return;
+    }
+    MeshView mv{};
+    stl2step::harness::toMeshView(mesh, mesh.comps[0], mv);
+    SegmentParams sp;
+    RegionSet probe;
+    expect(segment(mv, sp, probe, nullptr), "reseg: segment");
+    expect(probe.torusRevertValid && probe.preTorusWork != nullptr,
+           "reseg: a torus was admitted and the pre-T state is kept");
+    std::vector<int> held;
+    int nArc = 0;
+    for (const Region& r : probe.regions) {
+        if (r.origin != Origin::TorusBlend) continue;
+        if (r.radius < 20.0) held.insert(held.end(), r.tris.begin(), r.tris.end());
+        else ++nArc;
+    }
+    std::sort(held.begin(), held.end());
+    expect(!held.empty() && nArc == 2, "reseg: hub and arc tori claimed");
+    SegmentParams hp = sp;
+    hp.torusWithheldTris = held;
+    RegionSet full, tail;
+    expect(segment(mv, hp, full, nullptr), "reseg: segment with withheld tori");
+    expect(resegmentTorus(mv, hp, probe, tail, nullptr), "reseg: resegmentTorus");
+    expect(sameRegionSet(full, tail), "reseg: resegmentTorus == segment, region by region");
+    int nTorus = 0, nHeldTorus = 0;
+    for (const Region& r : tail.regions) {
+        if (r.origin != Origin::TorusBlend) continue;
+        ++nTorus;
+        for (int t : r.tris)
+            if (std::binary_search(held.begin(), held.end(), t)) {
+                ++nHeldTorus;
+                break;
+            }
+    }
+    expect(nTorus == 2 && nHeldTorus == 0, "reseg: only the withheld tori are gone");
+    RegionSet none;
+    expect(!resegmentTorus(mv, hp, RegionSet{}, none, nullptr),
+           "reseg: no pre-T state, no resegment");
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1) caseResegment(argv[1]);
+    caseRefusalGeometric();
+    caseChainFailsGeometric();
+    caseWithheld();
+    caseWindowOverlap();
+    caseJointTorus();
+    caseProfileAbout();
+    caseTorusSides();
     caseJointAxis();
     caseCoaxialFamilies();
     caseChainSuperset();

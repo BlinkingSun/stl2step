@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 
 #include "refit.hpp"
@@ -59,6 +60,10 @@ DerivedTols deriveTols(const MeshView& mv, const SegmentParams& p) {
     return tol;
 }
 
+bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                    const SegmentWork& preTorus, const TorusTopologySnapshot* snap,
+                    RegionSet& out);
+
 bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                RegionSet& out) {
     SegmentWork work;
@@ -94,7 +99,19 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Line)) return false;
     if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Line)) return false;
 
-    const SegmentWork preTorus = work;
+    auto preTorus = std::make_shared<const SegmentWork>(work);
+    if (!runTorusStages(mv, p, tol, *preTorus, nullptr, out)) return false;
+    // U-3 per torus (D-fc-4.11 (a)): resegmentTorus restarts here.
+    if (out.torusRevertValid) out.preTorusWork = std::move(preTorus);
+    return true;
+}
+
+// Stage T, H1, A3 and topology on the pre-T working state. `snap`, when given,
+// is the pre-T snapshot already built from this same state.
+bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                    const SegmentWork& preTorus, const TorusTopologySnapshot* snap,
+                    RegionSet& out) {
+    SegmentWork work = preTorus;
 
     if (!claimToriT(mv, p, tol, work)) return false;
 
@@ -106,7 +123,10 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
 
     TorusTopologySnapshot torusRevertSnap;
     bool torusRevertValidSnap = false;
-    if (work.torusAdmitted) {
+    if (work.torusAdmitted && snap) {
+        torusRevertSnap = *snap;
+        torusRevertValidSnap = true;
+    } else if (work.torusAdmitted) {
         SegmentWork revW = preTorus;
         if (!commitPlanesA3(mv, p, tol, revW)) return false;
         RegionSet revRs;
@@ -265,6 +285,31 @@ bool segment(const MeshView& mv, const SegmentParams& p, RegionSet& out, WarnFn 
             return false;
         }
 
+        return true;
+    } catch (...) {
+        out = RegionSet{};
+        if (warn) warn("refit::segment: unknown error");
+        return false;
+    }
+}
+
+bool resegmentTorus(const MeshView& mv, const SegmentParams& p, const RegionSet& from,
+                    RegionSet& out, WarnFn warn) {
+    try {
+        out = RegionSet{};
+        if (!from.preTorusWork || !from.torusRevertValid) return false;
+        detail::ThreadBudgetScope threadBudget(p.requestedThreads);
+
+        SegmentParams params = p;
+        adaptCoarseSegmentParams(mv, params);
+        const DerivedTols tol = deriveTols(mv, params);
+
+        if (!runTorusStages(mv, params, tol, *from.preTorusWork, &from.torusRevert, out)) {
+            out = RegionSet{};
+            if (warn) warn("refit::segment: stage failed");
+            return false;
+        }
+        out.preTorusWork = from.preTorusWork;
         return true;
     } catch (...) {
         out = RegionSet{};

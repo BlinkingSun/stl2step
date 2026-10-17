@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
@@ -1714,6 +1715,247 @@ bool torusChainSupersetFails(const std::vector<ProfPt>& candidatePts, std::size_
                              std::size_t nBand, double tau) {
     if (nBand >= nCandidates) return false;
     return !certifyTorus(candidatePts, tau).ok;
+}
+
+bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
+                                const std::vector<char>& failedTri) {
+    for (int t : bandTris)
+        if (t >= 0 && (std::size_t)t < failedTri.size() && failedTri[(std::size_t)t]) return true;
+    return false;
+}
+
+bool torusRefusalGeometric(const TorusCert& c) {
+    if (c.ok || !c.determinate) return false;
+    return !(c.why && std::strcmp(c.why, "fit-singular") == 0);
+}
+
+bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* joint, double tau) {
+    if (onFamily.ok) return false;
+    if (joint && joint->fitted) {
+        // An under-determined chain does not determine the joint axis either:
+        // its donors' deviations about that axis refuse nothing.
+        if (joint->ok || !joint->chain.determinate) return false;
+        if (!jointAxisCertifies(joint->family, tau)) return true;
+        return torusRefusalGeometric(joint->chain);
+    }
+    return torusRefusalGeometric(onFamily);
+}
+
+int torusSidesOf(int cols, double span, bool closed) {
+    if (closed || cols < 2 || !(span > 0.0) || !(span < kTwoPi)) return std::max(cols, 1);
+    const double n = std::round(kTwoPi * (double)(cols - 1) / span);
+    return std::isfinite(n) ? std::max(1, (int)n) : std::max(cols, 1);
+}
+
+std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& origin,
+                                 const gp_XYZ& axis, const gp_XYZ& xHint) {
+    gp_XYZ a = axis;
+    const double am = a.Modulus();
+    if (am > gp::Resolution()) a /= am;
+    else a = gp_XYZ(0, 0, 1);
+    gp_XYZ x = xHint - a * xHint.Dot(a);
+    if (!(x.Modulus() > gp::Resolution())) {
+        const gp_XYZ tmp = (std::abs(a.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+        x = a.Crossed(tmp);
+    }
+    const gp_XYZ e1 = x / x.Modulus();
+    const gp_XYZ e2 = a.Crossed(e1);
+    std::vector<ProfPt> out;
+    out.reserve(pts.size());
+    for (const gp_XYZ& p : pts) {
+        const gp_XYZ d = p - origin;
+        ProfPt o;
+        o.z = d.Dot(a);
+        const double px = d.Dot(e1), py = d.Dot(e2);
+        o.rho = std::hypot(px, py);
+        o.psi = std::atan2(py, px);
+        if (o.psi < 0.0) o.psi += kTwoPi;
+        out.push_back(o);
+    }
+    return out;
+}
+
+// Levenberg-Marquardt on (axis tilt along U, V; axis point along U, V; Rmaj, z0,
+// Rmin). Donor residuals rho - R_g with R_g projected out as the mean of donor g's
+// own rho (jointAxisFit's step); chain residuals hypot(rho - Rmaj, z - z0) - Rmin.
+JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
+                                 const std::vector<gp_XYZ>& chain, const gp_XYZ& originSeed,
+                                 const gp_XYZ& axisSeed, const gp_XYZ& xHint, double tau,
+                                 int maxIters) {
+    JointTorusCert out;
+    if (!(tau > 0.0) || donors.empty() || chain.empty()) return out;
+    gp_XYZ W = axisSeed;
+    if (!(W.Modulus() > gp::Resolution())) return out;
+    W /= W.Modulus();
+    const gp_XYZ Wseed = W;
+    gp_XYZ C = originSeed;
+    std::vector<gp_XYZ> P;
+    std::vector<int> gOf;  // donor index, -1 for a chain vertex
+    for (int g = 0; g < (int)donors.size(); ++g)
+        for (const gp_XYZ& p : donors[(std::size_t)g]) {
+            P.push_back(p);
+            gOf.push_back(g);
+        }
+    for (const gp_XYZ& p : chain) {
+        P.push_back(p);
+        gOf.push_back(-1);
+    }
+    for (const gp_XYZ& p : P)
+        if (!std::isfinite(p.X()) || !std::isfinite(p.Y()) || !std::isfinite(p.Z())) return out;
+    const int nG = (int)donors.size();
+    std::vector<double> cnt((std::size_t)nG, 0.0);
+    for (int g : gOf)
+        if (g >= 0) cnt[(std::size_t)g] += 1.0;
+    for (double c : cnt)
+        if (!(c > 0.0)) return out;
+    double Rmaj = 0, z0 = 0, Rmin = 0;
+    {
+        const std::vector<ProfPt> seed = profileAbout(chain, C, W, xHint);
+        if (!fitProfileCircle(seed, tau, Rmaj, z0, Rmin)) return out;
+    }
+    constexpr int kN = 7;
+    std::vector<double> rho(P.size()), zv(P.size()), Rg((std::size_t)nG);
+    auto evaluate = [&](const gp_XYZ& Wc, const gp_XYZ& Cc, double ra, double zc, double rb,
+                        double& E) {
+        std::fill(Rg.begin(), Rg.end(), 0.0);
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const gp_XYZ d = P[i] - Cc;
+            zv[i] = d.Dot(Wc);
+            const double m = (d - Wc * zv[i]).Modulus();
+            if (!std::isfinite(m) || m <= gp::Resolution()) return false;
+            rho[i] = m;
+            if (gOf[i] >= 0) Rg[(std::size_t)gOf[i]] += m;
+        }
+        for (int g = 0; g < nG; ++g) Rg[(std::size_t)g] /= cnt[(std::size_t)g];
+        E = 0;
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const double f = (gOf[i] >= 0) ? rho[i] - Rg[(std::size_t)gOf[i]]
+                                           : std::hypot(rho[i] - ra, zv[i] - zc) - rb;
+            E += f * f;
+        }
+        return std::isfinite(E);
+    };
+    double E = 0;
+    if (!evaluate(W, C, Rmaj, z0, Rmin, E)) return out;
+    double lambda = 1e-6;
+    const int iterCap = maxIters > 0 ? maxIters : 16;
+    for (int it = 0; it < iterCap; ++it) {
+        const gp_XYZ tmp = (std::fabs(W.X()) < 0.9) ? gp_XYZ(1, 0, 0) : gp_XYZ(0, 1, 0);
+        gp_XYZ U = W.Crossed(tmp);
+        U /= U.Modulus();
+        const gp_XYZ V = W.Crossed(U);
+        std::vector<std::array<double, kN>> J(P.size());
+        std::vector<std::array<double, 4>> colMean((std::size_t)nG, {{0, 0, 0, 0}});
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            const gp_XYZ d = P[i] - C;
+            const double du = d.Dot(U), dv = d.Dot(V);
+            const double dRa = -zv[i] * du / rho[i], dRb = -zv[i] * dv / rho[i];
+            const double dRc = -du / rho[i], dRd = -dv / rho[i];
+            std::array<double, kN>& row = J[i];
+            if (gOf[i] >= 0) {
+                row = {{dRa, dRb, dRc, dRd, 0, 0, 0}};
+                std::array<double, 4>& cm = colMean[(std::size_t)gOf[i]];
+                for (int k = 0; k < 4; ++k) cm[(std::size_t)k] += row[(std::size_t)k];
+            } else {
+                const double s = std::hypot(rho[i] - Rmaj, zv[i] - z0);
+                if (!(s > gp::Resolution())) return out;
+                const double cr = (rho[i] - Rmaj) / s, cz = (zv[i] - z0) / s;
+                row = {{cr * dRa + cz * du, cr * dRb + cz * dv, cr * dRc, cr * dRd, -cr, -cz, -1.0}};
+            }
+        }
+        for (int g = 0; g < nG; ++g)
+            for (int k = 0; k < 4; ++k) colMean[(std::size_t)g][(std::size_t)k] /= cnt[(std::size_t)g];
+        double A[kN][kN] = {{0}};
+        double b[kN] = {0};
+        for (std::size_t i = 0; i < P.size(); ++i) {
+            double gr[kN];
+            for (int k = 0; k < kN; ++k) gr[k] = J[i][(std::size_t)k];
+            double f;
+            if (gOf[i] >= 0) {
+                const std::array<double, 4>& cm = colMean[(std::size_t)gOf[i]];
+                for (int k = 0; k < 4; ++k) gr[k] -= cm[(std::size_t)k];
+                f = rho[i] - Rg[(std::size_t)gOf[i]];
+            } else {
+                f = std::hypot(rho[i] - Rmaj, zv[i] - z0) - Rmin;
+            }
+            for (int k = 0; k < kN; ++k) {
+                b[k] -= gr[k] * f;
+                for (int l = 0; l < kN; ++l) A[k][l] += gr[k] * gr[l];
+            }
+        }
+        bool stepped = false;
+        for (int trial = 0; trial < 8 && !stepped; ++trial) {
+            double M[kN][kN + 1];
+            for (int k = 0; k < kN; ++k) {
+                for (int l = 0; l < kN; ++l) M[k][l] = A[k][l];
+                M[k][k] = M[k][k] * (1.0 + lambda) + lambda;
+                M[k][kN] = b[k];
+            }
+            bool singular = false;
+            for (int col = 0; col < kN && !singular; ++col) {
+                int piv = col;
+                for (int r = col + 1; r < kN; ++r)
+                    if (std::fabs(M[r][col]) > std::fabs(M[piv][col])) piv = r;
+                if (!(std::fabs(M[piv][col]) > gp::Resolution())) {
+                    singular = true;
+                    break;
+                }
+                if (piv != col)
+                    for (int l = 0; l <= kN; ++l) std::swap(M[piv][l], M[col][l]);
+                for (int r = col + 1; r < kN; ++r) {
+                    const double fac = M[r][col] / M[col][col];
+                    for (int l = col; l <= kN; ++l) M[r][l] -= fac * M[col][l];
+                }
+            }
+            if (singular) break;
+            double dx[kN];
+            bool finite = true;
+            for (int r = kN - 1; r >= 0; --r) {
+                double acc = M[r][kN];
+                for (int l = r + 1; l < kN; ++l) acc -= M[r][l] * dx[l];
+                dx[r] = acc / M[r][r];
+                if (!std::isfinite(dx[r])) finite = false;
+            }
+            if (!finite) break;
+            gp_XYZ Wn = W + U * dx[0] + V * dx[1];
+            if (!(Wn.Modulus() > gp::Resolution())) break;
+            Wn /= Wn.Modulus();
+            const gp_XYZ Cn = C + U * dx[2] + V * dx[3];
+            const double Ran = Rmaj + dx[4], zn = z0 + dx[5], Rbn = Rmin + dx[6];
+            double En = 0;
+            const std::vector<double> rhoKeep = rho, zKeep = zv, RgKeep = Rg;
+            if (evaluate(Wn, Cn, Ran, zn, Rbn, En) && En <= E) {
+                W = Wn;
+                C = Cn;
+                Rmaj = Ran;
+                z0 = zn;
+                Rmin = Rbn;
+                E = En;
+                lambda = std::max(1e-12, lambda / 3.0);
+                stepped = true;
+            } else {
+                rho = rhoKeep;
+                zv = zKeep;
+                Rg = RgKeep;
+                lambda *= 5.0;
+                if (lambda > 1e6) break;
+            }
+        }
+        if (!stepped) break;
+    }
+    if (W.Dot(Wseed) < 0.0) W.Reverse();
+    if (!std::isfinite(C.X()) || !std::isfinite(C.Y()) || !std::isfinite(C.Z())) return out;
+    gp_XYZ mean(0, 0, 0);
+    for (const gp_XYZ& p : P) mean += p;
+    mean /= (double)P.size();
+    C = C + W * ((mean - C).Dot(W));
+    out.fitted = true;
+    out.tilt = std::min(1.0, W.Crossed(Wseed).Modulus());
+    out.tilt = std::asin(out.tilt);
+    out.family = jointAxisAbout(donors, C, W);
+    out.chain = certifyTorus(profileAbout(chain, C, W, xHint), tau);
+    out.ok = jointAxisCertifies(out.family, tau) && out.chain.ok;
+    return out;
 }
 
 }  // namespace refit

@@ -508,11 +508,12 @@ set_target_properties(relational_torus_unit PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-target_link_libraries(relational_torus_unit PRIVATE stl2step::core)
+target_link_libraries(relational_torus_unit PRIVATE stl2step::core stl2step::harness)
 target_include_directories(relational_torus_unit PRIVATE
     "${_stl2step_root}/include"
     "${_stl2step_root}/src"
-    "${_stl2step_root}/tests/support")
+    "${_stl2step_root}/tests/support"
+    "${_stl2step_root}/tests/harness")
 if(MSVC)
     target_compile_definitions(relational_torus_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
     target_compile_options(relational_torus_unit PRIVATE /EHsc)
@@ -520,7 +521,8 @@ endif()
 if(COMMAND stl2step_adhoc_sign)
     stl2step_adhoc_sign(relational_torus_unit)
 endif()
-add_test(NAME relational_torus_unit COMMAND relational_torus_unit)
+add_test(NAME relational_torus_unit
+    COMMAND relational_torus_unit "${_stl2step_root}/tests/corpus/handle-pickup.stl")
 set_tests_properties(relational_torus_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
