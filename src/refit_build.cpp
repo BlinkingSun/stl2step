@@ -4076,11 +4076,10 @@ double walkSignedAreaUV(const std::vector<LoopWireSlot>& slots, const LoopConnWa
     return 0.5 * a;
 }
 
-extern thread_local std::unordered_set<const void*> gCrossCapRimTShapes;
-
 // D-S3-171 case (c): signed area of one edge from the curve, not a 1-vertex polygon.
 // Circle: sign(axis · plate normal) × traversal orientation × π r².
-// Else: dense samples along the adaptor's own parameter range.
+// Else: dense samples along the curve read under the edge's orientation flag
+// (edgeSampledSignedAreaUV, D-fc-5.13).
 double edgeCurveSignedAreaUV(const TopoDS_Edge& eIn, const Region& plate) {
     if (eIn.IsNull()) return 0.0;
     const gp_Pln pln(plate.ax);
@@ -4094,38 +4093,10 @@ double edgeCurveSignedAreaUV(const TopoDS_Edge& eIn, const Region& plate) {
             const double r = circ.Radius();
             return s * kPi * r * r;
         }
-        const Standard_Real f = ac.FirstParameter();
-        const Standard_Real l = ac.LastParameter();
-        if (l - f <= Precision::PConfusion()) return 0.0;
-        std::vector<gp_Pnt2d> uv;
-        uv.reserve(32);
-        for (int i = 0; i < 32; i++) {
-            const Standard_Real t =
-                f + (l - f) * (Standard_Real)i / 32.0;
-            Standard_Real u = 0, vv = 0;
-            ElSLib::Parameters(pln, ac.Value(t), u, vv);
-            const gp_Pnt2d q(u, vv);
-            if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
-            uv.push_back(q);
-        }
-        if (uv.size() < 3) return 0.0;
-        double a = 0.0;
-        for (size_t i = 0; i < uv.size(); i++) {
-            const gp_Pnt2d& p0 = uv[i];
-            const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
-            a += p0.X() * p1.Y() - p1.X() * p0.Y();
-        }
-        // The samples run along the curve's own parameter. A rim the crossing-cap
-        // path minted (D-fc-5.7 O-1) reads its orientation flag, as the circle
-        // branch above does; every other edge keeps the reading its plane was
-        // validated against (D-fc-1.15: S16-R2's closed ellipse rims still revert).
-        if (eIn.Orientation() == TopAbs_REVERSED &&
-            gCrossCapRimTShapes.count(diagTShapePtr(eIn)))
-            a = -a;
-        return 0.5 * a;
     } catch (const Standard_Failure&) {
         return 0.0;
     }
+    return edgeSampledSignedAreaUV(eIn, pln);
 }
 
 double walkCurveSignedAreaUV(const std::vector<LoopWireSlot>& slots, const LoopConnWalk& conn,
@@ -7328,8 +7299,6 @@ void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F);
 Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
                                       const Handle(Geom_Surface)& srf, const char* kind);
 thread_local std::unordered_set<const void*> gSeamTShapes;
-// D-fc-5.7 O-1: the exact rims the crossing-cap path mints (enrolled, pinned).
-thread_local std::unordered_set<const void*> gCrossCapRimTShapes;
 thread_local int lastCanonClearPass = -1;
 thread_local int gCompNTri = 0;
 // D-130-2 tier-2 polyline edges (ONE degree-1 B-spline per skew cyl|cyl loop):
@@ -7342,6 +7311,9 @@ thread_local std::unordered_set<const void*> gTier2TShapes;
 // rewrites the tolerance down to the sampled gap; the census reads the
 // closed-form supremum, which is larger. Raised again after SameParameter.
 thread_local std::unordered_set<const void*> gConeIsoCapTShapes;
+// D-fc-5.13: the half-turn arcs a closed ellipse rim ships as (closedEllipseHalves).
+// SameParameter lowers them to the sampled gap as well; raised again with the iso rims.
+thread_local std::unordered_set<const void*> gEllipseHalfTShapes;
 // The TShape-address sets above (and gMeshTShapes) are refilled only at a
 // canon-clear transition, but every rebuild round inside one recoverPass
 // re-mints chain edges and frees the old ones. A freed address handed to a
@@ -13735,15 +13707,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             const int ci = cp->chainIdx.front();
             if (ci < 0 || (size_t)ci >= geom.size()) return -1;
             const ChainGeom& g = geom[(size_t)ci];
-            if (!g.collapsed || g.edges.size() != 1 || g.edges[0].IsNull()) return -1;
-            Standard_Real f0 = 0, l0 = 0;
-            const Handle(Geom_Curve) c0 = basisCurveOf(BRep_Tool::Curve(g.edges[0], f0, l0));
-            if (Handle(Geom_Circle)::DownCast(c0).IsNull() &&
-                Handle(Geom_Ellipse)::DownCast(c0).IsNull())
-                return -1;
-            TopoDS_Vertex a, b;
-            TopExp::Vertices(g.edges[0], a, b);
-            return (!a.IsNull() && a.IsSame(b)) ? ci : -1;
+            return (g.collapsed && closedAnalyticRim(g.edges)) ? ci : -1;
         };
         int crossing = 0;
         for (const Loop* cp : {capL, capH})
@@ -13930,7 +13894,8 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 const TopoDS_Vertex VP = wireVertNearestU(exactLow ? pathH : pathL);
                 const TopoDS_Edge exactPathOld = exactPath.empty() ? TopoDS_Edge() : exactPath[0];
                 TopoDS_Vertex VE;
-                if (!VP.IsNull() && exactPath.size() == 1 && ciExact >= 0) {
+                if (!VP.IsNull() && ciExact >= 0 &&
+                    exactPath.size() == geom[(size_t)ciExact].edges.size()) {
                     // The minted rim lies on the chain's own curve and runs with the
                     // chain's walk (the old edge's traversal, orientation flag
                     // included), FORWARD on that curve, from the generator through
@@ -14000,7 +13965,6 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                                     bindAllVariants(e, *consumerR, kindStr, mv, ciExact, acc);
                                 bindAllVariants(e, *ownerR, kindStr, mv, ciExact, acc);
                                 noteWirePop(e, "rebuildCollapsed", ciExact);
-                                enrollTShape(gCrossCapRimTShapes, e);
                             }
                             mintedExact = rim;
                             // This wall's copy runs as its path ran the old edge.
@@ -16569,9 +16533,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gRegionSurf.clear();
                     gSurfIdent.clear();
                     gSeamTShapes.clear();
-                    gCrossCapRimTShapes.clear();
                     gTier2TShapes.clear();
                     gConeIsoCapTShapes.clear();
+                    gEllipseHalfTShapes.clear();
                     gMeshTShapes.clear();
                     gWirePopCi.clear();
                     gWirePopSite.clear();
@@ -17431,6 +17395,16 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // cylinder that carries an inner wire and the single arc would
                 // otherwise leave the seam nowhere outside that wire to stand.
                 std::vector<TopoDS_Edge> chainEdges{e};
+                // D-fc-5.13: a closed ellipse rim ships as two half-turn arcs (the
+                // D-fc-5.7 O-1 construction), their antipodal vertex an exact curve
+                // point minted with the edges both faces share.
+                if (full && curve.kind == AnalyticCurve::Elips) {
+                    std::vector<TopoDS_Edge> halves = closedEllipseHalves(e);
+                    if (halves.size() == 2) {
+                        for (const TopoDS_Edge& h : halves) enrollTShape(gEllipseHalfTShapes, h);
+                        chainEdges = std::move(halves);
+                    }
+                }
                 // CYLCYL: the stage was the landing door (D-130-17 keeps the
                 // union disabled); the geometry is the condition, and
                 // rimSplitVertex asks it -- a closed360 cylinder carrying an
@@ -20212,17 +20186,20 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         // branch, |d0 − R|, because the iso is coaxial with the cone and the
         // two axes differ by more than Precision::Confusion. Cover that
         // supremum after SameParameter so it is not lowered again.
-        if (!gConeIsoCapTShapes.empty()) {
+        // The half-turn arcs of a closed ellipse rim likewise (D-fc-5.13).
+        if (!gConeIsoCapTShapes.empty() || !gEllipseHalfTShapes.empty()) {
             BRep_Builder bb;
             for (TopExp_Explorer ex(sh, TopAbs_EDGE); ex.More(); ex.Next()) {
                 const TopoDS_Edge e = TopoDS::Edge(ex.Current());
                 const void* ts = diagTShapePtr(e);
-                if (!ts || !gConeIsoCapTShapes.count(ts)) continue;
+                const bool iso = ts && gConeIsoCapTShapes.count(ts);
+                if (!iso && !(ts && gEllipseHalfTShapes.count(ts))) continue;
                 const double exm = maxExactAllPcurves(e, -1.0);
                 if (!(exm >= 0.0) || !std::isfinite(exm)) continue;
                 const double want =
                     std::max(Precision::Confusion(), exm + Precision::PConfusion());
-                fireTolRewriteEdge(bb, e, want, "cone-iso-cap", meshTolCap(mv, nullptr));
+                fireTolRewriteEdge(bb, e, want, iso ? "cone-iso-cap" : "ellipse-half",
+                                   meshTolCap(mv, nullptr));
             }
         }
 

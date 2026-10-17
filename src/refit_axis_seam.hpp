@@ -8,8 +8,22 @@
 #ifndef STL2STEP_REFIT_AXIS_SEAM_HPP
 #define STL2STEP_REFIT_AXIS_SEAM_HPP
 
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
+#include <ElSLib.hxx>
+#include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_Ellipse.hxx>
 #include <Geom_Surface.hxx>
+#include <Geom_TrimmedCurve.hxx>
+#include <Standard_Failure.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
@@ -17,7 +31,9 @@
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
 #include <Precision.hxx>
 
@@ -191,6 +207,105 @@ inline std::size_t torusNamingEnd(const std::vector<char>& namesTorus) {
 // has been built: the regions after them cannot change the named set.
 inline bool torusRoundDecided(bool torusFailed, std::size_t built, std::size_t namingEnd) {
     return torusFailed && built >= namingEnd;
+}
+
+// D-S3-171 case (c), the sampled branch: the signed area (plane UV, about the plane's
+// normal) of an edge's curve sampled densely along its own parameter and closed back
+// to its start. The edge's traversal is that run read under its orientation flag
+// (D-fc-5.13: a plane whose inner loop is one closed ellipse handed REVERSED).
+inline double edgeSampledSignedAreaUV(const TopoDS_Edge& e, const gp_Pln& pln) {
+    if (e.IsNull()) return 0.0;
+    try {
+        BRepAdaptor_Curve ac(e);
+        const Standard_Real f = ac.FirstParameter();
+        const Standard_Real l = ac.LastParameter();
+        if (l - f <= Precision::PConfusion()) return 0.0;
+        std::vector<gp_Pnt2d> uv;
+        uv.reserve(32);
+        for (int i = 0; i < 32; i++) {
+            const Standard_Real t = f + (l - f) * (Standard_Real)i / 32.0;
+            Standard_Real u = 0, vv = 0;
+            ElSLib::Parameters(pln, ac.Value(t), u, vv);
+            const gp_Pnt2d q(u, vv);
+            if (!uv.empty() && uv.back().Distance(q) <= Precision::PConfusion()) continue;
+            uv.push_back(q);
+        }
+        if (uv.size() < 3) return 0.0;
+        double a = 0.0;
+        for (std::size_t i = 0; i < uv.size(); i++) {
+            const gp_Pnt2d& p0 = uv[i];
+            const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
+            a += p0.X() * p1.Y() - p1.X() * p0.Y();
+        }
+        if (e.Orientation() == TopAbs_REVERSED) a = -a;
+        return 0.5 * a;
+    } catch (const Standard_Failure&) {
+        return 0.0;
+    }
+}
+
+inline Handle(Geom_Curve) rimBasisCurve(const Handle(Geom_Curve)& c) {
+    const Handle(Geom_TrimmedCurve) t = Handle(Geom_TrimmedCurve)::DownCast(c);
+    return (!t.IsNull() && !t->BasisCurve().IsNull()) ? t->BasisCurve() : c;
+}
+
+// D-fc-5.13 (the D-fc-5.7 O-1 construction): a closed ellipse edge as two half-turn
+// arcs of its own curve, from its vertex to the antipode (the curve point half a turn
+// on, minted exact) and back, in the edge's own traversal. A full-turn ellipse has no
+// certified bind class (refit_ellipse_bind's range clause); a half-turn arc has. Empty
+// when the edge is not one full turn of an ellipse closed at one vertex.
+inline std::vector<TopoDS_Edge> closedEllipseHalves(const TopoDS_Edge& e) {
+    const double kHalfTurn = 3.14159265358979323846;
+    if (e.IsNull()) return {};
+    try {
+        Standard_Real f = 0, l = 0;
+        const Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+        if (c.IsNull()) return {};
+        const Handle(Geom_Ellipse) ge = Handle(Geom_Ellipse)::DownCast(rimBasisCurve(c));
+        if (ge.IsNull() || std::fabs((l - f) - 2.0 * kHalfTurn) > Precision::PConfusion())
+            return {};
+        TopoDS_Vertex V, V2;
+        TopExp::Vertices(e, V, V2, Standard_False);
+        if (V.IsNull() || !V.IsSame(V2)) return {};
+        V.Orientation(TopAbs_FORWARD);
+        TopoDS_Vertex VA;
+        BRep_Builder().MakeVertex(VA, ge->Value(f + kHalfTurn), Precision::Confusion());
+        BRepBuilderAPI_MakeEdge m1(ge, V, VA, f, f + kHalfTurn);
+        BRepBuilderAPI_MakeEdge m2(ge, VA, V, f + kHalfTurn, l);
+        if (!m1.IsDone() || !m2.IsDone()) return {};
+        const TopoDS_Edge a1 = m1.Edge(), a2 = m2.Edge();
+        if (e.Orientation() == TopAbs_REVERSED)
+            return {TopoDS::Edge(a2.Reversed()), TopoDS::Edge(a1.Reversed())};
+        return {a1, a2};
+    } catch (const Standard_Failure&) {
+    }
+    return {};
+}
+
+// One closed analytic rim: a single closed circle or ellipse edge, or the two half-turn
+// arcs of one ellipse that closedEllipseHalves makes, joined end to end.
+inline bool closedAnalyticRim(const std::vector<TopoDS_Edge>& edges) {
+    if (edges.empty() || edges.size() > 2) return false;
+    Handle(Geom_Curve) basis;
+    for (const TopoDS_Edge& e : edges) {
+        if (e.IsNull()) return false;
+        Standard_Real f = 0, l = 0;
+        const Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+        if (c3.IsNull()) return false;
+        const Handle(Geom_Curve) c = rimBasisCurve(c3);
+        const bool ellipse = !Handle(Geom_Ellipse)::DownCast(c).IsNull();
+        if (!ellipse && Handle(Geom_Circle)::DownCast(c).IsNull()) return false;
+        if (edges.size() == 2 && !ellipse) return false;
+        if (!basis.IsNull() && basis != c) return false;
+        basis = c;
+    }
+    TopoDS_Vertex a, b;
+    TopExp::Vertices(edges.front(), a, b, Standard_True);
+    if (a.IsNull() || b.IsNull()) return false;
+    if (edges.size() == 1) return a.IsSame(b);
+    TopoDS_Vertex c2, d2;
+    TopExp::Vertices(edges.back(), c2, d2, Standard_True);
+    return !a.IsSame(b) && b.IsSame(c2) && d2.IsSame(a);
 }
 
 }  // namespace refit
