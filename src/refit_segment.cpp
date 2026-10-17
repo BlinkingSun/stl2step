@@ -118,6 +118,8 @@ bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTol
     // H1 (D-fc-1.3): after stage T, before A3. The pre-T snapshot already closed.
     if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Torus)) return false;
     if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Torus)) return false;
+    // D-fc-5.11 F8: a corner of three certified rounds is a sphere.
+    if (!claimSphereCorners(mv, p, tol, work)) return false;
 
     if (!commitPlanesA3(mv, p, tol, work)) return false;
 
@@ -128,6 +130,8 @@ bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTol
         torusRevertValidSnap = true;
     } else if (work.torusAdmitted) {
         SegmentWork revW = preTorus;
+        // The pre-T topology keeps the sphere corners of its own rounds.
+        if (!claimSphereCorners(mv, p, tol, revW)) return false;
         if (!commitPlanesA3(mv, p, tol, revW)) return false;
         RegionSet revRs;
         revRs.compRoot = out.compRoot;

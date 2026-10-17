@@ -314,6 +314,10 @@ bool refuteNgonByLaw (const MeshView&, const SegmentParams&, const DerivedTols&,
 bool claimRelRevolve (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
 bool reclaimRelational(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
 
+// D-fc-5.11 F8. Sphere corners (src/refit_relational_sphere.cpp): after every
+// stage that certifies a round (H1), before A3.
+bool claimSphereCorners(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+
 bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
 
 // --- D-140-8 U-R5..U-R8, U-R13: the same-surface UNION CENSUS -----------------
