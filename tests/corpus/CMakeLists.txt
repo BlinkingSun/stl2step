@@ -97,6 +97,7 @@ set(STL2STEP_CORPUS_FC_IDS
     S27_sphere_corner_fine
     S28_varradius_negative
     S29_hex_law
+    S30-open-crack
 )
 
 enable_testing()

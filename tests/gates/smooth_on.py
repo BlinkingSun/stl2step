@@ -21,7 +21,9 @@ G5_EDGE_K = 0.1
 G4_4_MIN_G1_S02 = 22
 LEGACY_VOLUME_GATE_PCT = 0.01
 
-DIRTY_SKIP_FIXTURES = frozenset({"S15", "S16-R1-round-2"})
+# D-fc-5.10: S15 now closes in the TrueForm mesh heal; S30-open-crack's crack is
+# wider than sewTol, so it stays dirty and keeps the dirty-skip leg live.
+DIRTY_SKIP_FIXTURES = frozenset({"S30-open-crack", "S16-R1-round-2"})
 # Force-sew repair can emit a volume warning (exit 2) on the pinned S09 loft
 # while off-path exits 0; G0.3 STEP-identity still holds (global refit disable).
 G03_FORCE_SEW_EXIT_EXEMPT = frozenset({"S09"})
