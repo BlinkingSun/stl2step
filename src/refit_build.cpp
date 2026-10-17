@@ -19195,7 +19195,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             }
                         }
                     }
-                    if (!faceIsValid(f)) boundEdgesExactOnFace(f, meshTolCap(mv, &r));
+                    if (!faceIsValid(f)) {
+                        reverseInsideOutWire(f);
+                        boundEdgesExactOnFace(f, meshTolCap(mv, &r));
+                    }
                     if (!finishTorus(f, BuiltAs::Single)) return torusFail("invalid", __LINE__, &f);
                     return true;
                 }
