@@ -1,7 +1,7 @@
 // Synthetic cases for the torus-family seam predicates (D-fc-4.8), the closed-wall /
 // closed-torus build predicates of fx-closed360, the crossing-cap predicates of
 // D-fc-5.7 O-1, the U-3 naming predicates and the closed-ellipse rim construction of
-// D-fc-5.13. No mesh.
+// D-fc-5.13 and the D-fc-5.20 refusal of a non-positive quantum. No mesh file.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -9,6 +9,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <vector>
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
@@ -344,6 +345,93 @@ int main() {
         expect(!closedAnalyticRim({c1, c2}), "rim: two circle arcs are not this construction");
         expect(h.size() == 2 && !closedAnalyticRim({h[0], h[1], full}), "rim: three edges");
         expect(!closedAnalyticRim({}), "rim: no edge");
+    }
+
+    // D-fc-5.20 B-1. The review's closed elliptical rim: radii 5 and 3, eight
+    // vertices on the ellipse, chain start at the major-axis vertex, the opposite
+    // vertex exactly at the antipode. q ≤ 0 and a non-finite q refuse the split.
+    {
+        const double a = 5.0, b = 3.0;
+        const gp_Elips el(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), a, b);
+        const TopoDS_Edge full = BRepBuilderAPI_MakeEdge(el).Edge();
+        TopoDS_Vertex edgeV0, edgeV1;
+        TopExp::Vertices(full, edgeV0, edgeV1, Standard_True);
+        expect(!edgeV0.IsNull() && BRep_Tool::Pnt(edgeV0).Distance(gp_Pnt(a, 0, 0)) < 1e-12,
+               "b1 mesh: the edge starts at the major-axis vertex");
+        gp_Pnt pAnti;
+        expect(closedEllipseAntipode(full, pAnti), "b1 mesh: the antipode exists");
+        std::vector<TopoDS_Vertex> verts(8);
+        std::vector<int> ids(8);
+        BRep_Builder bb;
+        for (int k = 0; k < 8; ++k) {
+            const double t = k * (2.0 * kPi / 8.0);
+            const gp_Pnt p = (k == 4) ? pAnti : ElCLib::Value(t, el);
+            bb.MakeVertex(verts[(size_t)k], p, Precision::Confusion());
+            ids[(size_t)k] = k;
+        }
+        const int iTerm = 0;
+        const int iAnti = 4;
+        expect(BRep_Tool::Pnt(verts[(size_t)iAnti]).Distance(pAnti) == 0.0,
+               "b1 mesh: the opposite vertex is the antipode");
+        expect(BRep_Tool::Pnt(verts[(size_t)iTerm]).Distance(gp_Pnt(a, 0, 0)) < 1e-9,
+               "b1 mesh: the chain starts at the major-axis vertex");
+
+        const double refused[] = {0.0, -0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::infinity(),
+                                  -std::numeric_limits<double>::infinity()};
+        for (double q : refused) {
+            char name[80];
+            std::snprintf(name, sizeof name, "b1: q=%g admits nothing", q);
+            expect(!ellipseRimSplitAdmitted(q), name);
+            std::snprintf(name, sizeof name, "b1: q=%g mints nothing", q);
+            expect(closedEllipseChainSplit(full, q, TopoDS_Vertex()).empty(), name);
+            std::snprintf(name, sizeof name, "b1: q=%g refuses the split with the antipode in hand", q);
+            expect(closedEllipseChainSplit(full, q, verts[(size_t)iAnti]).empty(), name);
+        }
+        // Asking the constructor directly still mints. That mint is a second
+        // vertex at the mesh vertex's place: the twin the gate refuses.
+        {
+            const std::vector<TopoDS_Edge> minted = closedEllipseHalves(full);
+            bool twin = minted.size() == 2;
+            if (twin) {
+                TopoDS_Vertex m0f, m0l;
+                TopExp::Vertices(minted[0], m0f, m0l, Standard_True);
+                twin = !m0l.IsSame(verts[(size_t)iAnti]) &&
+                       BRep_Tool::Pnt(m0l).Distance(BRep_Tool::Pnt(verts[(size_t)iAnti])) < 1e-12;
+            }
+            expect(twin, "b1 witness: an unguarded mint twins the antipode vertex");
+        }
+
+        const double q = 1.0e-6;
+        const double tau = 2.0 * q;
+        expect(ellipseRimSplitAdmitted(q), "b1: a positive finite q admits");
+        const int lv = closedEllipseAntipodePick(full, verts, ids, iTerm, tau);
+        expect(lv == iAnti, "b1: positive q picks the mesh antipode");
+        expect(closedEllipseAntipodePick(full, verts, ids, iTerm, 0.0) < 0, "b1: tau 0 picks nothing");
+        expect(closedEllipseAntipodePick(full, verts, ids, iTerm,
+                                         std::numeric_limits<double>::quiet_NaN()) < 0,
+               "b1: NaN tau picks nothing");
+        const std::vector<TopoDS_Edge> h =
+            (lv >= 0) ? closedEllipseChainSplit(full, q, verts[(size_t)lv]) : std::vector<TopoDS_Edge>{};
+        bool meet = h.size() == 2;
+        if (meet) {
+            TopoDS_Vertex h0f, h0l, h1f, h1l;
+            TopExp::Vertices(h[0], h0f, h0l, Standard_True);
+            TopExp::Vertices(h[1], h1f, h1l, Standard_True);
+            Standard_Real f0 = 0, l0 = 0, f1 = 0, l1 = 0;
+            BRep_Tool::Range(h[0], f0, l0);
+            BRep_Tool::Range(h[1], f1, l1);
+            meet = h0l.IsSame(verts[(size_t)iAnti]) && h1f.IsSame(verts[(size_t)iAnti]) &&
+                   std::fabs((l0 - f0) - kPi) < 1e-8 && std::fabs((l1 - f1) - kPi) < 1e-8;
+        }
+        expect(meet, "b1: positive q meets at the mesh vertex, half a turn each");
+
+        std::vector<TopoDS_Vertex> far(1);
+        bb.MakeVertex(far[0], gp_Pnt(0, 0, 40), Precision::Confusion());
+        expect(closedEllipseAntipodePick(full, far, std::vector<int>{0}, -1, tau) < 0,
+               "b1: a vertex outside tau is not the antipode");
+        expect(closedEllipseChainSplit(full, q, TopoDS_Vertex()).size() == 2,
+               "b1: positive q with no in-range vertex still mints the exact point");
     }
 
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);

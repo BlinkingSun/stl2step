@@ -17399,30 +17399,22 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // D-fc-5.7 O-1 construction). Their antipodal vertex is the chain's own
                 // mesh vertex when one stands within tau of the antipode (D-130-16: no
                 // twin of a mesh vertex), else an exact curve point minted with the
-                // edges both faces share.
+                // edges both faces share. D-fc-5.20: a quantum that is not finite and
+                // positive admits nothing — the full-turn edge stays, and nothing is
+                // minted.
                 if (full && curve.kind == AnalyticCurve::Elips) {
                     TopoDS_Vertex atAntipode;
-                    gp_Pnt pA;
-                    const double tauA = 2.0 * std::max(mv.quantFloor, 0.0);
-                    if (tauA > 0.0 && closedEllipseAntipode(e, pA)) {
-                        int lvA = -1;
-                        double dA = tauA;
-                        for (int lv : ch.meshVerts) {
-                            if (lv < 0 || (size_t)lv >= verts.size() || verts[(size_t)lv].IsNull() ||
-                                verts[(size_t)lv].IsSame(verts[(size_t)ia]))
-                                continue;
-                            const double d = BRep_Tool::Pnt(verts[(size_t)lv]).Distance(pA);
-                            if (d <= dA) {
-                                dA = d;
-                                lvA = lv;
-                            }
-                        }
+                    if (ellipseRimSplitAdmitted(mv.quantFloor)) {
+                        const double tauA = 2.0 * mv.quantFloor;
+                        const int lvA =
+                            closedEllipseAntipodePick(e, verts, ch.meshVerts, ia, tauA);
                         if (lvA >= 0) {
                             snapVertexToCurve(verts[(size_t)lvA], curve, geom[ci].chainSnapCap);
                             atAntipode = verts[(size_t)lvA];
                         }
                     }
-                    std::vector<TopoDS_Edge> halves = closedEllipseHalves(e, atAntipode);
+                    std::vector<TopoDS_Edge> halves =
+                        closedEllipseChainSplit(e, mv.quantFloor, atAntipode);
                     if (halves.size() == 2) {
                         for (const TopoDS_Edge& h : halves) enrollTShape(gEllipseHalfTShapes, h);
                         chainEdges = std::move(halves);
