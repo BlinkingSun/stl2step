@@ -18,6 +18,7 @@
 #include "refit_internal.hpp"
 #include "refit_relational_arc.hpp"
 #include "refit_axis_seam.hpp"
+#include "refit_edge_bound.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -1077,6 +1078,26 @@ bool ensureFaceValid(TopoDS_Face& f, double cap) {
         return false;
     }
     return faceIsValid(f);
+}
+
+// fx-hubtori (fx-tori-r1 Open 2). FixAddPCurve gives a projected edge the
+// deviation it sampled. A mesh chord that crosses a torus diagonally (between two
+// rows) peaks between those samples: the hub R12/r3 rim chord measured 0.0080946
+// against an exact 0.0081335 mm. BRepCheck then reads InvalidCurveOnSurface and
+// cannot orient the face's single wire (UnorientableShape). Every edge of the face
+// takes its exact curve-on-surface deviation (exactEdgeDeviationOnFace): raised
+// only, never past cap (an edge that needs more keeps its tolerance and the face
+// stays invalid).
+void boundEdgesExactOnFace(const TopoDS_Face& f, double cap) {
+    BRep_Builder B;
+    TopTools_IndexedMapOfShape emap;
+    TopExp::MapShapes(f, TopAbs_EDGE, emap);
+    for (int i = 1; i <= emap.Extent(); i++) {
+        const TopoDS_Edge& e = TopoDS::Edge(emap(i));
+        const double d = exactEdgeDeviationOnFace(e, f);
+        if (edgeBoundOf(d, BRep_Tool::Tolerance(e), cap) == EdgeBound::Raise)
+            fireTolRewriteEdge(B, e, d, "torus-exact", cap);
+    }
 }
 
 void addPcurvesOnFace(TopoDS_Face& f, double sewTol, bool /*closed360*/) {
@@ -19164,6 +19185,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             }
                         }
                     }
+                    if (!faceIsValid(f)) boundEdgesExactOnFace(f, meshTolCap(mv, &r));
                     if (!finishTorus(f, BuiltAs::Single)) return torusFail("invalid", __LINE__, &f);
                     return true;
                 }
