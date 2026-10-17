@@ -1,5 +1,6 @@
 // Synthetic cases for the torus-family seam predicates (D-fc-4.8), the closed-wall /
-// closed-torus build predicates of fx-closed360 and the U-3 naming predicates. No mesh.
+// closed-torus build predicates of fx-closed360, the crossing-cap predicates of
+// D-fc-5.7 O-1 and the U-3 naming predicates. No mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -157,6 +158,36 @@ int main() {
     expect(!splitCapHealApplies(2.0 * kTau, kTau, true), "split-cap: uncertified wall keeps its path");
     expect(!splitCapHealApplies(0.5 * kTau, kTau, false), "split-cap: all-polyline rims keep their path");
     expect(!splitCapHealApplies(0.0, 0.0, true), "split-cap: tau 0 admits nothing");
+
+    // crossingCapApplies (D-fc-5.7 O-1): interior certified, a rim vertex off tau, one
+    // exact rim and at least one crossing chain -- all four required.
+    expect(crossingCapApplies(0.5 * kTau, 300.0 * kTau, kTau, true, 15),
+           "crossing cap: rim-off wall with an exact rim and a crossing rim");
+    expect(!crossingCapApplies(2.0 * kTau, 300.0 * kTau, kTau, true, 15),
+           "crossing cap: an interior vertex off tau keeps the path");
+    expect(!crossingCapApplies(0.5 * kTau, 0.5 * kTau, kTau, true, 15),
+           "crossing cap: a wall certified on every vertex is the split-cap heal's");
+    expect(!crossingCapApplies(0.5 * kTau, 300.0 * kTau, kTau, false, 15),
+           "crossing cap: no exact rim keeps the path");
+    expect(!crossingCapApplies(0.5 * kTau, 300.0 * kTau, kTau, true, 0),
+           "crossing cap: no crossing chain keeps the path");
+    expect(!crossingCapApplies(0.0, 1.0, 0.0, true, 15), "crossing cap: tau 0 admits nothing");
+
+    // capPointOnGenerator: where a generator meets a cap's plane -- an oblique cut
+    // (normal (1, 0, 2)) through a cylinder of radius 4 about z, generator at 60 degrees.
+    {
+        const gp_Ax2 cap(gp_Pnt(0, 0, 3), gp_Dir(1.0 / std::sqrt(5.0), 0, 2.0 / std::sqrt(5.0)));
+        const double R = 4.0, u = kPi / 3.0;
+        const gp_Lin gen(onCircle(R, u, -40.0), gp_Dir(0, 0, 1));
+        gp_Pnt x;
+        const bool ok = capPointOnGenerator(cap, gen, x);
+        const double zWant = 3.0 - 0.5 * R * std::cos(u);  // n.(x - o) = 0, n ~ (1, 0, 2)
+        expect(ok && std::fabs(x.Z() - zWant) < 1e-12 && gen.Distance(x) < 1e-12,
+               "cap point: on the generator and on the cap plane");
+        const gp_Ax2 side(gp_Pnt(0, 0, 0), gp_Dir(1, 0, 0));
+        expect(!capPointOnGenerator(side, gp_Lin(gp_Pnt(0, 2, 0), gp_Dir(0, 0, 1)), x),
+               "cap point: a generator parallel to the plane meets it nowhere");
+    }
 
     // capLoopUnshareable: every chain of the cap loop must border a face that can carry
     // the rim circle; only the first chain can hand over a built rim edge.

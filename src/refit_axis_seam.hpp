@@ -10,6 +10,7 @@
 
 #include <Geom_Curve.hxx>
 #include <Geom_Surface.hxx>
+#include <gp.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -133,6 +134,30 @@ inline bool rimRunsWithSurfaceU(const Handle(Geom_Curve)& c, double f,
 // exact rim with an analytic neighbour ships with its mesh-polyline rim.
 inline bool splitCapHealApplies(double maxVertexDev, double tau, bool oneExactRim) {
     return tau > 0.0 && maxVertexDev <= tau && oneExactRim;
+}
+
+// D-fc-5.7 O-1: a closed wall whose rim crosses its neighbours along mesh edges -- a
+// bore leaving through a round, its rim a non-planar mesh polyline -- ships that rim
+// as the polyline beside one exact rim. Scope: the wall's own vertices leave tau only
+// on its rims (every interior vertex within tau, D-fc-1.4; a rim vertex beyond it is
+// where the mesh leaves the surface, the chord-bounded cover of D-fc-4.5). A wall
+// certified on every vertex keeps the split-cap heal above.
+inline bool crossingCapApplies(double interiorDev, double maxVertexDev, double tau,
+                               bool oneExactRim, int crossingChains) {
+    return tau > 0.0 && interiorDev <= tau && maxVertexDev > tau && oneExactRim &&
+           crossingChains > 0;
+}
+
+// Where a generator meets the plane of a cap circle or ellipse; the caller takes the
+// curve point at that point's parameter (exact on the curve). False when the line
+// runs parallel to the plane.
+inline bool capPointOnGenerator(const gp_Ax2& capPlane, const gp_Lin& gen, gp_Pnt& x) {
+    const gp_XYZ n = capPlane.Direction().XYZ();
+    const double den = n.Dot(gen.Direction().XYZ());
+    if (std::fabs(den) <= gp::Resolution()) return false;
+    const double t = n.Dot(capPlane.Location().XYZ() - gen.Location().XYZ()) / den;
+    x = gp_Pnt(gen.Location().XYZ() + t * gen.Direction().XYZ());
+    return true;
 }
 
 // D-fc-4.6 F9 over the whole rim. A closed torus's rim is one 2π circle, so every

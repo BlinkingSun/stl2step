@@ -7,9 +7,11 @@
 //   1. Narrow donor heal (D-fc-4.5). An accepted CylGrow region that the revolve
 //      donor test refuses on its vertices (own LS residual > tau) is re-certified
 //      on its tau-inliers I; every other triangle of it must be chord-bounded
-//      cover. It then grows over free triangles from I, refitting and regrowing
-//      to a fixed point, and takes a same-surface partial reached only through
-//      the healed gap.
+//      cover. It then grows over free triangles from the region (its inliers
+//      chain, its cover is traversed), refitting and regrowing to a fixed point,
+//      and takes a same-surface partial reached only through the healed gap. A
+//      healed band that is one edge-component bounded by two cycles, each winding
+//      once about the axis, is a closed wall by construction (D-fc-5.7 O-1).
 //   2. Same-surface closure (D-fc-4.4). Certified partial CylGrow regions that
 //      are one surface at tau merge greedily to a fixed point; the Unclaimed
 //      I/Cover triangles inside the group's extent fill the gap (D-fc-3.2.7).
@@ -52,8 +54,6 @@ constexpr double kTiny = 1e-30;
 constexpr int kMinAxialLevels = 2;
 // D-fc-4.5: a cover triangle has >= 2 vertices within tau (the third within sDev).
 constexpr int kCoverOnVertices = 2;
-// A closed wall between two rims is an annulus: two boundary loops (topology).
-constexpr int kAnnulusLoops = 2;
 
 bool diagOn() {
     const char* e = std::getenv("STL2STEP_DIAG_REL");
@@ -251,8 +251,10 @@ double percentile75(std::vector<double> v) {
     return v[(std::size_t)std::floor(0.75 * (double)(v.size() - 1))];
 }
 
+// closedByConstruction: the set is an annulus about the axis (annulusAboutAxis), a
+// closed wall whatever D2's band count reads; its span is then 2*pi.
 bool cylFields(const RMesh& rm, const DerivedTols& tol, const std::vector<int>& tris,
-               const Cyl& s, CylFields& f) {
+               const Cyl& s, CylFields& f, bool closedByConstruction = false) {
     const MeshView& mv = *rm.mv;
     if (tris.empty()) return false;
     const gp_XYZ aw = s.A;
@@ -318,7 +320,7 @@ bool cylFields(const RMesh& rm, const DerivedTols& tol, const std::vector<int>& 
         jmax = (int)m - 1;
     }
     const double bandArc = kTwoPi / (double)nBands;
-    f.closed360 = nBands >= 3 && maxGap <= 1.5 * bandArc;
+    f.closed360 = (nBands >= 3 && maxGap <= 1.5 * bandArc) || closedByConstruction;
     const double span = f.closed360 ? kTwoPi : (kTwoPi - maxGap);
     if (!(span > 0)) return false;
     f.nSides = (int)std::llround(kTwoPi * nBands / span);
@@ -501,6 +503,66 @@ int boundaryLoops(const RMesh& rm, const std::vector<int>& ts) {
     return loops;
 }
 
+// The boundary cycles of a triangle set, each as local vertex ids in traversal order.
+// False when a boundary vertex is not of degree 2 (a pinch is not one cycle).
+bool boundaryCycles(const RMesh& rm, const std::vector<int>& ts,
+                    std::vector<std::vector<int>>& out) {
+    const MeshView& mv = *rm.mv;
+    out.clear();
+    if (!mv.compEdges) return false;
+    std::map<int, int> cnt;
+    for (int t : ts)
+        for (int s = 0; s < 3; ++s) ++cnt[mv.triEdges[t][s]];
+    std::map<int, std::vector<int>> g;
+    for (const auto& kv : cnt) {
+        if (kv.second != 1) continue;
+        const auto& e = mv.compEdges[kv.first];
+        g[e.first].push_back(e.second);
+        g[e.second].push_back(e.first);
+    }
+    std::set<int> used;
+    for (const auto& kv : g) {
+        if (kv.second.size() != 2) return false;
+        if (used.count(kv.first)) continue;
+        std::vector<int> cyc{kv.first};
+        used.insert(kv.first);
+        int prev = -1, cur = kv.first;
+        for (;;) {
+            const auto& nb = g[cur];
+            const int nx = nb[0] != prev ? nb[0] : nb[1];
+            prev = cur;
+            cur = nx;
+            if (cur == kv.first) break;
+            if (!used.insert(cur).second) return false;
+            cyc.push_back(cur);
+        }
+        out.push_back(std::move(cyc));
+    }
+    return true;
+}
+
+// D-fc-5.7 O-1: the set is a closed wall by construction (annulusAboutAxis).
+bool closedWallByConstruction(const RMesh& rm, const std::vector<int>& ts, const Cyl& s) {
+    const MeshView& mv = *rm.mv;
+    std::vector<std::vector<int>> cyc;
+    if (!mv.compVtx || !boundaryCycles(rm, ts, cyc)) return false;
+    gp_XYZ e1 = std::abs(s.A.X()) < 0.9 ? gp_XYZ(1, 0, 0).Crossed(s.A)
+                                       : gp_XYZ(0, 1, 0).Crossed(s.A);
+    e1 /= e1.Modulus();
+    const gp_XYZ e2 = s.A.Crossed(e1);
+    std::vector<int> windings;
+    for (const auto& c : cyc) {
+        std::vector<double> az;
+        az.reserve(c.size());
+        for (int lv : c) {
+            const gp_XYZ d = mv.pts[mv.compVtx[lv]] - s.C;
+            az.push_back(std::atan2(d.Dot(e2), d.Dot(e1)));
+        }
+        windings.push_back(windingNumber(az));
+    }
+    return annulusAboutAxis((int)edgeComponents(rm, ts).size(), windings);
+}
+
 // Partial-arc membership with the largest-gap convention of Region::uMin/uMax.
 bool inArc(double chi, double uMin, double uMax, double slack) {
     double x = chi;
@@ -674,7 +736,8 @@ int healRefusedDonors(const RMesh& rm, const SegmentParams& p, const DerivedTols
         for (int it = 0; it < maxIt; ++it) {
             std::fill(seen.begin(), seen.end(), 0);
             for (int t : R.tris) seen[(std::size_t)t] = 1;
-            std::vector<int> stack = I, ab, cv;
+            // The region seeds the growth: its inliers chain, its cover is traversed.
+            std::vector<int> stack = R.tris, ab, cv;
             while (!stack.empty()) {
                 const int u = stack.back();
                 stack.pop_back();
@@ -783,7 +846,8 @@ int healRefusedDonors(const RMesh& rm, const SegmentParams& p, const DerivedTols
         std::sort(grown.begin(), grown.end());
         grown.erase(std::unique(grown.begin(), grown.end()), grown.end());
         CylFields f;
-        if (!cylFields(rm, tol, grown, S, f)) {
+        const bool closedWall = closedWallByConstruction(rm, grown, S);
+        if (!cylFields(rm, tol, grown, S, f, closedWall)) {
             dg.why = "degenerate";
             printBand(dg);
             continue;
@@ -818,9 +882,9 @@ int healRefusedDonors(const RMesh& rm, const SegmentParams& p, const DerivedTols
         printBand(dg);
         if (diagOn())
             std::fprintf(stderr, "DIAG_REL_HEAL seed=%d absorbed=%d absorbCover=%d partners=%d "
-                                 "partnerTris=%d closed360=%d\n",
+                                 "partnerTris=%d closed360=%d annulus=%d\n",
                          dg.seed, (int)absorbed.size(), (int)cov.size(), (int)partners.size(),
-                         nPartTris, (int)R.closed360);
+                         nPartTris, (int)R.closed360, (int)closedWall);
     }
     eraseRegions(work, absorbedRegions);
     return healed;

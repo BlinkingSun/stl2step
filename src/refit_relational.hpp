@@ -85,6 +85,35 @@ inline double tanDistTol(double tolA, double tau) { return tolA + tau; }
 // D-fc-1.6(7). |a·n_A| <= (anchorTol(A) + τ) / L.
 inline double tanAngTol(double tolA, double tau, double L) { return (tolA + tau) / L; }
 
+// A closed wall between two rims is an annulus: two boundary loops (topology).
+constexpr int kAnnulusLoops = 2;
+
+// D-fc-5.7 O-1. Winding number about an axis of a closed vertex cycle, from its
+// vertex azimuths in traversal order: the wrapped steps summed over 2π. The sum is
+// an integer multiple of 2π, read off by rounding; no threshold.
+inline int windingNumber(const std::vector<double>& azimuths) {
+    const double kTwoPi = 6.283185307179586476925286766559;
+    if (azimuths.size() < 3) return 0;
+    double sum = 0;
+    for (std::size_t i = 0; i < azimuths.size(); ++i) {
+        double d = azimuths[(i + 1) % azimuths.size()] - azimuths[i];
+        d = std::remainder(d, kTwoPi);
+        sum += d;
+    }
+    return static_cast<int>(std::lround(sum / kTwoPi));
+}
+
+// D-fc-5.7 O-1. A band is a closed wall by construction when it is ONE edge-component
+// bounded by kAnnulusLoops cycles, each winding once about the axis: every generator
+// crosses it, whatever its tessellation (D2's band count cannot see that on a wall
+// tessellated coarsely at one rim and finely at the other).
+inline bool annulusAboutAxis(int edgeComponents, const std::vector<int>& cycleWindings) {
+    if (edgeComponents != 1 || (int)cycleWindings.size() != kAnnulusLoops) return false;
+    for (int w : cycleWindings)
+        if (w != 1 && w != -1) return false;
+    return true;
+}
+
 }}  // namespace stl2step::refit
 
 #endif  // STL2STEP_REFIT_RELATIONAL_HPP

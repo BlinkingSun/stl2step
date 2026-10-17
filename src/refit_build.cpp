@@ -970,6 +970,37 @@ bool cylinderPostFitOk(const Region& r, const MeshView& mv, const RegionSet& rs)
     return true;
 }
 
+// D-fc-5.7 O-1: the largest radial residual over a cylinder wall's interior
+// vertices -- those on no boundary edge of its triangle set. Its rim vertices are
+// where the mesh leaves the surface and are not read here.
+double wallInteriorDev(const Region& r, const MeshView& mv) {
+    if (r.type != SurfType::Cylinder || !mv.compEdges || !mv.compVtx) return 0.0;
+    std::map<int, int> edgeUse;
+    for (int lt : r.tris) {
+        if (lt < 0 || (size_t)lt >= mv.nTri) continue;
+        for (int s = 0; s < 3; s++) ++edgeUse[mv.triEdges[lt][s]];
+    }
+    std::unordered_set<int> rim;
+    for (const auto& kv : edgeUse) {
+        if (kv.second != 1 || kv.first < 0 || (size_t)kv.first >= mv.nEdge) continue;
+        rim.insert(mv.compVtx[mv.compEdges[kv.first].first]);
+        rim.insert(mv.compVtx[mv.compEdges[kv.first].second]);
+    }
+    const gp_Cylinder cyl = asCyl(r);
+    double d = 0.0;
+    for (int lt : r.tris) {
+        if (lt < 0 || (size_t)lt >= mv.nTri) continue;
+        const int* T = mv.tris[mv.compTris[lt]];
+        for (int i = 0; i < 3; i++) {
+            if (rim.count(T[i])) continue;
+            const gp_Vec v(cyl.Location(), gp_Pnt(mv.pts[T[i]]));
+            d = std::max(d, std::fabs(gp_Vec(cyl.Axis().Direction()).Crossed(v).Magnitude() -
+                                      cyl.Radius()));
+        }
+    }
+    return d;
+}
+
 double meshTolCap(const MeshView& mv, const Region* r) {
     double c = std::max(mv.sewTol, Precision::Confusion());
     if (r) {
@@ -4045,6 +4076,8 @@ double walkSignedAreaUV(const std::vector<LoopWireSlot>& slots, const LoopConnWa
     return 0.5 * a;
 }
 
+extern thread_local std::unordered_set<const void*> gCrossCapRimTShapes;
+
 // D-S3-171 case (c): signed area of one edge from the curve, not a 1-vertex polygon.
 // Circle: sign(axis · plate normal) × traversal orientation × π r².
 // Else: dense samples along the adaptor's own parameter range.
@@ -4082,6 +4115,13 @@ double edgeCurveSignedAreaUV(const TopoDS_Edge& eIn, const Region& plate) {
             const gp_Pnt2d& p1 = uv[(i + 1) % uv.size()];
             a += p0.X() * p1.Y() - p1.X() * p0.Y();
         }
+        // The samples run along the curve's own parameter. A rim the crossing-cap
+        // path minted (D-fc-5.7 O-1) reads its orientation flag, as the circle
+        // branch above does; every other edge keeps the reading its plane was
+        // validated against (D-fc-1.15: S16-R2's closed ellipse rims still revert).
+        if (eIn.Orientation() == TopAbs_REVERSED &&
+            gCrossCapRimTShapes.count(diagTShapePtr(eIn)))
+            a = -a;
         return 0.5 * a;
     } catch (const Standard_Failure&) {
         return 0.0;
@@ -7288,6 +7328,8 @@ void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F);
 Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
                                       const Handle(Geom_Surface)& srf, const char* kind);
 thread_local std::unordered_set<const void*> gSeamTShapes;
+// D-fc-5.7 O-1: the exact rims the crossing-cap path mints (enrolled, pinned).
+thread_local std::unordered_set<const void*> gCrossCapRimTShapes;
 thread_local int lastCanonClearPass = -1;
 thread_local int gCompNTri = 0;
 // D-130-2 tier-2 polyline edges (ONE degree-1 B-spline per skew cyl|cyl loop):
@@ -10682,6 +10724,28 @@ double brepCheckInContextMax(const TopoDS_Face& f, const TopoDS_Edge& e) {
     return maxD;
 }
 
+// D-fc-5.7 O-1: every edge of a face carries its own deviation from the face as
+// BRepCheck measures it in context (brepCheckInContextMax), up to cap; then the
+// vertex pass of ensureFaceValid. A mesh chord off a cylinder strays furthest between
+// its ends, which ensureFaceValid's mid-point reading does not see.
+bool fitEdgeTolerancesToFace(TopoDS_Face& f, double cap) {
+    if (f.IsNull()) return false;
+    try {
+        BRep_Builder B;
+        for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+            const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+            const double d = brepCheckInContextMax(f, e);
+            if (!(d > BRep_Tool::Tolerance(e))) continue;
+            if (d > cap) return false;
+            fireTolRewriteEdge(B, e, std::min(d * 1.001 + Precision::Confusion(), cap), "other",
+                               cap);
+        }
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    return ensureFaceValid(f, cap);
+}
+
 double brepDevMaxOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f3, Standard_Real l3,
                         const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& pc,
                         Standard_Real a, Standard_Real b, const TopLoc_Location& loc) {
@@ -13165,6 +13229,13 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // buildWithInners / the composite UV path so a mesh-polyline rim keeps
     // meshE TShapes (makeFaceKeep) and retries outer-wire sense.
     bool mintRefused = false;
+    // D-fc-5.7 O-1 (crossingCapApplies): a mint-refused composite whose seam stands on
+    // the crossing rim; the exact rim is minted on that generator and every edge
+    // carries its own measured deviation from the face.
+    bool crossingCap = false;
+    int ciExact = -1;
+    const Loop* exactCapLoop = nullptr;
+    std::vector<TopoDS_Edge> mintedExact;
     // A torus blend shares its rims with this wall. makeFaceCopy (the simple
     // Seamed360 default) duplicates those TShapes (J2); the torus face then
     // cannot sew and J6 reports two free edges. Force the keep path.
@@ -13369,6 +13440,7 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // (already-shared circle) path keeps meshTolCap so B0 is inert.
         const double faceCap =
             publishSimple ? meshTolCap(mv, &r) : partialFaceTolCap(mv, r);
+        if (crossingCap && !faceIsValid(got)) fitEdgeTolerancesToFace(got, faceCap);
         if (!faceIsValid(got) && !ensureFaceValid(got, faceCap)) {
             if (diagP2Enabled()) {
                 char faceSt[256] = "[]", wireSt[256] = "[]";
@@ -13513,7 +13585,8 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             addPcurvesOnFace(f, sewTol, true);
             assertSeamPair();
             if (gSeamSet) rebranchEdges(f, gSeamU0, gSeamE);
-            const bool ok = faceIsValid(f);
+            bool ok = faceIsValid(f);
+            if (!ok && crossingCap) ok = fitEdgeTolerancesToFace(f, partialFaceTolCap(mv, r));
             if (!ok && diagP2Enabled()) {
                 try {
                     BRepCheck_Analyzer an(f, Standard_True);
@@ -13653,6 +13726,46 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         for (const Loop* cp : {capL, capH})
             for (int ci : cp->chainIdx)
                 if (!partnerBuildable(ci, r, rs, eprimeFill, exploded)) mintRefused = true;
+    // D-fc-5.7 O-1: a wall whose rim crosses its neighbours along mesh edges (cap chains
+    // that ship as their mesh polyline) beside one exact rim -- a single closed circle
+    // or ellipse against a buildable partner -- takes the same composite binding.
+    if (!capsOneChain && !capHasPolyline && !mintRefused) {
+        auto closedExactRim = [&](const Loop* cp) -> int {
+            if (!capExact(cp)) return -1;
+            const int ci = cp->chainIdx.front();
+            if (ci < 0 || (size_t)ci >= geom.size()) return -1;
+            const ChainGeom& g = geom[(size_t)ci];
+            if (!g.collapsed || g.edges.size() != 1 || g.edges[0].IsNull()) return -1;
+            Standard_Real f0 = 0, l0 = 0;
+            const Handle(Geom_Curve) c0 = basisCurveOf(BRep_Tool::Curve(g.edges[0], f0, l0));
+            if (Handle(Geom_Circle)::DownCast(c0).IsNull() &&
+                Handle(Geom_Ellipse)::DownCast(c0).IsNull())
+                return -1;
+            TopoDS_Vertex a, b;
+            TopExp::Vertices(g.edges[0], a, b);
+            return (!a.IsNull() && a.IsSame(b)) ? ci : -1;
+        };
+        int crossing = 0;
+        for (const Loop* cp : {capL, capH})
+            for (int ci : cp->chainIdx)
+                if (ci >= 0 && (size_t)ci < geom.size() && !geom[(size_t)ci].collapsed &&
+                    !geom[(size_t)ci].tier2Polyline)
+                    ++crossing;
+        const int exL = closedExactRim(capL), exH = closedExactRim(capH);
+        exactCapLoop = exL >= 0 ? capL : (exH >= 0 ? capH : nullptr);
+        ciExact = exL >= 0 ? exL : exH;
+        const double tauW = 2.0 * std::max(mv.quantFloor, 0.0);
+        if (crossingCapApplies(crossing > 0 ? wallInteriorDev(r, mv) : 0.0, r.maxVertexDev, tauW,
+                               exactCapLoop != nullptr, crossing))
+            mintRefused = crossingCap = true;
+        if (diagP2Enabled() && crossing > 0)
+            std::fprintf(stderr,
+                         "DIAG_CROSSCAP rid=%d crossing=%d exactRim=%d interiorDevTau=%.4f "
+                         "maxDevTau=%.4f applies=%d\n",
+                         r.id, crossing, exactCapLoop ? 1 : 0,
+                         tauW > 0 ? wallInteriorDev(r, mv) / tauW : -1.0,
+                         tauW > 0 ? r.maxVertexDev / tauW : -1.0, crossingCap ? 1 : 0);
+    }
     // D-140-13: persist onto the component. A mintRefused composite may still
     // close a shell (shelf / Body244); if it does not, buildFaces takes the
     // existing ChainUnstable facet path instead of returning false.
@@ -13802,11 +13915,109 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 }
                 return best;
             };
-            const TopoDS_Vertex VL = wireVertNearestU(pathL);
+            TopoDS_Vertex VL = wireVertNearestU(pathL);
             // The high cap must meet the SAME generator, not merely the same
             // azimuth target: on a staggered wall those differ by half a facet.
             TopoDS_Vertex VH;
-            if (!VL.IsNull()) {
+            if (crossingCap) {
+                // D-fc-5.7 O-1: the crossing rim has mesh vertices only, and none need
+                // stand on the exact rim's vertex generator. The seam stands on the
+                // crossing rim's vertex nearest seamU; the exact rim, one closed
+                // circle or ellipse, is minted with its vertex on that generator
+                // (a closed analytic edge may start anywhere on its curve).
+                const bool exactLow = exactCapLoop == capL;
+                std::vector<TopoDS_Edge>& exactPath = exactLow ? pathL : pathH;
+                const TopoDS_Vertex VP = wireVertNearestU(exactLow ? pathH : pathL);
+                const TopoDS_Edge exactPathOld = exactPath.empty() ? TopoDS_Edge() : exactPath[0];
+                TopoDS_Vertex VE;
+                if (!VP.IsNull() && exactPath.size() == 1 && ciExact >= 0) {
+                    // The minted rim lies on the chain's own curve and runs with the
+                    // chain's walk (the old edge's traversal, orientation flag
+                    // included), FORWARD on that curve, from the generator through
+                    // VP. A circle ships whole; an ellipse ships as two half-turn
+                    // arcs, its antipode the second exact point -- a full-turn
+                    // ellipse has no certified bind class (refit_ellipse_bind's
+                    // range clause), a half-turn arc has.
+                    const TopoDS_Edge& old = geom[(size_t)ciExact].edges[0];
+                    Standard_Real f0 = 0, l0 = 0;
+                    const Handle(Geom_Curve) c0 = basisCurveOf(BRep_Tool::Curve(old, f0, l0));
+                    const Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(c0);
+                    const Handle(Geom_Ellipse) ge = Handle(Geom_Ellipse)::DownCast(c0);
+                    const gp_Lin gen(BRep_Tool::Pnt(VP), r.ax.Direction());
+                    gp_Ax2 ax = !gc.IsNull() ? gc->Circ().Position()
+                                             : (!ge.IsNull() ? ge->Elips().Position() : gp_Ax2());
+                    gp_Pnt X;
+                    if ((!gc.IsNull() || !ge.IsNull()) && capPointOnGenerator(ax, gen, X)) {
+                        BRepAdaptor_Curve co(old);
+                        gp_Pnt Po;
+                        gp_Vec To;
+                        co.D1(0.5 * (co.FirstParameter() + co.LastParameter()), Po, To);
+                        if (old.Orientation() == TopAbs_REVERSED) To.Reverse();
+                        gp_Pnt Pc;
+                        gp_Vec Tc;
+                        if (!gc.IsNull())
+                            ElCLib::D1(ElCLib::Parameter(gc->Circ(), Po), gc->Circ(), Pc, Tc);
+                        else
+                            ElCLib::D1(ElCLib::Parameter(ge->Elips(), Po), ge->Elips(), Pc, Tc);
+                        if (To.Dot(Tc) < 0.0)
+                            ax = gp_Ax2(ax.Location(), ax.Direction().Reversed(), ax.XDirection());
+                        std::vector<TopoDS_Edge> rim;
+                        if (!gc.IsNull()) {
+                            const gp_Circ cw(ax, gc->Circ().Radius());
+                            BRep_Builder().MakeVertex(
+                                VE, ElCLib::Value(ElCLib::Parameter(cw, X), cw),
+                                Precision::Confusion());
+                            const TopoDS_Edge e = makeFullCircle(cw, VE);
+                            if (!e.IsNull()) rim.push_back(e);
+                        } else {
+                            const gp_Elips ew(ax, ge->Elips().MajorRadius(),
+                                              ge->Elips().MinorRadius());
+                            const double t0 = ElCLib::Parameter(ew, X);
+                            TopoDS_Vertex VA;
+                            BRep_Builder().MakeVertex(VE, ElCLib::Value(t0, ew),
+                                                      Precision::Confusion());
+                            BRep_Builder().MakeVertex(VA, ElCLib::Value(t0 + kPi, ew),
+                                                      Precision::Confusion());
+                            const Handle(Geom_Ellipse) gw = new Geom_Ellipse(ew);
+                            const TopoDS_Edge a1 = bindEdgeByParam(gw, VE, VA, t0, t0 + kPi);
+                            const TopoDS_Edge a2 =
+                                bindEdgeByParam(gw, VA, VE, t0 + kPi, t0 + 2.0 * kPi);
+                            if (!a1.IsNull() && !a2.IsNull()) rim = {a1, a2};
+                        }
+                        if (!rim.empty()) {
+                            // Their pcurves are born where every collapsed chain
+                            // edge's are (rebuildCollapsed): owner plane, then wall.
+                            const Region* partner =
+                                regionById(rs, capPartnerRid(ciExact, r, rs));
+                            const Region* ownerR =
+                                (partner && partner->type == SurfType::Plane) ? partner : &r;
+                            const Region* consumerR = ownerR == &r ? partner : &r;
+                            const char* kindStr = !gc.IsNull() ? "circ" : "elips";
+                            SeamBindCounts acc;
+                            for (const TopoDS_Edge& e : rim) {
+                                bindAllVariants(e, *ownerR, kindStr, mv, ciExact, acc);
+                                if (consumerR)
+                                    bindAllVariants(e, *consumerR, kindStr, mv, ciExact, acc);
+                                bindAllVariants(e, *ownerR, kindStr, mv, ciExact, acc);
+                                noteWirePop(e, "rebuildCollapsed", ciExact);
+                                enrollTShape(gCrossCapRimTShapes, e);
+                            }
+                            mintedExact = rim;
+                            // This wall's copy runs as its path ran the old edge.
+                            exactPath = rim;
+                            if (geom[(size_t)ciExact].edges[0].Orientation() !=
+                                    exactPathOld.Orientation()) {
+                                std::reverse(exactPath.begin(), exactPath.end());
+                                for (TopoDS_Edge& e : exactPath) e.Reverse();
+                            }
+                        } else {
+                            VE.Nullify();
+                        }
+                    }
+                }
+                VL = exactLow ? VE : VP;
+                VH = exactLow ? VP : VE;
+            } else if (!VL.IsNull()) {
                 const gp_Lin genL(BRep_Tool::Pnt(VL), r.ax.Direction());
                 double bd = 1e300;
                 for (const TopoDS_Edge& e : pathH) {
@@ -13960,7 +14171,14 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 emit(warn, "seamed360: composite MakeFace not done — try TwoHalves");
                 return false;
             }
-        return finishFace(got, false, -1, -1, eL, eH);
+        const bool fin = finishFace(got, false, -1, -1, eL, eH);
+        // D-fc-5.7 O-1: the exact rim this face carries is the chain's edge from now
+        // on, so its partner shares it.
+        if (fin && crossingCap && !mintedExact.empty()) {
+            geom[(size_t)ciExact].edges = mintedExact;
+            collapsed[(size_t)ciExact] = 1;
+        }
+        return fin;
     } catch (const Standard_Failure& e) {
         emit(warn, std::string("seamed360: ") + (e.GetMessageString() ? e.GetMessageString() : "throw"));
         return false;
@@ -16351,6 +16569,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     gRegionSurf.clear();
                     gSurfIdent.clear();
                     gSeamTShapes.clear();
+                    gCrossCapRimTShapes.clear();
                     gTier2TShapes.clear();
                     gConeIsoCapTShapes.clear();
                     gMeshTShapes.clear();
