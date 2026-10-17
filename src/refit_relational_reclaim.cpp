@@ -1742,6 +1742,144 @@ bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* j
     return torusRefusalGeometric(joint->chain);
 }
 
+TorusRings torusRingsOf(const std::vector<int>& verts, const std::vector<double>& rhoAt,
+                        const std::vector<double>& zAt, int maxV, double tau) {
+    TorusRings out;
+    out.ringOf.assign((std::size_t)std::max(maxV, -1) + 1, -1);
+    if (!(tau > 0.0)) return out;
+    struct Cell {
+        int parent = 0;
+        long long kr = 0, kz = 0;
+        double rMin = 0, rMax = 0, zMin = 0, zMax = 0;
+        std::vector<int> verts;
+    };
+    std::vector<Cell> cells;
+    std::map<std::pair<long long, long long>, int> buckets;
+    for (int v : verts) {
+        const double rho = rhoAt[(std::size_t)v];
+        const double z = zAt[(std::size_t)v];
+        const auto key = std::make_pair((long long)std::llround(rho / tau), (long long)std::llround(z / tau));
+        auto it = buckets.find(key);
+        if (it == buckets.end()) {
+            Cell c;
+            c.parent = (int)cells.size();
+            c.kr = key.first;
+            c.kz = key.second;
+            c.rMin = c.rMax = rho;
+            c.zMin = c.zMax = z;
+            c.verts.push_back(v);
+            buckets.emplace(key, (int)cells.size());
+            cells.push_back(std::move(c));
+        } else {
+            Cell& c = cells[(std::size_t)it->second];
+            c.verts.push_back(v);
+            c.rMin = std::min(c.rMin, rho);
+            c.rMax = std::max(c.rMax, rho);
+            c.zMin = std::min(c.zMin, z);
+            c.zMax = std::max(c.zMax, z);
+        }
+    }
+    auto findCell = [&](int x) {
+        while (cells[(std::size_t)x].parent != x) {
+            cells[(std::size_t)x].parent = cells[(std::size_t)cells[(std::size_t)x].parent].parent;
+            x = cells[(std::size_t)x].parent;
+        }
+        return x;
+    };
+    auto uniteCell = [&](int a, int b) {
+        a = findCell(a);
+        b = findCell(b);
+        if (a == b) return false;
+        const double rMin = std::min(cells[(std::size_t)a].rMin, cells[(std::size_t)b].rMin);
+        const double rMax = std::max(cells[(std::size_t)a].rMax, cells[(std::size_t)b].rMax);
+        const double zMin = std::min(cells[(std::size_t)a].zMin, cells[(std::size_t)b].zMin);
+        const double zMax = std::max(cells[(std::size_t)a].zMax, cells[(std::size_t)b].zMax);
+        if (rMax - rMin > tau || zMax - zMin > tau) return false;
+        cells[(std::size_t)b].parent = a;
+        cells[(std::size_t)a].rMin = rMin;
+        cells[(std::size_t)a].rMax = rMax;
+        cells[(std::size_t)a].zMin = zMin;
+        cells[(std::size_t)a].zMax = zMax;
+        return true;
+    };
+    {
+        bool changed = !cells.empty();
+        for (int guard = 0; changed && guard < (int)cells.size() + 2; ++guard) {
+            changed = false;
+            for (int i = 0; i < (int)cells.size(); ++i)
+                for (int dr = -1; dr <= 1; ++dr)
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        if (dr == 0 && dz == 0) continue;
+                        const auto it = buckets.find(std::make_pair(cells[(std::size_t)i].kr + dr,
+                                                                    cells[(std::size_t)i].kz + dz));
+                        if (it != buckets.end() && uniteCell(i, it->second)) changed = true;
+                    }
+        }
+    }
+    std::vector<std::vector<int>> groups(cells.size());
+    for (int i = 0; i < (int)cells.size(); ++i) {
+        auto& g = groups[(std::size_t)findCell(i)];
+        g.insert(g.end(), cells[(std::size_t)i].verts.begin(), cells[(std::size_t)i].verts.end());
+    }
+    for (auto& g : groups) {
+        if ((int)g.size() < minStations(kParamsLine)) continue;
+        TorusRing ring;
+        ring.minV = g.front();
+        double sr = 0, sz = 0;
+        for (int v : g) {
+            sr += rhoAt[(std::size_t)v];
+            sz += zAt[(std::size_t)v];
+            ring.minV = std::min(ring.minV, v);
+        }
+        ring.rho = sr / (double)g.size();
+        ring.z = sz / (double)g.size();
+        ring.verts = std::move(g);
+        out.rings.push_back(std::move(ring));
+    }
+    std::sort(out.rings.begin(), out.rings.end(), [](const TorusRing& a, const TorusRing& b) {
+        if (a.z != b.z) return a.z < b.z;
+        if (a.rho != b.rho) return a.rho < b.rho;
+        return a.minV < b.minV;
+    });
+    for (int i = 0; i < (int)out.rings.size(); ++i)
+        for (int v : out.rings[(std::size_t)i].verts) out.ringOf[(std::size_t)v] = i;
+    return out;
+}
+
+std::vector<int> torusStationCands(const std::vector<std::array<int, 3>>& triVerts,
+                                   const std::vector<int>& chainTris,
+                                   const std::vector<int>& ringOf, const std::vector<char>& live,
+                                   const std::vector<int>& sheetOfTri, int sheet) {
+    auto ringAt = [&](int v) {
+        return (v >= 0 && (std::size_t)v < ringOf.size()) ? ringOf[(std::size_t)v] : -1;
+    };
+    std::set<int> stations;
+    for (int t : chainTris) {
+        if (t < 0 || (std::size_t)t >= triVerts.size()) continue;
+        for (int v : triVerts[(std::size_t)t])
+            if (ringAt(v) >= 0) stations.insert(ringAt(v));
+    }
+    std::vector<int> out;
+    for (std::size_t t = 0; t < triVerts.size(); ++t) {
+        if (t >= live.size() || !live[t] || t >= sheetOfTri.size() || sheetOfTri[t] != sheet)
+            continue;
+        int ids[3] = {-1, -1, -1}, nR = 0;
+        bool onAll = true;
+        for (int v : triVerts[t]) {
+            const int r = ringAt(v);
+            if (r < 0 || !stations.count(r)) {
+                onAll = false;
+                break;
+            }
+            bool dup = false;
+            for (int i = 0; i < nR; ++i) dup = dup || ids[i] == r;
+            if (!dup) ids[nR++] = r;
+        }
+        if (onAll && nR >= 2) out.push_back((int)t);
+    }
+    return out;
+}
+
 int torusSidesOf(int cols, double span, bool closed) {
     if (closed || cols < 2 || !(span > 0.0) || !(span < kTwoPi)) return std::max(cols, 1);
     const double n = std::round(kTwoPi * (double)(cols - 1) / span);

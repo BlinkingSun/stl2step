@@ -143,6 +143,33 @@ JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
 // only for over-determination (or that certifies) does not fail it.
 bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* joint, double tau);
 
+// The Torus-mode ring rule (D-fc-3.5.1, the Line-mode cell rule): the vertices
+// `verts` (ids <= maxV) bucketed at tau by (rhoAt, zAt) about one frame, buckets
+// united while the union stays within tau in rho and in z; a group of fewer than
+// minStations(kParamsLine) vertices is no ring. Rings are ordered by (z, rho,
+// smallest vertex id); ringOf[v] is v's ring or -1.
+struct TorusRing {
+    double rho = 0, z = 0;  // means of its vertices
+    int minV = 0;
+    std::vector<int> verts;
+};
+struct TorusRings {
+    std::vector<TorusRing> rings;
+    std::vector<int> ringOf;
+};
+TorusRings torusRingsOf(const std::vector<int>& verts, const std::vector<double>& rhoAt,
+                        const std::vector<double>& zAt, int maxV, double tau);
+
+// D-fc-4.12 (gather): the stations of a ring chain about an axis are the rings
+// (ringOf, about that axis) holding a vertex of one of its triangles chainTris;
+// its candidate set there is every triangle t with live[t] and sheet[t] == sheet
+// whose three vertices (triVerts[t]) lie on those stations, on two or more of
+// them. Ascending triangle ids.
+std::vector<int> torusStationCands(const std::vector<std::array<int, 3>>& triVerts,
+                                   const std::vector<int>& chainTris,
+                                   const std::vector<int>& ringOf, const std::vector<char>& live,
+                                   const std::vector<int>& sheetOfTri, int sheet);
+
 }  // namespace refit
 }  // namespace stl2step
 

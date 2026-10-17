@@ -754,6 +754,76 @@ static void caseBridgeChain() {
            "D-fc-4.12: under-determined on the family axis and jointly is not geometric");
 }
 
+// D-fc-4.12 (gather): the ring rule about a frame. Three stations of a partial
+// torus are three rings about the true axis, every vertex of a station in its
+// ring; about an axis tilted by 8e-6 rad each station's vertices spread past tau
+// in z and split into several rings.
+static void caseRingsOf() {
+    const double tau = 1e-4;
+    const gp_XYZ o(10, -5, 3), ax(0, 1, 0), xHint(1, 0, 0);
+    std::vector<gp_XYZ> pts;
+    std::vector<int> stationOf;
+    const double vs[3] = {0.5 * kPi, 75.0 * kPi / 180.0, 60.0 * kPi / 180.0};
+    for (int s = 0; s < 3; ++s) {
+        const std::vector<gp_XYZ> row =
+            torusPts(o, ax, 89.5, 3.0, 0.1, 1.1, 20, vs[s], vs[s], 1, 0.0);
+        for (std::size_t i = 0; i < row.size(); i += 2) {  // one point per azimuth
+            pts.push_back(row[i]);
+            stationOf.push_back(s);
+        }
+    }
+    std::vector<int> ids(pts.size());
+    for (std::size_t i = 0; i < pts.size(); ++i) ids[i] = (int)i;
+    auto ringsAbout = [&](const gp_XYZ& axis) {
+        const std::vector<ProfPt> pr = profileAbout(pts, o, axis, xHint);
+        std::vector<double> rho(pts.size()), z(pts.size());
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            rho[i] = pr[i].rho;
+            z[i] = pr[i].z;
+        }
+        return torusRingsOf(ids, rho, z, (int)pts.size() - 1, tau);
+    };
+    const TorusRings onTrue = ringsAbout(ax);
+    bool whole = onTrue.rings.size() == 3;
+    for (std::size_t i = 0; i < pts.size() && whole; ++i)
+        for (std::size_t j = 0; j < pts.size() && whole; ++j)
+            if ((stationOf[i] == stationOf[j]) != (onTrue.ringOf[i] == onTrue.ringOf[j])) whole = false;
+    expect(whole, "ringsOf: about the true axis each station is one ring");
+    bool ordered = true;
+    for (std::size_t r = 1; r < onTrue.rings.size(); ++r)
+        ordered = ordered && onTrue.rings[r - 1].z <= onTrue.rings[r].z;
+    expect(ordered, "ringsOf: rings ordered by z");
+    const TorusRings onTilt = ringsAbout(gp_XYZ(8e-6, 1, 0));
+    expect(onTilt.rings.size() > 3, "ringsOf: about a tilted axis the stations split");
+    expect(torusRingsOf(ids, std::vector<double>(pts.size(), 1.0), std::vector<double>(pts.size(), 0.0),
+                        (int)pts.size() - 1, 0.0)
+               .rings.empty(),
+           "ringsOf: tau 0 forms no ring");
+}
+
+// D-fc-4.12 (gather): the chain's stations and its candidate set on them.
+static void caseStationCands() {
+    // Vertices 0..8 on rings 0,0,0,1,1,1,2,2,2; vertex 9 on ring 3; 10 on none.
+    const std::vector<int> ringOf = {0, 0, 0, 1, 1, 1, 2, 2, 2, 3, -1};
+    const std::vector<std::array<int, 3>> tv = {
+        {0, 1, 3},   // 0: rings 0,1 (chain)
+        {1, 3, 4},   // 1: rings 0,1
+        {3, 4, 6},   // 2: rings 1,2 -- on the chain's stations, not in the chain
+        {6, 7, 9},   // 3: ring 3 is not a station
+        {0, 1, 2},   // 4: one station only
+        {4, 6, 10},  // 5: a vertex on no ring
+        {2, 5, 8},   // 6: rings 0,1,2 but dead
+        {5, 7, 8},   // 7: rings 1,2 but the other sheet
+    };
+    const std::vector<char> live = {1, 1, 1, 1, 1, 1, 0, 1};
+    const std::vector<int> sheet = {1, 1, 1, 1, 1, 1, 1, -1};
+    const std::vector<int> got = torusStationCands(tv, {0, 1, 6}, ringOf, live, sheet, 1);
+    expect(got == std::vector<int>({0, 1, 2}),
+           "stationCands: every live same-sheet triangle on >= 2 of the chain's stations");
+    expect(torusStationCands(tv, {}, ringOf, live, sheet, 1).empty(),
+           "stationCands: no chain, no stations");
+}
+
 // D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
 // its triangles and its atom keep their pre-T state.
 static void caseWithheld() {
@@ -844,6 +914,47 @@ static void caseResegment(const char* stl) {
     }
     std::sort(held.begin(), held.end());
     expect(!held.empty() && nArc >= 1, "reseg: hub and arc tori claimed");
+    // D-fc-4.12 (gather): the arc fillet's chain, re-gathered about its joint
+    // family axis, ships each arc as one band: two arc tori, each one
+    // edge-connected piece.
+    {
+        std::vector<std::vector<int>> nbr(mv.nTri);
+        std::map<std::pair<int, int>, int> firstTri;
+        for (int t = 0; t < (int)mv.nTri; ++t) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3; ++k) {
+                int a = mv.tris[gt][k], b = mv.tris[gt][(k + 1) % 3];
+                if (a > b) std::swap(a, b);
+                auto it = firstTri.find({a, b});
+                if (it == firstTri.end()) firstTri[{a, b}] = t;
+                else {
+                    nbr[(std::size_t)t].push_back(it->second);
+                    nbr[(std::size_t)it->second].push_back(t);
+                }
+            }
+        }
+        int nOne = 0;
+        for (const Region& r : probe.regions) {
+            if (r.origin != Origin::TorusBlend || r.radius < 20.0) continue;
+            std::vector<char> in(mv.nTri, 0), seen(mv.nTri, 0);
+            for (int t : r.tris) in[(std::size_t)t] = 1;
+            std::vector<int> stack{r.tris.front()};
+            seen[(std::size_t)r.tris.front()] = 1;
+            std::size_t n = 0;
+            while (!stack.empty()) {
+                const int c = stack.back();
+                stack.pop_back();
+                ++n;
+                for (int m : nbr[(std::size_t)c])
+                    if (in[(std::size_t)m] && !seen[(std::size_t)m]) {
+                        seen[(std::size_t)m] = 1;
+                        stack.push_back(m);
+                    }
+            }
+            if (n == r.tris.size()) ++nOne;
+        }
+        expect(nArc == 2 && nOne == 2, "regather: two arc tori, each one edge-connected band");
+    }
     SegmentParams hp = sp;
     hp.torusWithheldTris = held;
     RegionSet full, tail;
@@ -871,6 +982,8 @@ int main(int argc, char** argv) {
     caseRefusalGeometric();
     caseChainFailsGeometric();
     caseBridgeChain();
+    caseRingsOf();
+    caseStationCands();
     caseWithheld();
     caseWindowOverlap();
     caseJointTorus();

@@ -1807,113 +1807,13 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
     }
     // Rings: the Line-mode cell rule (tau buckets, united while the union stays
     // within tau in rho and in z).
-    struct Cell {
-        int parent = 0;
-        long long kr = 0, kz = 0;
-        double rMin = 0, rMax = 0, zMin = 0, zMax = 0;
-        std::vector<int> verts;
-    };
-    std::vector<Cell> cells;
-    std::map<std::pair<long long, long long>, int> buckets;
-    for (int v : allV) {
-        const double rho = rhoOf[(std::size_t)v];
-        const double z = zOf[(std::size_t)v];
-        const auto key = std::make_pair((long long)std::llround(rho / tau), (long long)std::llround(z / tau));
-        auto it = buckets.find(key);
-        if (it == buckets.end()) {
-            Cell c;
-            c.parent = (int)cells.size();
-            c.kr = key.first;
-            c.kz = key.second;
-            c.rMin = c.rMax = rho;
-            c.zMin = c.zMax = z;
-            c.verts.push_back(v);
-            buckets.emplace(key, (int)cells.size());
-            cells.push_back(std::move(c));
-        } else {
-            Cell& c = cells[(std::size_t)it->second];
-            c.verts.push_back(v);
-            c.rMin = std::min(c.rMin, rho);
-            c.rMax = std::max(c.rMax, rho);
-            c.zMin = std::min(c.zMin, z);
-            c.zMax = std::max(c.zMax, z);
-        }
-    }
-    auto findCell = [&](int x) {
-        while (cells[(std::size_t)x].parent != x) {
-            cells[(std::size_t)x].parent = cells[(std::size_t)cells[(std::size_t)x].parent].parent;
-            x = cells[(std::size_t)x].parent;
-        }
-        return x;
-    };
-    auto uniteCell = [&](int a, int b) {
-        a = findCell(a);
-        b = findCell(b);
-        if (a == b) return false;
-        const double rMin = std::min(cells[(std::size_t)a].rMin, cells[(std::size_t)b].rMin);
-        const double rMax = std::max(cells[(std::size_t)a].rMax, cells[(std::size_t)b].rMax);
-        const double zMin = std::min(cells[(std::size_t)a].zMin, cells[(std::size_t)b].zMin);
-        const double zMax = std::max(cells[(std::size_t)a].zMax, cells[(std::size_t)b].zMax);
-        if (rMax - rMin > tau || zMax - zMin > tau) return false;
-        cells[(std::size_t)b].parent = a;
-        cells[(std::size_t)a].rMin = rMin;
-        cells[(std::size_t)a].rMax = rMax;
-        cells[(std::size_t)a].zMin = zMin;
-        cells[(std::size_t)a].zMax = zMax;
-        return true;
-    };
-    {
-        bool changed = !cells.empty();
-        for (int guard = 0; changed && guard < (int)cells.size() + 2; ++guard) {
-            changed = false;
-            for (int i = 0; i < (int)cells.size(); ++i)
-                for (int dr = -1; dr <= 1; ++dr)
-                    for (int dz = -1; dz <= 1; ++dz) {
-                        if (dr == 0 && dz == 0) continue;
-                        const auto it = buckets.find(std::make_pair(cells[(std::size_t)i].kr + dr,
-                                                                    cells[(std::size_t)i].kz + dz));
-                        if (it != buckets.end() && uniteCell(i, it->second)) changed = true;
-                    }
-        }
-    }
-    struct Ring {
-        double rho = 0, z = 0;
-        int minV = 0;
-        int nV = 0;
-    };
-    std::vector<Ring> rings;
-    std::vector<int> ringOf((std::size_t)maxV + 1, -1);
-    {
-        std::vector<std::vector<int>> groups(cells.size());
-        for (int i = 0; i < (int)cells.size(); ++i) {
-            auto& g = groups[(std::size_t)findCell(i)];
-            g.insert(g.end(), cells[(std::size_t)i].verts.begin(), cells[(std::size_t)i].verts.end());
-        }
-        std::vector<std::pair<Ring, std::vector<int>>> made;
-        for (auto& g : groups) {
-            if ((int)g.size() < minStations(kParamsLine)) continue;
-            Ring ring;
-            ring.minV = g.front();
-            double sr = 0, sz = 0;
-            for (int v : g) {
-                sr += rhoOf[(std::size_t)v];
-                sz += zOf[(std::size_t)v];
-                ring.minV = std::min(ring.minV, v);
-            }
-            ring.rho = sr / (double)g.size();
-            ring.z = sz / (double)g.size();
-            ring.nV = (int)g.size();
-            made.emplace_back(ring, std::move(g));
-        }
-        std::sort(made.begin(), made.end(), [](const auto& a, const auto& b) {
-            if (a.first.z != b.first.z) return a.first.z < b.first.z;
-            if (a.first.rho != b.first.rho) return a.first.rho < b.first.rho;
-            return a.first.minV < b.first.minV;
-        });
-        for (int i = 0; i < (int)made.size(); ++i) {
-            rings.push_back(made[(std::size_t)i].first);
-            for (int v : made[(std::size_t)i].second) ringOf[(std::size_t)v] = i;
-        }
+    const TorusRings ringSet = torusRingsOf(allV, rhoOf, zOf, maxV, tau);
+    const std::vector<TorusRing>& rings = ringSet.rings;
+    const std::vector<int>& ringOf = ringSet.ringOf;
+    std::vector<std::array<int, 3>> triVerts((std::size_t)nTri);
+    for (int t = 0; t < nTri; ++t) {
+        const int gt = mv.compTris ? mv.compTris[t] : t;
+        for (int k = 0; k < 3; ++k) triVerts[(std::size_t)t][(std::size_t)k] = mv.tris[gt][k];
     }
     const int nRings = (int)rings.size();
     struct Cand {
@@ -2060,11 +1960,11 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
         }
         if (bandTris.empty()) continue;
         // D-fc-4.8 (a): the chain's candidate set is the band's superset.
-        const std::vector<int> chainCands = bandTris;
+        std::vector<int> chainCands = bandTris;
         // An atom joins only whole: one that is not wholly on the chain leaves it.
-        {
+        auto wholeAtoms = [&](std::vector<int>& tris) {
             std::map<int, int> hit;
-            for (int t : bandTris)
+            for (int t : tris)
                 if (atomOf[(std::size_t)t] >= 0) ++hit[atomOf[(std::size_t)t]];
             std::vector<char> drop(work.accepted.size(), 0);
             bool any = false;
@@ -2075,13 +1975,14 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 }
             if (any) {
                 std::vector<int> keep;
-                for (int t : bandTris) {
+                for (int t : tris) {
                     const int a = atomOf[(std::size_t)t];
                     if (a < 0 || !drop[(std::size_t)a]) keep.push_back(t);
                 }
-                bandTris.swap(keep);
+                tris.swap(keep);
             }
-        }
+        };
+        wholeAtoms(bandTris);
         if (bandTris.empty()) continue;
         // D-fc-4.9 P2 (i): the chain is certified with its donor family. The
         // family axis is kept when it already certifies the chain's candidate set
@@ -2133,18 +2034,89 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                                  jc.chain.determinate ? jc.chain.maxDev / tau : -1.0,
                                  jc.chain.Rmaj, jc.chain.Rmin, torusWhy(jc.chain), jc.ok ? 1 : 0);
                 }
+                // D-fc-4.12 (gather): a chain the joint family certificate accepts
+                // has its stations re-formed about that axis -- the one on which
+                // every vertex of every station is concyclic within tau -- and its
+                // candidate set becomes every live triangle on them, certified
+                // again with the family, to a fixed point (cap p.maxRefineIters).
+                // A station set that no longer certifies refuses the chain (its
+                // candidate set was a passing window of it); one that does not
+                // settle is refused as unstable.
+                bool settled = jc.ok;
                 if (jc.ok) {
+                    std::vector<int> cur = chainCands;
+                    JointTorusCert cj = jc;
+                    TorusCert famCur = onFamily;
+                    bool stable = false;
+                    for (int it = 0; it < wm.maxIter && cj.ok; ++it) {
+                        const Frame jf = makeFrame(cj.family.origin, cj.family.axis, fr.e1);
+                        std::vector<double> rhoJ((std::size_t)maxV + 1, 0.0);
+                        std::vector<double> zJ((std::size_t)maxV + 1, 0.0);
+                        for (int v : allV) {
+                            const ProfPt pp = profOfPoint(mv.pts[v], jf, 0);
+                            rhoJ[(std::size_t)v] = pp.rho;
+                            zJ[(std::size_t)v] = pp.z;
+                        }
+                        const TorusRings rj = torusRingsOf(allV, rhoJ, zJ, maxV, tau);
+                        std::vector<char> live((std::size_t)nTri, 0);
+                        std::vector<int> sheetJ((std::size_t)nTri, 0);
+                        for (int t = 0; t < nTri; ++t) {
+                            if (!liveTri(t)) continue;
+                            live[(std::size_t)t] = 1;
+                            sheetJ[(std::size_t)t] = sheetOf(mv, t, jf);
+                        }
+                        std::vector<int> next =
+                            torusStationCands(triVerts, cur, rj.ringOf, live, sheetJ, sheet);
+                        if (diagOn())
+                            std::fprintf(stderr,
+                                         "DIAG_REL_TORUS_REGATHER seed=%d it=%d nCand=%zu "
+                                         "next=%zu\n",
+                                         minTriOf(chainCands), it, cur.size(), next.size());
+                        if (next == cur) {
+                            stable = true;
+                            break;
+                        }
+                        if (next.empty()) break;
+                        Band nb;
+                        nb.in.assign((std::size_t)nTri, 0);
+                        nb.tris = next;
+                        nb.sheet = sheet;
+                        for (int t : next) nb.in[(std::size_t)t] = 1;
+                        collectBand(mv, fr, wm.g2l, nb);
+                        famCur = certifyTorus(nb.pts, tau);
+                        cj = JointTorusCert{};
+                        if ((int)nb.pts.size() >= kTorusProfPts) {
+                            std::vector<gp_XYZ> np;
+                            bandPoints(nb, np);
+                            cj = jointTorusCertify(donor.famPts, np, fr.origin, fr.axis, fr.e1, tau,
+                                                   wm.maxIter);
+                        }
+                        cur.swap(next);
+                    }
+                    if (cur != chainCands) {
+                        chainCands = cur;
+                        bandTris = cur;
+                        wholeAtoms(bandTris);
+                    }
+                    onFamilyCert = famCur;
+                    jointCert = cj;
+                    settled = stable;
+                    if (!stable && diagOn())
+                        std::fprintf(stderr, "DIAG_REL_TORUS_REGATHER seed=%d %s\n",
+                                     minTriOf(chainCands), cj.ok ? "unstable" : "refused");
+                }
+                if (settled) {
                     chainOk = true;
                     joint = true;
-                    cfr = makeFrame(jc.family.origin, jc.family.axis, fr.e1);
+                    cfr = makeFrame(jointCert.family.origin, jointCert.family.axis, fr.e1);
                     jointDonor = donor;
                     jointDonor.fr = cfr;
-                    jointDonor.radius = jc.family.radius.front();
-                    jointDonor.maxDev = jc.family.maxDev.front();
+                    jointDonor.radius = jointCert.family.radius.front();
+                    jointDonor.maxDev = jointCert.family.maxDev.front();
                 }
             }
             chainGeomFail = !chainOk && torusChainFailsGeometric(
-                                            onFamily, jointRan ? &jointCert : nullptr, tau);
+                                            onFamilyCert, jointRan ? &jointCert : nullptr, tau);
         }
         Donor& cdonor = joint ? jointDonor : donor;
         // D-fc-4.11 (F1 refined): the chain consumes its ring-graph edges after its
@@ -2418,8 +2390,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             std::fprintf(stderr, "DIAG_REL_TORUS_RINGS seed=%d n=%zu", minTriOf(chainCands),
                          chain.size());
             for (int id : chain)
-                std::fprintf(stderr, " %d:%.6f/%.6f/%d", id, rings[(std::size_t)id].rho,
-                             rings[(std::size_t)id].z, rings[(std::size_t)id].nV);
+                std::fprintf(stderr, " %d:%.6f/%.6f/%zu", id, rings[(std::size_t)id].rho,
+                             rings[(std::size_t)id].z, rings[(std::size_t)id].verts.size());
             std::fprintf(stderr, "\n");
         }
     }
