@@ -30,7 +30,8 @@ struct HealStats {
 };
 
 // tris is rewritten only when at least one cluster heals. tau = 2·quantFloor.
-// quantFloor <= 0 or a mesh with no open edge returns with tris untouched.
+// quantFloor <= 0, a mesh with no open edge, or any non-finite vertex
+// coordinate or edge length (D-fc-5.19) returns with tris untouched.
 HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
                              const std::vector<std::array<double, 3>>& pts,
                              double quantFloor, double sewTol, bool diag);

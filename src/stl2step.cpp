@@ -269,7 +269,9 @@ private:
 //     splits the owning triangle, keeping its winding. The vertex must lie
 //     farther than max(stitchTol, tau) from both ends (closer is a duplicate of
 //     that end), so every split edge is strictly shorter than its parent and
-//     the fixed point terminates. Order: owning triangle, then edge.
+//     the fixed point terminates. The owning apex is not a legal split; that
+//     one candidate is discarded and the next candidate on the same edge is
+//     still considered (D-fc-5.19). Order: owning triangle, then edge.
 // Certificate per stitched cluster (input triangles joined by a shared vertex,
 // a weld or a split): the healed cluster has no edge used more than twice, no
 // winding conflict, and strictly fewer open edges. A cluster that fails keeps
@@ -316,6 +318,21 @@ HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
     for (const auto& kv : E0)
         if (kv.second.cnt == 1) st.boundaryBefore++;
     if (st.boundaryBefore == 0) return st;
+
+    // D-fc-5.19 (B1). A non-finite coordinate makes the weld cell index
+    // (floor of coord/h) and the boundary x-sort undefined. A NaN length fails
+    // `d > tau`, so the sMin refusal below would not see it. Refuse the whole
+    // heal, tris untouched, before sMin, the weld, or any sort.
+    for (const auto& t : tris) {
+        for (int v : t) {
+            if (v < 0 || (size_t)v >= pts.size()) return st;
+            const auto& p = pts[(size_t)v];
+            if (!std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2]))
+                return st;
+        }
+    }
+    for (const auto& kv : E0)
+        if (!std::isfinite(dist(keyLo(kv.first), keyHi(kv.first)))) return st;
 
     st.sMin = std::numeric_limits<double>::infinity();
     for (const auto& kv : E0) {
@@ -487,11 +504,18 @@ HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
                 for (const HealCellIndex::Cell& c : cells) grid.visit(c, [&](int p) { cand.push_back(p); });
                 std::sort(cand.begin(), cand.end());
             }
+            int sEdge = 0;
+            for (; sEdge < 3; ++sEdge)
+                if (work[(size_t)t][sEdge] == a && work[(size_t)t][(sEdge + 1) % 3] == b) break;
+            if (sEdge >= 3) continue;
+            const int apex = work[(size_t)t][(sEdge + 2) % 3];
             int best = -1;
             double bestT = 2, bestD = 0;
             for (int p : cand) {
                 const int v = bvx[(size_t)p];
-                if (v == a || v == b) continue;
+                // Owning apex → {a, apex, apex}. Discard that candidate alone
+                // and keep the next on-edge vertex (D-fc-5.19 B2).
+                if (v == a || v == b || v == apex) continue;
                 const double px = pts[(size_t)v][0] - pts[(size_t)a][0];
                 const double py = pts[(size_t)v][1] - pts[(size_t)a][1];
                 const double pz = pts[(size_t)v][2] - pts[(size_t)a][2];
@@ -502,13 +526,8 @@ HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
                 if (d <= tau && tt < bestT) { best = v; bestT = tt; bestD = d; }
             }
             if (best < 0) continue;
-            int s = 0;
-            for (; s < 3; ++s)
-                if (work[(size_t)t][s] == a && work[(size_t)t][(s + 1) % 3] == b) break;
-            const int c = work[(size_t)t][(s + 2) % 3];
-            if (best == c) continue;
-            work[(size_t)t] = { a, best, c };
-            work.push_back({ best, b, c });
+            work[(size_t)t] = { a, best, apex };
+            work.push_back({ best, b, apex });
             dead.push_back(0);
             touched[(size_t)t] = 1;
             touched.push_back(1);
