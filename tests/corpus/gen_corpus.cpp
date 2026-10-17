@@ -1064,6 +1064,36 @@ FixtureResult buildS15() {
     return out;
 }
 
+// ---- S30: dirty mesh whose crack is wider than sewTol --------------------------
+// S15's split vertex, but 2^-8 mm (float-exact, ~22x the auto sewTol of a 10 mm
+// cube): neither the TrueForm mesh heal (D-fc-5.10) nor the sew pass closes it,
+// so the component stays dirty, TrueForm skips it and it ships as an open shell.
+FixtureResult buildS30OpenCrack() {
+    FixtureResult clean = buildS01();
+    MeshData dirty = clean.mesh;
+    if (!dirty.tris.empty()) {
+        const double gap = std::ldexp(1.0, -8);
+        const int dupFrom = dirty.tris[0][1];
+        const int dupIdx = static_cast<int>(dirty.verts.size());
+        dirty.verts.push_back(dirty.verts[dupFrom]);
+        dirty.verts.back().x += gap;
+        dirty.verts.back().y += gap;
+        dirty.tris[0][1] = dupIdx;
+    }
+    Sidecar sc = clean.sidecar;
+    sc.id = "S30-open-crack";
+    sc.description =
+        "dirty 10 mm cube (split shared vertex 2^-8 mm, wider than auto sewTol; stays open)";
+    sc.expectedExit = 2;
+    sc.expectedSolids = 0;
+    sc.expectedOpenShells = 1;
+    FixtureResult out;
+    out.mesh = std::move(dirty);
+    out.sidecar = std::move(sc);
+    fillMeshSidecar(out);
+    return out;
+}
+
 // Closed wedge plate: top plane slants from zThick at x=0 to zThin (>0) at x=X.
 // A vertical N>=6 bore through non-parallel caps is still a closed360 P1 claim
 // (45° ridges) but P2 Seamed360 expects iso-v circular caps — slanted elliptical
@@ -3386,6 +3416,7 @@ int main(int argc, char** argv) {
     run("S13", [] { return buildS13(); });
     run("S14", [] { return buildS14(); });
     run("S15", [] { return buildS15(); });
+    run("S30-open-crack", [] { return buildS30OpenCrack(); });
     run("S16-R1-explode-success", [] { return buildS16R1Explode(); });
     run("S16-R1-round-2", [] { return buildS16R1Round2(); });
     run("S16-R2-ChainUnstable", [] { return buildS16R2(); });

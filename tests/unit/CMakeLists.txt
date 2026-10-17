@@ -601,6 +601,32 @@ set_tests_properties(relational_capface_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# fc/fx-heal132 (D-fc-5.10): healOpenBoundaries (weld + vertex-on-edge split,
+# per-cluster certificate) on synthetic meshes, plus one convert() round trip.
+add_executable(heal_open_boundaries_unit heal_open_boundaries_unit.cpp)
+target_compile_features(heal_open_boundaries_unit PRIVATE cxx_std_17)
+set_target_properties(heal_open_boundaries_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(heal_open_boundaries_unit PRIVATE stl2step::core)
+target_include_directories(heal_open_boundaries_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(heal_open_boundaries_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(heal_open_boundaries_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(heal_open_boundaries_unit)
+endif()
+add_test(NAME heal_open_boundaries_unit
+    COMMAND heal_open_boundaries_unit
+        "${CMAKE_CURRENT_BINARY_DIR}")
+set_tests_properties(heal_open_boundaries_unit PROPERTIES
+    LABELS "unit;heal"
+    TIMEOUT 120)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)
