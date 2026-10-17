@@ -91,6 +91,85 @@ std::vector<CoaxialFamily> coaxialFamilies(const std::vector<AxisDonor>& donors,
 bool torusChainSupersetFails(const std::vector<ProfPt>& candidatePts, std::size_t nCandidates,
                              std::size_t nBand, double tau);
 
+// D-fc-4.10 F1: a Torus-mode band that shares a triangle with the candidate set
+// of an earlier refused chain (failedTri[t] != 0) is a passing window of a
+// failing band, and is refused.
+bool torusWindowOverlapsRefused(const std::vector<int>& bandTris,
+                                const std::vector<char>& failedTri);
+
+// D-fc-4.11 (F1 refined): a certifyTorus refusal is GEOMETRIC when its evidence
+// was determinate (certifyTorus's own counts met) and a geometric test failed:
+// line-first, sphere, degenerate, spindle, or a vertex off tau. A refusal for
+// over-determination (profile-underdetermined: levels / cols / profPts) or a
+// singular circle fit is not.
+bool torusRefusalGeometric(const TorusCert& c);
+
+// The full-turn side count of a torus band's azimuthal tessellation, for its
+// chord sagitta and dVolPredicted: a closed band's cols columns cover the whole
+// turn; a partial band's cols columns are cols - 1 steps over its own azimuth
+// span (the rule partial cylinders use, 2 pi nBands / span).
+int torusSidesOf(int cols, double span, bool closed);
+
+// The profile (rho, z, psi) of each point about the frame (origin, axis, xHint):
+// the Torus scan's frame, psi measured from xHint projected off the axis.
+std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& origin,
+                                 const gp_XYZ& axis, const gp_XYZ& xHint);
+
+// D-fc-4.9 P2 option (i): the over-determined family certificate of a Torus-mode
+// ring chain. One least-squares axis (4 DOF) over the coaxial donor family's
+// certified vertices (one radius per donor, projected out) PLUS the chain's
+// vertices (one profile circle Rmaj, z0, Rmin about that axis), from the seed
+// frame. The chain is accepted only when every donor vertex stays within tau of
+// its donor's radius about the joint axis AND certifyTorus itself passes on the
+// chain's profile about it (every chain vertex within tau of the torus). Never a
+// band-only refit: the donors are always in the fit and in the certificate.
+struct JointTorusCert {
+    JointAxisFit family;  // the joint axis; radius / maxDev per donor
+    TorusCert chain;      // certifyTorus on the chain's profile about the joint axis
+    double tilt = 0;      // angle between the seed axis and the joint axis (rad)
+    bool fitted = false;  // the joint least squares produced a finite axis
+    bool ok = false;      // jointAxisCertifies(family, tau) && chain.ok
+};
+JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
+                                 const std::vector<gp_XYZ>& chain, const gp_XYZ& originSeed,
+                                 const gp_XYZ& axisSeed, const gp_XYZ& xHint, double tau,
+                                 int maxIters);
+
+// D-fc-4.11 (F1 refined): a Torus-mode ring chain's candidate set fails the
+// GEOMETRIC certificate. When the joint family certificate ran on a finite axis
+// it decides: on a chain that certifyTorus finds determinate about the joint
+// axis, a donor vertex off tau of its donor's radius or a geometric refusal of
+// certifyTorus. Otherwise the family-axis certificate decides. A chain refused
+// only for over-determination (or that certifies) does not fail it.
+bool torusChainFailsGeometric(const TorusCert& onFamily, const JointTorusCert* joint, double tau);
+
+// The Torus-mode ring rule (D-fc-3.5.1, the Line-mode cell rule): the vertices
+// `verts` (ids <= maxV) bucketed at tau by (rhoAt, zAt) about one frame, buckets
+// united while the union stays within tau in rho and in z; a group of fewer than
+// minStations(kParamsLine) vertices is no ring. Rings are ordered by (z, rho,
+// smallest vertex id); ringOf[v] is v's ring or -1.
+struct TorusRing {
+    double rho = 0, z = 0;  // means of its vertices
+    int minV = 0;
+    std::vector<int> verts;
+};
+struct TorusRings {
+    std::vector<TorusRing> rings;
+    std::vector<int> ringOf;
+};
+TorusRings torusRingsOf(const std::vector<int>& verts, const std::vector<double>& rhoAt,
+                        const std::vector<double>& zAt, int maxV, double tau);
+
+// D-fc-4.12 (gather): the stations of a ring chain about an axis are the rings
+// (ringOf, about that axis) holding a vertex of one of its triangles chainTris;
+// its candidate set there is every triangle t with live[t] and sheet[t] == sheet
+// whose three vertices (triVerts[t]) lie on those stations, on two or more of
+// them. Ascending triangle ids.
+std::vector<int> torusStationCands(const std::vector<std::array<int, 3>>& triVerts,
+                                   const std::vector<int>& chainTris,
+                                   const std::vector<int>& ringOf, const std::vector<char>& live,
+                                   const std::vector<int>& sheetOfTri, int sheet);
+
 }  // namespace refit
 }  // namespace stl2step
 

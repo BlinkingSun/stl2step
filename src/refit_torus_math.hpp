@@ -55,6 +55,8 @@
 
 #include <Precision.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Torus.hxx>
 
@@ -113,6 +115,19 @@ double torusVOfProfilePoint(const gp_Torus& torus, double rho, double z);
 // is the cylinder-side tangency circle and v = +-PI/2 the plane-side one.
 // False — and writes nothing — on a refused torus.
 bool torusVIsoCircle(const gp_Torus& torus, double v, gp_Circ& out);
+
+// The tangent contact of a ring torus with a plane perpendicular to its axis at
+// the tube's top or bottom (v = +-PI/2, radius R), or with a coaxial cylinder at
+// the tube's outer or inner equator (v = 0 or PI, radius R +- r): true, with that
+// v-iso, when every point of the circle is within tol of the partner surface.
+// The plane bound is exact, |(c - P).n| + radius |a x n|; the cylinder bound is
+// dist(c, cylinder axis) + |radius - Rc| + radius (1 - |a.b|): seen along the
+// cylinder axis the circle is an ellipse of semi-axes radius and radius |a.b|
+// about its centre's projection. False, writing
+// nothing, on a refused torus or when no tangency circle is that close.
+bool torusPlaneContactCircle(const gp_Torus& torus, const gp_Pln& pln, double tol, gp_Circ& out);
+bool torusCylinderContactCircle(const gp_Torus& torus, const gp_Cylinder& cyl, double tol,
+                                gp_Circ& out);
 
 // ---------------------------------------------------------------------------
 // 3. exact point-to-surface distance

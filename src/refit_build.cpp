@@ -1388,7 +1388,14 @@ void commitTorusPendingReclaim(RegionSet& rs, int torId) {
     TorusPendingReclaim& pack = rs.torusPending[(std::size_t)torp->torusPending];
     if (pack.committed) return;
     pack.committed = true;
-    rs.torusRevertValid = false;
+    // D-fc-4.11 (a): committing one torus keeps the pre-T snapshot. A torus that
+    // fails later in this component is named in rs.torusFailedTris and the
+    // driver withholds it alone (per-torus U-3), the shipped tori stay.
+}
+
+// U-3 per torus (D-fc-4.11 (a)): name a torus region that failed to ship.
+void noteTorusFailed(RegionSet& rs, const Region& tor) {
+    rs.torusFailedTris.insert(rs.torusFailedTris.end(), tor.tris.begin(), tor.tris.end());
 }
 
 void revertTorusPendingReclaim(RegionSet& /*rs*/, Region& /*tor*/) {}
@@ -15794,6 +15801,7 @@ bool tryStageP(const MeshView& mv, RegionSet& rs, std::vector<TopoDS_Face>& out)
 bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vertex>& verts,
                 std::vector<TopoDS_Face>& out, WarnFn warn) {
     out.clear();
+    rs.torusFailedTris.clear();
     try {
         gCompNTri = (int)mv.nTri;
         gReconnectFires = 0;
@@ -16217,6 +16225,41 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                              ? cLo
                                              : cHi;
                         }
+                    }
+                }
+                // F-3 (D-fc-4.12): an OPEN chain between a partial torus blend and a
+                // plane perpendicular to its axis at the tube's top or bottom, or a
+                // coaxial cylinder at its outer or inner equator, is their tangent
+                // contact -- the torus's own v-iso there, which the partner holds
+                // within anchorTol(partner) + tau (D-fc-1.4, D-fc-1.6.7) -- not the
+                // mesh chords: one arc both faces share.
+                if (curve.kind == AnalyticCurve::None && anaPair && !ch.closedLoop &&
+                    !coneRimPartner && ch.meshVerts.size() >= 3) {
+                    const Region* tor = (A && isTorusBlendR(*A)) ? A
+                                       : (B && isTorusBlendR(*B)) ? B
+                                                                 : nullptr;
+                    const Region* oth = (tor == A) ? B : A;
+                    const double tauC = 2.0 * std::max(mv.quantFloor, 0.0);
+                    if (tor && oth && !tor->closed360 && tauC > 0.0) {
+                        const gp_Torus gt(tor->ax, tor->radius, tor->radius2);
+                        const double tolC = std::max(tauC, oth->maxVertexDev) + tauC;
+                        gp_Circ cc;
+                        const bool on =
+                            (oth->type == SurfType::Plane &&
+                             torusPlaneContactCircle(gt, gp_Pln(oth->ax), tolC, cc)) ||
+                            (oth->type == SurfType::Cylinder &&
+                             torusCylinderContactCircle(gt, gp_Cylinder(oth->ax, oth->radius),
+                                                        tolC, cc));
+                        if (on) {
+                            curve.kind = AnalyticCurve::Circ;
+                            curve.circ = cc;
+                        }
+                        if (diagRelEnabled())
+                            std::fprintf(stderr,
+                                         "DIAG_TORUS_CONTACT ci=%d tor=%d oth=%d othType=%d "
+                                         "nV=%zu tol=%.6g on=%d\n",
+                                         (int)ci, tor->id, oth->id, (int)oth->type,
+                                         ch.meshVerts.size(), tolC, on ? 1 : 0);
                     }
                 }
                 // Detector B: a plane-loop CIRCLE answers where IntAna has no
@@ -18194,6 +18237,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                 Br.UpdateVertex(sv.first, sv.second);
                         }
                         revertTorusTopology();
+                        if (torusSnapshot) noteTorusFailed(rs, r);
                         if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
                             std::fprintf(stderr,
                                          "DIAG_TORUSFAIL rid=%d site=%d step=%s closed360=%d "
@@ -18948,7 +18992,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             if (id < 0 || (size_t)id >= exploded.size() || exploded[(size_t)id]) return;
             exploded[(size_t)id] = 1;
             Region* rr = regionByIdMut(rs, id);
-            if (torusSnapshot && rr && isTorusBlendR(*rr)) torusExplodedU3 = true;
+            if (torusSnapshot && rr && isTorusBlendR(*rr)) {
+                torusExplodedU3 = true;
+                noteTorusFailed(rs, *rr);
+            }
             if (rr) {
                 rr->builtAs = BuiltAs::ExplodedToFacets;
                 rr->reject = Reject::FaceBuildFailed;
@@ -19036,6 +19083,17 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
             if (torusU3Failed) {
+                // D-fc-4.11 (a): this round also decides every closed torus whose
+                // cap partner failed (the partner rule below); they are named with
+                // the tori that failed, so one withholding pass covers the round.
+                for (int id : failedIds)
+                    for (const BoundaryChain& ch : rs.chains) {
+                        if (ch.regA != id && ch.regB != id) continue;
+                        const Region* o = regionById(rs, ch.regA == id ? ch.regB : ch.regA);
+                        if (o && o->origin == Origin::TorusBlend && o->closed360 &&
+                            o->builtAs == BuiltAs::Seamed360)
+                            noteTorusFailed(rs, *o);
+                    }
                 out.clear();
                 return false;
             }
@@ -19060,6 +19118,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         const Region* o = regionById(rs, ch.regA == id ? ch.regB : ch.regA);
                         if (o && o->origin == Origin::TorusBlend && o->closed360 &&
                             o->builtAs == BuiltAs::Seamed360) {
+                            noteTorusFailed(rs, *o);
                             if (diagRelEnabled())
                                 std::fprintf(stderr,
                                              "DIAG_TORUS_U3 partner=%d of torus=%d failed: pre-T\n",
