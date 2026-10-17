@@ -4,7 +4,10 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.5.0] - 2026-10-16
+
+TrueForm now infers fillets and hole chamfers from their relationship to the planes and
+holes it has already identified (task `stl2step-fc`, three increments below).
 
 TrueForm changes from the fillet/chamfer training phase (task `stl2step-fc`), first
 increment. Two user-visible results on the training files: the tray (`test copy`) no longer

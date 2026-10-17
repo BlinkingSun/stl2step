@@ -76,9 +76,9 @@ On a fully prismatic real CAD export (the `handle-lock` fixture: 908 triangles, 
 
 Flat faces are recovered exactly in both modes — coplanar triangles merge into single planar faces. This is the main win for downstream CAM even without TrueForm.
 
-TrueForm does **not** recover cones, spheres, or tori (reported, left faceted), does not reconstruct freeform/NURBS, and **skips refit on any component that needs the sewing repair path**.
+TrueForm recovers planes, cylinders (including fillets between identified planes) and cones (chamfers, countersinks, funnel walls on an identified hole axis). It does **not** yet recover spheres or general tori (reported, left faceted), does not reconstruct freeform/NURBS, and **skips refit on any component that needs the sewing repair path**.
 
-**Documented limitations, not bugs.** A regular N≥6 prism (e.g. a hex socket) **is** recovered as a cylinder. A symmetric 45° chamfer **is** recovered as a fillet. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
+**Documented limitations, not bugs.** A regular N≥6 prism (e.g. a hex socket) **is** recovered as a cylinder unless the file's own tessellation shows it is a true polygon (since 1.5.0 such hexagonal holes stay planar). A symmetric 45° chamfer **is** recovered as a fillet. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected.
 
 Output is always written in **millimetres**. STL is unitless, so tell the engine the input units (see `--units` / `Options::inchInput` / `Options::scale`).
 
@@ -86,9 +86,9 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut 0.2.3 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.4.4 + SolidOut 0.2.3 for macOS and Windows). SolidOut 0.2.3 ships with engine 1.4.4 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
+Download: [SolidOut 0.2.4 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.5.0 + SolidOut 0.2.4 for macOS and Windows). SolidOut 0.2.4 ships with engine 1.5.0 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
 
-Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same current release with engine 1.4.2 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
+Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same current release with engine 1.5.0 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
 
 **Updating the engine.** The Engine card in the right panel shows the engine in use and an **Update engine** button. On launch and on the button the app checks this repository's latest release; when a newer engine exists the line under the button turns amber and one press downloads, verifies (SHA-256 from the manifest; Developer ID Team ID on macOS) and installs it into the app's data folder. Nothing in the app bundle changes, and the next conversion uses the new engine without a restart. A release without `engine-manifest.json` is not an engine candidate.
 
@@ -114,6 +114,8 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 | `engine-manifest.json` | Schema 1 index of engine bundles | the updater |
 | `SHA256SUMS-engine.txt` | SHA-256 checksums of the engine files | the updater |
 
+**What changed in 1.5.0.** TrueForm infers fillets and hole chamfers from the planes and holes it has already identified: a fillet between two identified planes ships as an analytic cylinder (axis along their intersection, every vertex within τ = 2·quantFloor, no fold-angle floor), and a chamfer, countersink or funnel wall around an identified hole ships as a cone on the hole's axis. Split or mis-fitted geometry is reclaimed (phantom large-radius cylinders give their triangles to the certified fillet through them; certified pieces of one cylinder join into one face); zero-area T-junction triangles are absorbed before segmentation; six-sided holes that are true hexagons stay planar. No training file or test fixture reverts. SolidOut 0.2.4 bundles 1.5.0; SolidOut Web adds a Download log button.
+
 **What changed in 1.4.4.** A 45° chamfer where a cross bore meets a face is built as one analytic cone, and plane/cylinder rims ship as analytic circle arcs where the mesh supports them (training plate: STEP faces 413 → 314, polyline edges 204 → 138); every other fixture converts byte-identically except one seam edge that heals to analytic. The Windows engine and SolidOut installers are now built by GitHub Actions (OpenCASCADE 8.0.1 as before; the CI build of 1.4.3 was verified byte-identical to the previous build).
 
 **What changed in 1.4.3.** Windows: the bundled engine no longer aborts at the end of a conversion (a small-string overrun in the RESULT JSON builder, MSVC only); RESULT/MESH_RESULT are flushed explicitly; calibrated tests skip with a reason on OpenCASCADE below 7.9. SolidOut 0.2.2: native menu, 60-minute visible limit with Cancel, diagnosable engine errors. 1.4.2: `--threads 1` constructs zero worker threads (Safari wasm). See [CHANGELOG.md](CHANGELOG.md).
@@ -121,23 +123,23 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 ```json
 {
   "schema": 1,
-  "engineVersion": "1.4.4",
+  "engineVersion": "1.5.0",
   "assets": {
     "macos-arm64": {
-      "name": "stl2step-engine-v1.4.4-macos-arm64.tar.gz",
-      "sha256": "42580bc75e65e9da3fae42880dd93f09026e638d07c16c1d4f77a77164eeb5c2",
-      "size": 13261421,
+      "name": "stl2step-engine-v1.5.0-macos-arm64.tar.gz",
+      "sha256": "241cc089b8acb567ca663fd71e404d4d5b407832e862fd75bb201c2e5ddaff10",
+      "size": 13479860,
       "minOS": "26.0",
       "teamId": "L3LP86Z6L4"
     },
     "windows-x64": {
-      "name": "stl2step-engine-v1.4.4-windows-x64.zip",
-      "sha256": "55f648476323b518561dde6f6020b981c1f3cb8b575118fe23e3ca5730d7bb96",
-      "size": 16296214,
+      "name": "stl2step-engine-v1.5.0-windows-x64.zip",
+      "sha256": "e8b77ee6779557e98bc27a46106df98e59b3421820cc91d0aa246eabf8a1c9ef",
+      "size": 16496968,
       "minWindows": "10"
     },
     "web-wasm": {
-      "name": "stl2step-engine-v1.4.4-web-wasm.tar.gz",
+      "name": "stl2step-engine-v1.5.0-web-wasm.tar.gz",
       "emscripten": "6.0.5",
       "occt": "7.9.3",
       "threads": "1"
