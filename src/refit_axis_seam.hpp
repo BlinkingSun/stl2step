@@ -8,6 +8,8 @@
 #ifndef STL2STEP_REFIT_AXIS_SEAM_HPP
 #define STL2STEP_REFIT_AXIS_SEAM_HPP
 
+#include <Geom_Curve.hxx>
+#include <Geom_Surface.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -103,6 +105,33 @@ inline double rimSeamOffset(const gp_Ax1& axis, const gp_Dir& refX, const std::v
     const gp_Vec d(axis.Location(), pts[(std::size_t)k]);
     const double x = d.Dot(h.x), y = d.Dot(h.y);
     return 2.0 * std::hypot(x, y) * std::sin(0.5 * std::fabs(std::atan2(y, x)));
+}
+
+// The builder builds closed-360 cylinders first, then regions in id order. A rim
+// shared with a face built before the torus is that face's own circle, minted at
+// that face's vertex; the closed-torus path can re-mint only a rim built after it.
+inline bool rimBuiltBeforeTorus(bool partnerClosedCylinder, int partnerId, int torusId) {
+    return partnerClosedCylinder || partnerId < torusId;
+}
+
+// A rim curve runs with the surface's u when its tangent at parameter f has no
+// negative component along the surface's du at (u0, v). A coaxial wall fitted with
+// an antiparallel axis gives its rims the opposite sense.
+inline bool rimRunsWithSurfaceU(const Handle(Geom_Curve)& c, double f,
+                                const Handle(Geom_Surface)& s, double u0, double v) {
+    if (c.IsNull() || s.IsNull()) return true;
+    gp_Pnt P, S;
+    gp_Vec T, Du, Dv;
+    c->D1(f, P, T);
+    s->D1(u0, v, S, Du, Dv);
+    return !(T.Dot(Du) < 0.0);
+}
+
+// Heal-not-revert for a closed wall whose split cap meets an unbuilt partner: only a
+// wall certified at tau (every vertex within tau, D-fc-1.4) that still shares one
+// exact rim with an analytic neighbour ships with its mesh-polyline rim.
+inline bool splitCapHealApplies(double maxVertexDev, double tau, bool oneExactRim) {
+    return tau > 0.0 && maxVertexDev <= tau && oneExactRim;
 }
 
 }  // namespace refit

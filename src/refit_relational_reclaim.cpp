@@ -1350,6 +1350,12 @@ int claimRingCylinders(const RMesh& rm, const SegmentParams& p, const DerivedTol
             for (int t : band) inAdd[(std::size_t)t] = 1;
             dg.straddle = trimClaimed(rm, work, inAdd);
             for (int t : band) owner[(std::size_t)t] = (int)work.accepted.size();
+            // The trim moved straddle remainders into new provisionals; later charts'
+            // boundaries are read against the provisionals as they now stand.
+            if (dg.straddle > 0)
+                for (int i = 0; i < (int)work.provisionals.size(); ++i)
+                    for (int t : work.provisionals[(std::size_t)i].tris)
+                        if (t >= 0 && t < nTri) triProv[(std::size_t)t] = i;
             dg.nSides = r.nSides;
             dg.dVol = r.dVolPredicted;
             work.accepted.push_back(std::move(r));

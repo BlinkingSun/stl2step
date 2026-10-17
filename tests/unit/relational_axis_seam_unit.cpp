@@ -1,4 +1,5 @@
-// Synthetic cases for the torus-family seam predicates (D-fc-4.8). No mesh.
+// Synthetic cases for the torus-family seam predicates (D-fc-4.8) and the closed-wall /
+// closed-torus build predicates of fx-closed360. No mesh.
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
@@ -8,7 +9,10 @@
 #include <cstdio>
 #include <vector>
 
+#include <Geom_Circle.hxx>
+#include <Geom_ToroidalSurface.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 
 using namespace stl2step::refit;
 
@@ -130,6 +134,29 @@ int main() {
         std::vector<gp_Pnt> within = {onCircle(20, s, 4)};
         expect(rimSeamOffset(fam, refX, within) <= kTau, "offset: an aligned rim is within tau");
     }
+
+    // rimBuiltBeforeTorus: closed-360 cylinders build first, then region id order.
+    expect(rimBuiltBeforeTorus(true, 40, 7), "built-before: a closed cylinder builds first");
+    expect(rimBuiltBeforeTorus(false, 3, 7), "built-before: a lower id builds first");
+    expect(!rimBuiltBeforeTorus(false, 9, 7), "built-before: a higher id builds after");
+
+    // rimRunsWithSurfaceU: a rim circle coaxial with the torus, axis along or against it.
+    {
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        Handle(Geom_Surface) tor = new Geom_ToroidalSurface(ax, 14.0, 3.0);
+        const double v = kPi;  // inner equator, rho = 11
+        Handle(Geom_Curve) with = new Geom_Circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), 11.0);
+        Handle(Geom_Curve) against = new Geom_Circle(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, -1), gp_Dir(1, 0, 0)), 11.0);
+        expect(rimRunsWithSurfaceU(with, 0.0, tor, 0.0, v), "rim sense: coaxial circle runs with u");
+        expect(!rimRunsWithSurfaceU(against, 0.0, tor, 0.0, v), "rim sense: antiparallel circle runs -u");
+        expect(rimRunsWithSurfaceU(Handle(Geom_Curve)(), 0.0, tor, 0.0, v), "rim sense: no curve keeps +u");
+    }
+
+    // splitCapHealApplies: certified at tau and one exact rim, both required.
+    expect(splitCapHealApplies(0.5 * kTau, kTau, true), "split-cap: certified wall with an exact rim");
+    expect(!splitCapHealApplies(2.0 * kTau, kTau, true), "split-cap: uncertified wall keeps its path");
+    expect(!splitCapHealApplies(0.5 * kTau, kTau, false), "split-cap: all-polyline rims keep their path");
+    expect(!splitCapHealApplies(0.0, 0.0, true), "split-cap: tau 0 admits nothing");
 
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;

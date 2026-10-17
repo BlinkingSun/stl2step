@@ -3371,8 +3371,9 @@ std::vector<TorusSeamFamily> shareTorusSeamFrames(const MeshView& mv, RegionSet&
                 const BoundaryChain& ch = rs.chains[(size_t)ci];
                 const Region* P = regionById(rs, ch.regA == tid ? ch.regB : ch.regA);
                 if (!P || !isAnalytic(P)) continue;
-                const bool p360 = P->closed360 && P->type == SurfType::Cylinder;
-                if (p360 || P->id < tid) ++reusedHigh;
+                if (rimBuiltBeforeTorus(P->closed360 && P->type == SurfType::Cylinder, P->id,
+                                        tid))
+                    ++reusedHigh;
             }
         }
         const bool active = worst > tau || reusedHigh > 0;
@@ -13466,13 +13467,13 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
     // uncertified wall, or one whose every rim is a mesh polyline (it gains no
     // exact edge: each rim edge it would ship is a chord off its surface), keeps
     // the path it had.
-    const double tauWall = 2.0 * std::max(mv.quantFloor, 0.0);
     auto capExact = [&](const Loop* cp) {
         return cp->chainIdx.size() == 1 &&
                partnerBuildable(cp->chainIdx.front(), r, rs, eprimeFill, exploded);
     };
-    if (!capsOneChain && !capHasPolyline && tauWall > 0.0 && r.maxVertexDev <= tauWall &&
-        (capExact(capL) || capExact(capH)))
+    if (!capsOneChain && !capHasPolyline &&
+        splitCapHealApplies(r.maxVertexDev, 2.0 * std::max(mv.quantFloor, 0.0),
+                            capExact(capL) || capExact(capH)))
         for (const Loop* cp : {capL, capH})
             for (int ci : cp->chainIdx)
                 if (!partnerBuildable(ci, r, rs, eprimeFill, exploded)) mintRefused = true;
@@ -18650,12 +18651,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             try {
                                 Standard_Real f = 0, l = 0;
                                 Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
-                                if (c.IsNull()) return true;
-                                gp_Pnt P, S;
-                                gp_Vec T, Du, Dv;
-                                c->D1(f, P, T);
-                                tsurf->D1(u0, vRim, S, Du, Dv);
-                                return !(T.Dot(Du) < 0.0);
+                                return rimRunsWithSurfaceU(c, f, tsurf, u0, vRim);
                             } catch (const Standard_Failure&) {
                             }
                             return true;
