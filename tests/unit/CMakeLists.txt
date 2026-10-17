@@ -575,6 +575,30 @@ set_tests_properties(relational_arc_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# fc/fx-slitheal (D-fc-5.11 F3): zero-area fins and out-and-back slits.
+add_executable(relational_slit_heal_unit relational_slit_heal_unit.cpp)
+target_compile_features(relational_slit_heal_unit PRIVATE cxx_std_17)
+set_target_properties(relational_slit_heal_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_slit_heal_unit PRIVATE stl2step::core)
+target_include_directories(relational_slit_heal_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(relational_slit_heal_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_slit_heal_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_slit_heal_unit)
+endif()
+add_test(NAME relational_slit_heal_unit COMMAND relational_slit_heal_unit)
+set_tests_properties(relational_slit_heal_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)
