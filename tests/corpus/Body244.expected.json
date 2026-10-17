@@ -32,12 +32,12 @@
     {
       "component": 0,
       "disposition": "BUILT",
-      "censusValidExpected": false,
-      "censusValidReason": "CLOSURES 2026-10-15 06:05 / D-fc-1.1: facet lines replaced by 2 true cones (analytic 148 to 3). Measured census valid=false, closed=true, cylinders=178 (>= floor 178). One seamed360 BRepCheck-invalid face; D-fc-1.14 keeps Body244.cyl360.rid1 until that seam is fixed.",
-      "builtCylindersFloor": 178,
-      "builtPlanesFloor": 364,
-      "faceCount": 2498,
-      "surfaceCensus": {"plane": 2320, "cylinder": 178, "cone": 0, "planar_facets": 0},
+      "censusValidExpected": true,
+      "censusValidReason": "fc-4 (D-fc-4.6, 8654f72; orchestrator 2026-10-17): Body244 ships 13 analytic faces (3 planes, 3 cylinders, 3 cones, 4 tori) and the census validates (valid=true, closed=true); the seamed360 face is fixed (Body244.cyl360.rid1 retired). Floors and face count are the measured values. Earlier: CLOSURES 2026-10-15 06:05 / D-fc-1.1 (2 cones, 178 cylinder slivers, one BRepCheck-invalid seamed360 face).",
+      "builtCylindersFloor": 3,
+      "builtPlanesFloor": 3,
+      "faceCount": 13,
+      "surfaceCensus": {"plane": 3, "cylinder": 3, "cone": 3, "torus": 4, "planar_facets": 0},
       "volumeBudgetMM3": 0.8912471122,
       "smoothContainedRegions": 0,
       "smoothContainedTriangles": 0

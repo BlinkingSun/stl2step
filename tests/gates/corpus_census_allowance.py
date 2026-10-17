@@ -25,10 +25,10 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_CORPUS = REPO / "tests" / "corpus"
-# Body244: CLOSURES 2026-10-15 17:20 (orchestrator ruling G9) — the
-# BRepCheck-invalid seamed360 face is pre-existing at v1.4.4 (audit G10),
-# not introduced by the D-fc-1.1 funnel cones.
-ALLOWED_FALSE: Set[str] = {"Body11", "Body244"}
+# Body244 left this set in fc-4 (D-fc-4.6, 8654f72): its seamed360 face is
+# fixed and the 13-face analytic part census-validates (valid=true, closed),
+# so a regression to invalid FAILS here again (ruling G9 of 2026-10-15 retired).
+ALLOWED_FALSE: Set[str] = {"Body11"}
 
 
 class GateError(Exception):
@@ -149,9 +149,11 @@ def _self_test() -> int:
         ]
     }
     check(
-        evaluate({"Body11": ok_doc, "Body244": ok_doc}) == [],
-        "Body11+Body244 with reason+floor+sibling PASSES",
+        evaluate({"Body11": ok_doc}) == [],
+        "Body11 with reason+floor+sibling PASSES",
     )
+    b244 = evaluate({"Body11": ok_doc, "Body244": ok_doc})
+    check(any("Body244" in f for f in b244), "Body244 marked census-invalid FAILS (left ALLOWED_FALSE in fc-4)")
     extra = evaluate({"Body11": ok_doc, "S09": ok_doc})
     check(any("S09" in f for f in extra), "second false part FAILS")
     missing = evaluate({})
