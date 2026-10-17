@@ -2904,10 +2904,15 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     I.clear();
                     const gp_XYZ bc = b + g * tp;
                     const gp_XYZ c = centerOf(tp, r);
+                    // Past the contact: the fitted contact OR the station
+                    // generator, where T's certified body ends (D-fc-5.5 F-1).
                     auto inSlab = [&](const gp_XYZ& pnt) {
                         gp_XYZ w = pnt - bc;
                         w -= axis * w.Dot(axis);
-                        return !(sg * g.Dot(w) < -tau || s * nTs.Dot(w) < -tau);
+                        gp_XYZ w0 = pnt - b;
+                        w0 -= axis * w0.Dot(axis);
+                        return osbPastContact(g.Dot(w), g.Dot(w0), sg, tau) &&
+                               !(s * nTs.Dot(w) < -tau);
                     };
                     if (++sc.triTick > 2000000000) {
                         std::fill(sc.triGen.begin(), sc.triGen.end(), 0);
@@ -2993,6 +2998,24 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     finish("underdetermined");
                     return;
                 }
+                // D-fc-5.5 F-2: over-determination counted leave-one-provisional-out
+                // on I -- without any one source (an Unclaimed provisional, or the
+                // uncertified region robbed, D-fc-4.3) I keeps minStations.
+                {
+                    std::vector<std::array<gp_XYZ, 3>> tp;
+                    std::vector<int> ts;
+                    tp.reserve(Iset.size());
+                    ts.reserve(Iset.size());
+                    for (int t : Iset) {
+                        tp.push_back({cornerPt(mv, t, 0), cornerPt(mv, t, 1), cornerPt(mv, t, 2)});
+                        const int ow = uncertOwner[(std::size_t)t];
+                        ts.push_back(ow >= 0 ? nProv + ow : triProv[t]);
+                    }
+                    if (leaveOneSourceOutStations(tp, ts, axis, tau) < minStations(kParamsOneSided)) {
+                        finish("underdetermined");
+                        return;
+                    }
+                }
                 if (dg.lineRes <= tau) {
                     finish("line");
                     return;
@@ -3065,7 +3088,10 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                             break;
                         }
                     }
-                    if (!tOut) {
+                    // D-fc-5.5 (F-1's premise): T's certified body ends at the
+                    // station generator. A band holding any of T's certified
+                    // triangles runs back over T (one surface, one face).
+                    if (!tOut || bandHoldsAny(TA.body, inC)) {
                         finish("anchor-in-band");
                         return;
                     }
@@ -3604,6 +3630,29 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
     } catch (...) {
         return false;
     }
+}
+
+int leaveOneSourceOutStations(const std::vector<std::array<gp_XYZ, 3>>& triPts,
+                              const std::vector<int>& triSrc, const gp_XYZ& axis, double tau) {
+    if (triPts.size() != triSrc.size()) return 0;
+    std::vector<int> srcs(triSrc);
+    std::sort(srcs.begin(), srcs.end());
+    srcs.erase(std::unique(srcs.begin(), srcs.end()), srcs.end());
+    if (srcs.empty()) return 0;
+    int fewest = std::numeric_limits<int>::max();
+    std::vector<Vert> vs;
+    for (int k : srcs) {
+        vs.clear();
+        for (std::size_t i = 0; i < triPts.size(); ++i) {
+            if (triSrc[i] == k) continue;
+            for (const gp_XYZ& c : triPts[i]) vs.push_back(Vert{-1, c});
+        }
+        int st = 0, lv = 0;
+        double lr = 0;
+        profileCounts(vs, axis, tau, st, lv, lr);
+        fewest = std::min(fewest, st);
+    }
+    return fewest;
 }
 
 bool planeAnchorOf(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,

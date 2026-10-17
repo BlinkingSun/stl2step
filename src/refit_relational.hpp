@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace stl2step {
 namespace refit {
@@ -36,6 +37,22 @@ constexpr int kParamsOneSided = 2;
 
 // D-fc-1.6(2).
 inline int minStations(int params) { return params + 1; }
+
+// D-fc-5.5 F-1. One-sided blend slab, "past the contact": a section offset is
+// on the band side of the fitted contact generator (gw) OR of the station
+// generator, where T's certified body ends (gw0), each with τ slack. Offsets
+// are along the contact direction g; sg is the band side (±1).
+inline bool osbPastContact(double gw, double gw0, double sg, double tau) {
+    return !(sg * gw < -tau) || !(sg * gw0 < -tau);
+}
+
+// D-fc-5.5. True when the band (inBand[t] != 0) holds any triangle of `tris`
+// -- e.g. of an anchor's certified body, which is that anchor's surface.
+inline bool bandHoldsAny(const std::vector<int>& tris, const std::vector<char>& inBand) {
+    for (int t : tris)
+        if (t >= 0 && (std::size_t)t < inBand.size() && inBand[(std::size_t)t]) return true;
+    return false;
+}
 
 // D-fc-1.4. Exact predicate of commitPlanesA3 (refit_grow.cpp:2293-2297).
 // areaMin = tol.epsPlane * mv.diag (refit_grow.cpp:2198). Shatter-class

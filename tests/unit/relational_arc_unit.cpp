@@ -374,8 +374,51 @@ static void casePlaneAnchor() {
     expect(!planeAnchorOf(mv, sp, tol, pr, pa), "plane anchor needs an Unclaimed provisional");
 }
 
+static void caseOsbGuards() {
+    // D-fc-5.5 F-1: past the fitted contact OR the station generator, tau slack.
+    expect(osbPastContact(-2 * kTau, 0.5 * kTau, 1.0, kTau), "osb slab: past the station generator");
+    expect(osbPastContact(0.0, -2 * kTau, 1.0, kTau), "osb slab: past the fitted contact");
+    expect(!osbPastContact(-2 * kTau, -2 * kTau, 1.0, kTau), "osb slab: behind both generators");
+    expect(osbPastContact(2 * kTau, 2 * kTau, -1.0, kTau) == false, "osb slab: band side from sg");
+    // D-fc-5.5 F-2: stations left without any one source. An extruded arc of 5
+    // columns (stations) at 2 levels, one quad (2 triangles) between columns.
+    auto quad = [](double R, double a0, double a1, double h) {
+        const gp_XYZ p0(R * std::cos(a0), R * std::sin(a0), 0), p1(R * std::cos(a0), R * std::sin(a0), h);
+        const gp_XYZ q0(R * std::cos(a1), R * std::sin(a1), 0), q1(R * std::cos(a1), R * std::sin(a1), h);
+        return std::vector<std::array<gp_XYZ, 3>>{{p0, q0, p1}, {p1, q0, q1}};
+    };
+    const gp_XYZ ax(0, 0, 1);
+    std::vector<std::array<gp_XYZ, 3>> tp;
+    std::vector<int> ts;
+    for (int i = 0; i < 4; ++i) {
+        for (const auto& t : quad(10, 0.1 * i, 0.1 * (i + 1), 5)) {
+            tp.push_back(t);
+            ts.push_back(i < 2 ? 7 : 9);
+        }
+    }
+    expect(leaveOneSourceOutStations(tp, ts, ax, kTau) == 3, "leave-one-source-out: 3 stations left");
+    std::vector<int> one(ts.size(), 4);
+    expect(leaveOneSourceOutStations(tp, one, ax, kTau) == 0, "leave-one-source-out: one source leaves 0");
+    // I-starved: two quads from two sources, each alone 2 stations (a line).
+    std::vector<std::array<gp_XYZ, 3>> tp2;
+    std::vector<int> ts2;
+    for (int i : {0, 2})
+        for (const auto& t : quad(10, 0.1 * i, 0.1 * (i + 1), 5)) {
+            tp2.push_back(t);
+            ts2.push_back(i);
+        }
+    expect(leaveOneSourceOutStations(tp2, ts2, ax, kTau) == 2,
+           "leave-one-source-out: two one-quad sources underdetermined");
+    // The band holding an anchor's certified triangle.
+    std::vector<char> inBand(6, 0);
+    inBand[4] = 1;
+    expect(bandHoldsAny({1, 4}, inBand) && !bandHoldsAny({0, 1, 2}, inBand) && !bandHoldsAny({9}, inBand),
+           "band holds an anchor body triangle");
+}
+
 int main() {
     casePredicates();
+    caseOsbGuards();
     caseCoaxialCert();
     caseLineMode();
     caseSectionFillet(false);

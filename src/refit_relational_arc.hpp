@@ -9,6 +9,7 @@
 #include "refit_relational_torus.hpp"
 
 #include <gp_XYZ.hxx>
+#include <array>
 #include <vector>
 
 namespace stl2step {
@@ -94,6 +95,14 @@ struct SectionCircle {
     double radius = 0, tol = 0, length = 0;
     int acc = -1;  // work.accepted index
 };
+
+// D-fc-5.5 F-2 (D-fc-1.11(ii)(a), the D-fc-4.6 leave-one-out). The fewest
+// section stations (points merged at tau in the plane normal to axis) of a
+// band left after removing the triangles of any one source -- the provisional
+// or uncertified region each triangle came from. triPts[i] holds triangle i's
+// corners, triSrc[i] its source. A band of one source leaves 0.
+int leaveOneSourceOutStations(const std::vector<std::array<gp_XYZ, 3>>& triPts,
+                              const std::vector<int>& triSrc, const gp_XYZ& axis, double tau);
 
 // D-fc-5.2. Runs after the coaxial family claims (it needs their circles).
 // Hypotheses come from accepted non-closed CylGrow regions (D-fc-4.6 F2 atoms)
