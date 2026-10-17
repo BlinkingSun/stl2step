@@ -1182,6 +1182,47 @@ const char* torusWhy(const TorusCert& c) {
     return "vertex-off";
 }
 
+// D-fc-5.17. The relational horn is tangent to a certified cylinder of radius
+// R_edge: r = R_edge / 2, so Rmaj = R_edge - r. A cone is not that anchor.
+double cylinderEdgeRadius(const SegmentWork& work, const Donor& donor) {
+    if (donor.idx < 0 || (std::size_t)donor.idx >= work.accepted.size()) return 0.0;
+    if (work.accepted[(std::size_t)donor.idx].type != SurfType::Cylinder) return 0.0;
+    if (!(donor.radius > 0.0) || !std::isfinite(donor.radius)) return 0.0;
+    return donor.radius;
+}
+
+// certifyTorus is frozen and returns before a spindle can be accepted. The
+// horn is tried here, at that call. A miss returns the spindle unchanged, so
+// the refusal why is the one torusWhy already maps.
+TorusCert certifyTorusHorn(const std::vector<ProfPt>& pts, double tau, double edgeR, int maxIt) {
+    const TorusCert raw = certifyTorus(pts, tau);
+    if (raw.ok) return raw;
+    const TorusCert h = hornFromSpindle(raw, pts, tau, edgeR, maxIt > 0 ? maxIt : 1);
+    if (!(h.ok && !raw.ok)) return raw;
+    if (diagOn()) {
+        const double gapTau = (tau > 0.0) ? (raw.Rmaj - raw.Rmin) / tau : 0.0;
+        const double devTau = (tau > 0.0) ? h.maxDev / tau : 0.0;
+        const int rel = (edgeR > tau && std::fabs(2.0 * h.Rmin - edgeR) <= tau) ? 1 : 0;
+        std::fprintf(stderr,
+                     "DIAG_REL_HORN nV=%zu gapTau=%.4f edgeR=%.8g r=%.8g z0=%.8g "
+                     "maxDevTau=%.4f rel=%d\n",
+                     pts.size(), gapTau, edgeR, h.Rmin, h.z0, devTau, rel);
+    }
+    return h;
+}
+
+// A horn has one fewer free radius than the profile circle. The relational
+// form (r fixed by the certified edge) is anchored; the (z0, r) refit is
+// kParamsHorn. A ring stays kParamsCircle. Equality of the two radii is the
+// horn this caller wrote: certifyTorus accepts only Rmaj > Rmin.
+int torusCertParams(const TorusCert& c, double edgeR, double tau) {
+    if (c.ok && c.Rmin > 0.0 && std::fabs(c.Rmaj - c.Rmin) <= gp::Resolution()) {
+        if (edgeR > tau && std::fabs(2.0 * c.Rmin - edgeR) <= tau) return kParamsAnchored;
+        return kParamsHorn;
+    }
+    return kParamsCircle;
+}
+
 // One scan per axis. Later donors share it only when the longer axis length
 // makes tanAngTol strict, so a short tilted sliver cannot lock out a real axis.
 struct AxisScan {
@@ -2616,7 +2657,9 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             sup.sheet = sheet;
             for (int t : chainCands) sup.in[(std::size_t)t] = 1;
             collectBand(mv, fr, wm.g2l, sup);
-            const TorusCert onFamily = certifyTorus(sup.pts, tau);
+            // D-fc-5.17: spindle within tau of a horn is tried at this call.
+            const double edgeR = cylinderEdgeRadius(work, donor);
+            const TorusCert onFamily = certifyTorusHorn(sup.pts, tau, edgeR, wm.maxIter);
             onFamilyCert = onFamily;
             chainOk = onFamily.ok;
             // certifyTorus needs kTorusProfPts distinct profile points on any axis:
@@ -2692,7 +2735,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                         nb.sheet = sheet;
                         for (int t : next) nb.in[(std::size_t)t] = 1;
                         collectBand(mv, fr, wm.g2l, nb);
-                        famCur = certifyTorus(nb.pts, tau);
+                        famCur = certifyTorusHorn(nb.pts, tau, edgeR, wm.maxIter);
                         cj = JointTorusCert{};
                         if ((int)nb.pts.size() >= kTorusProfPts) {
                             std::vector<gp_XYZ> np;
@@ -2817,7 +2860,8 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
                 d.why = why;
                 printBand(d);
             };
-            const TorusCert cert = certifyTorus(band.pts, tau);
+            const double bandEdge = cylinderEdgeRadius(work, cdonor);
+            const TorusCert cert = certifyTorusHorn(band.pts, tau, bandEdge, wm.maxIter);
             // Line-first is a geometric refusal only on determinate evidence: a
             // band below certifyTorus's own counts is under-determined first
             // (D-fc-1.6.2 certificate order).
@@ -2949,7 +2993,7 @@ void gatherTori(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisS
             DiagRec d = baseDiag("torus", cdonor, band, tau);
             d.stations = cert.profPts;
             d.levels = cert.levels;
-            d.params = kParamsCircle;
+            d.params = torusCertParams(cert, bandEdge, tau);
             d.maxDev = cert.maxDev;
             d.maxDevTau = cert.maxDev / tau;
             d.lineResTau = cert.lineRes / tau;

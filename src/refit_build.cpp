@@ -1078,8 +1078,22 @@ bool ensureFaceValid(TopoDS_Face& f, double cap) {
                 gp_Vec v(c.Location(), p);
                 return std::fabs(gp_Vec(c.Axis().Direction()).Crossed(v).Magnitude() - c.Radius());
             }
-            if (s.GetType() == GeomAbs_Torus)
-                return pointTorusDist(s.Torus(), p);
+            if (s.GetType() == GeomAbs_Torus) {
+                // pointTorusDist stays a ring-only supremum. A horn's meridian
+                // is the same circle with Rmaj = r, and the pinch is not on a
+                // partial corner that passed the vertex test. A spindle still
+                // returns 0 here: it is not a positive deviation.
+                const gp_Torus gt = s.Torus();
+                const double d = pointTorusDist(gt, p);
+                if (d >= 0.0) return d;
+                if (!torusIsHorn(gt)) return 0.0;
+                const double R = gt.MajorRadius();
+                const double r = gt.MinorRadius();
+                const double z = torusAxialCoord(gt, p);
+                const double rho = torusRadialCoord(gt, p);
+                if (!std::isfinite(z) || !std::isfinite(rho)) return 0.0;
+                return std::fabs(std::hypot(rho - R, z) - r);
+            }
             return 0.0;
         };
         for (TopExp_Explorer vx(f, TopAbs_VERTEX); vx.More(); vx.Next()) {
@@ -16661,8 +16675,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                          isChamferConeR(*oth))) {
                         const gp_Torus gt(tor->ax, tor->radius, tor->radius2);
                         gp_Circ cLo, cHi;
-                        if (torusVIsoCircle(gt, tor->vMin, cLo) &&
-                            torusVIsoCircle(gt, tor->vMax, cHi)) {
+                        // A horn's v-iso is a circle except at the pinch. The
+                        // ring path is unchanged; a pinch rim stays a mesh chord.
+                        const bool ringIso = torusVIsoCircle(gt, tor->vMin, cLo) &&
+                                             torusVIsoCircle(gt, tor->vMax, cHi);
+                        const bool hornIso = !ringIso && hornVIsoCircle(gt, tor->vMin, cLo) &&
+                                             hornVIsoCircle(gt, tor->vMax, cHi);
+                        if (ringIso || hornIso) {
                             double sumR = 0.0;
                             int nR = 0;
                             for (int lv : ch.meshVerts) {
@@ -18784,7 +18803,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (r.vMax - r.vMin >= kPi - Precision::Angular())
                         return torusFail("v-closed", __LINE__, nullptr);
                     const gp_Torus gt(r.ax, r.radius, r.radius2);
-                    if (!torusIsRing(gt)) return torusFail("not-ring", __LINE__, nullptr);
+                    // D-fc-5.17. An exact horn (Rmaj = r) is admitted. A spindle
+                    // stays not-ring. Do not call SetMajorRadius: it throws
+                    // when R - r <= gp::Resolution().
+                    if (!torusIsRing(gt) && !torusIsHorn(gt))
+                        return torusFail("not-ring", __LINE__, nullptr);
                     Handle(Geom_ToroidalSurface) tsurf =
                         Handle(Geom_ToroidalSurface)::DownCast(regionSurf(r, SurfVar::TorusBase));
                     if (tsurf.IsNull())

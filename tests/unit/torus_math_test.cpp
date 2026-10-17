@@ -39,7 +39,9 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
+#include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Torus.hxx>
 #include <gp_Vec.hxx>
@@ -51,7 +53,11 @@ using stl2step::refit::pointTorusDist;
 using stl2step::refit::torusAxialCoord;
 using stl2step::refit::torusDevClassIsExact;
 using stl2step::refit::torusDevClassName;
+using stl2step::refit::hornVIsoCircle;
+using stl2step::refit::torusCylinderContactCircle;
+using stl2step::refit::torusIsHorn;
 using stl2step::refit::torusIsRing;
+using stl2step::refit::torusPlaneContactCircle;
 using stl2step::refit::torusRadialCoord;
 using stl2step::refit::torusVIsoCircle;
 using stl2step::refit::torusVOfProfilePoint;
@@ -618,11 +624,45 @@ static void testPlacementInvariance() {
     checkNear(worst, 0.0, 1e-13, "2000 random placements x 4 rims: worst rim deviation");
 }
 
+// D-fc-5.17. An exact horn is R == r, both above gp::Resolution(). The ring
+// primitives stay refused (testSphereLimitAndSpindle). The v = pi pinch is
+// not a circle. Contact falls back to the horn iso; a spindle still misses.
+static void testHornConstruct() {
+    const gp_Ax3 fr(gp_Pnt(1, 2, 3), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    const double R = 4.0;
+    const gp_Torus horn(fr, R, R);
+    check(torusIsHorn(horn) && !torusIsRing(horn), "horn: R == r is a horn, not a ring");
+    const gp_Torus ring(fr, R + 1.0, R);
+    check(torusIsRing(ring) && !torusIsHorn(ring), "horn: a ring is not a horn");
+    const gp_Torus spindle(fr, R - 1.0, R);
+    check(!torusIsHorn(spindle) && !torusIsRing(spindle), "horn: a spindle is neither");
+    const gp_Torus noTube(fr, R, 0.0);
+    check(!torusIsHorn(noTube), "horn: no tube is not a horn");
+    gp_Circ iso;
+    check(hornVIsoCircle(horn, 0.0, iso) && std::fabs(iso.Radius() - 2.0 * R) <= 1e-12,
+          "horn: v = 0 iso is the outer equator, radius 2R");
+    check(!hornVIsoCircle(horn, kPi, iso), "horn: v = pi is the pinch, not a circle");
+    check(!hornVIsoCircle(spindle, 0.0, iso), "horn: a spindle has no horn iso");
+    check(!hornVIsoCircle(ring, 0.0, iso), "horn: a ring does not take the horn iso");
+    const gp_Pln top(gp_Ax3(gp_Pnt(1, 2, 3.0 + R), gp_Dir(0, 0, 1)));
+    gp_Circ c;
+    check(torusPlaneContactCircle(horn, top, 1e-6, c) && std::fabs(c.Radius() - R) <= 1e-9,
+          "horn: a coaxial plane at the top is the v = pi/2 circle");
+    const gp_Cylinder wall(gp_Ax3(gp_Pnt(1, 2, 3), gp_Dir(0, 0, 1)), 2.0 * R);
+    check(torusCylinderContactCircle(horn, wall, 1e-6, c) && std::fabs(c.Radius() - 2.0 * R) <= 1e-9,
+          "horn: a coaxial cylinder at the outer equator is the v = 0 circle");
+    check(!torusPlaneContactCircle(spindle, top, 1e-6, c),
+          "horn: a spindle still has no plane contact");
+    check(!torusCylinderContactCircle(spindle, wall, 1e-6, c),
+          "horn: a spindle still has no cylinder contact");
+}
+
 int main() {
     testParametrisationAndPointDist();
     testTangencyCirclesExactZero();
     testGeneralCoaxial();
     testSphereLimitAndSpindle();
+    testHornConstruct();
     testRefusals();
     testPlacementInvariance();
 

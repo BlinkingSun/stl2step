@@ -35,6 +35,12 @@ constexpr int kParamsAnchored = 1, kParamsLine = 2, kParamsCircle = 3, kParamsAx
 // imposed; free are the contact position along T and r.
 constexpr int kParamsOneSided = 2;
 
+// D-fc-5.17. A horn torus fixes Rmaj = r (the profile circle passes through
+// the axis). Free parameters are z0 and r — two, one fewer than the profile
+// circle. When r is the certified edge-round radius over 2 (Rmaj = R_edge - r),
+// only z0 is free and the count is kParamsAnchored.
+constexpr int kParamsHorn = kParamsLine;
+
 // D-fc-1.6(2).
 inline int minStations(int params) { return params + 1; }
 
