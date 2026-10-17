@@ -35,8 +35,34 @@ constexpr int kParamsAnchored = 1, kParamsLine = 2, kParamsCircle = 3, kParamsAx
 // imposed; free are the contact position along T and r.
 constexpr int kParamsOneSided = 2;
 
+// D-fc-5.11 F9. Hem: the half-cylinder tangent to two certified antiparallel
+// planes. Axis ∥ n_T × n_X (certified), r = half the gap, centre midway, the
+// contact where T's certified body ends: zero free parameters.
+constexpr int kParamsHem = 0;
+
 // D-fc-1.6(2).
 inline int minStations(int params) { return params + 1; }
+
+// D-fc-5.11 F9. T and X' are antiparallel: parallel by the pair walk's test
+// (|n_T × n_X'| <= rhs, D-fc-3.2.2) with opposed normals. Co-directed
+// parallel planes are a step, never one half-turn.
+inline bool hemAntiparallel(double crossTX, double rhs, double dotTX) {
+    return crossTX <= rhs && dotTX < 0.0;
+}
+
+// D-fc-5.11 F9. Tangent to both planes: r = half the gap, measured from the
+// contact on T along the centre side to X'. A gap within τ is one sheet.
+inline bool hemRadiusOf(double gap, double tau, double& r) {
+    r = 0.5 * gap;
+    return gap > tau && std::isfinite(gap);
+}
+
+// D-fc-5.11 F9 / D-fc-1.5 O2. The hem turns through π: the vertex span
+// matches π within spanTol (D-fc-1.6.7 with dihedral π).
+inline bool hemSpansHalfTurn(double span, double spanTolV) {
+    constexpr double kHalfTurn = 3.14159265358979323846264338327950288;
+    return std::abs(span - kHalfTurn) <= spanTolV;
+}
 
 // D-fc-5.5 F-1. One-sided blend slab, "past the contact": a section offset is
 // on the band side of the fitted contact generator (gw) OR of the station

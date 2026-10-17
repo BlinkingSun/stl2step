@@ -1,6 +1,7 @@
 // Relational extrude (W1.1, amended D-fc-3.2).
 // Anchor-pair vote, slab τ-membership, chord-bounded coverage, then pegs.
-// Hems are deferred. Growth and the ruled-chain seed are not used.
+// Hems (D-fc-5.11 F9) are built by the one-sided station walk, which finds
+// the far plane. Growth and the ruled-chain seed are not used.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational.hpp"
@@ -1942,6 +1943,9 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             const double cross = A.n.Crossed(B.n).Modulus();
             const double rhs = 2.0 * (A.tolA + tau) / A.extent + 2.0 * (B.tolA + tau) / B.extent;
             if (cross <= rhs) {
+                // A parallel pair has no n_A × n_B axis. The hem (D-fc-5.11 F9)
+                // takes its axis from a third certified plane, in the one-sided
+                // station walk below; this walk leaves the pair.
                 BandDiag dg;
                 dg.tau = tau;
                 dg.mode = "hem";
@@ -2616,9 +2620,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         // Certificate: τ fixed point on I, stations >= minStations, levels >= 2,
         // line first, contact on T within tanDistTol, coverage D-fc-3.2.7,
         // anchor-in-band, trim X' (holds the far vertex and >= 2 levels within
-        // tanDistTol, all of C on one side, parallel, crossed; tangent ⇒
-        // hem-deferred, D-fc-3.1), vertex span == the fitted contact→X' arc
-        // within spanTol and facet normals span it, same-surface refused.
+        // tanDistTol, all of C on one side, parallel, crossed), vertex span ==
+        // the fitted contact→X' arc within spanTol and facet normals span it,
+        // same-surface refused. A far plane that is tangent and antiparallel
+        // to T is a hem (D-fc-5.11 F9): its surface is fixed by the anchors
+        // and certified on its own τ-preimage.
         //
         // T walks arefs order and its stations follow its edges, one serial
         // walk that restarts T after a commit. A station's evaluation reads the
@@ -2628,7 +2634,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         // depend on the worker count; threads 1 runs it inline.
         {
             const auto tOsb = std::chrono::steady_clock::now();
-            int osbEdges = 0, osbStations = 0, osbHyp = 0, osbAcc = 0;
+            int osbEdges = 0, osbStations = 0, osbHyp = 0, osbAcc = 0, osbHem = 0;
             // The pair walk refreshes its table from curA on; load every row.
             anchorTabEpoch = -1;
             std::vector<int> osbInBody((std::size_t)nTri, 0);
@@ -3058,7 +3064,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 // triangles outside C, holds the far vertex and >= 2 levels of C
                 // within tanDistTol, has all of C on one side, is parallel to the
                 // axis, and is crossed.
-                std::size_t trimIdx = nA;
+                std::size_t trimIdx = nA, hemIdx = nA;
                 bool farTangent = false;
                 for (std::size_t ix = 0; ix < nA && !farTangent; ++ix) {
                     if (ix == st.it || !anchorTabOk[ix] || !anchorTab[ix].certified) continue;
@@ -3091,8 +3097,9 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     const double dhi = std::abs((phi - XA.p0).Dot(XA.n));
                     if (std::abs(dlo - dhi) > tolX) continue;
                     if (std::abs(0.5 * (dlo + dhi) - radius) <= tolX) {
-                        // Tangent at the far end: two-sided, or a hem (O2, D-fc-3.1).
+                        // Tangent at the far end: two-sided, or a hem (O2, D-fc-5.11 F9).
                         farTangent = true;
+                        hemIdx = ix;
                         break;
                     }
                     if (trimIdx < nA) continue;
@@ -3101,7 +3108,213 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     dg.anchorTolB = XA.tolA;
                 }
                 if (farTangent) {
-                    finish("hem-deferred");
+                    const LiveAnchor& XH = anchorTab[hemIdx];
+                    const double crossTX = TA.n.Crossed(XH.n).Modulus();
+                    const double rhsTX =
+                        2.0 * (TA.tolA + tau) / TA.extent + 2.0 * (XH.tolA + tau) / XH.extent;
+                    if (!hemAntiparallel(crossTX, rhsTX, TA.n.Dot(XH.n))) {
+                        // Tangent, not antiparallel: the pair walk's two-sided blend.
+                        finish("not-blend");
+                        return;
+                    }
+                    // D-fc-5.11 F9 (un-defers D-fc-3.1). The far plane closes a
+                    // half-turn: a hem. Its surface comes from the anchors alone
+                    // (kParamsHem): the axis from (T, X), r = half the T|X' gap,
+                    // the centre midway, the contact at the station generator
+                    // where T's certified body ends. The band is that surface's
+                    // τ-preimage in the slab; nothing is fitted on it. The
+                    // one-sided fit above only found the band and its far plane.
+                    BandDiag hg;
+                    hg.tau = tau;
+                    hg.mode = "hem";
+                    hg.fit = "anchored";
+                    hg.params = kParamsHem;
+                    hg.seed = st.ot;
+                    hg.axis = axis;
+                    hg.anchorTolA = TA.tolA;
+                    hg.anchorTolB = XH.tolA;
+                    hg.dihedral = kPi;
+                    auto finishH = [&](const char* why) {
+                        hg.why = why;
+                        emitDiag(hg);
+                        tallyWhy(out.yc, why);
+                    };
+                    // Gap from the contact on T, along the centre side, to X'.
+                    const gp_XYZ toC = nTs * s;
+                    const double den = XH.n.Dot(toC);
+                    const double gap = std::abs(den) > 0.0 ? (XH.p0 - b).Dot(XH.n) / den : 0.0;
+                    double rH = 0.0;
+                    if (!hemRadiusOf(gap, tau, rH)) {
+                        finishH("degenerate");
+                        return;
+                    }
+                    hg.radius = rH;
+                    const gp_XYZ cH = centerOf(0.0, rH);
+                    std::vector<int> slabH, IH;
+                    collect(0.0, rH, slabH, IH);
+                    {
+                        // The hem lies between its two planes: the slab is
+                        // also on the centre side of X' (τ slack), as it is of
+                        // T, so either plane's station gives one band.
+                        const double sX = (cH - XH.p0).Dot(XH.n) < 0.0 ? -1.0 : 1.0;
+                        auto insideX = [&](int t) {
+                            for (int k = 0; k < 3; ++k)
+                                if (sX * (cornerPt(mv, t, k) - XH.p0).Dot(XH.n) < -tau) return false;
+                            return true;
+                        };
+                        slabH.erase(std::remove_if(slabH.begin(), slabH.end(),
+                                                   [&](int t) { return !insideX(t); }),
+                                    slabH.end());
+                        IH.erase(std::remove_if(IH.begin(), IH.end(),
+                                                [&](int t) { return !insideX(t); }),
+                                 IH.end());
+                    }
+                    if (IH.empty()) {
+                        finishH("vertex-off");
+                        return;
+                    }
+                    std::vector<Vert> ivH;
+                    uniqueVerts(mv, g2l, IH, ivH);
+                    profileCounts(ivH, axis, tau, hg.stations, hg.levels, hg.lineRes);
+                    hg.nV = (int)ivH.size();
+                    hg.nI = (int)IH.size();
+                    hg.compsI = edgeComps(IH);
+                    double hRms = 0;
+                    hg.certDev = devStats(ivH, cH, axis, rH, hRms);
+                    hg.maxDev = hg.certDev;
+                    if (hg.stations < minStations(kParamsHem) || hg.levels < 2) {
+                        finishH("underdetermined");
+                        return;
+                    }
+                    {
+                        // D-fc-5.5 F-2, counted on the hem's own I.
+                        std::vector<std::array<gp_XYZ, 3>> tp;
+                        std::vector<int> ts;
+                        tp.reserve(IH.size());
+                        ts.reserve(IH.size());
+                        for (int t : IH) {
+                            tp.push_back({cornerPt(mv, t, 0), cornerPt(mv, t, 1), cornerPt(mv, t, 2)});
+                            const int ow = uncertOwner[(std::size_t)t];
+                            ts.push_back(ow >= 0 ? nProv + ow : triProv[t]);
+                        }
+                        if (leaveOneSourceOutStations(tp, ts, axis, tau) < minStations(kParamsHem)) {
+                            finishH("underdetermined");
+                            return;
+                        }
+                    }
+                    if (hg.lineRes <= tau) {
+                        finishH("line");
+                        return;
+                    }
+                    if (hg.certDev > tau) {
+                        finishH("vertex-off");
+                        return;
+                    }
+                    // Both contacts: I meets T and holds >= 2 levels on X'.
+                    const double tolXH = tanDistTol(XH.tolA, tau);
+                    double minOnTH = std::numeric_limits<double>::infinity();
+                    std::vector<double> zOnX;
+                    double zloH = std::numeric_limits<double>::infinity();
+                    double zhiH = -std::numeric_limits<double>::infinity();
+                    for (const Vert& vt : ivH) {
+                        minOnTH = std::min(minOnTH, std::abs((vt.p - TA.p0).Dot(TA.n)));
+                        if (std::abs((vt.p - XH.p0).Dot(XH.n)) <= tolXH)
+                            zOnX.push_back(vt.p.Dot(axis));
+                        zloH = std::min(zloH, vt.p.Dot(axis));
+                        zhiH = std::max(zhiH, vt.p.Dot(axis));
+                    }
+                    hg.tanDistA = minOnTH;
+                    hg.tanDistB = std::abs(std::abs((cH - XH.p0).Dot(XH.n)) - rH);
+                    if (minOnTH > tanDistTol(TA.tolA, tau) || countLevels(zOnX, tau) < 2) {
+                        finishH("no-anchor");
+                        return;
+                    }
+                    // Coverage (D-fc-3.2.7) of the hem's own I.
+                    double sDevH = 0.0;
+                    for (int t : IH) {
+                        for (int k = 0; k < 3; ++k) {
+                            const gp_XYZ mid =
+                                0.5 * (cornerPt(mv, t, k) + cornerPt(mv, t, (k + 1) % 3));
+                            sDevH = std::max(sDevH, std::abs(radialDist(mid, cH, axis) - rH));
+                        }
+                    }
+                    hg.sDev = sDevH;
+                    std::vector<char> inIH((std::size_t)nTri, 0);
+                    for (int t : IH) inIH[(std::size_t)t] = 1;
+                    std::vector<int> CH = IH;
+                    for (int t : slabH) {
+                        if (inIH[(std::size_t)t] || !candidate(t)) continue;
+                        bool one = false, allS = true, allZ = true;
+                        for (int k = 0; k < 3; ++k) {
+                            const gp_XYZ pnt = cornerPt(mv, t, k);
+                            const double dv = std::abs(radialDist(pnt, cH, axis) - rH);
+                            const double z = pnt.Dot(axis);
+                            if (dv <= tau) one = true;
+                            if (dv > sDevH) allS = false;
+                            if (z < zloH - tau || z > zhiH + tau) allZ = false;
+                        }
+                        if (one && allS && allZ && triLevelCount(t, axis) >= 2) {
+                            CH.push_back(t);
+                            ++hg.nCover;
+                        }
+                    }
+                    std::sort(CH.begin(), CH.end());
+                    if (hg.nCover > 0) {
+                        std::vector<int> cov;
+                        for (int t : CH)
+                            if (!inIH[(std::size_t)t]) cov.push_back(t);
+                        std::vector<Vert> cvv;
+                        uniqueVerts(mv, g2l, cov, cvv);
+                        double cRms = 0;
+                        hg.coverDev = devStats(cvv, cH, axis, rH, cRms);
+                    }
+                    hg.compsC = edgeComps(CH);
+                    hg.nTri = (int)CH.size();
+                    std::vector<char> inCH((std::size_t)nTri, 0);
+                    for (int t : CH) inCH[(std::size_t)t] = 1;
+                    // D-fc-3.2.9 / D-fc-5.8 AF-1 on both anchors.
+                    auto ownsOutside = [&](int prov) {
+                        for (int t : work.provisionals[(std::size_t)prov].tris)
+                            if (t < 0 || t >= nTri || !inCH[(std::size_t)t]) return true;
+                        return false;
+                    };
+                    if (!ownsOutside(TA.prov) || bandHoldsAny(TA.body, inCH) ||
+                        !ownsOutside(XH.prov) || bandHoldsAny(XH.body, inCH)) {
+                        finishH("anchor-in-band");
+                        return;
+                    }
+                    std::vector<Vert> cvH;
+                    uniqueVerts(mv, g2l, CH, cvH);
+                    const gp_XYZ xdirH = lowestXDir(cvH, cH, axis);
+                    const SpanInfo spH =
+                        measureSpan(mv, g2l, CH, cvH, cH, axis, xdirH, tol.thetaBin);
+                    hg.span = spH.span;
+                    hg.spanTolV = spanTol(TA.tolA, XH.tolA, rH);
+                    if (!hemSpansHalfTurn(spH.span, hg.spanTolV) ||
+                        !normalsSpanDihedral(maxFacetNormalSep(mv, CH), hg.spanTolV)) {
+                        finishH("not-blend");
+                        return;
+                    }
+                    emitAdj(st.ot, axis, cH, rH, inCH);
+                    if (sameSurface(axis, cH, rH, inCH)) {
+                        finishH("same-surface");
+                        return;
+                    }
+                    if (diagOn())
+                        diagPrintf("DIAG_REL_HEM_COMMIT stage=extrude seed=%d provT=%d minTriT=%d "
+                                   "nT=%.6g,%.6g,%.6g dT=%.9g provX=%d minTriX=%d "
+                                   "nX=%.6g,%.6g,%.6g dX=%.9g gap=%.9g\n",
+                                   st.ot, TA.prov, TA.minTri, TA.n.X(), TA.n.Y(), TA.n.Z(),
+                                   TA.p0.Dot(TA.n), XH.prov, XH.minTri, XH.n.X(), XH.n.Y(),
+                                   XH.n.Z(), XH.p0.Dot(XH.n), gap);
+                    out.commit = true;
+                    out.C = std::move(CH);
+                    out.axis = axis;
+                    out.center = cH + axis * (0.5 * (zloH + zhiH) - cH.Dot(axis));
+                    out.radius = rH;
+                    out.provT = TA.prov;
+                    out.provX = XH.prov;
+                    out.dg = hg;
                     return;
                 }
                 if (trimIdx == nA) {
@@ -3229,6 +3442,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                         addWhy(yc, o.yc);
                         if (!o.commit) continue;
                         ++osbAcc;
+                        if (std::strcmp(o.dg.mode, "hem") == 0) ++osbHem;
                         commitBand(std::move(o.C), o.axis, o.center, o.radius, true, o.provT,
                                    o.provX, osbSts[k].ot, o.dg);
                         committed = true;
@@ -3245,8 +3459,8 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - tOsb).count();
                 std::fprintf(stderr,
                              "DIAG_REL_OSB stage=extrude contactEdges=%d stations=%d "
-                             "hypotheses=%d accept=%d seconds=%.6f\n",
-                             osbEdges, osbStations, osbHyp, osbAcc, seconds);
+                             "hypotheses=%d accept=%d seconds=%.6f hems=%d\n",
+                             osbEdges, osbStations, osbHyp, osbAcc, seconds, osbHem);
             }
         }
 

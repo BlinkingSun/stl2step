@@ -394,10 +394,15 @@ static void case4() {
     const int wb = s.tri(lo.back(), hi.back(), s.addV(gp_XYZ(0.5 * L, 2.0, -30.0)));
     addAnchor(w, {wa}, gp_XYZ(0, -1, 0), gp_XYZ(0, 0, 0), 0.0);
     addAnchor(w, {wb}, gp_XYZ(0, 1, 0), gp_XYZ(0, 2, 0), 0.0);
+    // D-fc-5.11 F9: the pair walk has no n_A × n_B axis for a parallel pair
+    // and leaves it (hem-deferred); the hem's axis comes from a third
+    // certified plane in the station walk, and this mesh has none.
     Run r = runClaim(s, std::move(w), 1e-4, 1);
-    const bool ok = r.work.accepted.empty() && hasWhy(r.diag, "hem-deferred");
+    const bool ok = r.work.accepted.empty() && hasWhy(r.diag, "hem-deferred") &&
+                    r.diag.find("mode=hem") != std::string::npos &&
+                    lineWithWhy(r.diag, "accept").empty();
     if (!ok) dumpFail("case4", r);
-    expect(ok, "case4 antiparallel hem deferred");
+    expect(ok, "case4 antiparallel pair without an axis source claims nothing");
 }
 
 static void case5() {
@@ -1172,7 +1177,7 @@ static void case22() {
     expect(ok, "case22 certified CylGrow region is not robbed");
 }
 
-static void case29() {
+static void case31() {
     using namespace stl2step::refit;
     // D-fc-4.3 with the segment's fillet strips: a prior FilletStrip at 100 τ
     // (uncertified, D-fc-1.4) is robbed by the certified band and dissolves
@@ -1199,13 +1204,13 @@ static void case29() {
                     r.work.accepted.size() == 3 &&
                     r.work.provisionals[(std::size_t)f.strayRobProv].claim == ProvClaim::Unclaimed &&
                     fieldNum(rob, "stolen") == 4.0 && fieldNum(rob, "released") == 1.0;
-    std::fprintf(stderr, "case29 nFil=%d filTris=%d %s\n", nFil, fil ? (int)fil->tris.size() : -1,
+    std::fprintf(stderr, "case31 nFil=%d filTris=%d %s\n", nFil, fil ? (int)fil->tris.size() : -1,
                  rob.c_str());
-    if (!ok) dumpFail("case29", r);
-    expect(ok, "case29 uncertified prior FilletStrip robbed by a certified band dissolves");
+    if (!ok) dumpFail("case31", r);
+    expect(ok, "case31 uncertified prior FilletStrip robbed by a certified band dissolves");
 }
 
-static void case30() {
+static void case32() {
     using namespace stl2step::refit;
     // A prior FilletStrip within τ is a certified surface: never robbed.
     RobFixture f = makeRob(0.5, Origin::FilletStrip);
@@ -1214,10 +1219,10 @@ static void case30() {
     for (const Region& a : r.work.accepted)
         if (a.origin == Origin::FilletStrip && a.tris.size() == f.stolen.size() + 1) kept = true;
     const bool ok = kept && r.diag.find("DIAG_REL_ROB") == std::string::npos;
-    std::fprintf(stderr, "case30 kept=%d accepted=%d\n", kept ? 1 : 0,
+    std::fprintf(stderr, "case32 kept=%d accepted=%d\n", kept ? 1 : 0,
                  (int)r.work.accepted.size());
-    if (!ok) dumpFail("case30", r);
-    expect(ok, "case30 certified prior FilletStrip is not robbed");
+    if (!ok) dumpFail("case32", r);
+    expect(ok, "case32 certified prior FilletStrip is not robbed");
 }
 
 static void case23() {
@@ -1413,16 +1418,63 @@ static void case25() {
     expect(same, "case25 threads 4 == threads 1");
 }
 
+static std::string hemLine(const std::string& diag, const char* why) {
+    const std::string key = std::string("why=") + why;
+    std::istringstream in(diag);
+    std::string line, last;
+    while (std::getline(in, line)) {
+        if (line.find("DIAG_REL_BAND") != std::string::npos &&
+            line.find("mode=hem") != std::string::npos && line.find(key) != std::string::npos)
+            last = line;
+    }
+    return last;
+}
+
+// D-fc-5.11 F9 accept check: one FilletStrip on every band triangle, r =
+// half the gap, zero free parameters, span pi, and (outward >= 0) the
+// convex/concave side.
+static bool hemAccepted(const Run& r, std::size_t nBand, double R, int outward, const char* tag) {
+    using namespace stl2step::refit;
+    const std::string acc = hemLine(r.diag, "accept");
+    bool ok = r.work.accepted.size() == 1 && !acc.empty() &&
+              acc.find("params=0") != std::string::npos &&
+              acc.find("fit=anchored") != std::string::npos &&
+              osbLine(r.diag, "hem-deferred").empty();
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        const double span = a.uMax - a.uMin;
+        ok = a.origin == Origin::FilletStrip && a.type == SurfType::Cylinder &&
+             nearRadius(a, R, r.tau) && !a.closed360 &&
+             (outward < 0 || a.outwardNormal == (outward > 0)) &&
+             std::abs(span - kPi) <= fieldNum(acc, "spanTol") && a.tris.size() == nBand &&
+             std::abs(fieldNum(acc, "dihedral") - kPi) <= 1e-8;  // printed %.9g
+        std::fprintf(stderr, "%s r=%.12g dev=%.3g span=%.6f tris=%d outward=%d %s\n", tag,
+                     a.radius, a.maxVertexDev, span, (int)a.tris.size(),
+                     a.outwardNormal ? 1 : 0, acc.c_str());
+    }
+    return ok;
+}
+
 static void case26() {
     using namespace stl2step::refit;
-    // D-fc-3.1 / D-fc-4.9: a half circle between antiparallel T and X' is
-    // tangent to X' at its far end. The one-sided relation refuses it as a hem.
+    // D-fc-5.11 F9 (un-defers D-fc-3.1): a half circle between antiparallel T
+    // and X', tangent to X' at its far end, is a hem. r = half the gap, the
+    // centre midway, the contact where T's body ends: nothing is fitted.
     auto built = makeOneSided(3.0, 8.0, kPi, 24, 2);
+    const std::size_t nBand = built.bandTris.size();
     Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
-    const bool ok = r.work.accepted.empty() && !osbLine(r.diag, "hem-deferred").empty() &&
-                    osbLine(r.diag, "accept").empty();
+    const bool ok = hemAccepted(r, nBand, 3.0, -1, "case26");
     if (!ok) dumpFail("case26", r);
-    expect(ok, "case26 one-sided hem (tangent X') deferred");
+    expect(ok, "case26 convex hem (tangent antiparallel X') is one half-cylinder");
+
+    auto again = makeOneSided(3.0, 8.0, kPi, 24, 2);
+    Run r4 = runClaim(again.synth, std::move(again.work), 1e-4, 4);
+    const bool same = r4.work.accepted.size() == 1 && r.work.accepted.size() == 1 &&
+                      r4.work.accepted[0].radius == r.work.accepted[0].radius &&
+                      r4.work.accepted[0].tris == r.work.accepted[0].tris &&
+                      r4.work.accepted[0].ax.Location().IsEqual(
+                          r.work.accepted[0].ax.Location(), 0.0);
+    expect(same, "case26 hem threads 4 == threads 1");
 }
 
 static void case27() {
@@ -1468,6 +1520,116 @@ static void case28() {
     expect(ok, "case28 planar chamfer is not a one-sided blend");
 }
 
+// D-fc-5.11 F9. Half-turn along +Y between T (z = 0) and X' (z = 2R + xOff):
+// centre (0, y, R), the arc through (R, y, R). Convex: the planes' outward
+// normals face away from each other (a lip). Concave: they face each other (a
+// slot end). The band winding follows the side. X' shares the band's far edge
+// when xOff = 0. A certified x-normal plane far from the band is the axis
+// source (n_T x n_X = Y).
+static OsbMesh makeHem(double R, double L, int nStrips, bool concave, double xOff) {
+    OsbMesh m;
+    std::vector<int> lo((std::size_t)nStrips + 1), hi((std::size_t)nStrips + 1);
+    for (int i = 0; i <= nStrips; ++i) {
+        const double th = kPi * (double)i / (double)nStrips;
+        const gp_XYZ p(R * std::sin(th), 0.0, R * (1.0 - std::cos(th)));
+        lo[(std::size_t)i] = m.synth.addV(p);
+        hi[(std::size_t)i] = m.synth.addV(gp_XYZ(p.X(), L, p.Z()));
+    }
+    for (int i = 0; i < nStrips; ++i) {
+        std::vector<int> tris;
+        const std::size_t a = (std::size_t)i, b = (std::size_t)i + 1;
+        if (concave) m.synth.addQuad(lo[a], hi[a], lo[b], hi[b], tris);
+        else m.synth.addQuad(lo[b], hi[b], lo[a], hi[a], tris);
+        for (int t : tris) m.bandTris.push_back(t);
+        addStrip(m.work, tris);
+    }
+    const double nz = concave ? 1.0 : -1.0;
+    const int wt = m.synth.tri(lo.front(), hi.front(), m.synth.addV(gp_XYZ(-30.0, 0.5 * L, 0.0)));
+    addAnchor(m.work, {wt}, gp_XYZ(0, 0, nz), gp_XYZ(0, 0, 0), 0.0);
+    const double zx = 2.0 * R + xOff;
+    int wx = -1;
+    if (xOff == 0.0) {
+        wx = m.synth.tri(lo.back(), hi.back(), m.synth.addV(gp_XYZ(-30.0, 0.5 * L, zx)));
+    } else {
+        wx = m.synth.tri(m.synth.addV(gp_XYZ(-1.0, 0.0, zx)), m.synth.addV(gp_XYZ(-1.0, L, zx)),
+                         m.synth.addV(gp_XYZ(-30.0, 0.5 * L, zx)));
+    }
+    addAnchor(m.work, {wx}, gp_XYZ(0, 0, -nz), gp_XYZ(0, 0, zx), 0.0);
+    const int wf = m.synth.tri(m.synth.addV(gp_XYZ(-40.0, 0.0, -50.0)),
+                               m.synth.addV(gp_XYZ(-40.0, L, -50.0)),
+                               m.synth.addV(gp_XYZ(-40.0, 0.5 * L, -80.0)));
+    addAnchor(m.work, {wf}, gp_XYZ(1, 0, 0), gp_XYZ(-40.0, 0, 0), 0.0);
+    return m;
+}
+
+static void hemPins() {
+    using namespace stl2step::refit;
+    std::fprintf(stderr, "kParamsHem=%d minStations=%d\n", kParamsHem, minStations(kParamsHem));
+    expect(kParamsHem == 0 && minStations(kParamsHem) == 1,
+           "hem kParamsHem = 0, minStations = 1");
+    // Antiparallel: parallel by the pair test with opposed normals.
+    expect(hemAntiparallel(0.0, 1e-3, -1.0), "hemAntiparallel opposed normals");
+    expect(hemAntiparallel(1e-3, 1e-3, -0.9999995), "hemAntiparallel at the parallel bound");
+    expect(!hemAntiparallel(0.0, 1e-3, 1.0), "hemAntiparallel co-directed = false (a step)");
+    expect(!hemAntiparallel(2e-3, 1e-3, -0.999998), "hemAntiparallel past the bound = false");
+    double r = -1.0;
+    const bool r6 = hemRadiusOf(6.0, 1e-4, r);
+    expect(r6 && r == 3.0, "hemRadiusOf(6) = 3");
+    expect(!hemRadiusOf(1e-4, 1e-4, r), "hemRadiusOf gap <= tau = one sheet");
+    expect(!hemRadiusOf(-2.0, 1e-4, r), "hemRadiusOf negative gap refused");
+    expect(hemSpansHalfTurn(kPi + 0.01, 0.02) && hemSpansHalfTurn(kPi - 0.01, 0.02),
+           "hemSpansHalfTurn within spanTol");
+    expect(!hemSpansHalfTurn(0.5 * kPi, 0.02) && !hemSpansHalfTurn(kPi + 0.03, 0.02),
+           "hemSpansHalfTurn quarter / past spanTol = false");
+}
+
+static void case29() {
+    using namespace stl2step::refit;
+    // D-fc-5.11 F9 concave: a slot end, the planes' normals face each other.
+    auto built = makeHem(4.0, 8.0, 24, true, 0.0);
+    const std::size_t nBand = built.bandTris.size();
+    Run r = runClaim(built.synth, std::move(built.work), 1e-4, 1);
+    const bool ok = hemAccepted(r, nBand, 4.0, 0, "case29");
+    if (!ok) dumpFail("case29", r);
+    expect(ok, "case29 concave hem (slot end) is one half-cylinder");
+
+    auto convex = makeHem(4.0, 8.0, 24, false, 0.0);
+    const std::size_t nC = convex.bandTris.size();
+    Run c = runClaim(convex.synth, std::move(convex.work), 1e-4, 1);
+    const bool okC = hemAccepted(c, nC, 4.0, 1, "case29-convex");
+    if (!okC) dumpFail("case29-convex", c);
+    expect(okC, "case29 convex hem (lip) is one half-cylinder");
+}
+
+static void case30() {
+    using namespace stl2step::refit;
+    // D-fc-5.11 F9 refusal: X' sits 1.5 tau past the half circle's far
+    // generator. It is still tangent to the one-sided fit within tanDistTol,
+    // so the walk reaches the hem; the hem surface (r = half the gap, centre
+    // midway) leaves the far vertices more than tau off, and the band is not
+    // its tau-preimage. Nothing is claimed; no fit is retried.
+    const double q = 1e-4, tau = 2.0 * q;
+    auto built = makeHem(4.0, 8.0, 24, false, 1.5 * tau);
+    Run r = runClaim(built.synth, std::move(built.work), q, 1);
+    std::string refused;
+    for (const char* why : {"vertex-off", "no-anchor", "not-blend", "underdetermined", "line"})
+        if (!hemLine(r.diag, why).empty()) refused = why;
+    const bool ok = r.work.accepted.empty() && hemLine(r.diag, "accept").empty() &&
+                    !refused.empty() && osbLine(r.diag, "accept").empty();
+    std::fprintf(stderr, "case30 refused=%s\n", refused.c_str());
+    if (!ok) dumpFail("case30", r);
+    expect(ok, "case30 far plane off the half-turn by 1.5 tau is refused");
+
+    // A far plane tangent but co-directed with T is a step, not a hem.
+    auto step = makeHem(4.0, 8.0, 24, false, 0.0);
+    step.work.provisionals[step.work.provisionals.size() - 2].plane =
+        gp_Ax3(gp_Pnt(0, 0, 8.0), gp_Dir(0, 0, -1));
+    Run s = runClaim(step.synth, std::move(step.work), q, 1);
+    const bool okS = s.work.accepted.empty() && hemLine(s.diag, "accept").empty();
+    if (!okS) dumpFail("case30-step", s);
+    expect(okS, "case30 co-directed tangent far plane is not a hem");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -1499,8 +1661,11 @@ int main() {
     case26();
     case27();
     case28();
+    hemPins();
     case29();
     case30();
+    case31();
+    case32();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
