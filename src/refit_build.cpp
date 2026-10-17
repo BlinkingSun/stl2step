@@ -2964,10 +2964,10 @@ AnalyticCurve sphereCornerContact(const Region& sph, const Region& oth, const Me
             out.circ = cylinderIsoCircle(oth, v);
         }
     }
-    // A torus round's contact (its meridian through the centre) is not
-    // constructed: the partial-torus face does not yet take a u-iso edge (its
-    // pcurves land a whole period off on both parameters), so the mesh
-    // polyline stays the edge there, counted as tier 2.
+    // Only cylinder rounds reach here: the claim takes no torus round (the
+    // partial-torus face does not yet take a u-iso edge -- its pcurves land a
+    // whole period off on both parameters -- and a polyline contact between
+    // two curved faces leaves the shell open by its chord lunes).
     return out;
 }
 
@@ -12975,6 +12975,77 @@ bool buildSphereCorner(const Region& r, const RegionSet& rs, const MeshView& mv,
             outF = f;
             return true;
         }
+    }
+    // Second attempt: the same sphere in a frame whose seam and poles are off
+    // the patch (its middle on the equator at u = pi), pcurves projected. Where
+    // the iso-line layout's exact corners trip the wire check, this face still
+    // ships the certified surface. Its surface is not the interned SphereBase,
+    // so the edge census reads its contacts as mixed, not as certified iso
+    // lines (they are not).
+    try {
+        const gp_Pnt c = r.ax.Location();
+        gp_XYZ m(0, 0, 0);
+        for (int t : r.tris) {
+            if (t < 0 || (size_t)t >= mv.nTri) continue;
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3; ++k) {
+                gp_XYZ d = mv.pts[mv.tris[gt][k]] - c.XYZ();
+                const double dm = d.Modulus();
+                if (dm > 0.0) m += d / dm;
+            }
+        }
+        const double mm = m.Modulus();
+        if (mm > 0.0) {
+            m /= mm;
+            const double ax3[3] = {std::fabs(m.X()), std::fabs(m.Y()), std::fabs(m.Z())};
+            int ke = 0;
+            for (int i = 1; i < 3; ++i)
+                if (ax3[i] < ax3[ke]) ke = i;
+            const gp_XYZ e(ke == 0 ? 1.0 : 0.0, ke == 1 ? 1.0 : 0.0, ke == 2 ? 1.0 : 0.0);
+            gp_XYZ zd = m.Crossed(e);
+            zd /= zd.Modulus();
+            Handle(Geom_SphericalSurface) alt = new Geom_SphericalSurface(
+                gp_Sphere(gp_Ax3(c, gp_Dir(zd), gp_Dir(m.Reversed())), r.radius));
+            for (int pass = 0; pass < 2; ++pass) {
+                TopoDS_Wire w = ow;
+                if (pass == 1) w.Reverse();
+                TopoDS_Face f;
+                const bool got = makeFaceCopy(alt, w, inners, r.outwardNormal, f) ||
+                                 makeFaceKeep(alt, w, inners, r.outwardNormal, f);
+                if (!got || f.IsNull()) continue;
+                addPcurvesOnFace(f, sewTol, false);
+                setFaceOutward(f, r.outwardNormal);
+                if (!faceIsValid(f)) {
+                    BRep_Builder Bs;
+                    for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                        const TopoDS_Edge& e2 = TopoDS::Edge(ex.Current());
+                        Bs.SameParameter(e2, Standard_False);
+                        BRepLib::SameParameter(e2, sewTol);
+                    }
+                }
+                pinVertices(f);
+                if (faceIsValid(f) || sphereTol(f)) {
+                    if (diagP2Enabled() || diag130Enabled() || diagRelEnabled())
+                        std::fprintf(stderr,
+                                     "DIAG_SPHEREFACE rid=%d nTri=%zu R=%.6f why=BUILT-centred "
+                                     "pass=%d outward=%d\n",
+                                     r.id, r.tris.size(), r.radius, pass, r.outwardNormal ? 1 : 0);
+                    outF = f;
+                    return true;
+                }
+                if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
+                    BRepCheck_Analyzer an(f, Standard_True);
+                    BRepCheck_Status fst = BRepCheck_NoError, wst = BRepCheck_NoError;
+                    const bool fe = firstOwnError(an.Result(f), fst);
+                    bool we = false;
+                    for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More() && !we; wx.Next())
+                        we = firstOwnError(an.Result(wx.Current()), wst);
+                    std::fprintf(stderr, "DIAG_SPHEREFACE rid=%d centred pass=%d faceOwn=%d wireOwn=%d\n",
+                                 r.id, pass, fe ? (int)fst : 0, we ? (int)wst : 0);
+                }
+            }
+        }
+    } catch (const Standard_Failure&) {
     }
     if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
         TopoDS_Face f;

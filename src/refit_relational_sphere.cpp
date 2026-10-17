@@ -4,7 +4,10 @@
 // own triangles. The claimed set is every free triangle inside the corner
 // sector whose three vertices lie within tau of that sphere; it is claimed only
 // when it is one disk bounded by the three rounds alone. Runs after the tori
-// (H1), before A3, so a torus round is a round like a cylinder.
+// (H1), before A3. The rounds are cylinders: a torus round's contact (its
+// meridian through the centre) cannot be built as an exact shared edge yet, and
+// a mesh-polyline contact between two curved faces leaves the shell open by its
+// chord lunes, so a corner with a torus round is not claimed.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational_sphere.hpp"
@@ -360,7 +363,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
         const int nEdge = (int)mv.nEdge;
         const bool dg = diagOn();
 
-        // --- rounds: cylinders and torus blends; certified per D-fc-1.4 ------
+        // --- rounds: cylinders, certified per D-fc-1.4 -----------------------
         std::vector<Round> rounds;
         for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
             const Region& R = work.accepted[(std::size_t)ai];
@@ -372,10 +375,6 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             if (R.type == SurfType::Cylinder) {
                 rd.s.circle = false;
                 rd.s.r = R.radius;
-            } else if (R.type == SurfType::Torus && R.origin == Origin::TorusBlend) {
-                rd.s.circle = true;
-                rd.s.R = R.radius;
-                rd.s.r = R.radius2;
             } else {
                 continue;
             }
