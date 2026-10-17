@@ -1328,16 +1328,6 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             }
             return true;
         };
-        auto measurePlaneDev = [&](const std::vector<int>& tris, const gp_XYZ& n,
-                                   const gp_XYZ& p0) -> double {
-            double mx = 0.0;
-            for (int t : tris) {
-                if (t < 0 || t >= nTri) continue;
-                for (int k = 0; k < 3; ++k)
-                    mx = std::max(mx, std::abs((cornerPt(mv, t, k) - p0).Dot(n)));
-            }
-            return mx;
-        };
         auto fillBoundary = [&](LiveAnchor& A) {
             A.boundary.clear();
             if (A.body.empty()) return;
@@ -1373,80 +1363,20 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         auto computeAnchor = [&](int prov, LiveAnchor& A) -> bool {
             if (prov < 0 || prov >= (int)work.provisionals.size()) return false;
             const Provisional& pr = work.provisionals[prov];
-            if (pr.claim != ProvClaim::Unclaimed || pr.tris.empty()) return false;
-            if (!a3WouldCommit(mv, tol, pr, false)) return false;
+            // The anchor predicate itself (audit-fx-arch F-5: one factor).
+            PlaneAnchor pa;
+            if (!planeAnchorOf(mv, p, tol, pr, pa)) return false;
             A = LiveAnchor();
             A.prov = prov;
-            A.minTri = minTriOf(pr.tris);
-            A.n = pr.plane.Direction().XYZ();
-            const double nm = A.n.Modulus();
-            if (!(nm > 1e-15)) return false;
-            A.n.Divide(nm);
-            A.p0 = pr.plane.Location().XYZ();
-            A.body = pr.tris;
-            A.maxDev = pr.maxVertexDev;
-            A.tolA = anchorTol(tau, pr.maxVertexDev);
-            A.certified = anchorCertified(tau, pr.maxVertexDev);
-            if (!A.certified) {
-                std::vector<int> cur = pr.tris;
-                gp_XYZ n = A.n;
-                gp_XYZ p0 = A.p0;
-                // D-fc-4.1. The peel starts from the plane of the provisional's
-                // own maximum-area facet (ties: smallest local id), not the A2
-                // running-PCA plane, which absorbed the band's facets (tray
-                // walls: 1.7-3.7 τ off it, 0 τ off their own facet). One seed;
-                // the certificate below is unchanged.
-                const int seedT = maxAreaFacet(mv, pr.tris, nTri);
-                if (seedT >= 0) {
-                    gp_XYZ sn;
-                    triAreaNormal(mv, seedT, sn);
-                    if (sn.Dot(A.n) < 0.0) sn.Reverse();
-                    n = sn;
-                    p0 = cornerPt(mv, seedT, 0);
-                }
-                bool peeled = false;
-                const int itCap = std::max(1, p.maxRefineIters);
-                for (int it = 0; it < itCap; ++it) {
-                    std::vector<int> in;
-                    in.reserve(cur.size());
-                    for (int t : cur)
-                        if (triOnPlane(t, n, p0)) in.push_back(t);
-                    if (in.empty()) {
-                        peeled = false;
-                        break;
-                    }
-                    if (in.size() == cur.size()) break;
-                    peeled = true;
-                    gp_Ax3 np;
-                    if (!pcaPlane(mv, in, np)) break;
-                    gp_XYZ nn = np.Direction().XYZ();
-                    const double nnm = nn.Modulus();
-                    if (!(nnm > 1e-15)) break;
-                    nn.Divide(nnm);
-                    if (nn.Dot(A.n) < 0.0) nn.Reverse();
-                    n = nn;
-                    p0 = np.Location().XYZ();
-                    cur.swap(in);
-                }
-                if (peeled) {
-                    const double dev = measurePlaneDev(cur, n, p0);
-                    Provisional body = pr;
-                    body.tris = cur;
-                    body.area = areaOfTris(mv, cur);
-                    body.maxVertexDev = dev;
-                    if (anchorCertified(tau, dev) && a3WouldCommit(mv, tol, body, false)) {
-                        A.n = n;
-                        A.p0 = p0;
-                        A.body.swap(cur);
-                        A.minTri = minTriOf(A.body);
-                        A.maxDev = dev;
-                        A.tolA = anchorTol(tau, dev);
-                        A.certified = true;
-                        A.peeled = true;
-                        A.nAll = (int)pr.tris.size();
-                    }
-                }
-            }
+            A.n = pa.n;
+            A.p0 = pa.p0;
+            A.body.swap(pa.body);
+            A.minTri = minTriOf(A.body);
+            A.maxDev = pa.dev;
+            A.tolA = pa.tol;
+            A.certified = pa.certified;
+            A.peeled = pa.peeled;
+            A.nAll = pa.peeled ? (int)pr.tris.size() : 0;
             std::vector<gp_XYZ> pts;
             pts.reserve(A.body.size() * 3);
             for (int t : A.body) {
@@ -3727,6 +3657,7 @@ bool planeAnchorOf(const MeshView& mv, const SegmentParams& p, const DerivedTols
         A.dev = dev;
         A.tol = anchorTol(tau, dev);
         A.certified = true;
+        A.peeled = true;
     }
     return true;
 }
@@ -4514,6 +4445,9 @@ bool claimSectionFillets(const MeshView& mv, const SegmentParams& p, const Deriv
                                    tans[ib].circle ? "circle" : "line", tans[ia].side, tans[ib].side,
                                    m.conc ? 1 : 0, why);
                     }
+                    // audit-fx-arch F-3: a GEOMETRIC refusal of the atom's band ends
+                    // the atom; another anchor pair is not tried on it.
+                    if (lineChainGeometric(why) || std::strcmp(why, "not-blend") == 0) done = true;
                 }
             }
         }

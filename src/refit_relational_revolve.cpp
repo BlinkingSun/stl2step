@@ -1802,11 +1802,17 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
         return s;
     };
 
+    // D-fc-4.10 F1, refined by D-fc-4.11 / D-fc-4.12 (audit-fx-arch F-1): the
+    // triangles of a chain refused after a GEOMETRIC certificate failure
+    // (lineChainGeometric) are never taken by a later chain's tau-preimage
+    // closure -- a passing subset of a failing band is a refusal.
+    std::vector<char> geomFailed((std::size_t)nTri, 0);
     for (const Chain& ch : chains) {
         std::vector<int> live;
         for (int t : ch.tris)
             if (t >= 0 && t < nTri && wm.freeTri[(std::size_t)t]) live.push_back(t);
         if (live.empty()) continue;
+        bool chainGeom = false;  // a hypothesis failed geometrically on this chain
         Band band;
         band.in.assign((std::size_t)nTri, 0);
         band.tris = live;
@@ -1862,6 +1868,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             d.side1 = sideBuf1;
             d.why = why;
             printBand(d);
+            if (chainGeom || lineChainGeometric(why))
+                for (int t : band.tris) geomFailed[(std::size_t)t] = 1;
         };
         if (two && (sideIsProfileCircle(s0, tau) || sideIsProfileCircle(s1, tau))) {
             refuse("profile-row");
@@ -1891,6 +1899,7 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             const int nChain = (int)cb.tris.size();
             auto member = [&](int t, const gp_XYZ& o, const gp_XYZ& a, double R) {
                 if (t < 0 || t >= nTri || !wm.freeTri[(std::size_t)t]) return false;
+                if (!preimageAdmits(geomFailed, band.in, t)) return false;
                 double zLo = 1e300, zHi = -1e300;
                 for (int k = 0; k < 3; ++k) {
                     const gp_XYZ d = triVert(mv, t, k) - o;
@@ -1956,6 +1965,7 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                 why = "same-surface";
             else if (cc.ok) why = "accept";
             const bool accept = std::strcmp(why, "accept") == 0;
+            if (!accept && lineChainGeometric(cc.why)) chainGeom = true;
             int straddle = 0;
             if (accept) {
                 Region r;
@@ -2106,8 +2116,11 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                 // a fixed point (D-fc-3.2.4/3.2.5, as D-fc-5.1): ring chains split
                 // one surface into pieces.
                 const Frame pf = makeFrame(fam.origin, fam.axis, gp_XYZ(1, 0, 0));
+                std::vector<char> compIn((std::size_t)nTri, 0);
+                for (int t : comp) compIn[(std::size_t)t] = 1;
                 auto onCone = [&](int t, const PartialConeCert& c) {
                     if (t < 0 || t >= nTri || !wm.freeTri[(std::size_t)t]) return false;
+                    if (!preimageAdmits(geomFailed, compIn, t)) return false;
                     const double sc = std::sqrt(1.0 + c.k * c.k);
                     double zLo = 1e300, zHi = -1e300;
                     for (int k = 0; k < 3; ++k) {
@@ -2201,6 +2214,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                 }
                 if (!paccept) {
                     ++refused;
+                    if (chainGeom || lineChainGeometric(pc.why))
+                        for (int t : comp) geomFailed[(std::size_t)t] = 1;
                     continue;
                 }
                 for (int t : cb.tris)
@@ -3516,6 +3531,16 @@ PartialConeCert certifyPartialCone(const std::vector<std::vector<gp_XYZ>>& famil
     c.ok = true;
     c.why = "accept";
     return c;
+}
+
+bool lineChainGeometric(const char* why) {
+    return why && (std::strcmp(why, "vertex-off") == 0 || std::strcmp(why, "line") == 0);
+}
+
+bool preimageAdmits(const std::vector<char>& geomFailed, const std::vector<char>& own, int t) {
+    if (t < 0) return false;
+    const std::size_t i = (std::size_t)t;
+    return !(i < geomFailed.size() && geomFailed[i]) || (i < own.size() && own[i]);
 }
 
 bool coaxialSameRadius(const JointAxisFit& fit, std::size_t nFamily, double tau) {

@@ -170,8 +170,8 @@ static void casePredicates() {
     expect(!sectionFilletCentre(L, L2, 1.0, 0, 0, px, py), "plane|plane is not a section fillet");
     // sectionConcentric.
     SectionAnchor in = A, out = A;
-    in.R = 33.1;
-    out.R = 34.9;
+    in.R = 10.0;
+    out.R = 12.5;
     in.tol = out.tol = kTau;
     expect(sectionConcentric(in, out), "concentric");
     out.cx = 1e-3;
@@ -556,7 +556,22 @@ static void casePartialCone() {
     expect(nCone == 1, "partial cone claimed in Line mode");
 }
 
+// audit-fx-arch F-1: geometric refusals and the preimage closure.
+static void caseGeomFailed() {
+    expect(lineChainGeometric("vertex-off") && lineChainGeometric("line"), "geometric: vertex-off, line");
+    expect(!lineChainGeometric("underdetermined") && !lineChainGeometric("same-surface") &&
+               !lineChainGeometric("partial-cone") && !lineChainGeometric(nullptr),
+           "not geometric: underdetermined, same-surface, partial-cone");
+    std::vector<char> failed(5, 0), own(5, 0);
+    failed[2] = failed[3] = 1;
+    own[3] = 1;
+    expect(preimageAdmits(failed, own, 1) && !preimageAdmits(failed, own, 2) &&
+               preimageAdmits(failed, own, 3) && !preimageAdmits(failed, own, -1),
+           "closure never takes a failed chain's triangle outside its own seed");
+}
+
 int main() {
+    caseGeomFailed();
     casePredicates();
     caseOsbGuards();
     casePartialCone();

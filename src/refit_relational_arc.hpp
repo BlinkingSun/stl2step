@@ -37,6 +37,15 @@ CoaxialCert certifyCoaxialBand(const std::vector<std::vector<gp_XYZ>>& family,
                                const std::vector<gp_XYZ>& band, const gp_XYZ& origin,
                                const gp_XYZ& axis, double tau, int maxIters);
 
+// D-fc-4.10 F1 / D-fc-4.11 / D-fc-4.12 in Line mode (audit-fx-arch F-1). A
+// refusal is GEOMETRIC when a determinate certificate found a vertex off tau or
+// a line (plane) where a surface was claimed. The triangles of a chain refused
+// after such a failure are never taken by a later chain's tau-preimage closure:
+// preimageAdmits(failed, own, t) is false for a failed triangle that is not in
+// the closure's own seed chain.
+bool lineChainGeometric(const char* why);
+bool preimageAdmits(const std::vector<char>& geomFailed, const std::vector<char>& own, int t);
+
 // D-fc-5.1 / D-fc-1.6.11. A certified coaxial band whose radius is within tau
 // of a family member's radius about the same axis is another piece of that
 // member's surface: one surface is one face (D-130-14), so it is refused.
@@ -83,6 +92,7 @@ struct PlaneAnchor {
     gp_XYZ n, p0;
     double dev = 0, tol = 0;
     bool certified = false;
+    bool peeled = false;  // certified on the peel's body, not the stored plane
     std::vector<int> body;
 };
 bool planeAnchorOf(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
