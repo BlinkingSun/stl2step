@@ -20,6 +20,7 @@
 #include "refit_axis_seam.hpp"
 #include "refit_cap_arc.hpp"
 #include "refit_edge_bound.hpp"
+#include "refit_slit_heal.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -17663,7 +17664,60 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         };
 
-        auto buildOneRegion = [&](Region& r, std::vector<TopoDS_Face>& acc) -> bool {
+        // D-fc-5.11 F3: zero-area fins (refit_slit_heal.hpp), decided per build round
+        // on that round's collapsed edges. A fin is cut from a host built before it in
+        // the round; a host that fails or explodes leaves the fin its own face, so the
+        // shell closes either way.
+        std::vector<int> finHostOf;
+        std::vector<char> finCutActive;
+        std::vector<std::vector<Loop>> finCutLoops;
+        auto decideFins = [&](const std::vector<size_t>& order) {
+            const size_t nId = exploded.size();
+            const size_t npos = (size_t)-1;
+            finHostOf.assign(nId, -1);
+            finCutActive.assign(nId, 0);
+            finCutLoops.assign(nId, std::vector<Loop>());
+            std::vector<size_t> pos(nId, npos);
+            for (size_t k = 0; k < order.size(); ++k) {
+                const int id = rs.regions[order[k]].id;
+                if (id >= 0 && (size_t)id < nId) pos[(size_t)id] = k;
+            }
+            auto facetFilled = [&](int id) {
+                return regionExploded(exploded, id) ||
+                       (id >= 0 && (size_t)id < eprimeFill.size() && eprimeFill[(size_t)id]);
+            };
+            auto analyticRun = [&](int ci) {
+                return ci >= 0 && (size_t)ci < geom.size() && collapsed[(size_t)ci] &&
+                       geom[(size_t)ci].collapsed && !geom[(size_t)ci].tier2Polyline &&
+                       !geom[(size_t)ci].edges.empty();
+            };
+            for (const Region& F : rs.regions) {
+                FinBigon fb;
+                if (!isAnalytic(&F) || !finBigonTopology(F, rs, fb)) continue;
+                const Region* H = regionById(rs, fb.host);
+                if (!isAnalytic(H) || facetFilled(F.id) || facetFilled(H->id)) continue;
+                const size_t f = (size_t)F.id, h = (size_t)H->id;
+                if (f >= nId || h >= nId || pos[f] == npos || pos[h] == npos || pos[h] > pos[f])
+                    continue;
+                if (!analyticRun(fb.c1) || !analyticRun(fb.c2)) continue;
+                if (!edgeRunsCoincide(geom[(size_t)fb.c1].edges, geom[(size_t)fb.c2].edges))
+                    continue;
+                std::vector<Loop> cut = finCutActive[h] ? finCutLoops[h] : H->loops;
+                bool inner = false;
+                for (const Loop& lp : cut)
+                    for (int ci : lp.chainIdx)
+                        if (ci == fb.c1) inner = lp.chainIdx.size() == 2;
+                if (!cutFinFromLoops(cut, fb.c1, fb.c2)) continue;
+                finCutLoops[h] = std::move(cut);
+                finCutActive[h] = 1;
+                finHostOf[f] = H->id;
+                if (diagRelEnabled())
+                    std::fprintf(stderr, "DIAG_REL_FIN host=%d fin=%d c1=%d c2=%d form=%s\n",
+                                 H->id, F.id, fb.c1, fb.c2, inner ? "inner" : "slit");
+            }
+        };
+
+        auto buildOneRegionAs = [&](Region& r, std::vector<TopoDS_Face>& acc) -> bool {
             if (failRidHits(r.id)) {
                 r.reject = Reject::FaceBuildFailed;
                 r.builtAs = BuiltAs::NotBuilt;
@@ -19521,6 +19575,32 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             return false;
         };
 
+        // D-fc-5.11 F3: a fin whose host shipped its face this round ships none (its
+        // pair left the host's wire); a host builds on its loops with every fin cut.
+        auto buildOneRegion = [&](Region& r, std::vector<TopoDS_Face>& acc) -> bool {
+            const size_t id = (size_t)r.id;
+            if (r.id >= 0 && id < finHostOf.size() && finHostOf[id] >= 0 &&
+                !regionExploded(exploded, r.id)) {
+                const Region* h = regionById(rs, finHostOf[id]);
+                if (h && !regionExploded(exploded, h->id) &&
+                    (h->builtAs == BuiltAs::Single || h->builtAs == BuiltAs::Seamed360 ||
+                     h->builtAs == BuiltAs::TwoHalves)) {
+                    r.builtAs = BuiltAs::NotBuilt;
+                    if (diagRelEnabled())
+                        std::fprintf(stderr, "DIAG_REL_FIN fin=%d absorbed host=%d\n", r.id, h->id);
+                    return true;
+                }
+            }
+            if (r.id >= 0 && id < finCutActive.size() && finCutActive[id]) {
+                std::vector<Loop> saved = std::move(r.loops);
+                r.loops = finCutLoops[id];
+                const bool ok = buildOneRegionAs(r, acc);
+                r.loops = std::move(saved);
+                return ok;
+            }
+            return buildOneRegionAs(r, acc);
+        };
+
         // D-fc-4.8: U-3 covers a torus that is itself exploded after its face was
         // built and committed (a later round's shell did not close): the
         // component takes the pre-T snapshot it arrived with, never verbatim.
@@ -19644,6 +19724,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // torus does (closedTorusPartnerFailed); read once the naming regions
             // are built, the only builds that can change it.
             bool partnerRead = false, partnerFailed = false;
+            decideFins(buildOrder);
             for (size_t k = 0; k < buildOrder.size(); k++) {
                 if (!partnerRead && k >= namingEnd) {
                     partnerRead = true;
@@ -19724,6 +19805,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 builtRid.clear();
                 anyFail = false;
                 failedIds.clear();
+                decideFins(buildOrder);
                 for (size_t oi : buildOrder) {
                     Region& r = rs.regions[oi];
                     if (regionExploded(exploded, r.id)) continue;
