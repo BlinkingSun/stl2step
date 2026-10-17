@@ -18493,12 +18493,16 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         // cannot carry the same circle (facets, an island, an exploded
                         // region) would be a free 2π edge beside the mesh polyline. The
                         // closed torus has no mesh-rim construction, so it does not ship
-                        // here; U-3 keeps the component's pre-T topology.
-                        auto capUnshareable = [&](int ci, bool reused) {
-                            return !reused && ci >= 0 &&
-                                   !partnerBuildable(ci, r, rs, &eprimeFill, &exploded);
+                        // here; U-3 keeps the component's pre-T topology. The rule reads
+                        // every chain of the cap loop, so the round that builds the torus
+                        // names it (D-fc-5.7 O-6).
+                        auto partnerOk = [&](int ci) {
+                            return partnerBuildable(ci, r, rs, &eprimeFill, &exploded);
                         };
-                        if (capUnshareable(ciL0, reusedL) || capUnshareable(ciH0, reusedH))
+                        const bool capLoops = capL && capH && !capL->chainIdx.empty() &&
+                                              !capH->chainIdx.empty();
+                        if (capLoops && (capLoopUnshareable(capL->chainIdx, reusedL, partnerOk) ||
+                                         capLoopUnshareable(capH->chainIdx, reusedH, partnerOk)))
                             return torusFail("cap-partner-unbuilt", __LINE__, nullptr);
                         if (eL.IsNull() || eH.IsNull()) return torusFail("cap-edge", __LINE__, nullptr);
 
@@ -19096,8 +19100,40 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 if (a360 != b360) return a360;
                 return ra.id < rb.id;
             });
-            for (size_t oi : buildOrder) {
-                Region& r = rs.regions[oi];
+            // U-3 per torus (D-fc-4.11 (a)): a round that failed a torus ships nothing,
+            // it only names the tori the driver withholds -- each torus by its own
+            // build, a closed torus also by a failure beside it (the partner rule
+            // below). The round stops once every region that can name one is built.
+            std::vector<char> namesTorus(buildOrder.size(), 0);
+            {
+                std::vector<int> closedTori;
+                for (const Region& t : rs.regions)
+                    if (t.origin == Origin::TorusBlend && t.closed360) closedTori.push_back(t.id);
+                std::sort(closedTori.begin(), closedTori.end());
+                auto isClosedTorus = [&](int id) {
+                    return std::binary_search(closedTori.begin(), closedTori.end(), id);
+                };
+                std::vector<int> besideClosed;
+                for (const BoundaryChain& ch : rs.chains) {
+                    if (isClosedTorus(ch.regA)) besideClosed.push_back(ch.regB);
+                    if (isClosedTorus(ch.regB)) besideClosed.push_back(ch.regA);
+                }
+                std::sort(besideClosed.begin(), besideClosed.end());
+                for (size_t k = 0; k < buildOrder.size(); k++) {
+                    const Region& r = rs.regions[buildOrder[k]];
+                    namesTorus[k] = isTorusBlendR(r) || std::binary_search(besideClosed.begin(),
+                                                                           besideClosed.end(), r.id);
+                }
+            }
+            const size_t namingEnd = torusNamingEnd(namesTorus);
+            for (size_t k = 0; k < buildOrder.size(); k++) {
+                if (torusRoundDecided(torusU3Failed, k, namingEnd)) {
+                    if (diagRelEnabled())
+                        std::fprintf(stderr, "DIAG_TORUS_U3 round decided built=%zu of %zu\n", k,
+                                     buildOrder.size());
+                    break;
+                }
+                Region& r = rs.regions[buildOrder[k]];
                 if (regionExploded(exploded, r.id)) continue;
                     std::vector<TopoDS_Face> acc;
                     if (!buildOneRegion(r, acc)) {

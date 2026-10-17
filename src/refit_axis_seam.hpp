@@ -21,6 +21,7 @@
 #include <Precision.hxx>
 
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 namespace stl2step {
@@ -132,6 +133,39 @@ inline bool rimRunsWithSurfaceU(const Handle(Geom_Curve)& c, double f,
 // exact rim with an analytic neighbour ships with its mesh-polyline rim.
 inline bool splitCapHealApplies(double maxVertexDev, double tau, bool oneExactRim) {
     return tau > 0.0 && maxVertexDev <= tau && oneExactRim;
+}
+
+// D-fc-4.6 F9 over the whole rim. A closed torus's rim is one 2π circle, so every
+// chain of its cap loop must border a face that can carry that circle. A chain whose
+// partner cannot (facets, an island, an exploded or E'-filled region) leaves the
+// circle beside a mesh polyline that no later round can share. Only the loop's first
+// chain can hand the torus a rim edge already built (frontReused).
+template <class PartnerBuildable>
+inline bool capLoopUnshareable(const std::vector<int>& chainIdx, bool frontReused,
+                               PartnerBuildable&& partnerBuildable) {
+    for (std::size_t k = 0; k < chainIdx.size(); ++k) {
+        const int ci = chainIdx[k];
+        if (ci < 0 || (k == 0 && frontReused)) continue;
+        if (!partnerBuildable(ci)) return true;
+    }
+    return false;
+}
+
+// U-3 per torus (D-fc-4.11 (a)). A build round in which a torus failed ships nothing:
+// the builder returns the tori it names and the driver withholds them. That set is
+// decided by each torus's own build and by the cap-partner rule over the round's
+// failures beside a closed torus; namesTorus marks those regions in build order.
+// torusNamingEnd is one past the last of them (0 when there is none).
+inline std::size_t torusNamingEnd(const std::vector<char>& namesTorus) {
+    for (std::size_t k = namesTorus.size(); k > 0; --k)
+        if (namesTorus[k - 1]) return k;
+    return 0;
+}
+
+// Once a torus failed, the round is decided when every region that can name a torus
+// has been built: the regions after them cannot change the named set.
+inline bool torusRoundDecided(bool torusFailed, std::size_t built, std::size_t namingEnd) {
+    return torusFailed && built >= namingEnd;
 }
 
 }  // namespace refit
