@@ -564,8 +564,10 @@ FixtureResult buildS02() {
                       planeRec({-1, 0, 0}, 1), planeRec({0, 1, 0}, 1), planeRec({0, -1, 0}, 1)};
     auto cyls = cubeEdgeCylinders(20.0, 2.0);
     sc.recoverable.insert(sc.recoverable.end(), cyls.begin(), cyls.end());
-    sc.mustRemainFaceted = {{ "sphere", 8, "vertex blends at cube corners (SphereNYI)" }};
-    sc.expectedRejects = {"sphereNYI"};
+    // D-fc-5.16 (fc-6 integrate 2026-10-18): the 8 vertex blends ship as spheres on the
+    // fixture's analytic volume (fx-sphere, audit PASS); the SphereNYI guard is retired.
+    sc.mustRemainFaceted = {};
+    sc.expectedRejects = {};
     return emitShape("S02", "20 mm cube, R=2 mm edge fillets + 8 spherical vertex blends", fillet,
                      0.25, 0.7, sc);
 }
@@ -3150,7 +3152,9 @@ FixtureResult buildS27() {
     sc.recoverable.push_back(edgeCyl({0, inset, inset}, {1, 0, 0}));
     sc.recoverable.push_back(edgeCyl({inset, 0, inset}, {0, 1, 0}));
     sc.recoverable.push_back(edgeCyl({inset, inset, 0}, {0, 0, 1}));
-    sc.mustRemainFaceted = {{"sphere", 1, "SphereNYI vertex blend where the three R3 fillets meet"}};
+    // D-fc-5.16 (fc-6 integrate 2026-10-18): the corner ships as one sphere octant on the
+    // three rounds' exact arcs (fx-sphere, audit PASS); the SphereNYI guard is retired.
+    sc.mustRemainFaceted = {};
     // CLOSURES 2026-10-15 21:10 (ruling F1(b)): no `expectedRejects: sphereNYI`.
     // S27 is a new fixture and its sidecar is being calibrated: the engine files
     // no reject for the octant (rejected=[]). The guard is mustRemainFaceted.

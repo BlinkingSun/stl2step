@@ -72,9 +72,9 @@
     }
   },
   "tier2Ceiling": {
-    "Body11": 5204,
-    "Body244": 1224,
-    "Body28": 1394,
+    "Body11": 2782,
+    "Body244": 0,
+    "Body28": 1228,
     "S01": 0,
     "S02": 0,
     "S03": 60,
@@ -95,17 +95,18 @@
     "S15": 0,
     "S16-R1-explode-success": 0,
     "S16-R1-round-2": 0,
-    "S16-R2-ChainUnstable": 0,
+    "S16-R2-ChainUnstable": 27,
     "S19_mouth_round": 492,
-    "S20_cross_bore_union": 0,
+    "S20_cross_bore_union": 2,
     "S21_rim_offplane_vertex": 0,
     "S23_plane_fillet_lowfold": 14,
     "S24_hem_uturn": 0,
-    "S25_peg_fillet": 1044,
-    "S26_funnel_rev": 4353,
-    "S27_sphere_corner_fine": 1670,
+    "S25_peg_fillet": 0,
+    "S26_funnel_rev": 104,
+    "S27_sphere_corner_fine": 0,
     "S28_varradius_negative": 41,
     "S29_hex_law": 0,
+    "S30-open-crack": 0,
     "boss_cone_chamfer": 0,
     "build_fixtures/counterbore": 0,
     "build_fixtures/fillet_strip_2tri": 0,
@@ -123,24 +124,29 @@
     "cross_bores": 2,
     "cyl_meets_chamfer": 0,
     "handle-lock": 0,
-    "handle-pickup": 358,
-    "linkage_bores_chamfer": 139,
+    "handle-pickup": 94,
+    "linkage_bores_chamfer": 159,
     "nonprismatic-control": 0,
-    "shelf_bracket": 52
+    "shelf_bracket": 30
   },
   "tier2CeilingNote": {
-    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN). D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (xguard-r1+bedge-r1): polylineTier2 138→110. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 110→125, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 110 tightening was measured before E2. fc-3 (D-fc-4.4, ORCHESTRATOR RULING CLOSURES 2026-10-16 01:15, re-affirmed 01:50 on audit-fc3-instruments F1): 125→139 measured on fc3-int a7d2776 (macOS), ABOVE the public ceiling 138 by decision. The four R3 slot ends now ship as ONE certified cylinder each; the net +14 is 15 straight R3 | R10-puncture-plane chord edges (the puncture planes are 2–3-triangle PlaneGrow facets of the R10 cross bore) that were facet|facet (counted analytic) and now deviate 0.0028–0.0033 mm against meshTolCap 0.0018 mm — every one overCap (linkage overCap 43→58), minus one cyl|cyl polyline. The R3∩R10 contact itself is unchanged (76 tier-2 segments). Tighten when the R10 cross bore ships as one face (wave-2 closure) so those edges become R3|R10 contacts.",
-    "Body11": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 5218→5204.",
-    "Body244": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1417→1224. CLOSURES 2026-10-15 06:05: analytic 148→3, facet lines replaced by 2 true cones. overCap remains 241. fc-4 (D-fc-4.6, 8654f72): Body244 is 13 analytic faces — overCap cleared (RATCHET-CLEAR, expectedRed entry removed); polylineTier2 measured 0 on macOS, ceiling lowered only after Linux/Windows are measured (D-130-24).",
-    "Body28": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 1385→1394, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 1385 tightening was measured before E2. Still below the public ceiling 1442.",
+    "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN). D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (xguard-r1+bedge-r1): polylineTier2 138→110. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 110→125, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 110 tightening was measured before E2. fc-3 (D-fc-4.4, ORCHESTRATOR RULING CLOSURES 2026-10-16 01:15, re-affirmed 01:50 on audit-fc3-instruments F1): 125→139 measured on fc3-int a7d2776 (macOS), ABOVE the public ceiling 138 by decision. The four R3 slot ends now ship as ONE certified cylinder each; the net +14 is 15 straight R3 | R10-puncture-plane chord edges (the puncture planes are 2–3-triangle PlaneGrow facets of the R10 cross bore) that were facet|facet (counted analytic) and now deviate 0.0028–0.0033 mm against meshTolCap 0.0018 mm — every one overCap (linkage overCap 43→58), minus one cyl|cyl polyline. The R3∩R10 contact itself is unchanged (76 tier-2 segments). Tighten when the R10 cross bore ships as one face (wave-2 closure) so those edges become R3|R10 contacts. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): RAISE 139 -> 159: D-fc-5.12 (fx-plater10 R10 instruments) — the slot/cross-bore contacts that now ship as certified analytic faces leave 20 tail chords as tier-2 polylines; measured 159 on all three platforms.",
+    "Body11": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 5218→5204. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 5204 -> 2782 (fx-b11walls + fx-ringdonor-r1: bores, mouth/lug tori, grip cones; D-fc-5.21).",
+    "Body244": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1417→1224. CLOSURES 2026-10-15 06:05: analytic 148→3, facet lines replaced by 2 true cones. overCap remains 241. fc-4 (D-fc-4.6, 8654f72): Body244 is 13 analytic faces — overCap cleared (RATCHET-CLEAR, expectedRed entry removed); polylineTier2 measured 0 on macOS, ceiling lowered only after Linux/Windows are measured (D-130-24). | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1224 -> 0.",
+    "Body28": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 1385→1394, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 1385 tightening was measured before E2. Still below the public ceiling 1442. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1394 -> 1228 (macOS 1228, Linux/Windows 1219; max).",
     "S21_rim_offplane_vertex": "D-S8 fixture added by this lane. edge_class_gate on be13e23: red lines clear, polylineTier2=0, and the gate's own line was 'no tier2Ceiling (a fixture the ratchet never saw is not measured); seed it'. Seeded at the measured 0. No expectedRed entry.",
     "S23_plane_fillet_lowfold": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=14, overCap at seed.",
     "S24_hem_uturn": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
-    "S25_peg_fillet": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1044, overCap at seed.",
-    "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=4186 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 4353, Windows 4353; ceiling = max = 4353.",
-    "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1617 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 1670, Windows 1670; ceiling = max = 1670.",
+    "S25_peg_fillet": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1044, overCap at seed. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1044 -> 0 (closed360 peg + torus build).",
+    "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=4186 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 4353, Windows 4353; ceiling = max = 4353. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 4353 -> 104 (fx-hubtori).",
+    "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1617 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 1670, Windows 1670; ceiling = max = 1670. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1670 -> 0 (fx-sphere: R3 sphere corner, D-fc-5.16).",
     "S28_varradius_negative": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=41, overCap at seed.",
-    "S29_hex_law": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry."
+    "S29_hex_law": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
+    "S16-R2-ChainUnstable": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): RAISE 0 -> 27: D-fc-5.13/5.19 — S16-R2 no longer reverts (95 -> 44 faces); its four bottom R1 rounds meet at the plate corners through 24 tier-2 cyl|cyl chords (D-fc-5.17: uncertified contact stays a polyline + warning) and 3 more; 27 on all three platforms (supersedes the d508c32 platform note).",
+    "S20_cross_bore_union": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): RAISE 0 -> 2: D-fc-5.17 (fx-cylcyl e770212/051d9f9) — the cross-bore union now builds; its two cyl|cyl contacts are tau-certified approximated curves recorded as tier 2; 2 on all three platforms.",
+    "S30-open-crack": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): SEED 0: D-fc-5.10 fixture (fx-heal132); measured 0 on all three platforms.",
+    "handle-pickup": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 358 -> 94 (fx-hubtori hub tori).",
+    "shelf_bracket": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 52 -> 30 (fx-s1closed)."
   },
   "expectedRed": {
     "Body11": [
@@ -156,9 +162,8 @@
     "S09": [
       "overCap"
     ],
-    "S16-R1-explode-success": [
-      "overCap",
-      "unhandled"
+    "S16-R2-ChainUnstable": [
+      "overCap"
     ],
     "S19_mouth_round": [
       "overCap"
@@ -170,9 +175,6 @@
       "overCap"
     ],
     "S26_funnel_rev": [
-      "overCap"
-    ],
-    "S27_sphere_corner_fine": [
       "overCap"
     ],
     "S28_varradius_negative": [
@@ -194,19 +196,18 @@
   },
   "expectedRedCountNote": "D-fc-5.4 (audit-fc3-instruments F1; lane fx-tooling, 2026-10-17): a per-platform COUNT ceiling on a line expectedRed admits, so new red lines cannot enter a listed class silently. Seeded at the overCap counts measured by `edge_class_gate.py --measure --binary build-wip/stl2step` on macOS / Homebrew OCCT 7.9.3 at 37710e6 (fc-4 integration). A platform with no value of its own uses the macos value; the orchestrator adds linux/windows values from their next preflight measures. Body244 has no entry: its expectedRed overCap admission was deleted in fc-4 (RATCHET-CLEAR, 41aba62), so a Body244 overCap is a hard FAIL. An increase FAILS; a decrease prints RATCHET-TIGHTEN.",
   "expectedRedCount": {
-    "Body11": {"overCap": {"macos": 3029}},
-    "Body28": {"overCap": {"macos": 477}},
+    "Body11": {"overCap": {"macos": 1949, "linux": 1949, "windows": 1949}},
+    "Body28": {"overCap": {"macos": 466, "linux": 464, "windows": 464}},
     "S03": {"overCap": {"macos": 52}},
     "S09": {"overCap": {"macos": 4}},
-    "S16-R1-explode-success": {"overCap": {"macos": 1}},
+    "S16-R2-ChainUnstable": {"overCap": {"macos": 2, "linux": 2, "windows": 2}},
     "S19_mouth_round": {"overCap": {"macos": 32}},
     "S23_plane_fillet_lowfold": {"overCap": {"macos": 12}},
-    "S25_peg_fillet": {"overCap": {"macos": 948}},
-    "S26_funnel_rev": {"overCap": {"macos": 4151}},
-    "S27_sphere_corner_fine": {"overCap": {"macos": 1472}},
+    "S25_peg_fillet": {"overCap": {"macos": 1, "linux": 1, "windows": 1}},
+    "S26_funnel_rev": {"overCap": {"macos": 104, "linux": 104, "windows": 104}},
     "S28_varradius_negative": {"overCap": {"macos": 46}},
-    "handle-pickup": {"overCap": {"macos": 59}},
-    "linkage_bores_chamfer": {"overCap": {"macos": 58}},
-    "shelf_bracket": {"overCap": {"macos": 9}}
+    "handle-pickup": {"overCap": {"macos": 35, "linux": 35, "windows": 35}},
+    "linkage_bores_chamfer": {"overCap": {"macos": 34, "linux": 34, "windows": 34}},
+    "shelf_bracket": {"overCap": {"macos": 7, "linux": 7, "windows": 7}}
   }
 }
