@@ -6,6 +6,33 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+Fifth increment: arcs without a common radius, closed walls, spheres, hems, horn tori and ruled
+walls. On the training files the tray now converts with no faceted regions (its divider's
+concentric arches, the floor-outline skirt and the roof-tip apex cones are analytic), the drill
+holder's corner rounds ship as tori, and the twisted vase's outer walls ship as ruled surfaces
+instead of a faceted solid. On the corpus, Body11's grip grooves ship as cones bounded by tori
+with single-face bores and rims (4688 → 1382 faces), and sphere corners ship where three equal
+rounds meet. No training file or test fixture reverts that converted before.
+
+### Added
+- Coaxial arc families: arcs on one axis with different radii (an arch without a common radius) are certified jointly from the planes they meet, with partial cones on the family axis.
+- Ring donors: a closed planar circular rim certifies the axis of a revolve band no cylinder could seed; a polygon loop is refuted by the file's own tessellation law and donates nothing.
+- Closed walls between two rims ship as whole 360° cylinders; a split cap whose two paths sweep opposite ways round the axis is bound as one wall.
+- Sphere corners: a sphere fixed by three rounds of one radius ships on their exact arcs.
+- Hems: the half-cylinder tangent to two antiparallel certified planes.
+- Horn tori where a corner round's major and minor radii meet.
+- Ruled walls: a wall between two straight rails and two planar caps ships as a degree-(1,1) B-spline face; an uncertified plane beside it ships as facets.
+- Section fillets anchored by one certified plane plus the tessellation law.
+- Cylinder–cylinder contacts certified within τ (cross bores) ship without a warning; the intersector runs only after the certificate passes.
+
+### Fixed
+- Mesh heal welds open cracks within min(sewTol, ½ shortest edge) and refuses non-finite input.
+- An inside-out partial-torus wire is rebuilt reversed; same-radius cylinder pieces merge into one face; zero-area fins left by a slit are dropped.
+- A closed elliptical rim splits at its own mesh vertex, and a mesh without a measurable quantum floor never mints one.
+- Composite chamfer cones ship only with closed, valid wires.
+
+### Fourth increment
+
 Fourth increment of the fillet/chamfer work: tori and one-sided rounds. On the training files:
 the funnel part (Body244) now converts as 13 analytic faces — two funnel cones, a 45° neck
 chamfer cone, the rim lip and cone-to-neck blends as tori, three cylinders and three planes,
