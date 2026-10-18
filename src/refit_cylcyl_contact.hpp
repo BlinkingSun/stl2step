@@ -141,6 +141,60 @@ inline double polylineOnCylSup(const gp_Pnt& p0, const gp_Pnt& p1, const gp_Ax3&
     return e + radius * (1.0 - std::cos(h)) + radius * polylineAzimuthGap(h);
 }
 
+// q = τ/2. GeomAPI_IntSS is asked for the intersection within q so a chord
+// whose sag is also within q stays inside τ.
+inline double intssTolOf(double tau) { return (tau > 0.0) ? tau * 0.5 : 0.0; }
+
+// A closed cyl|cyl contact needs the axes to meet: not parallel (a parallel
+// intersection is a line, and the tangent/parallel constructors already ran)
+// and the gap no larger than the sum of the radii plus τ. A wider gap leaves
+// every point of one cylinder more than τ off the other.
+inline bool axesMeetForContact(double radiusA, double radiusB, const AxisSep& sep, double tau) {
+    if (!(tau > 0.0) || sep.parallel) return false;
+    if (!(radiusA > 0.0) || !(radiusB > 0.0)) return false;
+    if (!std::isfinite(sep.distance)) return false;
+    return sep.distance <= radiusA + radiusB + tau;
+}
+
+// How far the chain sits off the two cylinders. The intersection lies on both,
+// so no branch can be closer to the chain than this. A non-finite distance
+// returns a negative value (refuse).
+inline double chainSurfaceClearance(const gp_Pnt* pts, int n, const gp_Ax3& axA, double rA,
+                                    const gp_Ax3& axB, double rB) {
+    if (pts == nullptr || n < 1) return 0.0;
+    double m = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const double dA = distToCylinder(axA, rA, pts[i]);
+        const double dB = distToCylinder(axB, rB, pts[i]);
+        if (!std::isfinite(dA) || !std::isfinite(dB)) return -1.0;
+        m = std::max(m, std::max(dA, dB));
+    }
+    return m;
+}
+
+// GeomAPI_IntSS is admissible only after the cheap certificate.
+// Axes meet (above). Equal radii whose axes meet are the Steinmetz sections:
+// when a section was built, its residual is `sectionResidual` (>= 0); IntSS
+// approximates that section within q, so a section that misses the gate by
+// more than q cannot be saved. `sectionResidual` < 0 means no section was
+// built (the unequal-radius crossing). The closed360 band test is the chain's
+// own clearance against min(band, snap): band is contactChordBand of this
+// chain, snap is the analytic snap ceiling.
+inline bool intssAdmissible(double radiusA, double radiusB, const AxisSep& sep, double tau,
+                            double clearance, double band, double snap, double sectionResidual,
+                            double q) {
+    if (!axesMeetForContact(radiusA, radiusB, sep, tau)) return false;
+    if (!(snap > 0.0) || !std::isfinite(snap)) return false;
+    if (!std::isfinite(band) || !std::isfinite(clearance) || !(clearance >= 0.0)) return false;
+    const double gate = band < snap ? band : snap;
+    if (!(clearance <= gate)) return false;
+    if (sectionResidual >= 0.0 && std::isfinite(sectionResidual) && std::isfinite(q) && q >= 0.0) {
+        if (sectionResidual > gate + q) return false;
+    }
+    if (steinmetzAdmissible(radiusA, radiusB, sep, tau) && !(sectionResidual >= 0.0)) return false;
+    return true;
+}
+
 // How far a contact of this chain may sit from the mesh vertices. Each mesh
 // edge already leaves both cylinders by polylineOnCylSup; the sum is that
 // edge's certificate. The chain's band is the worst edge. A branch of the

@@ -3248,6 +3248,10 @@ AnalyticCurve cylCylCertifiedContact(const Region& A, const Region& B, const Mes
         const double band = contactChordBand(chainPts.data(), (int)chainPts.size(), ch.closedLoop, axA,
                                               rA, axB, rB);
         if (!std::isfinite(band)) return none;
+        // Clearance is the necessary half of md <= band and md <= snap: the
+        // intersection lies on both cylinders. Measured before any IntSS.
+        const double clearance =
+            chainSurfaceClearance(chainPts.data(), (int)chainPts.size(), axA, rA, axB, rB);
         int seamLv = ch.meshVerts.front();
         if (ch.closedLoop) {
             // The bore that carries this loop as a cap seams on its u = 0
@@ -3264,6 +3268,10 @@ AnalyticCurve cylCylCertifiedContact(const Region& A, const Region& B, const Mes
             double maxDist = 0;
         };
         std::vector<Cand> cands;
+        // Residual of the exact sections already tested. Negative until one
+        // is measured. IntSS is not a second try for a section that misses
+        // the gate by more than q.
+        double bestSection = -1.0;
         auto consider = [&](const Handle(Geom_Curve)& src) {
             if (src.IsNull()) return;
             if (ch.closedLoop && !contactGeomClosed(src, tau)) {
@@ -3273,6 +3281,7 @@ AnalyticCurve cylCylCertifiedContact(const Region& A, const Region& B, const Mes
                 return;
             }
             const double md = maxDistToContact(src, mv, ch);
+            if (!(bestSection >= 0.0) || md < bestSection) bestSection = md;
             if (diagRelEnabled())
                 std::fprintf(stderr,
                              "DIAG_CYLCYL_CAND regA=%d regB=%d maxDist=%.6g snap=%.6g surface=%.6g\n",
@@ -3332,10 +3341,24 @@ AnalyticCurve cylCylCertifiedContact(const Region& A, const Region& B, const Mes
         AnalyticCurve exact = ship(cands);
         if (exact.kind != AnalyticCurve::None) return exact;
 
-        // q = τ/2. The intersection is requested within q so a chord whose sag
-        // is also within q stays inside τ. Measured spanOnBothCyls is the gate.
+        // Cheap certificate first. Axes meet, equal-radius sections, and the
+        // chain's own closed360 band. GeomAPI_IntSS runs only for a pair that
+        // passes them. q = intssTolOf(τ) = τ/2. Measured spanOnBothCyls is the
+        // gate on the curve that does run.
+        const double sectionResidual = bestSection;
         cands.clear();
-        const double q = tau * 0.5;
+        bestSection = -1.0;
+        const double q = intssTolOf(tau);
+        const AxisSep sep = cylinderAxisSeparation(axA, axB);
+        if (!intssAdmissible(rA, rB, sep, tau, clearance, band, snap, sectionResidual, q)) {
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_CYLCYL_SKIP regA=%d regB=%d clearance=%.6g band=%.6g "
+                             "snap=%.6g sep=%.6g parallel=%d section=%.6g q=%.6g\n",
+                             A.id, B.id, clearance, band, snap, sep.distance,
+                             sep.parallel ? 1 : 0, sectionResidual, q);
+            return none;
+        }
         Handle(Geom_CylindricalSurface) sA = new Geom_CylindricalSurface(gA);
         Handle(Geom_CylindricalSurface) sB = new Geom_CylindricalSurface(gB);
         GeomAPI_IntSS inter(sA, sB, q);

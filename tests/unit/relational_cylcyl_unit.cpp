@@ -138,6 +138,79 @@ static void caseContactChordBand() {
     expect(closedB + 1e-12 >= closing, "the closing edge is in the closed band");
 }
 
+static void caseIntssGate() {
+    const double tau = 1e-4;
+    const double q = intssTolOf(tau);
+    expect(q == tau * 0.5, "IntSS tolerance is tau/2");
+    expect(intssTolOf(0.0) == 0.0, "non-positive tau has no IntSS tolerance");
+    expect(intssTolOf(-tau) == 0.0, "negative tau has no IntSS tolerance");
+
+    const AxisSep meet = cylinderAxisSeparation(axZ(), axX());
+    expect(axesMeetForContact(8.0, 5.0, meet, tau), "unequal perpendicular axes meet");
+    expect(!axesMeetForContact(8.0, 5.0, meet, 0.0), "tau <= 0 axes do not meet");
+
+    gp_Ax3 parallel = axZ();
+    parallel.SetLocation(gp_Pnt(1.0, 0.0, 0.0));
+    const AxisSep par = cylinderAxisSeparation(axZ(), parallel);
+    expect(!axesMeetForContact(5.0, 5.0, par, tau), "parallel axes do not meet");
+
+    const double sum = 8.0 + 5.0 + tau;
+    gp_Ax3 atSum = axX();
+    atSum.SetLocation(gp_Pnt(0.0, sum, 0.0));
+    const AxisSep sumSep = cylinderAxisSeparation(axZ(), atSum);
+    expect(axesMeetForContact(8.0, 5.0, sumSep, tau), "gap equal to rA+rB+tau meets");
+    gp_Ax3 past = axX();
+    past.SetLocation(gp_Pnt(0.0, sum + tau, 0.0));
+    const AxisSep pastSep = cylinderAxisSeparation(axZ(), past);
+    expect(!axesMeetForContact(8.0, 5.0, pastSep, tau), "one more tau of gap does not meet");
+
+    const double band = 0.034;
+    const double snap = 2.3;
+    const double clearance = 0.017;
+    expect(intssAdmissible(8.0, 5.0, meet, tau, clearance, band, snap, -1.0, q),
+           "unequal meeting axes inside the band admit IntSS");
+    expect(intssAdmissible(8.0, 5.0, meet, tau, band, band, snap, -1.0, q),
+           "clearance equal to the band admits IntSS");
+    expect(!intssAdmissible(8.0, 5.0, meet, tau, band + tau, band, snap, -1.0, q),
+           "clearance above the band refuses IntSS");
+    expect(!intssAdmissible(8.0, 5.0, meet, tau, snap + tau, band + snap, snap, -1.0, q),
+           "clearance above the snap ceiling refuses IntSS");
+    expect(!intssAdmissible(8.0, 5.0, par, tau, clearance, band, snap, -1.0, q),
+           "parallel axes do not admit IntSS");
+    expect(!intssAdmissible(8.0, 5.0, pastSep, tau, clearance, band, snap, -1.0, q),
+           "axes that do not meet do not admit IntSS");
+
+    expect(steinmetzAdmissible(5.0, 5.0, meet, tau), "equal meeting radii are Steinmetz");
+    expect(!intssAdmissible(5.0, 5.0, meet, tau, clearance, band, snap, -1.0, q),
+           "equal radii with no section do not call IntSS");
+    const double gate = band;
+    expect(!intssAdmissible(5.0, 5.0, meet, tau, clearance, band, snap, gate + q + q, q),
+           "a section that misses the gate by more than q refuses IntSS");
+    expect(intssAdmissible(5.0, 5.0, meet, tau, clearance, band, snap, gate + q, q),
+           "a section within q of the gate still admits IntSS");
+
+    const double tightSnap = 0.02;
+    const double wideBand = 5.0;
+    expect(intssAdmissible(8.0, 5.0, meet, tau, 0.01, wideBand, tightSnap, -1.0, q),
+           "clearance inside the snap ceiling admits IntSS when the band is wider");
+    expect(!intssAdmissible(8.0, 5.0, meet, tau, tightSnap + tau, wideBand, tightSnap, -1.0, q),
+           "clearance above a tighter snap ceiling refuses IntSS");
+
+    const SteinmetzPair sp = steinmetzSections(CylAxis{axZ(), 1.0}, CylAxis{axX(), 1.0}, tau);
+    expect(sp.n == 2, "section for the clearance sample");
+    if (sp.n == 2) {
+        const gp_Pnt on = onElips(sp.e0.elips, 0.3);
+        const gp_Pnt one[1] = {on};
+        const double c = chainSurfaceClearance(one, 1, axZ(), 1.0, axX(), 1.0);
+        expect(c >= 0.0 && c <= 1e-9, "a section point has no cylinder clearance");
+        const gp_Pnt far[1] = {gp_Pnt(10.0, 10.0, 10.0)};
+        expect(chainSurfaceClearance(far, 1, axZ(), 1.0, axX(), 1.0) > tau,
+               "a far point's clearance exceeds tau");
+    }
+    expect(chainSurfaceClearance(nullptr, 1, axZ(), 1.0, axX(), 1.0) == 0.0,
+           "no points has no clearance");
+}
+
 static void caseSegmentGap() {
     const double tau = 1e-4;
     const gp_Pnt a(0, 0, 0);
@@ -156,6 +229,7 @@ int main() {
     caseExactMeeting();
     caseChordBound();
     caseContactChordBand();
+    caseIntssGate();
     caseSegmentGap();
     std::fprintf(stderr, "relational_cylcyl_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
