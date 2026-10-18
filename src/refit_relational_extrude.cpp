@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -4092,6 +4093,895 @@ struct LineAnc {
 
 bool diagSectionOn() { return diagOn(); }
 
+int cornerGid(const MeshView& mv, int t, int k) {
+    const int gt = mv.compTris ? mv.compTris[t] : t;
+    return mv.tris[gt][k];
+}
+
+double wrapPi(double a) {
+    while (a <= -kPi) a += kTwoPi;
+    while (a > kPi) a -= kTwoPi;
+    return a;
+}
+
+// D-fc-2.1 rails of one band. A boundary edge whose endpoints differ in
+// azimuth by more than τ/r is a chord. Rails split where the signed step
+// changes sign. The band carries the equal-step law when its long rails do.
+bool railsEqualStep(const MeshView& mv, const std::vector<int>& tris, const gp_XYZ& centre,
+                    const gp_XYZ& axis, double radius, double tau) {
+    if (!(radius > 0.0) || !(tau > 0.0)) return false;
+    gp_XYZ u, v;
+    if (!frameOf(axis, u, v)) return false;
+    const double azMin = tau / radius;
+    std::map<std::pair<int, int>, int> cnt;
+    for (int t : tris) {
+        if (t < 0 || (std::size_t)t >= mv.nTri) continue;
+        for (int k = 0; k < 3; ++k) {
+            const int a = cornerGid(mv, t, k);
+            const int b = cornerGid(mv, t, (k + 1) % 3);
+            cnt[{std::min(a, b), std::max(a, b)}]++;
+        }
+    }
+    auto azOf = [&](int g) {
+        const gp_XYZ d = mv.pts[g] - centre;
+        const gp_XYZ perp = d - axis * d.Dot(axis);
+        return std::atan2(perp.Dot(v), perp.Dot(u));
+    };
+    struct BE {
+        int a, b;
+    };
+    std::vector<BE> edges;
+    std::map<int, std::vector<int>> at;
+    for (const auto& kv : cnt) {
+        if (kv.second != 1) continue;
+        const double daz = std::fabs(wrapPi(azOf(kv.first.second) - azOf(kv.first.first)));
+        if (!(daz > azMin)) continue;
+        const int id = (int)edges.size();
+        edges.push_back({kv.first.first, kv.first.second});
+        at[kv.first.first].push_back(id);
+        at[kv.first.second].push_back(id);
+    }
+    std::vector<char> used(edges.size(), 0);
+    auto walk = [&](int startEdge, int startVert) {
+        std::vector<int> verts;
+        int e = startEdge, prev = startVert;
+        used[(std::size_t)e] = 1;
+        verts.push_back(edges[(std::size_t)e].a == prev ? edges[(std::size_t)e].b
+                                                        : edges[(std::size_t)e].a);
+        verts.push_back(prev == verts.back() ? edges[(std::size_t)e].a : edges[(std::size_t)e].b);
+        // verts currently [other, prev] — rebuild cleanly.
+        verts.clear();
+        verts.push_back(startVert);
+        const int other = edges[(std::size_t)e].a == startVert ? edges[(std::size_t)e].b
+                                                              : edges[(std::size_t)e].a;
+        verts.push_back(other);
+        prev = other;
+        for (;;) {
+            // D-fc-2.1, the same rule as collectRails: a rail is a degree-2
+            // chain. A branch ends it, so a shortcut chord is not spliced
+            // into the equal-step run.
+            if (at[prev].size() != 2) break;
+            int nxt = -1;
+            for (int id : at[prev]) {
+                if (!used[(std::size_t)id]) {
+                    nxt = id;
+                    break;
+                }
+            }
+            if (nxt < 0) break;
+            used[(std::size_t)nxt] = 1;
+            const int nw = edges[(std::size_t)nxt].a == prev ? edges[(std::size_t)nxt].b
+                                                            : edges[(std::size_t)nxt].a;
+            verts.push_back(nw);
+            prev = nw;
+        }
+        return verts;
+    };
+    std::vector<std::vector<int>> paths;
+    for (int i = 0; i < (int)edges.size(); ++i) {
+        if (used[(std::size_t)i]) continue;
+        const int a = edges[(std::size_t)i].a;
+        if (at[a].size() != 1 && at[edges[(std::size_t)i].b].size() != 1) continue;
+        const int s = at[a].size() == 1 ? a : edges[(std::size_t)i].b;
+        paths.push_back(walk(i, s));
+    }
+    for (int i = 0; i < (int)edges.size(); ++i) {
+        if (used[(std::size_t)i]) continue;
+        paths.push_back(walk(i, edges[(std::size_t)i].a));
+    }
+    bool anyLong = false;
+    for (const auto& path : paths) {
+        if (path.size() < 2) continue;
+        std::vector<double> steps;
+        double prevS = 0;
+        bool have = false;
+        for (std::size_t i = 0; i + 1 < path.size(); ++i) {
+            const double s = wrapPi(azOf(path[i + 1]) - azOf(path[i]));
+            if (!have) {
+                prevS = s;
+                have = true;
+                steps.push_back(std::fabs(s));
+                continue;
+            }
+            if ((s > 0.0) != (prevS > 0.0) && std::fabs(s) > azMin && std::fabs(prevS) > azMin) {
+                if ((int)steps.size() >= minStations(kParamsCircle)) {
+                    double mn = steps[0], mx = steps[0];
+                    for (double t : steps) {
+                        mn = std::min(mn, t);
+                        mx = std::max(mx, t);
+                    }
+                    if (!equalStepRail((int)steps.size(), mn, mx, tau, radius)) {
+                        if (diagSectionOn())
+                            diagPrintf("DIAG_REL_RAIL fail k=%d min=%.8g max=%.8g tol=%.8g r=%.8g\n",
+                                       (int)steps.size(), mn, mx, equalStepTol(tau, radius), radius);
+                        return false;
+                    }
+                    anyLong = true;
+                }
+                steps.clear();
+            }
+            steps.push_back(std::fabs(s));
+            prevS = s;
+        }
+        if ((int)steps.size() >= minStations(kParamsCircle)) {
+            double mn = steps[0], mx = steps[0];
+            for (double t : steps) {
+                mn = std::min(mn, t);
+                mx = std::max(mx, t);
+            }
+            if (!equalStepRail((int)steps.size(), mn, mx, tau, radius)) {
+                if (diagSectionOn())
+                    diagPrintf("DIAG_REL_RAIL fail k=%d min=%.8g max=%.8g tol=%.8g r=%.8g\n",
+                               (int)steps.size(), mn, mx, equalStepTol(tau, radius), radius);
+                return false;
+            }
+            anyLong = true;
+        }
+    }
+    if (!anyLong && diagSectionOn())
+        diagPrintf("DIAG_REL_RAIL none r=%.8g chords=%zu\n", radius, edges.size());
+    return anyLong;
+}
+
+// D-fc-5.17 (a) and D-fc-5.2 circle|circle. An unclaimed band whose own
+// chords are an equal-step section circle (D-fc-2), tangent to one certified
+// anchor, is a section fillet. Two certified circles (or a circle and a line)
+// use the one-parameter offset fit. The shatter-class flat on the far
+// generator commits as that circle's tangent plane (A3 fillet flank).
+void claimEqualStepSections(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                            SegmentWork& work, const std::vector<SectionCircle>& circles,
+                            std::vector<char>& freeTri, const std::vector<LineAnc>& lines,
+                            const std::vector<std::vector<int>>& lineBody,
+                            const std::vector<std::vector<int>>& nbr, const std::vector<int>& g2l,
+                            int& nEval, int& nAccept) {
+    const double tau = tauOf(mv);
+    const int nTri = (int)mv.nTri;
+    if (!(tau > 0.0) || nTri == 0) return;
+    const int maxIter = p.maxRefineIters > 0 ? p.maxRefineIters : 1;
+    struct Group {
+        std::vector<int> tris;
+        int minTri = 0;
+        gp_XYZ n;
+        gp_XYZ cent;
+    };
+    std::vector<int> groupOf((std::size_t)nTri, -1);
+    std::vector<Group> groups;
+    {
+        std::vector<char> seen((std::size_t)nTri, 0);
+        for (int t0 = 0; t0 < nTri; ++t0) {
+            if (!freeTri[(std::size_t)t0] || seen[(std::size_t)t0]) continue;
+            gp_XYZ n0;
+            if (!(triAreaNormal(mv, t0, n0) > 0.0)) {
+                seen[(std::size_t)t0] = 1;
+                continue;
+            }
+            const gp_XYZ p0 = cornerPt(mv, t0, 0);
+            auto onPlane = [&](int t) {
+                for (int k = 0; k < 3; ++k)
+                    if (std::fabs((cornerPt(mv, t, k) - p0).Dot(n0)) > tau) return false;
+                return true;
+            };
+            Group g;
+            std::vector<int> st{t0};
+            seen[(std::size_t)t0] = 1;
+            while (!st.empty()) {
+                const int t = st.back();
+                st.pop_back();
+                if (!onPlane(t)) continue;
+                g.tris.push_back(t);
+                groupOf[(std::size_t)t] = (int)groups.size();
+                for (int nb : nbr[(std::size_t)t]) {
+                    if (nb < 0 || nb >= nTri || seen[(std::size_t)nb] || !freeTri[(std::size_t)nb])
+                        continue;
+                    if (!onPlane(nb)) continue;
+                    seen[(std::size_t)nb] = 1;
+                    st.push_back(nb);
+                }
+            }
+            if (g.tris.empty()) continue;
+            std::sort(g.tris.begin(), g.tris.end());
+            g.minTri = g.tris.front();
+            gp_XYZ nsum(0, 0, 0), csum(0, 0, 0);
+            int nv = 0;
+            for (int t : g.tris) {
+                gp_XYZ nt;
+                const double a = triAreaNormal(mv, t, nt);
+                if (nt.Dot(n0) < 0.0) nt.Reverse();
+                nsum += nt * a;
+                for (int k = 0; k < 3; ++k) {
+                    csum += cornerPt(mv, t, k);
+                    ++nv;
+                }
+            }
+            const double nm = nsum.Modulus();
+            g.n = nm > 1e-15 ? nsum / nm : n0;
+            g.cent = nv ? csum / (double)nv : p0;
+            groups.push_back(std::move(g));
+        }
+    }
+    if (groups.empty()) return;
+    std::vector<std::vector<int>> gnbr(groups.size());
+    for (int t = 0; t < nTri; ++t) {
+        const int ga = groupOf[(std::size_t)t];
+        if (ga < 0) continue;
+        for (int nb : nbr[(std::size_t)t]) {
+            if (nb < 0 || nb >= nTri) continue;
+            const int gb = groupOf[(std::size_t)nb];
+            if (gb < 0 || gb == ga) continue;
+            gnbr[(std::size_t)ga].push_back(gb);
+        }
+    }
+    for (auto& v : gnbr) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+        std::sort(v.begin(), v.end(), [&](int a, int b) {
+            return groups[(std::size_t)a].minTri < groups[(std::size_t)b].minTri;
+        });
+    }
+    auto gidsOf = [&](const std::vector<int>& tris) {
+        std::vector<int> g;
+        for (int t : tris) {
+            if (t < 0 || t >= nTri) continue;
+            for (int k = 0; k < 3; ++k) g.push_back(cornerGid(mv, t, k));
+        }
+        std::sort(g.begin(), g.end());
+        g.erase(std::unique(g.begin(), g.end()), g.end());
+        return g;
+    };
+    auto touches = [&](const std::vector<int>& a, const std::vector<int>& b) {
+        for (int g : a)
+            if (std::binary_search(b.begin(), b.end(), g)) return true;
+        return false;
+    };
+    auto sharedGenerator = [&](int ga, int gb, gp_XYZ& dir, double& len) {
+        const std::vector<int> vb = gidsOf(groups[(std::size_t)gb].tris);
+        len = 0;
+        bool any = false;
+        for (int t : groups[(std::size_t)ga].tris) {
+            for (int k = 0; k < 3; ++k) {
+                const int a = cornerGid(mv, t, k);
+                const int b = cornerGid(mv, t, (k + 1) % 3);
+                if (!std::binary_search(vb.begin(), vb.end(), a) ||
+                    !std::binary_search(vb.begin(), vb.end(), b))
+                    continue;
+                const gp_XYZ d = mv.pts[b] - mv.pts[a];
+                const double L = d.Modulus();
+                if (L > len) {
+                    len = L;
+                    dir = L > 0.0 ? d / L : d;
+                    any = true;
+                }
+            }
+        }
+        return any;
+    };
+    struct Hit {
+        bool circle = false;
+        int idx = -1;
+        int side = 1;
+        double tol = 0;
+        double az = 0;
+    };
+    std::vector<char> used(groups.size(), 0);
+    for (int pass = 0; pass < 2; ++pass) {
+        const int nAnch = pass == 0 ? (int)circles.size() : (int)lines.size();
+        for (int ai = 0; ai < nAnch; ++ai) {
+            if (pass == 0 &&
+                (circles[(std::size_t)ai].acc < 0 ||
+                 circles[(std::size_t)ai].acc >= (int)work.accepted.size()))
+                continue;
+            std::vector<int> body =
+                pass == 0 ? gidsOf(work.accepted[(std::size_t)circles[(std::size_t)ai].acc].tris)
+                          : gidsOf(lineBody[(std::size_t)ai]);
+            const gp_XYZ an = pass == 0 ? circles[(std::size_t)ai].axis : lines[(std::size_t)ai].n;
+            const gp_XYZ ap = pass == 0 ? circles[(std::size_t)ai].origin : gp_XYZ(0, 0, 0);
+            const double aR = pass == 0 ? circles[(std::size_t)ai].radius : 0;
+            const double aTol = pass == 0 ? circles[(std::size_t)ai].tol : lines[(std::size_t)ai].tol;
+            const double aD = pass == 0 ? 0 : lines[(std::size_t)ai].d;
+            for (int gs = 0; gs < (int)groups.size(); ++gs) {
+                if (used[(std::size_t)gs]) continue;
+                const std::vector<int> sg = gidsOf(groups[(std::size_t)gs].tris);
+                if (!touches(sg, body)) continue;
+                bool onA = true;
+                for (int g : sg) {
+                    const gp_XYZ p = mv.pts[g];
+                    const double dev = pass == 0 ? std::fabs(radialDist(p, ap, an) - aR)
+                                                 : std::fabs(p.Dot(an) - aD);
+                    if (dev > tau) onA = false;
+                }
+                if (onA) continue;
+                // Every free neighbour that leaves the anchor on a generator.
+                // The lowest-minTri spur may be the anchor plane itself; a short
+                // spur is not the band, so each second is tried until one chain
+                // reaches minStations(kParamsCircle) groups past the seed.
+                struct StepCand {
+                    int nb = -1;
+                    gp_XYZ axis;
+                    double step = 0;
+                };
+                std::vector<StepCand> seconds;
+                for (int nb : gnbr[(std::size_t)gs]) {
+                    if (used[(std::size_t)nb]) continue;
+                    gp_XYZ dir;
+                    double elen = 0;
+                    gp_XYZ n2 = groups[(std::size_t)nb].n;
+                    if (n2.Dot(groups[(std::size_t)gs].n) < 0.0) n2.Reverse();
+                    gp_XYZ cr = groups[(std::size_t)gs].n.Crossed(n2);
+                    const double cm = cr.Modulus();
+                    if (!(cm > 1e-15)) continue;
+                    cr.Divide(cm);
+                    canonicalHemi(cr);
+                    if (!sharedGenerator(gs, nb, dir, elen)) continue;
+                    if (!edgeParallel(dir, elen, cr, tau)) continue;
+                    const gp_XYZ chord = groups[(std::size_t)nb].cent - groups[(std::size_t)gs].cent;
+                    const double ch = (chord - cr * chord.Dot(cr)).Modulus();
+                    if (!(ch > tau)) continue;
+                    StepCand c;
+                    c.nb = nb;
+                    c.axis = cr;
+                    c.step = std::acos(std::max(-1.0, std::min(1.0, groups[(std::size_t)gs].n.Dot(n2))));
+                    seconds.push_back(c);
+                }
+                std::vector<int> chain;
+                std::vector<char> inChain(groups.size(), 0);
+                gp_XYZ axis0(0, 0, 0);
+                double step0 = 0;
+                for (const StepCand& sec : seconds) {
+                    if (used[(std::size_t)gs] || used[(std::size_t)sec.nb]) continue;
+                    chain = {gs, sec.nb};
+                    std::fill(inChain.begin(), inChain.end(), 0);
+                    inChain[(std::size_t)gs] = 1;
+                    inChain[(std::size_t)sec.nb] = 1;
+                    axis0 = sec.axis;
+                    step0 = sec.step;
+                    double rProv = 0;
+                    bool rOk = false;
+                    bool broke = false;
+                    while (!broke) {
+                        const int end = chain.back();
+                        const int prev = chain[(std::size_t)chain.size() - 2];
+                        std::vector<int> cands;
+                        for (int nb : gnbr[(std::size_t)end]) {
+                            if (nb == prev || used[(std::size_t)nb] || inChain[(std::size_t)nb]) continue;
+                            gp_XYZ n2 = groups[(std::size_t)nb].n;
+                            if (n2.Dot(groups[(std::size_t)end].n) < 0.0) n2.Reverse();
+                            if (std::fabs(n2.Dot(axis0)) > tanAngTol(tau, tau, std::max(rProv, tau)))
+                                continue;
+                            gp_XYZ dir;
+                            double elen = 0;
+                            if (!sharedGenerator(end, nb, dir, elen) ||
+                                !edgeParallel(dir, elen, axis0, tau))
+                                continue;
+                            const double step = std::acos(
+                                std::max(-1.0, std::min(1.0, groups[(std::size_t)end].n.Dot(n2))));
+                            if (rOk && std::fabs(step - step0) > equalStepTol(tau, rProv)) continue;
+                            cands.push_back(nb);
+                        }
+                        if (cands.size() != 1) break;
+                        inChain[(std::size_t)cands[0]] = 1;
+                        chain.push_back(cands[0]);
+                        if (chain.size() == 3) {
+                            gp_XYZ u, v;
+                            if (!frameOf(axis0, u, v)) {
+                                broke = true;
+                                break;
+                            }
+                            double x1, y1, x2, y2, x3, y3;
+                            auto cornerXY = [&](int gi, double& x, double& y) {
+                                const gp_XYZ p =
+                                    cornerPt(mv, groups[(std::size_t)gi].tris.front(), 0);
+                                x = p.Dot(u);
+                                y = p.Dot(v);
+                            };
+                            cornerXY(chain[0], x1, y1);
+                            cornerXY(chain[1], x2, y2);
+                            cornerXY(chain[2], x3, y3);
+                            const double aa = std::hypot(x2 - x1, y2 - y1);
+                            const double bb = std::hypot(x3 - x2, y3 - y2);
+                            const double cc = std::hypot(x1 - x3, y1 - y3);
+                            const double area2 = (x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1);
+                            if (!(std::fabs(area2) > 0.0)) {
+                                broke = true;
+                                break;
+                            }
+                            rProv = aa * bb * cc / (2.0 * std::fabs(area2));
+                            rOk = rProv > tau;
+                            gp_XYZ n1 = groups[(std::size_t)chain[1]].n;
+                            if (n1.Dot(groups[(std::size_t)chain[0]].n) < 0.0) n1.Reverse();
+                            gp_XYZ n2 = groups[(std::size_t)chain[2]].n;
+                            if (n2.Dot(n1) < 0.0) n2.Reverse();
+                            const double s1 = std::acos(std::max(
+                                -1.0, std::min(1.0, groups[(std::size_t)chain[1]].n.Dot(n2))));
+                            if (!rOk || std::fabs(step0 - s1) > equalStepTol(tau, rProv)) {
+                                inChain[(std::size_t)chain.back()] = 0;
+                                chain.pop_back();
+                                broke = true;
+                            }
+                        }
+                    }
+                    if ((int)chain.size() >= minStations(kParamsCircle) + 1) break;
+                    chain.clear();
+                }
+                if ((int)chain.size() < minStations(kParamsCircle) + 1) continue;
+                ++nEval;
+                std::vector<int> band;
+                for (int gi : chain)
+                    for (int t : groups[(std::size_t)gi].tris) band.push_back(t);
+                std::sort(band.begin(), band.end());
+                const char* why = "accept";
+                gp_Dir axOut(axis0);
+                gp_Pnt cen;
+                double radius = 0, maxDev = 0;
+                bool stable = false;
+                for (int it = 0; it < maxIter; ++it) {
+                    gp_Dir axIn = axOut;
+                    if (!cylinderFitLS(mv, band, axIn, axOut, cen, radius, maxDev, maxIter) ||
+                        !(radius > tau)) {
+                        why = "degenerate";
+                        break;
+                    }
+                    std::vector<char> in((std::size_t)nTri, 0);
+                    for (int t : band) in[(std::size_t)t] = 1;
+                    std::vector<int> grown = band;
+                    std::vector<int> q = band;
+                    for (std::size_t qi = 0; qi < q.size(); ++qi) {
+                        const int t = q[qi];
+                        for (int nb : nbr[(std::size_t)t]) {
+                            if (nb < 0 || nb >= nTri || in[(std::size_t)nb] || !freeTri[(std::size_t)nb])
+                                continue;
+                            bool all = true;
+                            for (int k = 0; k < 3; ++k)
+                                if (std::fabs(radialDist(cornerPt(mv, nb, k), cen.XYZ(), axOut.XYZ()) -
+                                              radius) > tau)
+                                    all = false;
+                            if (!all) continue;
+                            in[(std::size_t)nb] = 1;
+                            grown.push_back(nb);
+                            q.push_back(nb);
+                        }
+                    }
+                    std::sort(grown.begin(), grown.end());
+                    if (grown == band) {
+                        stable = true;
+                        break;
+                    }
+                    band.swap(grown);
+                }
+                if (std::strcmp(why, "accept") == 0 && !stable) why = "unstable";
+                gp_XYZ axis = axOut.XYZ();
+                gp_XYZ centre = cen.XYZ();
+                std::vector<Vert> verts;
+                int stations = 0, levels = 0;
+                double lineRes = 0, rms = 0;
+                if (std::strcmp(why, "accept") == 0) {
+                    uniqueVerts(mv, g2l, band, verts);
+                    profileCounts(verts, axis, tau, stations, levels, lineRes);
+                    double s2 = 0;
+                    maxDev = 0;
+                    for (const Vert& vt : verts) {
+                        const double d = std::fabs(radialDist(vt.p, centre, axis) - radius);
+                        maxDev = std::max(maxDev, d);
+                        s2 += d * d;
+                    }
+                    rms = verts.empty() ? 0 : std::sqrt(s2 / (double)verts.size());
+                    if (stations < minStations(kParamsCircle) || levels < 2) why = "underdetermined";
+                    else if (lineRes <= tau) why = "line";
+                    else if (!(maxDev <= tau)) why = "vertex-off";
+                    else if (!railsEqualStep(mv, band, centre, axis, radius, tau)) why = "not-blend";
+                }
+                const gp_XYZ xdir =
+                    std::strcmp(why, "accept") == 0 ? lowestXDir(verts, centre, axis) : gp_XYZ(1, 0, 0);
+                SpanInfo sp{};
+                if (std::strcmp(why, "accept") == 0) {
+                    sp = measureSpan(mv, g2l, band, verts, centre, axis, xdir, tol.thetaBin);
+                    if (sp.closed360) why = "not-blend";
+                }
+                const double Lat = std::strcmp(why, "accept") == 0 ? std::max(sp.vMax - sp.vMin, tau) : tau;
+                std::vector<Hit> hits;
+                if (std::strcmp(why, "accept") == 0) {
+                    const SecFrame f = secFrame(centre, axis);
+                    const std::vector<int> bg = gidsOf(band);
+                    for (int ci = 0; ci < (int)circles.size(); ++ci) {
+                        const SectionCircle& C = circles[(std::size_t)ci];
+                        if (C.acc < 0 || C.acc >= (int)work.accepted.size()) continue;
+                        const std::vector<int> cg = gidsOf(work.accepted[(std::size_t)C.acc].tris);
+                        if (!touches(bg, cg)) continue;
+                        int side = 0;
+                        const double cross = C.axis.Crossed(axis).Modulus();
+                        const double dc = radialDist(C.origin, centre, axis);
+                        if (!sectionTangentCircle(cross, dc, C.radius, radius, C.tol, tau, Lat, side))
+                            continue;
+                        const Sec sc = toSec(f, C.origin);
+                        const double dm = std::hypot(sc.x, sc.y);
+                        if (!(dm > 0.0)) continue;
+                        const double ux = side > 0 ? sc.x / dm : -sc.x / dm;
+                        const double uy = side > 0 ? sc.y / dm : -sc.y / dm;
+                        Hit h;
+                        h.circle = true;
+                        h.idx = ci;
+                        h.side = side;
+                        h.tol = C.tol;
+                        h.az = std::atan2(uy, ux);
+                        hits.push_back(h);
+                    }
+                    for (int li = 0; li < (int)lines.size(); ++li) {
+                        const LineAnc& L = lines[(std::size_t)li];
+                        const std::vector<int> lg = gidsOf(lineBody[(std::size_t)li]);
+                        if (!touches(bg, lg)) continue;
+                        const double dl = L.n.Dot(centre) - L.d;
+                        if (!sectionTangentLine(L.n.Dot(axis), dl, radius, L.tol, tau, Lat)) continue;
+                        const Sec nn = toSec(f, f.o + L.n);
+                        const double px = dl >= 0.0 ? -nn.x : nn.x;
+                        const double py = dl >= 0.0 ? -nn.y : nn.y;
+                        if (!(std::hypot(px, py) > 0.0)) continue;
+                        Hit h;
+                        h.idx = li;
+                        h.side = dl >= 0.0 ? 1 : -1;
+                        h.tol = L.tol;
+                        h.az = std::atan2(py, px);
+                        hits.push_back(h);
+                    }
+                    if (hits.empty()) why = "no-anchor";
+                }
+                auto angDist = [&](double a, double b) {
+                    const double d = std::fabs(wrapPi(a - b));
+                    return d;
+                };
+                int endA = -1, endB = -1;
+                double farAz = 0, bandSpan = 0;
+                if (std::strcmp(why, "accept") == 0) {
+                    const SecFrame f = secFrame(centre, axis);
+                    std::vector<double> azs;
+                    for (const Vert& vt : verts) {
+                        const Sec s = toSec(f, vt.p);
+                        azs.push_back(std::atan2(s.y, s.x));
+                    }
+                    std::sort(azs.begin(), azs.end());
+                    azs.erase(std::unique(azs.begin(), azs.end(),
+                                          [&](double a, double b) {
+                                              return std::fabs(wrapPi(a - b)) <= tau / radius;
+                                          }),
+                              azs.end());
+                    double gap = azs.size() < 2 ? kTwoPi : (azs.front() + kTwoPi) - azs.back();
+                    std::size_t gapAt = azs.size() - 1;
+                    for (std::size_t i = 0; i + 1 < azs.size(); ++i) {
+                        if (azs[i + 1] - azs[i] > gap) {
+                            gap = azs[i + 1] - azs[i];
+                            gapAt = i;
+                        }
+                    }
+                    bandSpan = kTwoPi - gap;
+                    const double a0 = azs[(gapAt + 1) % azs.size()];
+                    const double a1 = azs[gapAt % azs.size()];
+                    double best0 = 1e300, best1 = 1e300;
+                    for (int i = 0; i < (int)hits.size(); ++i) {
+                        const double s0 = sectionContactSlack(hits[(std::size_t)i].tol, tau, radius);
+                        const double d0 = angDist(hits[(std::size_t)i].az, a0);
+                        const double d1 = angDist(hits[(std::size_t)i].az, a1);
+                        if (d0 <= s0 && d0 < best0) {
+                            best0 = d0;
+                            endA = i;
+                        }
+                        if (d1 <= s0 && d1 < best1) {
+                            best1 = d1;
+                            endB = i;
+                        }
+                    }
+                    if (endA >= 0 && endA == endB) endB = -1;
+                    farAz = endA >= 0 ? a1 : a0;
+                    if (endA < 0 && endB >= 0) {
+                        endA = endB;
+                        endB = -1;
+                        farAz = a0;
+                    }
+                    if (endA < 0) why = "no-anchor";
+                }
+                const bool two = endA >= 0 && endB >= 0;
+                const bool bothLines =
+                    two && !hits[(std::size_t)endA].circle && !hits[(std::size_t)endB].circle;
+                if (std::strcmp(why, "accept") == 0 && bothLines) why = "not-blend";
+                double spanTolV = 0, vSpan = 0, dihedral = 0;
+                if (std::strcmp(why, "accept") == 0 && two) {
+                    const Hit& ha = hits[(std::size_t)endA];
+                    const Hit& hb = hits[(std::size_t)endB];
+                    const SecFrame f = secFrame(centre, axis);
+                    auto toAnch = [&](const Hit& h) {
+                        SectionAnchor s;
+                        s.side = h.side;
+                        s.tol = h.tol;
+                        if (h.circle) {
+                            const SectionCircle& C = circles[(std::size_t)h.idx];
+                            const Sec sc = toSec(f, C.origin);
+                            s.circle = true;
+                            s.cx = sc.x;
+                            s.cy = sc.y;
+                            s.R = C.radius;
+                        } else {
+                            const LineAnc& L = lines[(std::size_t)h.idx];
+                            const Sec nn = toSec(f, f.o + L.n);
+                            double nx = nn.x, ny = nn.y;
+                            const double nm = std::hypot(nx, ny);
+                            nx /= nm;
+                            ny /= nm;
+                            s.nx = nx;
+                            s.ny = ny;
+                            s.d = (L.d - L.n.Dot(f.o)) / nm;
+                        }
+                        return s;
+                    };
+                    FilletModel m;
+                    m.A = toAnch(ha);
+                    m.B = toAnch(hb);
+                    if (sectionConcentric(m.A, m.B)) {
+                        why = "not-blend";
+                    } else {
+                        double param = radius, hx = 0, hy = 0;
+                        std::vector<Sec> q;
+                        for (const Vert& vt : verts) q.push_back(toSec(f, vt.p));
+                        if (!fitModel(m, q, tau, maxIter, param, hx, hy)) why = "degenerate";
+                        else {
+                            double rr = 0, px = 0, py = 0;
+                            if (!modelAt(m, param, hx, hy, rr, px, py)) why = "degenerate";
+                            else {
+                                maxDev = 0;
+                                double s2 = 0;
+                                for (const Sec& s : q) {
+                                    const double d = std::fabs(std::hypot(s.x - px, s.y - py) - rr);
+                                    maxDev = std::max(maxDev, d);
+                                    s2 += d * d;
+                                }
+                                rms = q.empty() ? 0 : std::sqrt(s2 / (double)q.size());
+                                if (!(maxDev <= tau)) why = "vertex-off";
+                                else {
+                                    centre = f.o + f.e1 * px + f.e2 * py;
+                                    radius = rr;
+                                }
+                            }
+                        }
+                    }
+                    if (std::strcmp(why, "accept") == 0) {
+                        dihedral = angDist(ha.az, hb.az);
+                        // The blend arc is the one the band covers.
+                        if (std::fabs(bandSpan - dihedral) > std::fabs(bandSpan - (kTwoPi - dihedral)))
+                            dihedral = kTwoPi - dihedral;
+                        spanTolV = spanTol(ha.tol, hb.tol, radius);
+                        vSpan = bandSpan;
+                        if (std::fabs(vSpan - dihedral) > spanTolV ||
+                            !normalsSpanDihedral(maxFacetNormalSep(mv, band), spanTolV))
+                            why = "not-blend";
+                    }
+                } else if (std::strcmp(why, "accept") == 0) {
+                    const Hit& ha = hits[(std::size_t)endA];
+                    dihedral = bandSpan;
+                    spanTolV = spanTol(ha.tol, tau, radius);
+                    vSpan = bandSpan;
+                    if (!normalsSpanDihedral(maxFacetNormalSep(mv, band), spanTolV)) why = "not-blend";
+                }
+                if (std::strcmp(why, "accept") == 0) {
+                    std::vector<char> inB((std::size_t)nTri, 0);
+                    for (int t : band) inB[(std::size_t)t] = 1;
+                    for (const Region& rr : work.accepted) {
+                        if (rr.tris.empty()) continue;
+                        bool touch = false;
+                        for (int t : rr.tris) {
+                            if (t < 0 || t >= nTri) continue;
+                            for (int n : nbr[(std::size_t)t])
+                                if (n >= 0 && n < nTri && inB[(std::size_t)n]) touch = true;
+                            if (touch) break;
+                        }
+                        if (!touch) continue;
+                        bool all = true;
+                        for (int g : gidsOf(rr.tris))
+                            if (std::fabs(radialDist(mv.pts[g], centre, axis) - radius) > tau) all = false;
+                        if (all) {
+                            why = "same-surface";
+                            break;
+                        }
+                    }
+                }
+                for (int gi : chain) used[(std::size_t)gi] = 1;
+                for (int t : band) {
+                    const int gi = groupOf[(std::size_t)t];
+                    if (gi >= 0) used[(std::size_t)gi] = 1;
+                }
+                int flank = -1;
+                int nbrA = -1, nbrB = -1;
+                if (std::strcmp(why, "accept") == 0) {
+                    const bool one = !two;
+                    if (!one) {
+                        const Hit& ha = hits[(std::size_t)endA];
+                        const Hit& hb = hits[(std::size_t)endB];
+                        if (!ha.circle) nbrA = lines[(std::size_t)ha.idx].prov;
+                        if (!hb.circle) nbrB = lines[(std::size_t)hb.idx].prov;
+                    } else {
+                        const Hit& ha = hits[(std::size_t)endA];
+                        if (!ha.circle) nbrA = lines[(std::size_t)ha.idx].prov;
+                        double nx = 0, ny = 0, d = 0;
+                        sectionTangentPlane(0, 0, radius, farAz, nx, ny, d);
+                        const SecFrame f = secFrame(centre, axis);
+                        const gp_XYZ N = f.e1 * nx + f.e2 * ny;
+                        const gp_XYZ P = centre + N * radius;
+                        std::vector<char> inB((std::size_t)nTri, 0);
+                        for (int t : band) inB[(std::size_t)t] = 1;
+                        int best = std::numeric_limits<int>::max();
+                        for (int pi = 0; pi < (int)work.provisionals.size(); ++pi) {
+                            const Provisional& pr = work.provisionals[(std::size_t)pi];
+                            if (pr.tris.empty() || a3WouldCommit(mv, tol, pr, false)) continue;
+                            if (pr.claim != ProvClaim::Unclaimed) continue;
+                            bool adj = false, off = false;
+                            for (int t : pr.tris) {
+                                if (t < 0 || t >= nTri) continue;
+                                for (int n : nbr[(std::size_t)t])
+                                    if (n >= 0 && n < nTri && inB[(std::size_t)n]) adj = true;
+                                for (int k = 0; k < 3; ++k)
+                                    if (std::fabs((cornerPt(mv, t, k) - P).Dot(N)) > tau) off = true;
+                            }
+                            if (!adj || off) continue;
+                            const int mt = minTriOf(pr.tris);
+                            if (mt < best) {
+                                best = mt;
+                                flank = pi;
+                            }
+                        }
+                        if (flank >= 0) {
+                            if (nbrA < 0) nbrA = flank;
+                            else nbrB = flank;
+                        }
+                    }
+                }
+                int straddle = 0;
+                if (std::strcmp(why, "accept") == 0) {
+                    std::vector<char> inB((std::size_t)nTri, 0);
+                    for (int t : band) inB[(std::size_t)t] = 1;
+                    double area = 0, sigma = 0;
+                    gp_XYZ cent(0, 0, 0);
+                    for (int t : band) {
+                        gp_XYZ nt;
+                        const double at = triAreaNormal(mv, t, nt);
+                        const gp_XYZ c3 =
+                            (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) / 3.0;
+                        area += at;
+                        cent += c3 * at;
+                    }
+                    if (area > 0.0) cent /= area;
+                    const gp_XYZ loc = centre + axis * ((cent - centre).Dot(axis));
+                    for (int t : band) {
+                        gp_XYZ nt;
+                        const double at = triAreaNormal(mv, t, nt);
+                        gp_XYZ rad =
+                            (cornerPt(mv, t, 0) + cornerPt(mv, t, 1) + cornerPt(mv, t, 2)) / 3.0 - loc;
+                        rad -= axis * rad.Dot(axis);
+                        const double rm = rad.Modulus();
+                        if (rm > 0.0) sigma += at * nt.Dot(rad / rm);
+                    }
+                    const bool outward = sigma > 0.0;
+                    const double useSpan = std::max(sp.span, 1e-12);
+                    int nSides = (int)std::llround(kTwoPi * (double)std::max(sp.nBands, 1) / useSpan);
+                    if (nSides < 1) nSides = 1;
+                    const int nProvNow = (int)work.provisionals.size();
+                    for (int pi = 0; pi < nProvNow; ++pi) {
+                        int nin = 0, nout = 0;
+                        for (int t : work.provisionals[(std::size_t)pi].tris)
+                            (t >= 0 && t < nTri && inB[(std::size_t)t]) ? ++nin : ++nout;
+                        if (nin > 0 && nout > 0) ++straddle;
+                    }
+                    Region r;
+                    r.type = SurfType::Cylinder;
+                    r.origin = Origin::FilletStrip;
+                    r.ax = gp_Ax3(gp_Pnt(loc), gp_Dir(axis), gp_Dir(xdir));
+                    r.radius = radius;
+                    r.uMin = sp.uMin;
+                    r.uMax = sp.uMax;
+                    r.vMin = sp.vMin;
+                    r.vMax = sp.vMax;
+                    r.closed360 = false;
+                    r.outwardNormal = outward;
+                    r.tris = band;
+                    r.maxVertexDev = maxDev;
+                    r.rmsVertexDev = rms;
+                    r.nSides = nSides;
+                    r.chordSagitta = chordSagitta(radius, nSides);
+                    r.dVolPredicted = dVolCylinderSector(area, radius, nSides, outward);
+                    r.filletNbrA = nbrA;
+                    r.filletNbrB = nbrB;
+                    for (int pi = 0; pi < nProvNow; ++pi) {
+                        Provisional& pr = work.provisionals[(std::size_t)pi];
+                        if (pr.claim != ProvClaim::Unclaimed) continue;
+                        std::vector<int> keep;
+                        bool hit = false;
+                        for (int t : pr.tris) {
+                            if (t >= 0 && t < nTri && inB[(std::size_t)t]) hit = true;
+                            else keep.push_back(t);
+                        }
+                        if (!hit) continue;
+                        if (keep.empty()) {
+                            pr.claim = ProvClaim::ConsumedFillet;
+                            continue;
+                        }
+                        std::vector<char> inK((std::size_t)nTri, 0);
+                        for (int t : keep) inK[(std::size_t)t] = 1;
+                        std::vector<char> seen((std::size_t)nTri, 0);
+                        std::vector<std::vector<int>> comps;
+                        for (int t0 : keep) {
+                            if (seen[(std::size_t)t0]) continue;
+                            std::vector<int> comp, qs{t0};
+                            seen[(std::size_t)t0] = 1;
+                            while (!qs.empty()) {
+                                const int c = qs.back();
+                                qs.pop_back();
+                                comp.push_back(c);
+                                for (int n : nbr[(std::size_t)c])
+                                    if (n >= 0 && n < nTri && inK[(std::size_t)n] && !seen[(std::size_t)n]) {
+                                        seen[(std::size_t)n] = 1;
+                                        qs.push_back(n);
+                                    }
+                            }
+                            std::sort(comp.begin(), comp.end());
+                            comps.push_back(std::move(comp));
+                        }
+                        std::sort(comps.begin(), comps.end());
+                        pr.tris = comps[0];
+                        refitPlaneProv(mv, g2l, pr);
+                        for (std::size_t c = 1; c < comps.size(); ++c) {
+                            Provisional np = pr;
+                            np.tris = comps[c];
+                            refitPlaneProv(mv, g2l, np);
+                            work.provisionals.push_back(std::move(np));
+                        }
+                    }
+                    for (int t : band)
+                        if (t >= 0 && t < nTri) freeTri[(std::size_t)t] = 0;
+                    work.accepted.push_back(std::move(r));
+                    ++nAccept;
+                }
+                if (diagSectionOn()) {
+                    const char* kA = "none";
+                    const char* kB = "none";
+                    int sA = 0, sB = 0;
+                    if (endA >= 0) {
+                        kA = hits[(std::size_t)endA].circle ? "circle" : "line";
+                        sA = hits[(std::size_t)endA].side;
+                    }
+                    if (endB >= 0) {
+                        kB = hits[(std::size_t)endB].circle ? "circle" : "line";
+                        sB = hits[(std::size_t)endB].side;
+                    }
+                    diagPrintf("DIAG_REL_BAND stage=extrude mode=section seed=%d nTri=%zu nV=%zu "
+                               "stations=%d levels=%d params=%d fit=%s radius=%.9g "
+                               "axis=%.6g,%.6g,%.6g maxDevMM=%.6g maxDevTau=%.6g lineResTau=%.6g "
+                               "span=%.9g dihedral=%.9g spanTol=%.6g straddle=%d atom=%d "
+                               "atoms=%zu kindA=%s kindB=%s sideA=%d sideB=%d hem=%d why=%s\n",
+                               band.empty() ? -1 : minTriOf(band), band.size(), verts.size(), stations,
+                               levels, two ? kParamsAnchored : kParamsCircle, two ? "anchored" : "free",
+                               radius, axis.X(), axis.Y(), axis.Z(), maxDev, tau > 0 ? maxDev / tau : 0,
+                               tau > 0 ? lineRes / tau : 0, vSpan, dihedral, spanTolV, straddle, -1,
+                               (std::size_t)0, kA, kB, sA, sB, 0, why);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace
 
 bool claimSectionFillets(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -4670,6 +5560,11 @@ bool claimSectionFillets(const MeshView& mv, const SegmentParams& p, const Deriv
                 }
             }
         }
+        // D-fc-5.17 (a) / D-fc-5.2. Unclaimed equal-step bands the atom walk
+        // never seeded. Appended regions sit past `dead`, so compaction keeps
+        // them. nEval / nAccept fold into the section sum below.
+        claimEqualStepSections(mv, p, tol, work, circles, freeTri, lines, lineBody, nbr, g2l,
+                               nEval, nAccept);
         if (diagSectionOn())
             diagPrintf("DIAG_REL_SUM stage=section pairs=%d accept=%d circles=%zu lines=%zu\n", nEval,
                        nAccept, circles.size(), lines.size());
