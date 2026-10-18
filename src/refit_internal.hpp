@@ -61,7 +61,8 @@ enum class ProvClaim : uint8_t {
     ConsumedFillet,     // C1 committed; permanently ineligible
     PendingTorus,       // stage T admitted; A3 skips; commit or revert at U-3
     ConsumedTorus,      // toroidal-round stage committed; permanently ineligible
-    CommittedPlane      // A3 committed as PlaneGrow
+    CommittedPlane,     // A3 committed as PlaneGrow
+    ConsumedRuled       // D-fc-5.9 ruled quad committed; permanently ineligible
 };
 
 struct Provisional {

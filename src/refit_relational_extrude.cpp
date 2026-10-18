@@ -1012,6 +1012,7 @@ const char* originName(Origin o) {
     case Origin::NgonWall: return "NgonWall";
     case Origin::ChamferCone: return "ChamferCone";
     case Origin::TorusBlend: return "TorusBlend";
+    case Origin::RuledQuad: return "RuledQuad";
     }
     return "other";
 }
