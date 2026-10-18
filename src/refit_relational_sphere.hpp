@@ -60,12 +60,24 @@ struct SphereCornerFit {
 SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double tau);
 
 // Largest distance of the points from their own least-squares plane (0 for
-// fewer than four points).
+// fewer than four points). HUGE_VAL when the eigensolve fails or the normal
+// is zero: that is not a measured residual.
 double planeResidual(const std::vector<gp_XYZ>& pts);
 
-// Plane first (fewest parameters, D-fc-1.6(3)): true when every point is within
-// tau of the points' own least-squares plane.
+// Plane first (fewest parameters, D-fc-1.6(3)): true when the plane was solved
+// and every point is within tau of it. A failed eigensolve is not planar.
 bool pointsPlanar(const std::vector<gp_XYZ>& pts, double tau);
+
+// The plane-first refusal (D-fc-5.20, fail closed). True when the points lie
+// within tau of their plane, OR that plane cannot be formed: tau is not a
+// positive finite number, the eigensolve fails, or the normal is zero. A
+// failed solve is a refusal. It is not "not planar", and it must not be skipped.
+bool planeGateRefuses(const std::vector<gp_XYZ>& pts, double tau);
+
+// Vertex tolerance stored for a measured gap d that the caller has already
+// admitted (d <= cap). The pad is the existing partial-face pad (1.001 plus
+// Precision::Confusion). The stored value never exceeds cap.
+double pinnedVertexTol(double d, double cap);
 
 // I9 for a sphere patch: the volume between the spherical triangle over
 // (p, q, s) -- three points on the sphere (centre, r) -- and the flat triangle:

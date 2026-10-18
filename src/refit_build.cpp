@@ -13121,7 +13121,7 @@ bool buildSphereCorner(const Region& r, const RegionSet& rs, const MeshView& mv,
                                                .Transformed(floc.Transformation()));
                     if (!c3.IsNull()) d = std::max(d, pv.Distance(c3->Value(k == 0 ? ca : cb)));
                     if (d <= cap && d > BRep_Tool::Tolerance(vv))
-                        Bv.UpdateVertex(vv, d * 1.001 + Precision::Confusion());
+                        Bv.UpdateVertex(vv, pinnedVertexTol(d, cap));
                 }
             }
         } catch (const Standard_Failure&) {
