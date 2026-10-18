@@ -372,6 +372,29 @@ inline bool ellipseRimSplitAdmitted(double q) {
     return std::isfinite(q) && q > 0.0;
 }
 
+// D-130-16: index of the chain vertex nearest the exact rim point `p` and within
+// tau, skipping `skip` (a vertex the rim already carries). Tie: the later
+// meshVerts entry. -1 when tau is not a positive finite length or no vertex
+// lies within tau; the caller then mints `p`. A vertex minted where a mesh
+// vertex stands is that vertex's twin.
+inline int chainVertexWithinTau(const gp_Pnt& p, const std::vector<TopoDS_Vertex>& verts,
+                                const std::vector<int>& meshVerts, const TopoDS_Vertex& skip,
+                                double tau) {
+    if (!(std::isfinite(tau) && tau > 0.0)) return -1;
+    int best = -1;
+    double dBest = tau;
+    for (int lv : meshVerts) {
+        if (lv < 0 || (size_t)lv >= verts.size() || verts[(size_t)lv].IsNull()) continue;
+        if (!skip.IsNull() && verts[(size_t)lv].IsSame(skip)) continue;
+        const double d = BRep_Tool::Pnt(verts[(size_t)lv]).Distance(p);
+        if (d <= dBest) {
+            dBest = d;
+            best = lv;
+        }
+    }
+    return best;
+}
+
 // Index of the chain vertex nearest the antipode and within tau, skipping the
 // chain terminal `skip` (the edge's own vertex). Tie: the later meshVerts
 // entry. -1 when tau is not a positive finite length, the edge is not one
@@ -382,19 +405,9 @@ inline int closedEllipseAntipodePick(const TopoDS_Edge& e,
     if (!(std::isfinite(tau) && tau > 0.0)) return -1;
     gp_Pnt pA;
     if (!closedEllipseAntipode(e, pA)) return -1;
-    int lvA = -1;
-    double dA = tau;
     const bool haveSkip = skip >= 0 && (size_t)skip < verts.size();
-    for (int lv : meshVerts) {
-        if (lv < 0 || (size_t)lv >= verts.size() || verts[(size_t)lv].IsNull()) continue;
-        if (haveSkip && verts[(size_t)lv].IsSame(verts[(size_t)skip])) continue;
-        const double d = BRep_Tool::Pnt(verts[(size_t)lv]).Distance(pA);
-        if (d <= dA) {
-            dA = d;
-            lvA = lv;
-        }
-    }
-    return lvA;
+    return chainVertexWithinTau(pA, verts, meshVerts,
+                                haveSkip ? verts[(size_t)skip] : TopoDS_Vertex(), tau);
 }
 
 // D-fc-5.13 (the D-fc-5.7 O-1 construction): a closed ellipse edge as two half-turn

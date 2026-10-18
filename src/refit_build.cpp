@@ -15213,29 +15213,73 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                             ElCLib::D1(ElCLib::Parameter(ge->Elips(), Po), ge->Elips(), Pc, Tc);
                         if (To.Dot(Tc) < 0.0)
                             ax = gp_Ax2(ax.Location(), ax.Direction().Reversed(), ax.XDirection());
+                        // D-130-16: each exact point of the rim is the chain's own mesh
+                        // vertex when one stands within tau of it (rebuildCollapsed's
+                        // antipode rule), its tolerance raised to its distance from the
+                        // curve; minted only otherwise. A vertex minted where a mesh
+                        // vertex stands is that vertex's twin.
+                        const double tauE = 2.0 * mv.quantFloor;
+                        const std::vector<int> noMesh;
+                        const std::vector<int>& exactMesh =
+                            (size_t)ciExact < rs.chains.size()
+                                ? rs.chains[(size_t)ciExact].meshVerts
+                                : noMesh;
+                        int lvE = -1, lvA = -1;
+                        auto rimVertexAt = [&](const gp_Pnt& p, const TopoDS_Vertex& skip,
+                                               const AnalyticCurve& cv, int& lv) {
+                            TopoDS_Vertex V;
+                            lv = chainVertexWithinTau(p, verts, exactMesh, skip, tauE);
+                            if (lv >= 0) {
+                                V = verts[(size_t)lv];
+                                bumpVertexTol(V, curveResidual(cv, BRep_Tool::Pnt(V)));
+                            } else {
+                                BRep_Builder().MakeVertex(V, p, Precision::Confusion());
+                            }
+                            return V;
+                        };
                         std::vector<TopoDS_Edge> rim;
                         if (!gc.IsNull()) {
                             const gp_Circ cw(ax, gc->Circ().Radius());
-                            BRep_Builder().MakeVertex(
-                                VE, ElCLib::Value(ElCLib::Parameter(cw, X), cw),
-                                Precision::Confusion());
+                            AnalyticCurve cv;
+                            cv.kind = AnalyticCurve::Circ;
+                            cv.circ = cw;
+                            VE = rimVertexAt(ElCLib::Value(ElCLib::Parameter(cw, X), cw),
+                                             TopoDS_Vertex(), cv, lvE);
                             const TopoDS_Edge e = makeFullCircle(cw, VE);
                             if (!e.IsNull()) rim.push_back(e);
                         } else {
                             const gp_Elips ew(ax, ge->Elips().MajorRadius(),
                                               ge->Elips().MinorRadius());
-                            const double t0 = ElCLib::Parameter(ew, X);
-                            TopoDS_Vertex VA;
-                            BRep_Builder().MakeVertex(VE, ElCLib::Value(t0, ew),
-                                                      Precision::Confusion());
-                            BRep_Builder().MakeVertex(VA, ElCLib::Value(t0 + kPi, ew),
-                                                      Precision::Confusion());
+                            AnalyticCurve cv;
+                            cv.kind = AnalyticCurve::Elips;
+                            cv.elips = ew;
+                            double t0 = ElCLib::Parameter(ew, X);
+                            VE = rimVertexAt(ElCLib::Value(t0, ew), TopoDS_Vertex(), cv, lvE);
+                            // A reused vertex runs the arcs from its own parameter.
+                            if (lvE >= 0) t0 = ElCLib::Parameter(ew, BRep_Tool::Pnt(VE));
+                            double tA = t0 + kPi;
+                            const TopoDS_Vertex VA =
+                                rimVertexAt(ElCLib::Value(tA, ew), VE, cv, lvA);
+                            if (lvA >= 0) {
+                                tA = ElCLib::Parameter(ew, BRep_Tool::Pnt(VA));
+                                while (tA < t0) tA += 2.0 * kPi;
+                                while (tA >= t0 + 2.0 * kPi) tA -= 2.0 * kPi;
+                            }
                             const Handle(Geom_Ellipse) gw = new Geom_Ellipse(ew);
-                            const TopoDS_Edge a1 = bindEdgeByParam(gw, VE, VA, t0, t0 + kPi);
-                            const TopoDS_Edge a2 =
-                                bindEdgeByParam(gw, VA, VE, t0 + kPi, t0 + 2.0 * kPi);
-                            if (!a1.IsNull() && !a2.IsNull()) rim = {a1, a2};
+                            if (tA > t0 + Precision::PConfusion() &&
+                                tA < t0 + 2.0 * kPi - Precision::PConfusion()) {
+                                const TopoDS_Edge a1 = bindEdgeByParam(gw, VE, VA, t0, tA);
+                                const TopoDS_Edge a2 =
+                                    bindEdgeByParam(gw, VA, VE, tA, t0 + 2.0 * kPi);
+                                if (!a1.IsNull() && !a2.IsNull()) rim = {a1, a2};
+                            }
                         }
+                        if (diagP2Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_CROSSRIM rid=%d ci=%d kind=%s lvE=%d lvA=%d "
+                                         "tau=%.6g built=%d\n",
+                                         r.id, ciExact, !gc.IsNull() ? "circ" : "elips", lvE,
+                                         lvA, tauE, rim.empty() ? 0 : 1);
                         if (!rim.empty()) {
                             // Their pcurves are born where every collapsed chain
                             // edge's are (rebuildCollapsed): owner plane, then wall.
