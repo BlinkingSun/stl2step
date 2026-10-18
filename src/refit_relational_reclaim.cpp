@@ -2322,14 +2322,21 @@ std::vector<AnnulusRings> annulusRingCharts(const MeshView& mv, const SegmentWor
     for (const Cand& c : cands) {
         for (int k = 0; k < kAnnulusLoops; ++k) peers.push_back(&c.a.ring[k]);
     }
+    // D-fc-5.20: moving an accepted chart empties MeshRing::verts while these
+    // pointers still address it, so a later chart misses that witness and F-2
+    // fails open. Refute every candidate against the intact set, then move.
     SegmentParams sp;
-    for (Cand& c : cands) {
-        bool ok = true;
-        for (int k = 0; k < kAnnulusLoops && ok; ++k) {
-            if (meshRingRefutedByTessLaw(mv, sp, tau, work, c.a.ring[k], peers)) ok = false;
+    std::vector<char> keep(cands.size(), 1);
+    for (std::size_t i = 0; i < cands.size(); ++i) {
+        for (int k = 0; k < kAnnulusLoops; ++k) {
+            if (meshRingRefutedByTessLaw(mv, sp, tau, work, cands[i].a.ring[k], peers)) {
+                keep[i] = 0;
+                break;
+            }
         }
-        if (ok) out.push_back(std::move(c.a));
     }
+    for (std::size_t i = 0; i < cands.size(); ++i)
+        if (keep[i]) out.push_back(std::move(cands[i].a));
     return out;
 }
 

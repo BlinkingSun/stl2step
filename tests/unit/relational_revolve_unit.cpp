@@ -1107,6 +1107,72 @@ static void caseMeshRingTessLaw() {
            "tesslaw: round bore not refuted by square");
 }
 
+// D-fc-5.20 B-1. Two flat annuli and no cylinder rail, so the only F-2 witness
+// is the other chart. The washer (48 stations, radii 5 and 6) refutes the
+// square frame (4 stations, radii 10 and 20). Both provisional orders must
+// keep the washer and refuse the square: accepting the washer must not empty
+// its rings before the square is tested.
+static void pushUnclaimed(SegmentWork& work, const std::vector<int>& tris) {
+    Provisional pr;
+    pr.claim = ProvClaim::Unclaimed;
+    pr.tris = tris;
+    work.provisionals.push_back(std::move(pr));
+}
+
+static void addAnnulus(Synth& s, double Ri, double Ro, double z, int N, std::vector<int>& tris) {
+    const std::vector<int> inn = ring(s, Ri, z, N);
+    const std::vector<int> out = ring(s, Ro, z, N);
+    band(s, inn, out, N, tris);
+}
+
+static void caseAnnulusWitnessOrder() {
+    auto run = [](bool washerFirst) {
+        Synth s;
+        std::vector<int> washerTris, squareTris;
+        auto addWasher = [&]() { addAnnulus(s, 5.0, 6.0, 0.0, 48, washerTris); };
+        auto addSquare = [&]() { addAnnulus(s, 10.0, 20.0, 5.0, 4, squareTris); };
+        if (washerFirst) {
+            addWasher();
+            addSquare();
+        } else {
+            addSquare();
+            addWasher();
+        }
+        s.finish();
+        SegmentWork work;
+        if (washerFirst) {
+            pushUnclaimed(work, washerTris);
+            pushUnclaimed(work, squareTris);
+        } else {
+            pushUnclaimed(work, squareTris);
+            pushUnclaimed(work, washerTris);
+        }
+        return annulusRingCharts(s.view(), work, 2.0 * s.q);
+    };
+    for (int ord = 0; ord < 2; ++ord) {
+        const bool washerFirst = ord == 0;
+        const auto charts = run(washerFirst);
+        const char* tag = washerFirst ? "washer-first" : "square-first";
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "witness order (%s): only the washer chart", tag);
+        bool onlyWasher = charts.size() == 1;
+        if (onlyWasher) {
+            const double lo = std::min(charts[0].ring[0].R, charts[0].ring[1].R);
+            const double hi = std::max(charts[0].ring[0].R, charts[0].ring[1].R);
+            const int wantChart = washerFirst ? 0 : 1;
+            onlyWasher = std::fabs(lo - 5.0) < 1e-6 && std::fabs(hi - 6.0) < 1e-6 &&
+                         charts[0].chart == wantChart;
+        }
+        expect(onlyWasher, buf);
+        if (!onlyWasher) {
+            std::fprintf(stderr, "  charts=%zu\n", charts.size());
+            for (const AnnulusRings& a : charts)
+                std::fprintf(stderr, "  chart=%d R=%.6f/%.6f stations=%d/%d\n", a.chart, a.ring[0].R,
+                             a.ring[1].R, a.ring[0].stations, a.ring[1].stations);
+        }
+    }
+}
+
 // F1 end to end: the annulus's rings donate the cone's axis; scattered columns
 // (every other sector) pass the column rule but are no wall.
 static void caseRingDonorCone() {
@@ -1297,6 +1363,7 @@ int main() {
     caseBandVolume();
     caseMeshRing();
     caseMeshRingTessLaw();
+    caseAnnulusWitnessOrder();
     caseTriSetLoops();
     caseAnnulusRings();
     caseRingDonorCone();
