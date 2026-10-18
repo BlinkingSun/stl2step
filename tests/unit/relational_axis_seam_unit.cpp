@@ -702,6 +702,94 @@ int main() {
                "b1: positive q with no in-range vertex still mints the exact point");
     }
 
+    // c1 (D-130-16, crossing-cap rim): an exact rim point is the chain's own mesh
+    // vertex when one stands within tau of it. The rim's mesh vertices sit off the
+    // fitted ellipse by a fraction of tau (the fit's residual); a vertex minted at
+    // the exact point would be a second vertex at that mesh vertex's place.
+    {
+        const double a = 6.0, b = 4.0;
+        const gp_Elips el(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), a, b);
+        const double q = 1.0e-5;
+        const double tau = 2.0 * q;
+        const int n = 12;
+        std::vector<TopoDS_Vertex> verts((size_t)n);
+        std::vector<int> ids((size_t)n);
+        BRep_Builder bb;
+        for (int k = 0; k < n; ++k) {
+            const double t = k * (2.0 * kPi / n);
+            const gp_Pnt p = ElCLib::Value(t, el).Translated(gp_Vec(0, 0, 0.4 * tau));
+            bb.MakeVertex(verts[(size_t)k], p, Precision::Confusion());
+            ids[(size_t)k] = k;
+        }
+        const int kE = 3, kA = 9;  // half a turn apart
+        const gp_Pnt pE = ElCLib::Value(kE * (2.0 * kPi / n), el);
+        const gp_Pnt pA = ElCLib::Value(kA * (2.0 * kPi / n), el);
+        expect(chainVertexWithinTau(pE, verts, ids, TopoDS_Vertex(), tau) == kE,
+               "c1: the mesh vertex within tau of the seam point is reused");
+        const int lvE = chainVertexWithinTau(pE, verts, ids, TopoDS_Vertex(), tau);
+        expect(lvE >= 0 && chainVertexWithinTau(pA, verts, ids, verts[(size_t)lvE], tau) == kA,
+               "c1: the mesh vertex within tau of the antipode is reused");
+        expect(chainVertexWithinTau(pE, verts, ids, verts[(size_t)kE], tau) < 0,
+               "c1: the skipped vertex is never its own antipode");
+        const gp_Pnt pMid = ElCLib::Value((kE + 0.5) * (2.0 * kPi / n), el);
+        expect(chainVertexWithinTau(pMid, verts, ids, TopoDS_Vertex(), tau) < 0,
+               "c1: no mesh vertex within tau -> mint (-1)");
+
+        const double refused[] = {0.0, -1.0, std::numeric_limits<double>::quiet_NaN(),
+                                  std::numeric_limits<double>::infinity()};
+        for (double t : refused) {
+            char name[80];
+            std::snprintf(name, sizeof name, "c1: tau=%g reuses nothing", t);
+            expect(chainVertexWithinTau(pE, verts, ids, TopoDS_Vertex(), t) < 0, name);
+        }
+
+        // Exactly tau away is within tau; just beyond is not.
+        std::vector<TopoDS_Vertex> edge(2);
+        bb.MakeVertex(edge[0], gp_Pnt(0, 0, tau), Precision::Confusion());
+        bb.MakeVertex(edge[1], gp_Pnt(0, 0, -tau * (1.0 + 1e-6)), Precision::Confusion());
+        expect(chainVertexWithinTau(gp_Pnt(0, 0, 0), edge, std::vector<int>{1, 0},
+                                    TopoDS_Vertex(), tau) == 0,
+               "c1: a vertex exactly tau away is within tau");
+        expect(chainVertexWithinTau(gp_Pnt(0, 0, 0), edge, std::vector<int>{1},
+                                    TopoDS_Vertex(), tau) < 0,
+               "c1: a vertex beyond tau is not reused");
+
+        // Nearest wins; an exact tie goes to the later meshVerts entry, so the pick
+        // is fixed by the chain's walk, never by container order elsewhere.
+        std::vector<TopoDS_Vertex> two(3);
+        bb.MakeVertex(two[0], gp_Pnt(0.5 * tau, 0, 0), Precision::Confusion());
+        bb.MakeVertex(two[1], gp_Pnt(-0.5 * tau, 0, 0), Precision::Confusion());
+        bb.MakeVertex(two[2], gp_Pnt(0, 0.25 * tau, 0), Precision::Confusion());
+        expect(chainVertexWithinTau(gp_Pnt(0, 0, 0), two, std::vector<int>{0, 1, 2},
+                                    TopoDS_Vertex(), tau) == 2,
+               "c1: the nearest vertex within tau wins");
+        expect(chainVertexWithinTau(gp_Pnt(0, 0, 0), two, std::vector<int>{0, 1},
+                                    TopoDS_Vertex(), tau) == 1 &&
+                   chainVertexWithinTau(gp_Pnt(0, 0, 0), two, std::vector<int>{1, 0},
+                                        TopoDS_Vertex(), tau) == 0,
+               "c1: a tie goes to the later meshVerts entry");
+
+        // Slots outside verts[] or null are not candidates.
+        std::vector<TopoDS_Vertex> holes(2);
+        bb.MakeVertex(holes[1], gp_Pnt(0, 0, 0), Precision::Confusion());
+        expect(chainVertexWithinTau(gp_Pnt(0, 0, 0), holes, std::vector<int>{-1, 0, 7, 1},
+                                    TopoDS_Vertex(), tau) == 1,
+               "c1: null and out-of-range slots are skipped");
+
+        // closedEllipseAntipodePick is the same rule at the antipode.
+        std::vector<TopoDS_Vertex> onEl = verts;
+        bb.MakeVertex(onEl[0], ElCLib::Value(0.0, el), Precision::Confusion());
+        BRepBuilderAPI_MakeEdge mFull(el, onEl[0], onEl[0]);
+        gp_Pnt pAnti;
+        if (mFull.IsDone() && closedEllipseAntipode(mFull.Edge(), pAnti)) {
+            const int pick = closedEllipseAntipodePick(mFull.Edge(), onEl, ids, 0, tau);
+            expect(pick == n / 2 && pick == chainVertexWithinTau(pAnti, onEl, ids, onEl[0], tau),
+                   "c1: the antipode pick is chainVertexWithinTau at the antipode");
+        } else {
+            expect(false, "c1: the full ellipse has an antipode");
+        }
+    }
+
     std::fprintf(stderr, "relational_axis_seam_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
 }
