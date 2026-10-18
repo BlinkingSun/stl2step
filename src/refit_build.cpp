@@ -19,6 +19,8 @@
 #include "refit_relational_arc.hpp"
 #include "refit_axis_seam.hpp"
 #include "refit_cap_arc.hpp"
+#include "refit_cylcyl_contact.hpp"
+#include "refit_relational.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -138,6 +140,7 @@
 #include <GeomAPI.hxx>
 #include <GeomAPI_ProjectPointOnCurve.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAPI_IntSS.hxx>
 #include <GeomProjLib.hxx>
 
 namespace stl2step {
@@ -1160,10 +1163,18 @@ int edgeConnecting(const MeshView& mv, const BoundaryChain& ch, int va, int vb) 
 }
 
 struct AnalyticCurve {
-    enum Kind { None, Lin, Circ, Elips } kind = None;
+    enum Kind { None, Lin, Circ, Elips, BSpl } kind = None;
     gp_Lin lin;
     gp_Circ circ;
     gp_Elips elips;
+    Handle(Geom_BSplineCurve) bspl;
+    // D-fc-5.17: an exact Steinmetz section, or an IntSS contact, sampled to a
+    // degree-1 polyline whose every span is within τ of both cylinders.
+    // The sewTol vertex test does not apply; a failed sample never sets this.
+    bool contactCertified = false;
+    // Closed contact only. Mesh-vertex slot the spline was rotated to: the cap
+    // owner's u = 0 column, so the bore seam meets this edge's one vertex.
+    int contactSeamLv = -1;
 };
 
 struct ChainGeom {
@@ -1189,6 +1200,10 @@ double curveResidual(const AnalyticCurve& c, const gp_Pnt& p) {
         if (c.kind == AnalyticCurve::Elips) {
             double t = ElCLib::Parameter(c.elips, p);
             return ElCLib::Value(t, c.elips).Distance(p);
+        }
+        if (c.kind == AnalyticCurve::BSpl && !c.bspl.IsNull()) {
+            GeomAPI_ProjectPointOnCurve proj(p, c.bspl);
+            if (proj.NbPoints() > 0) return proj.LowerDistance();
         }
     } catch (const Standard_Failure&) {
         return 1e300;
@@ -2964,9 +2979,380 @@ void emitDiagFallback(int ci, const BoundaryChain& ch, const char* cls, const ch
                  ci, cls, outcome, nA, nB, ch.regA, ch.regB, residual, nV);
 }
 
+// D-fc-5.17. IntAna returns no ellipse for an equal-radius meeting pair and no
+// curve at all for a general crossing. A certified contact is a degree-1
+// polyline: every pole and every span is within τ of both cylinders
+// (polylineOnCylSup, the binder's own supremum). The chain selects the branch.
+// Failure leaves the curve empty so the caller keeps the mesh-polyline warning.
+bool projectOnCurve(const Handle(Geom_Curve)& c, const gp_Pnt& p, double& t, double& dist) {
+    try {
+        GeomAPI_ProjectPointOnCurve proj(p, c);
+        if (proj.NbPoints() < 1) return false;
+        t = proj.LowerDistanceParameter();
+        dist = proj.LowerDistance();
+        return std::isfinite(t) && std::isfinite(dist);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+bool poleOnBothCyls(const gp_Pnt& p, const gp_Ax3& axA, double rA, const gp_Ax3& axB, double rB,
+                    double tau) {
+    return distToCylinder(axA, rA, p) <= tau && distToCylinder(axB, rB, p) <= tau;
+}
+
+bool spanOnBothCyls(const gp_Pnt& a, const gp_Pnt& b, const gp_Ax3& axA, double rA,
+                    const gp_Ax3& axB, double rB, double tau) {
+    if (!poleOnBothCyls(a, axA, rA, axB, rB, tau) || !poleOnBothCyls(b, axA, rA, axB, rB, tau))
+        return false;
+    if (polylineOnCylSup(a, b, axA, rA) > tau) return false;
+    if (polylineOnCylSup(a, b, axB, rB) > tau) return false;
+    return true;
+}
+
+bool walkContactSpan(const Handle(Geom_Curve)& src, double t0, double t1, std::vector<gp_Pnt>& poles,
+                     const gp_Ax3& axA, double rA, const gp_Ax3& axB, double rB, double tau) {
+    if (!(t1 > t0)) return true;
+    double t = t0;
+    gp_Pnt prev = src->Value(t);
+    if (!poleOnBothCyls(prev, axA, rA, axB, rB, tau)) return false;
+    while (t1 - t > Precision::PConfusion()) {
+        double tTry = t1;
+        gp_Pnt pTry = src->Value(tTry);
+        for (;;) {
+            const gp_Pnt midp = src->Value(0.5 * (t + tTry));
+            // Coincident ends of a closed curve are not a certified span: the
+            // parameter midpoint has to lie within τ of the published chord.
+            const bool ok = spanOnBothCyls(prev, pTry, axA, rA, axB, rB, tau) &&
+                            poleOnBothCyls(midp, axA, rA, axB, rB, tau) &&
+                            segmentGap(prev, pTry, midp) <= tau;
+            if (ok) break;
+            const double mid = 0.5 * (t + tTry);
+            if (!(mid > t) || !(mid < tTry)) return false;
+            tTry = mid;
+            pTry = src->Value(tTry);
+        }
+        if (!(tTry > t)) return false;
+        if (pTry.Distance(prev) > Precision::Confusion()) poles.push_back(pTry);
+        prev = pTry;
+        t = tTry;
+    }
+    return true;
+}
+
+Handle(Geom_BSplineCurve) makeContactSpline(const std::vector<gp_Pnt>& poles) {
+    const int m = (int)poles.size();
+    if (m < 2) return {};
+    try {
+        TColgp_Array1OfPnt arr(1, m);
+        TColStd_Array1OfReal knots(1, m);
+        TColStd_Array1OfInteger mults(1, m);
+        for (int i = 0; i < m; i++) {
+            arr.SetValue(i + 1, poles[(size_t)i]);
+            knots.SetValue(i + 1, (double)i);
+            mults.SetValue(i + 1, (i == 0 || i == m - 1) ? 2 : 1);
+        }
+        return new Geom_BSplineCurve(arr, knots, mults, 1);
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
+double maxDistToContact(const Handle(Geom_Curve)& c, const MeshView& mv, const BoundaryChain& ch) {
+    double m = 0;
+    for (int lv : ch.meshVerts) {
+        if (lv < 0 || (size_t)lv >= mv.nVtx) return 1e300;
+        double t = 0, d = 0;
+        if (!projectOnCurve(c, pntOf(mv, lv), t, d)) return 1e300;
+        m = std::max(m, d);
+    }
+    return m;
+}
+
+bool contactGeomClosed(const Handle(Geom_Curve)& c, double tau) {
+    if (c.IsNull()) return false;
+    if (c->IsClosed() || c->IsPeriodic()) return true;
+    try {
+        const double f = c->FirstParameter();
+        const double l = c->LastParameter();
+        return l > f && c->Value(f).Distance(c->Value(l)) <= tau;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+}
+
+// Full-period sample, then rotate so the seam vertex's nearest pole is first.
+// Every span was certified before the rotation, and rotation keeps those spans.
+Handle(Geom_BSplineCurve) sampleClosedContact(const Handle(Geom_Curve)& src, const gp_Pnt& seamP,
+                                             const gp_Ax3& axA, double rA, const gp_Ax3& axB,
+                                             double rB, double tau) {
+    const double f = src->FirstParameter();
+    const double l = src->LastParameter();
+    if (!(l > f)) return {};
+    std::vector<gp_Pnt> poles;
+    try {
+        const gp_Pnt p0 = src->Value(f);
+        if (!poleOnBothCyls(p0, axA, rA, axB, rB, tau)) return {};
+        poles.push_back(p0);
+        if (!walkContactSpan(src, f, l, poles, axA, rA, axB, rB, tau)) return {};
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+    if (poles.size() < 2) return {};
+    if (poles.back().Distance(poles.front()) > Precision::Confusion()) {
+        if (!spanOnBothCyls(poles.back(), poles.front(), axA, rA, axB, rB, tau)) return {};
+        poles.push_back(poles.front());
+    } else {
+        poles.back() = poles.front();
+    }
+    const int nUnique = (int)poles.size() - 1;
+    if (nUnique < 3) return {};
+    int best = 0;
+    double bestD = 1e300;
+    for (int i = 0; i < nUnique; i++) {
+        const double d = poles[(size_t)i].Distance(seamP);
+        if (d < bestD) {
+            bestD = d;
+            best = i;
+        }
+    }
+    if (best != 0) {
+        std::vector<gp_Pnt> uniq(poles.begin(), poles.begin() + nUnique);
+        std::rotate(uniq.begin(), uniq.begin() + best, uniq.end());
+        uniq.push_back(uniq.front());
+        poles.swap(uniq);
+    }
+    return makeContactSpline(poles);
+}
+
+double arcChainDist(const std::vector<gp_Pnt>& arc, const MeshView& mv, const BoundaryChain& ch) {
+    double m = 0;
+    for (int lv : ch.meshVerts) {
+        if (lv < 0 || (size_t)lv >= mv.nVtx) return 1e300;
+        const gp_Pnt p = pntOf(mv, lv);
+        double best = 1e300;
+        for (size_t k = 0; k < arc.size(); k++) best = std::min(best, p.Distance(arc[k]));
+        for (size_t k = 1; k < arc.size(); k++) {
+            const gp_Vec ab(arc[k - 1], arc[k]);
+            const double ab2 = ab.SquareMagnitude();
+            double d;
+            if (!(ab2 > gp::Resolution() * gp::Resolution())) d = p.Distance(arc[k - 1]);
+            else {
+                const double u = std::max(0.0, std::min(1.0, gp_Vec(arc[k - 1], p).Dot(ab) / ab2));
+                d = p.Distance(arc[k - 1].Translated(ab * u));
+            }
+            best = std::min(best, d);
+        }
+        m = std::max(m, best);
+    }
+    return m;
+}
+
+// Open chain on a closed contact: the arc from the first vertex to the last
+// whose chords stay nearest the chain. Spans are a subset of the certified loop.
+Handle(Geom_BSplineCurve) sampleOpenContact(const Handle(Geom_Curve)& src, const MeshView& mv,
+                                           const BoundaryChain& ch, const gp_Ax3& axA, double rA,
+                                           const gp_Ax3& axB, double rB, double tau) {
+    if (ch.meshVerts.size() < 2) return {};
+    const double f = src->FirstParameter();
+    const double l = src->LastParameter();
+    if (!(l > f)) return {};
+    std::vector<gp_Pnt> poles;
+    try {
+        const gp_Pnt p0 = src->Value(f);
+        if (!poleOnBothCyls(p0, axA, rA, axB, rB, tau)) return {};
+        poles.push_back(p0);
+        if (!walkContactSpan(src, f, l, poles, axA, rA, axB, rB, tau)) return {};
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+    if (poles.size() < 2) return {};
+    const bool closed = contactGeomClosed(src, tau);
+    if (!closed) {
+        const gp_Pnt pA = pntOf(mv, ch.meshVerts.front());
+        const gp_Pnt pB = pntOf(mv, ch.meshVerts.back());
+        if (poles.front().Distance(pB) + poles.back().Distance(pA) <
+            poles.front().Distance(pA) + poles.back().Distance(pB))
+            std::reverse(poles.begin(), poles.end());
+        return makeContactSpline(poles);
+    }
+    if (poles.back().Distance(poles.front()) <= Precision::Confusion()) poles.pop_back();
+    const int n = (int)poles.size();
+    if (n < 3) return {};
+    auto nearest = [&](const gp_Pnt& p) {
+        int b = 0;
+        double bd = 1e300;
+        for (int i = 0; i < n; i++) {
+            const double d = poles[(size_t)i].Distance(p);
+            if (d < bd) {
+                bd = d;
+                b = i;
+            }
+        }
+        return b;
+    };
+    const int iA = nearest(pntOf(mv, ch.meshVerts.front()));
+    const int iB = nearest(pntOf(mv, ch.meshVerts.back()));
+    auto collect = [&](int step) {
+        std::vector<gp_Pnt> arc;
+        for (int i = iA;; i = (i + step + n) % n) {
+            arc.push_back(poles[(size_t)i]);
+            if (i == iB) break;
+            if ((int)arc.size() > n) break;
+        }
+        return arc;
+    };
+    const std::vector<gp_Pnt> fwd = collect(1);
+    const std::vector<gp_Pnt> bak = collect(-1);
+    const double df = arcChainDist(fwd, mv, ch);
+    const double db = arcChainDist(bak, mv, ch);
+    const std::vector<gp_Pnt>& arc = df <= db ? fwd : bak;
+    if (arc.size() < 2) return {};
+    return makeContactSpline(arc);
+}
+
+AnalyticCurve cylCylCertifiedContact(const Region& A, const Region& B, const MeshView& mv,
+                                    const BoundaryChain& ch, int contactSeamLv) {
+    AnalyticCurve none;
+    const double tau = tauOf(mv);
+    if (!(tau > 0.0) || ch.meshVerts.size() < 2) return none;
+    if (A.radius <= 0.0 || B.radius <= 0.0) return none;
+    // Same chain the mesh publisher already collapses to one shared edge:
+    // both cylinders closed360, a closed loop, at least three vertices, and
+    // a cap owner whose u = 0 column is the edge's only vertex. Any other
+    // chain keeps its mesh polyline (and the warning). A certified curve on
+    // a partial boundary does not share that polyline's vertices, and the
+    // shell opens.
+    if (!(A.closed360 && B.closed360 && ch.closedLoop && ch.meshVerts.size() >= 3)) return none;
+    if (contactSeamLv < 0) return none;
+    try {
+        const gp_Cylinder gA = cylForIntersect(A);
+        const gp_Cylinder gB = cylForIntersect(B);
+        const gp_Ax3 axA = gA.Position();
+        const gp_Ax3 axB = gB.Position();
+        const double rA = gA.Radius();
+        const double rB = gB.Radius();
+        double surfaceBound = 0;
+        for (int lv : ch.meshVerts) {
+            if (lv < 0 || (size_t)lv >= mv.nVtx) return none;
+            const gp_Pnt p = pntOf(mv, lv);
+            surfaceBound = std::max(surfaceBound, distToCylinder(axA, rA, p) + distToCylinder(axB, rB, p));
+        }
+        const double snap = analyticSnapCap(mv, &A, &B);
+        std::vector<gp_Pnt> chainPts;
+        chainPts.reserve(ch.meshVerts.size());
+        for (int lv : ch.meshVerts) {
+            if (lv < 0 || (size_t)lv >= mv.nVtx) return none;
+            chainPts.push_back(pntOf(mv, lv));
+        }
+        const double band = contactChordBand(chainPts.data(), (int)chainPts.size(), ch.closedLoop, axA,
+                                              rA, axB, rB);
+        if (!std::isfinite(band)) return none;
+        int seamLv = ch.meshVerts.front();
+        if (ch.closedLoop) {
+            // The bore that carries this loop as a cap seams on its u = 0
+            // column. The edge has one vertex; it has to be that column or
+            // the generator through the rim misses it (S20's R6 halves).
+            if (contactSeamLv >= 0) seamLv = contactSeamLv;
+            else seamLv = seamVertexOf(mv, A, ch);
+        }
+        if (seamLv < 0 || (size_t)seamLv >= mv.nVtx) return none;
+        const gp_Pnt seamP = pntOf(mv, seamLv);
+
+        struct Cand {
+            Handle(Geom_Curve) src;
+            double maxDist = 0;
+        };
+        std::vector<Cand> cands;
+        auto consider = [&](const Handle(Geom_Curve)& src) {
+            if (src.IsNull()) return;
+            if (ch.closedLoop && !contactGeomClosed(src, tau)) {
+                if (diagRelEnabled())
+                    std::fprintf(stderr, "DIAG_CYLCYL_REJECT regA=%d regB=%d why=open-curve\n",
+                                 A.id, B.id);
+                return;
+            }
+            const double md = maxDistToContact(src, mv, ch);
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_CYLCYL_CAND regA=%d regB=%d maxDist=%.6g snap=%.6g surface=%.6g\n",
+                             A.id, B.id, md, snap, surfaceBound);
+            // Branch choice. analyticSnapCap is the ceiling shared with other
+            // analytic edges. contactChordBand is this chain's own mesh-edge
+            // certificate: a branch farther out is a different intersection.
+            // surfaceBound is the radial vertex residual and is not a window.
+            if (!(md <= snap) || !(md <= band)) {
+                if (diagRelEnabled())
+                    std::fprintf(stderr,
+                                 "DIAG_CYLCYL_REJECT regA=%d regB=%d why=band maxDist=%.6g "
+                                 "band=%.6g snap=%.6g\n",
+                                 A.id, B.id, md, band, snap);
+                return;
+            }
+            cands.push_back(Cand{src, md});
+        };
+
+        const SteinmetzPair sections =
+            steinmetzSections(CylAxis{axA, rA}, CylAxis{axB, rB}, tau);
+        if (sections.n >= 1) consider(new Geom_Ellipse(sections.e0.elips));
+        if (sections.n >= 2) consider(new Geom_Ellipse(sections.e1.elips));
+
+        auto ship = [&](const std::vector<Cand>& from) -> AnalyticCurve {
+            std::vector<Cand> ordered = from;
+            std::stable_sort(ordered.begin(), ordered.end(),
+                             [](const Cand& a, const Cand& b) { return a.maxDist < b.maxDist; });
+            for (const Cand& cand : ordered) {
+                Handle(Geom_BSplineCurve) spline =
+                    ch.closedLoop ? sampleClosedContact(cand.src, seamP, axA, rA, axB, rB, tau)
+                                  : sampleOpenContact(cand.src, mv, ch, axA, rA, axB, rB, tau);
+                if (spline.IsNull() || spline->Degree() != 1) {
+                    if (diagRelEnabled())
+                        std::fprintf(stderr, "DIAG_CYLCYL_REJECT regA=%d regB=%d why=sample\n",
+                                     A.id, B.id);
+                    continue;
+                }
+                const double md = maxDistToContact(spline, mv, ch);
+                if (!(md <= snap)) continue;
+                AnalyticCurve out;
+                out.kind = AnalyticCurve::BSpl;
+                out.bspl = spline;
+                out.contactCertified = true;
+                if (ch.closedLoop) out.contactSeamLv = seamLv;
+                if (diagRelEnabled())
+                    std::fprintf(stderr,
+                                 "DIAG_CYLCYL_CONTACT regA=%d regB=%d nPoles=%d closed=%d "
+                                 "maxDist=%.6g tau=%.6g seamLv=%d\n",
+                                 A.id, B.id, spline->NbPoles(), ch.closedLoop ? 1 : 0, md, tau,
+                                 out.contactSeamLv);
+                return out;
+            }
+            return none;
+        };
+
+        AnalyticCurve exact = ship(cands);
+        if (exact.kind != AnalyticCurve::None) return exact;
+
+        // q = τ/2. The intersection is requested within q so a chord whose sag
+        // is also within q stays inside τ. Measured spanOnBothCyls is the gate.
+        cands.clear();
+        const double q = tau * 0.5;
+        Handle(Geom_CylindricalSurface) sA = new Geom_CylindricalSurface(gA);
+        Handle(Geom_CylindricalSurface) sB = new Geom_CylindricalSurface(gB);
+        GeomAPI_IntSS inter(sA, sB, q);
+        if (diagRelEnabled())
+            std::fprintf(stderr, "DIAG_CYLCYL_INTSS regA=%d regB=%d done=%d n=%d q=%.6g\n", A.id,
+                         B.id, inter.IsDone() ? 1 : 0, inter.IsDone() ? inter.NbLines() : 0, q);
+        if (!inter.IsDone() || inter.NbLines() < 1) return none;
+        for (int i = 1; i <= inter.NbLines(); i++) consider(inter.Line(i));
+        return ship(cands);
+    } catch (const Standard_Failure&) {
+        return none;
+    }
+}
+
 AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView& mv,
                                 const BoundaryChain& ch, double sewTol, WarnFn warn,
-                                bool* usedCylCylFallback = nullptr) {
+                                bool* usedCylCylFallback = nullptr, int contactSeamLv = -1) {
     if (usedCylCylFallback) *usedCylCylFallback = false;
     const double tolAng = Precision::Angular();
     const double tol = std::max(sewTol, Precision::Confusion());
@@ -3032,7 +3418,7 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             return c;
         }
         if (A.type == SurfType::Cylinder && B.type == SurfType::Plane) {
-            return intersectSurfaces(B, A, mv, ch, sewTol, warn);
+            return intersectSurfaces(B, A, mv, ch, sewTol, warn, nullptr, contactSeamLv);
         }
         if (A.type == SurfType::Cylinder && B.type == SurfType::Cylinder) {
             IntAna_QuadQuadGeo iq(cylForIntersect(A), cylForIntersect(B), tol);
@@ -3063,6 +3449,8 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
                                  cylCylClassName(A, B, epsPl), ch.regA, ch.regB, onTol,
                                  ch.meshVerts.size());
             }
+            if (c.kind == AnalyticCurve::None)
+                c = cylCylCertifiedContact(A, B, mv, ch, contactSeamLv);
             if (c.kind == AnalyticCurve::None) {
                 if (diagP2Enabled()) {
                     IntAna_ResultType ty = iq.IsDone() ? iq.TypeInter() : IntAna_Empty;
@@ -3160,6 +3548,23 @@ TopoDS_Edge makeEdgeFromCurve(const AnalyticCurve& c, const TopoDS_Vertex& v1,
                 if (me.IsDone()) return me.Edge();
             } else {
                 BRepBuilderAPI_MakeEdge me(c.elips, v1, v2);
+                if (me.IsDone()) return me.Edge();
+            }
+        } else if (c.kind == AnalyticCurve::BSpl && !c.bspl.IsNull()) {
+            // Poles were sampled from the certified contact. The first pole is
+            // the projection of v1, the last of v2 (the same vertex when the
+            // chain is closed). Tolerance only — the vertex stays put.
+            const double f = c.bspl->FirstParameter();
+            const double l = c.bspl->LastParameter();
+            const gp_Pnt p0 = c.bspl->Value(f);
+            const gp_Pnt p1 = c.bspl->Value(l);
+            bumpVertexTol(v1, BRep_Tool::Pnt(v1).Distance(p0));
+            bumpVertexTol(v2, BRep_Tool::Pnt(v2).Distance(p1));
+            if (closedFull || v1.IsSame(v2)) {
+                BRepBuilderAPI_MakeEdge me(c.bspl, v1, v1, f, l);
+                if (me.IsDone()) return me.Edge();
+            } else {
+                BRepBuilderAPI_MakeEdge me(c.bspl, v1, v2, f, l);
                 if (me.IsDone()) return me.Edge();
             }
         }
@@ -16611,6 +17016,24 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                      j6UncollapsePass == 0)
                         ? warn
                         : nullptr;
+                // D-fc-5.17: a closed cyl|cyl contact is one edge with one vertex.
+                // That vertex is the cap owner's u = 0 column (vertexClosestToU
+                // at 0), the same column the mesh publisher seams on. Azimuth 0
+                // of the other cylinder does not lie on that generator.
+                int contactSeamLv = -1;
+                if (anaPair && bothCyl && ch.closedLoop && A && B) {
+                    const Region* capOwner = nullptr;
+                    for (const Region* R : {A, B}) {
+                        for (const Loop& lp : R->loops) {
+                            if (lp.role != LoopRole::CapLow && lp.role != LoopRole::CapHigh)
+                                continue;
+                            for (int k : lp.chainIdx)
+                                if (k == (int)ci) capOwner = R;
+                        }
+                        if (capOwner) break;
+                    }
+                    if (capOwner) contactSeamLv = vertexClosestToU(mv, *capOwner, ch, 0.0);
+                }
                 if (anaPair) {
                     if (ch.tangent) {
                         if (A->type == SurfType::Cylinder && B->type == SurfType::Plane)
@@ -16622,9 +17045,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                 *A, *B, mv, ch, intAnaAcceptResidual(mv, ch, sewTol, A, B));
                             usedFallback = (curve.kind != AnalyticCurve::None);
                         } else
-                            curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn);
+                            curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn, nullptr,
+                                                      contactSeamLv);
                     } else {
-                        curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn, &usedFallback);
+                        curve = intersectSurfaces(*A, *B, mv, ch, sewTol, chainWarn, &usedFallback,
+                                                  contactSeamLv);
                     }
                     if (usedFallback && curve.kind != AnalyticCurve::None) {
                         const double epsPl = derivedEpsPlane(mv);
@@ -16854,6 +17279,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                                                                 : nullptr;
                     const Region* axR = cyl ? cyl : cn ? cn : tor;
                     int sv = axR ? seamVertexOf(mv, *axR, ch) : ch.meshVerts.front();
+                    // D-fc-5.17: the certified contact was rotated onto the cap
+                    // owner's u = 0 column. The edge's vertex is that column.
+                    if (curve.contactCertified && curve.contactSeamLv >= 0)
+                        sv = curve.contactSeamLv;
                     ia = ib = sv;
                 } else {
                     if (ch.meshVerts.size() < 2) continue;
@@ -16935,6 +17364,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     const double ratioSew = sewTol > 0.0 ? maxDist / sewTol : maxDist;
                     const char* kind = (curve.kind == AnalyticCurve::Circ)   ? "circ"
                                        : (curve.kind == AnalyticCurve::Lin) ? "lin"
+                                       : (curve.kind == AnalyticCurve::BSpl) ? "bspl"
                                                                             : "elips";
                     const int fb = (maxDist > sewTol) ? 1 : 0;
                     if (recoverPass == 0 && rounds == 0 && fallbackGuardPass == 0 &&
@@ -16953,7 +17383,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // fb=0 (ratioSew≈0) and keep geom.
                     // D-S1 / D-S2, discard path only (guard a). A chain that is
                     // inside sewTol today is untouched above.
-                    if (fb) {
+                    // D-fc-5.17: a τ-certified contact is not discarded for sitting
+                    // farther than sewTol from the mesh vertices. The vertices of
+                    // an N-gon lie on the chords; the contact lies on the cylinders.
+                    if (fb && !curve.contactCertified) {
                         const bool pass0 = recoverPass == 0 && rounds == 0 &&
                                            fallbackGuardPass == 0 && j6UncollapsePass == 0;
                         const ChainSpanRuns sp = chainSpanRuns(curve, mv, ch, A, B, sewTol);
@@ -17335,6 +17768,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 (void)plnHint;
                 if (e.IsNull()) {
+                    // The sample did not become an edge. The mesh polyline stays,
+                    // so the IntAna warning stays with it. Do not enroll
+                    // chainEdgeFail: that drops cylinders on a bent pipe.
+                    if (curve.contactCertified) {
+                        emit(chainWarn, "smooth: IntAna cyl|cyl empty/same — keeping mesh polyline");
+                        nNone++;
+                        continue;
+                    }
                     const gp_Pnt paF = BRep_Tool::Pnt(verts[(size_t)ia]);
                     const gp_Pnt pbF = BRep_Tool::Pnt(verts[(size_t)ib]);
                     const bool identicLine =
@@ -17517,6 +17958,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (curve.kind == AnalyticCurve::Circ) kindStr = "circ";
                     else if (curve.kind == AnalyticCurve::Lin) kindStr = "lin";
                     else if (curve.kind == AnalyticCurve::Elips) kindStr = "elips";
+                    else if (curve.kind == AnalyticCurve::BSpl) kindStr = "tier2poly";
                     SeamBindCounts acc;
                     for (TopoDS_Edge& ce : chainEdges) {
                         bindAllVariants(ce, *ownerR, kindStr, mv, (int)ci, acc);
@@ -17531,6 +17973,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
                 geom[ci].collapsed = true;
                 geom[ci].edges = chainEdges;
+                if (curve.kind == AnalyticCurve::BSpl) geom[ci].tier2Polyline = true;
                 for (const TopoDS_Edge& ce : chainEdges) noteWirePop(ce, "rebuildCollapsed", (int)ci);
                 collapsed[ci] = 1;
                 nOk++;
