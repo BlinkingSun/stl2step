@@ -16,6 +16,8 @@
 #include "refit_profile_cert.hpp"
 #include "refit_relational.hpp"
 
+#include <Precision.hxx>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -112,11 +114,26 @@ SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double t
     return f;
 }
 
-double planeResidual(const std::vector<gp_XYZ>& pts) {
-    if (pts.size() < 4) return 0.0;
+// solved: a finite residual was measured. Fewer than four points is residual 0
+// (the historical value). A failed eigensolve, a zero normal, or a non-finite
+// residual is unsolved: the caller must refuse, not treat it as "not a plane".
+namespace {
+struct PlaneSolve {
+    bool solved = false;
+    double residual = 0;
+};
+
+PlaneSolve solvePlane(const std::vector<gp_XYZ>& pts) {
+    PlaneSolve s;
+    if (pts.size() < 4) {
+        s.solved = true;
+        s.residual = 0.0;
+        return s;
+    }
     gp_XYZ m(0, 0, 0);
     for (const gp_XYZ& p : pts) m += p;
     m /= (double)pts.size();
+    if (!std::isfinite(m.X()) || !std::isfinite(m.Y()) || !std::isfinite(m.Z())) return s;
     std::array<std::array<double, 3>, 3> C{};
     for (const gp_XYZ& p : pts) {
         const double d[3] = {p.X() - m.X(), p.Y() - m.Y(), p.Z() - m.Z()};
@@ -125,21 +142,51 @@ double planeResidual(const std::vector<gp_XYZ>& pts) {
     }
     std::array<double, 3> ev{};
     std::array<std::array<double, 3>, 3> evec{};
-    if (!jacobiEigenSymmetric3(C, ev, evec)) return HUGE_VAL;
+    if (!jacobiEigenSymmetric3(C, ev, evec)) return s;
     int k = 0;
     for (int i = 1; i < 3; ++i)
         if (ev[i] < ev[k]) k = i;
     gp_XYZ n(evec[k][0], evec[k][1], evec[k][2]);  // row k: eigenvector of eval[k]
     const double nm = n.Modulus();
-    if (!(nm > 0.0)) return HUGE_VAL;
+    if (!(nm > 0.0) || !std::isfinite(nm)) return s;
     n /= nm;
     double mx = 0.0;
-    for (const gp_XYZ& p : pts) mx = std::max(mx, std::fabs((p - m).Dot(n)));
-    return mx;
+    for (const gp_XYZ& p : pts) {
+        const double h = std::fabs((p - m).Dot(n));
+        if (!std::isfinite(h)) return s;
+        mx = std::max(mx, h);
+    }
+    s.solved = true;
+    s.residual = mx;
+    return s;
+}
+}  // namespace
+
+double planeResidual(const std::vector<gp_XYZ>& pts) {
+    const PlaneSolve s = solvePlane(pts);
+    return s.solved ? s.residual : HUGE_VAL;
 }
 
 bool pointsPlanar(const std::vector<gp_XYZ>& pts, double tau) {
-    return planeResidual(pts) <= tau;
+    const PlaneSolve s = solvePlane(pts);
+    return s.solved && std::isfinite(s.residual) && s.residual <= tau;
+}
+
+bool planeGateRefuses(const std::vector<gp_XYZ>& pts, double tau) {
+    // D-fc-5.20. q <= 0 admits nothing. A failed eigensolve is not evidence
+    // the points leave the plane, so the plane-first refusal still fires.
+    if (!(tau > 0.0) || !std::isfinite(tau)) return true;
+    const PlaneSolve s = solvePlane(pts);
+    if (!s.solved || !std::isfinite(s.residual)) return true;
+    return s.residual <= tau;
+}
+
+double pinnedVertexTol(double d, double cap) {
+    // Same pad partialFaceTolCap already applies. Admitted only up to cap:
+    // a vertex at the cap must not be stored past it.
+    const double padded = d * 1.001 + Precision::Confusion();
+    if (!(padded < cap)) return cap;
+    return padded;
 }
 
 RoundCert certifyCylinderRound(const RoundSpine& spine,
@@ -579,9 +626,10 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 refuse("underdetermined");
                 continue;
             }
-            // Plane first (fewest parameters).
+            // Plane first (fewest parameters). A failed eigensolve refuses
+            // here; it is not treated as "not a plane" (D-fc-5.20).
             planeRes = planeResidual(vp);
-            if (pointsPlanar(vp, tau)) {
+            if (planeGateRefuses(vp, tau)) {
                 refuse("line");
                 continue;
             }
@@ -896,9 +944,14 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 newIdx[(std::size_t)i] = (int)keep.size();
                 keep.push_back(std::move(work.accepted[(std::size_t)i]));
             }
+            // ChamferCone and TorusBlend both store a neighbour as an accepted
+            // index. A dissolved slot clears the link (newIdx is -1). A donor
+            // above the hole moves with the compaction, so the index is not
+            // left naming the wrong region (D-fc-5.20).
             for (Region& rg : keep) {
-                if (rg.origin != Origin::ChamferCone || rg.filletNbrA < 0 || rg.filletNbrA >= nAcc)
-                    continue;
+                const bool nbr =
+                    rg.origin == Origin::ChamferCone || rg.origin == Origin::TorusBlend;
+                if (!nbr || rg.filletNbrA < 0 || rg.filletNbrA >= nAcc) continue;
                 rg.filletNbrA = newIdx[(std::size_t)rg.filletNbrA];
             }
             for (TorusPendingReclaim& pack : work.torusPending)

@@ -8,11 +8,14 @@
 #include "refit_relational.hpp"
 #include "refit_relational_sphere.hpp"
 
+#include <Precision.hxx>
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <utility>
 #include <vector>
@@ -172,8 +175,37 @@ static void casePredicates() {
     std::vector<gp_XYZ> pl = {gp_XYZ(0, 0, 0), gp_XYZ(1, 0, 0), gp_XYZ(0, 1, 0),
                               gp_XYZ(1, 1, 0.5 * kTau), gp_XYZ(2, 3, 0)};
     expect(pointsPlanar(pl, kTau), "points within tau of a plane: planar");
+    expect(planeGateRefuses(pl, kTau), "a solved plane within tau refuses");
     pl.push_back(gp_XYZ(0.5, 0.5, 3 * kTau));
     expect(!pointsPlanar(pl, kTau), "a point 3 tau off: not planar");
+    expect(!planeGateRefuses(pl, kTau), "a solved plane beyond tau does not refuse");
+    // D-fc-5.20. Coordinates whose covariance overflows make the eigensolve
+    // return false. That is a refusal, not a skip of the plane gate. The
+    // magnitude is only large enough to overflow a product of doubles. It is
+    // not a measured length from a part.
+    const double big = 1e200;
+    const std::vector<gp_XYZ> boom = {gp_XYZ(0, 0, 0), gp_XYZ(big, 0, 0), gp_XYZ(0, big, 0),
+                                      gp_XYZ(0, 0, big), gp_XYZ(big, big, 0)};
+    expect(!pointsPlanar(boom, kTau), "an unsolved plane is not a measured plane");
+    expect(planeGateRefuses(boom, kTau), "a failed eigensolve refuses the plane gate");
+    expect(planeResidual(boom) == HUGE_VAL, "a failed eigensolve is not a finite residual");
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const std::vector<gp_XYZ> nanPts = {gp_XYZ(0, 0, 0), gp_XYZ(1, 0, 0), gp_XYZ(0, 1, 0),
+                                        gp_XYZ(0, 0, 1), gp_XYZ(nan, 0, 0)};
+    expect(planeGateRefuses(nanPts, kTau), "a non-finite cloud refuses the plane gate");
+    expect(planeGateRefuses(pl, 0.0), "tau 0 refuses the plane gate");
+    expect(planeGateRefuses(pl, nan), "a non-finite tau refuses the plane gate");
+
+    // pinVertices. A gap at the cap used to be stored past the cap by the pad.
+    const double cap = 1.0;
+    expect(pinnedVertexTol(cap, cap) == cap, "a vertex at the cap is stored at the cap");
+    const double mid = pinnedVertexTol(0.5 * cap, cap);
+    expect(mid > 0.5 * cap && mid < cap, "a vertex at half the cap keeps the pad inside the cap");
+    const double near = cap / 1.001;
+    expect(near < cap && pinnedVertexTol(near, cap) == cap,
+           "a pad that would pass the cap is clamped to the cap");
+    expect(pinnedVertexTol(0.0, cap) == Precision::Confusion(),
+           "a vertex on the pcurve end stores only Confusion, under the cap");
 
     // I9 cap volume: the flat octant triangle of a unit sphere bounds pi/6 - 1/6.
     const double v = sphereCapVolume(gp_XYZ(0, 0, 0), 1.0, gp_XYZ(1, 0, 0), gp_XYZ(0, 1, 0),
@@ -405,10 +437,71 @@ static void caseCorner() {
     }
 }
 
+// A dissolved uncertified region leaves a hole in the accepted list. A torus
+// whose neighbour index named that hole is cleared. A torus whose neighbour
+// sat above the hole takes the dense index, not the stale one.
+static void caseDissolveNbr() {
+    const double r = 2.0;
+    const int n = 6;
+    const Corner k = makeCorner(r, n, 5.0, r, 0.0);
+    SegmentWork w;
+    for (int q = 0; q < 3; ++q)
+        w.accepted.push_back(roundRegion(q, r, k.roundTris[(std::size_t)q], Origin::FilletStrip, 0.0));
+    // Index 3: uncertified CylGrow holding the octant. The corner robs it.
+    w.accepted.push_back(roundRegion(0, r, k.sphereTris, Origin::CylGrow, 3 * kTau));
+    Region torGone;
+    torGone.type = SurfType::Torus;
+    torGone.origin = Origin::TorusBlend;
+    torGone.radius = 4.0;
+    torGone.radius2 = 1.0;
+    torGone.filletNbrA = 3;  // the region that dissolves
+    w.accepted.push_back(torGone);
+    Region donor;
+    donor.type = SurfType::Cylinder;
+    donor.origin = Origin::CylGrow;
+    donor.radius = r;
+    donor.maxVertexDev = 0.0;
+    w.accepted.push_back(donor);  // index 5, survives
+    Region torLive;
+    torLive.type = SurfType::Torus;
+    torLive.origin = Origin::TorusBlend;
+    torLive.radius = 4.0;
+    torLive.radius2 = 2.0;
+    torLive.filletNbrA = 5;  // the surviving donor, above the hole
+    w.accepted.push_back(torLive);
+    Region cone;
+    cone.type = SurfType::Cone;
+    cone.origin = Origin::ChamferCone;
+    cone.radius = r;
+    cone.filletNbrA = 5;
+    w.accepted.push_back(cone);
+    const MeshView mv = k.s.view();
+    SegmentParams p;
+    DerivedTols tol;
+    expect(claimSphereCorners(mv, p, tol, w), "dissolve claim returns");
+    int nSph = 0, donorAt = -1, torGoneNbr = 99, torLiveNbr = 99, coneNbr = 99;
+    for (int i = 0; i < (int)w.accepted.size(); ++i) {
+        const Region& g = w.accepted[(std::size_t)i];
+        if (g.type == SurfType::Sphere && g.origin == Origin::SphereCorner) ++nSph;
+        if (g.origin == Origin::TorusBlend && g.radius2 == 1.0) torGoneNbr = g.filletNbrA;
+        if (g.origin == Origin::TorusBlend && g.radius2 == 2.0) torLiveNbr = g.filletNbrA;
+        if (g.origin == Origin::ChamferCone) coneNbr = g.filletNbrA;
+        if (g.origin == Origin::CylGrow && g.tris.empty() && g.maxVertexDev == 0.0) donorAt = i;
+    }
+    expect(nSph == 1, "the corner still claims one sphere");
+    expect(torGoneNbr == -1, "a torus naming the dissolved region is cleared");
+    expect(donorAt >= 0 && torLiveNbr == donorAt,
+           "a torus naming a later donor takes the dense index");
+    expect(donorAt >= 0 && coneNbr == donorAt, "a chamfer cone's neighbour is remapped too");
+    expect(torLiveNbr >= 0 && torLiveNbr < (int)w.accepted.size(),
+           "the remapped torus index is inside the kept list");
+}
+
 int main() {
     casePredicates();
     caseRoundCert();
     caseCorner();
+    caseDissolveNbr();
     std::fprintf(stderr, "relational_sphere_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS",
                  gFail);
     return gFail ? 1 : 0;
