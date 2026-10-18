@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-18
+
+TrueForm now builds tori, sphere corners, hems, horn tori, ruled walls and arcs without a common
+radius from the planes and holes it has already identified (task `stl2step-fc`, increments 4 and 5
+below).
+
+### Fifth increment
+
 Fifth increment: arcs without a common radius, closed walls, spheres, hems, horn tori and ruled
 walls. On the training files the tray now converts with no faceted regions (its divider's
 concentric arches, the floor-outline skirt and the roof-tip apex cones are analytic), the drill
