@@ -1021,8 +1021,63 @@ static void caseResegment(const char* stl) {
            "reseg: no pre-T state, no resegment");
 }
 
+// D-fc-5.17. Points on a circle with Rmaj = r - 0.4*tau. certifyTorus stops at
+// spindle-torus. The horn is the caller: relational r = R_edge / 2 first, then
+// a two-parameter refit. A gap past tau, or one vertex past tau, stays refused.
+static void caseHornFromSpindle() {
+    const double tau = 2e-6;
+    const double r = 1.0;
+    const double z0 = 0.4;
+    const double Rmaj = r - 0.4 * tau;
+    const int nPsi = 4;
+    const int nPhi = 5;
+    std::vector<ProfPt> P;
+    int lv = 0;
+    for (int j = 0; j < nPhi; ++j) {
+        const double t = (double)j / (double)(nPhi - 1);
+        const double phi = 0.2 + t * (1.2 - 0.2);
+        const double rho = Rmaj + r * std::cos(phi);
+        const double z = z0 + r * std::sin(phi);
+        for (int i = 0; i < nPsi; ++i) {
+            ProfPt p;
+            p.rho = rho;
+            p.z = z;
+            p.psi = (kPi * 2.0) * (double)i / (double)nPsi;
+            p.lv = lv++;
+            P.push_back(p);
+        }
+    }
+    const TorusCert raw = certifyTorus(P, tau);
+    expect(!raw.ok && raw.determinate && raw.why && std::string(raw.why) == "spindle-torus",
+           "horn: certifyTorus refuses the near-horn as a spindle");
+    expect(raw.Rmaj - raw.Rmin >= -tau && raw.Rmaj - raw.Rmin <= 0.0,
+           "horn: the spindle gap is inside tau");
+    const TorusCert h = hornFromSpindle(raw, P, tau, 0.0, 8);
+    expect(h.ok && h.Rmaj == h.Rmin && h.Rmin > tau && h.maxDev <= tau,
+           "horn: two-parameter refit, every vertex within tau");
+    const TorusCert rel = hornFromSpindle(raw, P, tau, 2.0 * r, 8);
+    expect(rel.ok && std::fabs(rel.Rmin - r) <= tau && rel.Rmaj == rel.Rmin,
+           "horn: relational r = R_edge / 2");
+    const TorusCert wrong = hornFromSpindle(raw, P, tau, 10.0, 8);
+    expect(wrong.ok && std::fabs(wrong.Rmin - r) <= tau && std::fabs(wrong.Rmin - 5.0) > tau,
+           "horn: a donor radius the vertices miss falls through to the two-parameter fit");
+    TorusCert deep = raw;
+    deep.Rmaj = r - 10.0 * tau;
+    deep.ok = false;
+    deep.determinate = true;
+    deep.why = "spindle-torus";
+    const TorusCert deepOut = hornFromSpindle(deep, P, tau, 0.0, 8);
+    expect(!deepOut.ok && deepOut.why && std::string(deepOut.why) == "spindle-torus",
+           "horn: a spindle deeper than tau stays a spindle");
+    std::vector<ProfPt> moved = P;
+    moved[0].rho += 50.0 * tau;
+    const TorusCert off = hornFromSpindle(raw, moved, tau, 0.0, 8);
+    expect(!off.ok, "horn: a vertex outside tau is not shipped");
+}
+
 int main(int argc, char** argv) {
     if (argc > 1) caseResegment(argv[1]);
+    caseHornFromSpindle();
     caseRefusalGeometric();
     caseChainFailsGeometric();
     caseBridgeChain();

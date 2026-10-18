@@ -480,6 +480,30 @@ static void caseSpindle() {
     if (!hasWhy(diag, "spindle")) std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
 }
 
+// D-fc-5.17. A quarter whose fitted major radius sits half a tau inside the
+// minor radius is a spindle to certifyTorus. The donor cylinder is the outer
+// equator, so the horn that ships has Rmaj = r exactly.
+static void caseHorn() {
+    const double tau = 2.0 * 1e-6;
+    const double r = 2.0;
+    const double Rmaj = r - 0.5 * tau;
+    Part p = lathe(Rmaj, r, 0.0, 0.5 * kPi, 5, 16, Rmaj + r, -4.0, 0.0);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    expect(tauOf(mv) == tau, "horn tau is 2q");
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Torus);
+    const Region* t = findNew(p.work, SurfType::Torus, Origin::TorusBlend);
+    expect(t != nullptr, "horn claimed");
+    if (!t) return;
+    std::fprintf(stderr, "horn Rmaj=%.10g Rmin=%.10g dev=%.3g tau=%.3g\n", t->radius, t->radius2,
+                 t->maxVertexDev, tauOf(mv));
+    expect(t->radius == t->radius2, "horn Rmaj = r");
+    expect(t->radius > tauOf(mv), "horn radius above tau");
+    expect(t->maxVertexDev <= tauOf(mv), "horn vertices within tau");
+}
+
 static void casePartial() {
     Part p = frustum(16, 2, 4, 10.0, 0.0, 14.0, 4.0, 4.0, false);
     MeshView mv = p.mesh.view();
@@ -1260,6 +1284,7 @@ int main() {
     caseTwoLevelNotTorus();
     caseSphere();
     caseSpindle();
+    caseHorn();
     casePartial();
     caseBadDonor();
     caseWedge();

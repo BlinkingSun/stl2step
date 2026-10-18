@@ -95,6 +95,16 @@ bool torusDevClassIsExact(TorusDevClass c);
 // (R == 0) and a degenerate circle (r == 0).
 bool torusIsRing(const gp_Torus& torus);
 
+// D-fc-5.17. Exact horn: both radii above gp::Resolution and |R - r| no larger
+// than gp::Resolution (gp_Torus's constructor admits R == r; SetMajorRadius
+// does not). A spindle (R < r) and a ring (R - r > gp::Resolution) are not.
+// The deviation class stays refused — torusIsRing is unchanged.
+bool torusIsHorn(const gp_Torus& torus);
+
+// v-iso of a horn whose radius R + r*cos(v) is positive. The pinch (radius 0)
+// is not a circle. False for a ring or a spindle; those stay on torusVIsoCircle.
+bool hornVIsoCircle(const gp_Torus& torus, double v, gp_Circ& out);
+
 // z = (p - torus.Location()) . torus.Axis().Direction().
 double torusAxialCoord(const gp_Torus& torus, const gp_Pnt& p);
 

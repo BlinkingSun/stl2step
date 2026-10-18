@@ -115,6 +115,18 @@ int torusSidesOf(int cols, double span, bool closed);
 std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& origin,
                                  const gp_XYZ& axis, const gp_XYZ& xHint);
 
+// D-fc-5.17. certifyTorus refuses a spindle and is not edited. When that
+// refusal is within tau of a horn (-tau <= Rmaj - Rmin <= 0, both radii above
+// tau), the caller tries the fewer-parameter horn: the profile circle passes
+// through the axis (Rmaj = r). Relational form first, one free parameter z0:
+// about a certified edge-round of radius edgeR > tau, r = edgeR / 2 so
+// Rmaj = edgeR - r. Otherwise refit (z0, r), seeded by Rmaj := the spindle's
+// Rmin. Accept only when every profile point is within tau. Returns `spindle`
+// unchanged when the horn does not apply or does not fit. maxIt is the
+// caller's p.maxRefineIters cap.
+TorusCert hornFromSpindle(const TorusCert& spindle, const std::vector<ProfPt>& P, double tau,
+                          double edgeR, int maxIt);
+
 // D-fc-4.9 P2 option (i): the over-determined family certificate of a Torus-mode
 // ring chain. One least-squares axis (4 DOF) over the coaxial donor family's
 // certified vertices (one radius per donor, projected out) PLUS the chain's

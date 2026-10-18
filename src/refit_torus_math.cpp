@@ -95,6 +95,28 @@ bool torusIsRing(const gp_Torus& torus) {
     return torusParams(torus, R, r);
 }
 
+bool torusIsHorn(const gp_Torus& torus) {
+    const double R = torus.MajorRadius();
+    const double r = torus.MinorRadius();
+    if (!std::isfinite(R) || !std::isfinite(r)) return false;
+    if (!(r > gp::Resolution()) || !(R > gp::Resolution())) return false;
+    return std::fabs(R - r) <= gp::Resolution();
+}
+
+bool hornVIsoCircle(const gp_Torus& torus, double v, gp_Circ& out) {
+    if (!torusIsHorn(torus) || !std::isfinite(v)) return false;
+    const double R = torus.MajorRadius();
+    const double r = torus.MinorRadius();
+    const double radius = R + r * std::cos(v);
+    const double offset = r * std::sin(v);
+    if (!std::isfinite(radius) || !(radius > gp::Resolution()) || !std::isfinite(offset))
+        return false;
+    const gp_Dir za = torus.Axis().Direction();
+    const gp_Pnt c = torus.Location().Translated(gp_Vec(za) * offset);
+    out = gp_Circ(gp_Ax2(c, za, torus.Position().XDirection()), radius);
+    return true;
+}
+
 double torusAxialCoord(const gp_Torus& torus, const gp_Pnt& p) {
     return (p.XYZ() - torus.Location().XYZ()).Dot(torus.Axis().Direction().XYZ());
 }
@@ -128,13 +150,15 @@ bool torusVIsoCircle(const gp_Torus& torus, double v, gp_Circ& out) {
 
 bool torusPlaneContactCircle(const gp_Torus& torus, const gp_Pln& pln, double tol, gp_Circ& out) {
     double R, r;
-    if (!torusParams(torus, R, r) || !(tol >= 0.0)) return false;
+    // A horn's top and bottom circles have positive radius. A spindle stays refused.
+    if (!(tol >= 0.0)) return false;
+    if (!torusParams(torus, R, r) && !torusIsHorn(torus)) return false;
     const gp_Vec a(torus.Axis().Direction());
     const gp_Vec n(pln.Axis().Direction());
     const double tilt = a.Crossed(n).Magnitude();
     for (const double v : {0.5 * kTorusPi, -0.5 * kTorusPi}) {
         gp_Circ c;
-        if (!torusVIsoCircle(torus, v, c)) continue;
+        if (!torusVIsoCircle(torus, v, c) && !hornVIsoCircle(torus, v, c)) continue;
         const double sup = std::fabs(gp_Vec(pln.Location(), c.Location()).Dot(n)) + c.Radius() * tilt;
         if (std::isfinite(sup) && sup <= tol) {
             out = c;
@@ -147,7 +171,10 @@ bool torusPlaneContactCircle(const gp_Torus& torus, const gp_Pln& pln, double to
 bool torusCylinderContactCircle(const gp_Torus& torus, const gp_Cylinder& cyl, double tol,
                                 gp_Circ& out) {
     double R, r;
-    if (!torusParams(torus, R, r) || !(tol >= 0.0)) return false;
+    // A horn's outer equator is a circle; its pinch (v = pi, radius 0) is not.
+    // A spindle stays refused.
+    if (!(tol >= 0.0)) return false;
+    if (!torusParams(torus, R, r) && !torusIsHorn(torus)) return false;
     const gp_Vec a(torus.Axis().Direction());
     const gp_Vec b(cyl.Axis().Direction());
     // Seen along the cylinder axis the circle is an ellipse of semi-axes radius
@@ -157,7 +184,7 @@ bool torusCylinderContactCircle(const gp_Torus& torus, const gp_Cylinder& cyl, d
     const double off = (d - b * d.Dot(b)).Magnitude();
     for (const double v : {0.0, kTorusPi}) {
         gp_Circ c;
-        if (!torusVIsoCircle(torus, v, c)) continue;
+        if (!torusVIsoCircle(torus, v, c) && !hornVIsoCircle(torus, v, c)) continue;
         const double sup = off + std::fabs(c.Radius() - cyl.Radius()) + c.Radius() * squash;
         if (std::isfinite(sup) && sup <= tol) {
             out = c;

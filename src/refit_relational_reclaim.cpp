@@ -2853,6 +2853,138 @@ std::vector<ProfPt> profileAbout(const std::vector<gp_XYZ>& pts, const gp_XYZ& o
     return out;
 }
 
+namespace {
+
+bool hornProfileDev(const std::vector<ProfPt>& P, double z0, double r, double& maxDev, double& rms) {
+    maxDev = 0.0;
+    rms = 0.0;
+    if (!(r > 0.0) || P.empty()) return false;
+    double sum2 = 0.0;
+    for (const ProfPt& p : P) {
+        if (!std::isfinite(p.rho) || !std::isfinite(p.z)) return false;
+        const double d = std::fabs(std::hypot(p.rho - r, p.z - z0) - r);
+        if (!std::isfinite(d)) return false;
+        maxDev = std::max(maxDev, d);
+        sum2 += d * d;
+    }
+    rms = std::sqrt(sum2 / (double)P.size());
+    return std::isfinite(maxDev) && std::isfinite(rms);
+}
+
+// One free parameter z0. r is fixed (the relational horn, or a held seed).
+bool fitHornZ(const std::vector<ProfPt>& P, double r, double& z0, int maxIt, double tau,
+              double& maxDev, double& rms) {
+    if (!(r > tau) || maxIt < 1) return false;
+    for (int it = 0; it < maxIt; ++it) {
+        double h = 0.0, g = 0.0;
+        for (const ProfPt& p : P) {
+            const double dy = p.z - z0;
+            const double s = std::hypot(p.rho - r, dy);
+            if (!(s > gp::Resolution())) continue;
+            const double jz = -dy / s;
+            const double res = s - r;
+            h += jz * jz;
+            g += jz * res;
+        }
+        if (!(h > gp::Resolution())) break;
+        const double dz = -g / h;
+        if (!std::isfinite(dz)) return false;
+        z0 += dz;
+        if (std::fabs(dz) <= tau) break;
+    }
+    return std::isfinite(z0) && hornProfileDev(P, z0, r, maxDev, rms) && maxDev <= tau;
+}
+
+// Two free parameters (z0, r), Rmaj held equal to r. Seeded by the caller.
+bool fitHornZR(const std::vector<ProfPt>& P, double& z0, double& r, int maxIt, double tau,
+               double& maxDev, double& rms) {
+    if (!(r > tau) || maxIt < 1) return false;
+    for (int it = 0; it < maxIt; ++it) {
+        double h11 = 0.0, h12 = 0.0, h22 = 0.0, g1 = 0.0, g2 = 0.0;
+        for (const ProfPt& p : P) {
+            const double dx = p.rho - r, dy = p.z - z0;
+            const double s = std::hypot(dx, dy);
+            if (!(s > gp::Resolution())) continue;
+            const double jz = -dy / s;
+            const double jr = -dx / s - 1.0;
+            const double res = s - r;
+            h11 += jz * jz;
+            h12 += jz * jr;
+            h22 += jr * jr;
+            g1 += jz * res;
+            g2 += jr * res;
+        }
+        const double det = h11 * h22 - h12 * h12;
+        if (!(std::fabs(det) > gp::Resolution())) break;
+        const double dz = (-g1 * h22 + g2 * h12) / det;
+        const double dr = (-h11 * g2 + h12 * g1) / det;
+        if (!std::isfinite(dz) || !std::isfinite(dr)) return false;
+        z0 += dz;
+        r += dr;
+        if (!(r > tau)) return false;
+        if (std::hypot(dz, dr) <= tau) break;
+    }
+    return std::isfinite(z0) && hornProfileDev(P, z0, r, maxDev, rms) && maxDev <= tau;
+}
+
+}  // namespace
+
+TorusCert hornFromSpindle(const TorusCert& spindle, const std::vector<ProfPt>& P, double tau,
+                          double edgeR, int maxIt) {
+    if (!(tau > 0.0) || maxIt < 1 || P.size() < 3) return spindle;
+    if (spindle.ok || !spindle.determinate || !spindle.why) return spindle;
+    if (std::strcmp(spindle.why, "spindle-torus") != 0) return spindle;
+    if (!(spindle.Rmin > tau)) return spindle;
+    const double gap = spindle.Rmaj - spindle.Rmin;
+    if (!(gap >= -tau && gap <= 0.0)) return spindle;
+
+    double bestZ = 0.0, bestR = 0.0, bestMax = 0.0, bestRms = 0.0;
+    bool got = false;
+    // Fewest parameters first. r fixed by the certified edge-round: Rmaj = r
+    // = edgeR / 2, so Rmaj = edgeR - r. One free parameter, z0.
+    if (edgeR > tau) {
+        double z = spindle.z0, mx = 0.0, rms = 0.0;
+        if (fitHornZ(P, 0.5 * edgeR, z, maxIt, tau, mx, rms)) {
+            bestZ = z;
+            bestR = 0.5 * edgeR;
+            bestMax = mx;
+            bestRms = rms;
+            got = true;
+        }
+    }
+    // Rmaj := the spindle's Rmin, then refit (z0, r). The snap itself ships
+    // when the refit does not improve on a residual already within tau.
+    if (!got) {
+        double z = spindle.z0, r = spindle.Rmin, mx = 0.0, rms = 0.0;
+        double seedMax = 0.0, seedRms = 0.0;
+        const bool seedOk = hornProfileDev(P, z, r, seedMax, seedRms) && seedMax <= tau;
+        const bool refined = fitHornZR(P, z, r, maxIt, tau, mx, rms);
+        if (refined) {
+            bestZ = z;
+            bestR = r;
+            bestMax = mx;
+            bestRms = rms;
+            got = true;
+        } else if (seedOk) {
+            bestZ = spindle.z0;
+            bestR = spindle.Rmin;
+            bestMax = seedMax;
+            bestRms = seedRms;
+            got = true;
+        }
+    }
+    if (!got || !(bestR > tau)) return spindle;
+    TorusCert h = spindle;
+    h.ok = true;
+    h.why = "accept";
+    h.Rmaj = bestR;
+    h.Rmin = bestR;
+    h.z0 = bestZ;
+    h.maxDev = bestMax;
+    h.rmsDev = bestRms;
+    return h;
+}
+
 // Levenberg-Marquardt on (axis tilt along U, V; axis point along U, V; Rmaj, z0,
 // Rmin). Donor residuals rho - R_g with R_g projected out as the mean of donor g's
 // own rho (jointAxisFit's step); chain residuals hypot(rho - Rmaj, z - z0) - Rmin.
@@ -3031,7 +3163,18 @@ JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
     out.tilt = std::min(1.0, W.Crossed(Wseed).Modulus());
     out.tilt = std::asin(out.tilt);
     out.family = jointAxisAbout(donors, C, W);
-    out.chain = certifyTorus(profileAbout(chain, C, W, xHint), tau);
+    const std::vector<ProfPt> chainProf = profileAbout(chain, C, W, xHint);
+    out.chain = certifyTorus(chainProf, tau);
+    // D-fc-5.17: a joint-axis spindle within tau of a horn is tried here, at
+    // the certifyTorus call. The family still has to certify (every donor
+    // vertex within tau); a horn that does not fit leaves the spindle refusal.
+    if (!out.chain.ok) {
+        const double edgeR = (!out.family.radius.empty() && jointAxisCertifies(out.family, tau))
+                                 ? out.family.radius.front()
+                                 : 0.0;
+        const TorusCert horn = hornFromSpindle(out.chain, chainProf, tau, edgeR, std::max(1, maxIters));
+        if (horn.ok) out.chain = horn;
+    }
     out.ok = jointAxisCertifies(out.family, tau) && out.chain.ok;
     return out;
 }
