@@ -108,7 +108,7 @@ import json, re, sys
 PREFIX = re.compile(r"^[^\t]*\t[^\t]*\t[0-9]{4}-[0-9]{2}-[0-9]{2}T\S+ ")
 SUMMARY = re.compile(r"[0-9]+% tests passed")
 TIME = re.compile(
-    r"Test #\d+:\s+(gates_full|p1_ac2_gates_baseline)\b.*?"
+    r"Test\s+#\d+:\s+(gates_full|p1_ac2_gates_baseline)\b.*?"
     r"(Passed|\*\*\*Timeout|\*\*\*Skipped|\*\*\*Failed|\*\*\*Not Run)"
     r"\s+([0-9]+(?:\.[0-9]+)?)\s+sec"
 )
