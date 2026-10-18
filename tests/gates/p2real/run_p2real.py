@@ -198,7 +198,11 @@ def main() -> int:
     if manifest:
         names = [e["stl"] for e in json.loads((dumps_dir / "MANIFEST.json").read_text())]
     else:
-        names = [p.name for p in sorted(args.corpus.glob("S*.stl"))]
+        # fx-wintwins O-1: an explicit, case-sensitive fixture list on every platform (NTFS globbing is
+        # case-insensitive, so "S*.stl" also ran shelf_bracket.stl on Windows only); shelf runs everywhere on purpose.
+        names = [p.name for p in sorted(args.corpus.glob("*.stl")) if p.name.startswith("S")]
+        if (args.corpus / "shelf_bracket.stl").exists():
+            names.append("shelf_bracket.stl")
         names.append(args.cube.name)
 
     rows: list[str] = []

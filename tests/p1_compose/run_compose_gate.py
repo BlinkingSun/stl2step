@@ -283,7 +283,9 @@ def main() -> int:
     ap.add_argument("--cube", type=Path, required=True)
     args = ap.parse_args()
 
-    fixtures = sorted(args.corpus.glob("S*.stl")) + [args.cube]
+    # fx-wintwins O-1: explicit, case-sensitive on every platform; shelf_bracket runs everywhere on purpose.
+    fixtures = [p for p in sorted(args.corpus.glob("*.stl")) if p.name.startswith("S")]
+    fixtures += [p for p in [args.corpus / "shelf_bracket.stl"] if p.exists()] + [args.cube]
     matcher = load_matcher(args.ichecker)
     listed = load_p1_expected_red(args.repo)
     rows: list[str] = []
