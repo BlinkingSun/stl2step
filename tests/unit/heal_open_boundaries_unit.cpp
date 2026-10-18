@@ -9,7 +9,11 @@
 //  - a lid offset by more than stitchTol stays open;
 //  - a T-vertex 3·tau off the edge is not split;
 //  - an unwelded sheet whose boundary vertices all share one x (the case an
-//    x-sorted sweep handles in quadratic time) gets every weld and T split.
+//    x-sorted sweep handles in quadratic time) gets every weld and T split;
+//  - a non-finite vertex coordinate or edge length refuses the heal, tris
+//    untouched, even when a disjoint cluster would otherwise close (D-fc-5.19);
+//  - the owning apex of an open edge is discarded alone, so a later vertex on
+//    that edge still splits it (D-fc-5.19).
 // tau = 2·quantFloor (D-130-12); stitchTol = min(sewTol, sMin / 2).
 // SPDX-License-Identifier: MIT
 
@@ -22,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <string>
 #include <utility>
@@ -41,6 +46,15 @@ static void check(bool ok, const char* name) {
 }
 
 struct EdgeHealth { int boundary = 0; int nonManifold = 0; int conflict = 0; };
+
+static bool hasEdge(const Tris& tris, int a, int b) {
+    for (const auto& t : tris)
+        for (int s = 0; s < 3; ++s) {
+            const int u = t[s], v = t[(s + 1) % 3];
+            if ((u == a && v == b) || (u == b && v == a)) return true;
+        }
+    return false;
+}
 
 static EdgeHealth health(const Tris& tris) {
     struct Rec { int cnt = 0; int fwd = 0; };
@@ -319,6 +333,115 @@ int main(int argc, char** argv) {
         check(after.boundary == 5 * n && st.boundaryAfter == 5 * n,
               "slab: only the sheet's outer rim stays open (no capping)");
         check(after.nonManifold == 0 && after.conflict == 0, "slab: 2-manifold, consistent winding");
+    }
+
+    // ---- 9. non-finite input refuses the heal (D-fc-5.19 B1) -----------------
+    // The review mesh: an open box whose lid is jittered by 3·tau (it welds and
+    // closes on its own) plus a disjoint flap. A finite flap leaves the lid
+    // free to heal. A NaN or infinite coordinate, or a finite coordinate whose
+    // edge length overflows, refuses the whole heal before any weld.
+    {
+        const double qB = 1e-4;
+        const double tauB = 2.0 * qB;
+        const double sewB = 1e-3;
+        Pts base;
+        Tris baseTris;
+        openBoxWithLid(base, baseTris, { 3 * tauB, -2 * tauB, tauB }, 0.4 * tauB);
+        {
+            Pts pts = base;
+            Tris tris = baseTris;
+            const HealStats st = healOpenBoundaries(tris, pts, qB, sewB, false);
+            const EdgeHealth h = health(tris);
+            check(st.clustersHealed == 1 && h.boundary == 0 && h.nonManifold == 0 && h.conflict == 0,
+                  "B1 control: jittered lid closes");
+        }
+        {
+            Pts pts = base;
+            Tris tris = baseTris;
+            const int b = (int)pts.size();
+            pts.push_back({ 0, 10, 0 });
+            pts.push_back({ 1, 10, 0 });
+            pts.push_back({ 0.5, 10, 1 });
+            tris.push_back({ b, b + 1, b + 2 });
+            const HealStats st = healOpenBoundaries(tris, pts, qB, sewB, false);
+            bool flapKept = false;
+            for (const auto& t : tris)
+                if (t[0] == b && t[1] == b + 1 && t[2] == b + 2) flapKept = true;
+            check(st.clustersHealed == 1 && st.clustersRefused == 1 && flapKept,
+                  "B1 finite flap: lid heals, disjoint flap keeps its triangle");
+        }
+        {
+            Pts pts = base;
+            Tris tris = baseTris;
+            const int b = (int)pts.size();
+            pts.push_back({ 0, 10, 0 });
+            pts.push_back({ 1, 10, 0 });
+            pts.push_back({ std::numeric_limits<double>::quiet_NaN(), 10, 0 });
+            tris.push_back({ b, b + 1, b + 2 });
+            const Tris in = tris;
+            const HealStats st = healOpenBoundaries(tris, pts, qB, sewB, false);
+            check(tris == in && st.clustersHealed == 0 && st.welds == 0 && st.splits == 0,
+                  "B1 NaN coordinate: heal refused, lid not welded");
+        }
+        {
+            Pts pts = base;
+            Tris tris = baseTris;
+            const int b = (int)pts.size();
+            pts.push_back({ 0, 10, 0 });
+            pts.push_back({ 1, 10, 0 });
+            pts.push_back({ std::numeric_limits<double>::infinity(), 10, 0 });
+            tris.push_back({ b, b + 1, b + 2 });
+            const Tris in = tris;
+            const HealStats st = healOpenBoundaries(tris, pts, qB, sewB, false);
+            check(tris == in && st.clustersHealed == 0 && st.welds == 0 && st.splits == 0,
+                  "B1 +Inf coordinate: heal refused");
+        }
+        {
+            Pts pts = base;
+            Tris tris = baseTris;
+            const int b = (int)pts.size();
+            const double big = std::numeric_limits<double>::max();
+            pts.push_back({ 0, 10, 0 });
+            pts.push_back({ big, 10, 0 });
+            pts.push_back({ 0, 11, 0 });
+            tris.push_back({ b, b + 1, b + 2 });
+            const Tris in = tris;
+            const HealStats st = healOpenBoundaries(tris, pts, qB, sewB, false);
+            check(tris == in && st.clustersHealed == 0 && st.welds == 0 && st.splits == 0,
+                  "B1 non-finite edge length: heal refused");
+        }
+    }
+
+    // ---- 10. owning apex does not mask a later on-edge split (D-fc-5.19 B2) --
+    // A(0,0,0) B(1,0,0) C(0.25, 1e-4, 0): C is the owning apex and the minimum-t
+    // candidate on AB (t = 0.25, height 1e-4 <= tau). D(0.75, 0, 0) lies on AB
+    // at t = 0.75. Triangle B-D-E owns DB, so inserting D closes that edge and
+    // the certificate keeps the split. E-D-F is the disjoint-from-AB flap.
+    {
+        const double qB = 1e-4;
+        const double tauB = 2.0 * qB;
+        const double sewB = 1e-3;
+        const int A = 0, B = 1, C = 2, D = 3, E = 4, F = 5;
+        Pts pts = {
+            { 0, 0, 0 }, { 1, 0, 0 }, { 0.25, 1e-4, 0 },
+            { 0.75, 0, 0 }, { 0.75, 0.4, 0 }, { 0.75, 0.4, 0.3 },
+        };
+        Tris tris = { { A, B, C }, { B, D, E }, { E, D, F } };
+        check(hasEdge(tris, A, B), "B2: fixture has edge AB");
+        const HealStats st = healOpenBoundaries(tris, pts, qB, sewB, false);
+        const EdgeHealth h = health(tris);
+        check(st.splits == 1 && st.welds == 0, "B2: D is the one split; nothing welds");
+        check(st.clustersHealed == 1 && st.clustersRefused == 0, "B2: the cluster heals");
+        check(st.boundaryBefore == 7 && st.boundaryAfter == 6, "B2: open edges 7 -> 6");
+        check(h.boundary == 6 && h.nonManifold == 0 && h.conflict == 0,
+              "B2: manifold, consistent winding");
+        check(hasEdge(tris, A, D) && hasEdge(tris, D, B) && !hasEdge(tris, A, B),
+              "B2: D splits AB; the apex did not abandon the edge");
+        bool distinct = true;
+        for (const auto& t : tris)
+            if (t[0] == t[1] || t[1] == t[2] || t[0] == t[2]) distinct = false;
+        check(distinct && tris.size() == 4, "B2: one added triangle, none degenerate");
+        check(st.splitMax <= tauB, "B2: the split lies within tau of its edge");
     }
 
     if (gFail) {
