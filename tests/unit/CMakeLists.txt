@@ -527,6 +527,29 @@ set_tests_properties(relational_torus_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# fc/fx-cylcyl (D-fc-5.17): Steinmetz admission and the degree-1 chord bound.
+add_executable(relational_cylcyl_unit relational_cylcyl_unit.cpp)
+target_compile_features(relational_cylcyl_unit PRIVATE cxx_std_17)
+set_target_properties(relational_cylcyl_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_cylcyl_unit PRIVATE stl2step::core)
+target_include_directories(relational_cylcyl_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_cylcyl_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_cylcyl_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_cylcyl_unit)
+endif()
+add_test(NAME relational_cylcyl_unit COMMAND relational_cylcyl_unit)
+set_tests_properties(relational_cylcyl_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 # fc/fx-tori-r1 (D-fc-4.8): one seam azimuth per torus axis family.
 add_executable(relational_axis_seam_unit relational_axis_seam_unit.cpp)
 target_compile_features(relational_axis_seam_unit PRIVATE cxx_std_17)
