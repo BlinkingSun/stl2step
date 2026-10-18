@@ -364,6 +364,39 @@ inline bool closedEllipseAntipode(const TopoDS_Edge& e, gp_Pnt& p) {
     return false;
 }
 
+// SPEC-common-fc: if q ≤ 0, admit nothing. A non-finite quantum is the same
+// refusal. D-fc-5.20: the closed-ellipse split (reuse a mesh vertex, or mint
+// the antipode) runs only for a positive finite q. Otherwise the full-turn
+// edge stays and no twin is minted.
+inline bool ellipseRimSplitAdmitted(double q) {
+    return std::isfinite(q) && q > 0.0;
+}
+
+// Index of the chain vertex nearest the antipode and within tau, skipping the
+// chain terminal `skip` (the edge's own vertex). Tie: the later meshVerts
+// entry. -1 when tau is not a positive finite length, the edge is not one
+// full turn of an ellipse, or no other vertex lies within tau.
+inline int closedEllipseAntipodePick(const TopoDS_Edge& e,
+                                     const std::vector<TopoDS_Vertex>& verts,
+                                     const std::vector<int>& meshVerts, int skip, double tau) {
+    if (!(std::isfinite(tau) && tau > 0.0)) return -1;
+    gp_Pnt pA;
+    if (!closedEllipseAntipode(e, pA)) return -1;
+    int lvA = -1;
+    double dA = tau;
+    const bool haveSkip = skip >= 0 && (size_t)skip < verts.size();
+    for (int lv : meshVerts) {
+        if (lv < 0 || (size_t)lv >= verts.size() || verts[(size_t)lv].IsNull()) continue;
+        if (haveSkip && verts[(size_t)lv].IsSame(verts[(size_t)skip])) continue;
+        const double d = BRep_Tool::Pnt(verts[(size_t)lv]).Distance(pA);
+        if (d <= dA) {
+            dA = d;
+            lvA = lv;
+        }
+    }
+    return lvA;
+}
+
 // D-fc-5.13 (the D-fc-5.7 O-1 construction): a closed ellipse edge as two half-turn
 // arcs of its own curve, from its vertex to the antipode and back, in the edge's own
 // traversal. The antipode is `atAntipode` when the caller has a vertex standing there
@@ -408,6 +441,16 @@ inline std::vector<TopoDS_Edge> closedEllipseHalves(const TopoDS_Edge& e,
     } catch (const Standard_Failure&) {
     }
     return {};
+}
+
+// The two half-turn arcs, or empty. Empty when the quantum does not admit the
+// split (D-fc-5.20): closedEllipseHalves is not called, so a null atAntipode
+// does not mint. When the quantum admits, a null atAntipode mints the exact
+// antipode and a mesh vertex standing there is reused.
+inline std::vector<TopoDS_Edge> closedEllipseChainSplit(const TopoDS_Edge& e, double q,
+                                                        const TopoDS_Vertex& atAntipode) {
+    if (!ellipseRimSplitAdmitted(q)) return {};
+    return closedEllipseHalves(e, atAntipode);
 }
 
 // One closed analytic rim: a single closed circle or ellipse edge, or the two half-turn
