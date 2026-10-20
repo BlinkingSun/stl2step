@@ -28,6 +28,21 @@ if(TARGET stl2step)
         REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_redir_py};${_redir_stl}")
     unset(_redir_py)
     unset(_redir_stl)
+
+    # GitHub #24: RESULT carries "validityCheck":"skipped" above the
+    # BRepCheck face cap, and only there.
+    set(_vc_py "${CMAKE_CURRENT_SOURCE_DIR}/result_validity_check.py")
+    set(_vc_stl "${CMAKE_CURRENT_SOURCE_DIR}/cube.stl")
+    add_test(NAME result_validity_check
+        COMMAND ${Python3_EXECUTABLE} "${_vc_py}"
+            --binary "$<TARGET_FILE:stl2step>"
+            --small-stl "${_vc_stl}")
+    set_tests_properties(result_validity_check PROPERTIES
+        LABELS "cli;result"
+        TIMEOUT 600
+        REQUIRED_FILES "$<TARGET_FILE:stl2step>;${_vc_py};${_vc_stl}")
+    unset(_vc_py)
+    unset(_vc_stl)
 endif()
 
 foreach(_stl2step_test_dir harness corpus gates unit mesh grade)

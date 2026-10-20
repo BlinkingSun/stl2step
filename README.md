@@ -385,7 +385,7 @@ The `RESULT {json}` object (also `Result::toJson()`) has a stable field set:
 | `solids`, `openShells` | int | Solids written; components that couldn't close |
 | `facesBeforeUnify`, `facesAfterUnify` | int | Face count around the coplanar merge |
 | `meshVolumeMM3`, `stepVolumeMM3` | number | Source vs. re-read volume (mm³) |
-| `volumeDeltaPct` | number | Round-trip volume error (`-1` if not measured) |
+| `volumeDeltaPct` | number | Round-trip volume error: re-read STEP vs. the B-Rep written, not vs. the mesh (`-1` if not measured) |
 | `watertight` | bool | Every component closed with consistent winding |
 | `seconds` | number | Wall-clock time |
 | `warnings` | string[] | Every warning emitted |
@@ -409,6 +409,11 @@ and default to zero.
 | `smoothMaxDevMM` | number | Max vertex deviation from fit (mm) |
 | `smoothMaxEdgeTolMM` | number | Max edge tolerance written (mm) |
 | `smoothVolPredictedMM3` | number | Predicted volume from analytic fits (mm³) |
+
+The B-Rep validity check runs on shapes of up to 50,000 faces. Above that it is
+skipped and RESULT ends with `"validityCheck":"skipped"`. The skip is not a
+warning and does not change the exit code, so treat such a file as unchecked
+rather than validated. The key is absent whenever the check ran.
 
 **Exit codes:** `0` clean · `2` STEP written but with warnings (open shell,
 volume mismatch, …) · `1` failed, no output written.

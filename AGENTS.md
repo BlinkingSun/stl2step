@@ -89,7 +89,7 @@ Success flag is `ok`. On failure: `ok=false` + `error`.
 | `facesAfterUnify` | 0 | Face count after coplanar merge. |
 | `meshVolumeMM3` | 0 | Source mesh volume (mm³). |
 | `stepVolumeMM3` | 0 | Volume re-read from the STEP (mm³; 0 if verify off). |
-| `volumeDeltaPct` | -1 | \|step − brep\| / brep × 100 (−1 if not measured). |
+| `volumeDeltaPct` | -1 | \|step − brep\| / brep × 100 (−1 if not measured). Measures the STEP write and re-read, not fidelity to the mesh; a mesh-vs-B-Rep volume mismatch is reported as a warning instead. |
 | `watertight` | true | Every component closed with consistent winding. |
 | `seconds` | 0 | Wall-clock time of the whole conversion. |
 | `warnings` | [] | Every Warning emitted, in order. |
@@ -113,6 +113,15 @@ character-identical to 1.0.0.
 | `smoothMaxDevMM` | 0 | Max vertex deviation from fit (mm). |
 | `smoothMaxEdgeTolMM` | 0 | Max edge tolerance written (mm). |
 | `smoothVolPredictedMM3` | 0 | Predicted volume from analytic fits (mm³). |
+
+`validityCheck` — appended last, **only when the B-Rep validity check
+(`BRepCheck_Analyzer`) did not run** because the written shape has more than
+50,000 faces. Its value is then `"skipped"`. The ShapeFix repair that an
+invalid shape would trigger is skipped with it. The skip is not a warning and
+does not change the exit code, so an exit `0` with this key means "written,
+validity not checked", not "checked and valid". At or under the cap the key
+is absent and RESULT is unchanged. There is no C++ `Result` member for it (the
+header is frozen); read it from `toJson()` / the `RESULT` line.
 
 ### Exit codes (CLI) / `Result::exitCode`
 
@@ -334,6 +343,10 @@ Because each invocation is independent, batch with `xargs -P` /
   (cones, spheres, tori left faceted) are `note()`, **not** warnings — a dirty
   input converted with `--smooth` keeps its exit code versus the same input
   without it.
+- `"validityCheck":"skipped"` in RESULT (any exit) → the shape had more than
+  50,000 faces and was never run through `BRepCheck_Analyzer`. If your host
+  needs a validity guarantee, check the STEP yourself before presenting it as
+  validated.
 - Timeout guard (subprocess): conversion time scales with triangle count; set a
   generous timeout for very large meshes rather than a tight one.
 
@@ -351,6 +364,8 @@ line appends the `smooth*` keys after `warnings`. Those keys are present
 **only when `smooth == true`**; they are omitted (never zero-valued) on the
 off path so the RESULT string stays character-identical to 1.0.0. The C++
 `Result` members are always present and default to zero (the dual contract).
+`validityCheck` (added after 1.6.0) follows the same additive rule: emitted last, only
+when the validity check was skipped (more than 50,000 faces).
 
 ---
 

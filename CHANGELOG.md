@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- RESULT reports `"validityCheck":"skipped"` when the B-Rep validity check did not run because
+  the shape has more than 50,000 faces (GitHub #24). Before, the skip appeared only in the
+  progress log, so a host reading RESULT could not tell an unchecked file from a checked one.
+  The key is absent whenever the check ran, so RESULT is unchanged at or under the cap, and the
+  exit code is unchanged either way. New ctest `result_validity_check`.
+
+### Documentation
+
+- `volumeDeltaPct` is documented as what it measures: the STEP write and re-read against the
+  B-Rep, not fidelity to the source mesh (README, AGENTS.md).
+
 ## [1.6.0] - 2026-10-18
 
 TrueForm now builds tori, sphere corners, hems, horn tori, ruled walls and arcs without a common

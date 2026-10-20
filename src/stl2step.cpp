@@ -647,6 +647,24 @@ int meshTJunctionsAbsorbedOf(const std::string& in, const std::string& out) {
     return it == gAbsorbCount.end() ? -1 : it->second;
 }
 
+// BRepCheck runs only up to this many faces; above it the check (and the
+// ShapeFix repair it gates) is skipped. GitHub #24: the skip reaches RESULT
+// through the same input/output channel, recorded on every run so a later
+// conversion of the same pair never inherits a stale entry.
+constexpr int kValidityCheckMaxFaces = 50000;
+std::unordered_map<std::string, bool> gCheckSkipped;  // guarded by gAbsorbMu
+
+void noteValidityCheckSkipped(const std::string& in, const std::string& out, bool skipped) {
+    std::lock_guard<std::mutex> lk(gAbsorbMu);
+    gCheckSkipped[absorbIoKey(in, out)] = skipped;
+}
+
+bool validityCheckSkippedOf(const std::string& in, const std::string& out) {
+    std::lock_guard<std::mutex> lk(gAbsorbMu);
+    auto it = gCheckSkipped.find(absorbIoKey(in, out));
+    return it != gCheckSkipped.end() && it->second;
+}
+
 // ---------------------------------------------------------------- small helpers
 
 std::string fmtInt(long long n) {
@@ -1728,7 +1746,7 @@ Result Converter::run() {
             BRepLib::EncodeRegularity(shape, Precision::Angular());
         note("  fit       tolerances fitted to true planar deviation  [%.2fs]\n", timer.lap());
 
-        bool doCheck = facesAfter <= 50000;
+        bool doCheck = facesAfter <= kValidityCheckMaxFaces;
         bool doVol = makeSolids && solidsOut > 0 && openShellsOut == 0;
         struct Analysis {
             bool checkRan = false, valid = true, failed = false, volRan = false;
@@ -1910,6 +1928,7 @@ Result Converter::run() {
             r.radiusDriftMaxRel = refitTotals.radiusMaxRel;
         }
         noteMeshTJunctionsAbsorbed(r.input, r.output, meshTJunctionsAbsorbed);
+        noteValidityCheckSkipped(r.input, r.output, !doCheck);
         r.ok = true;
         r.exitCode = warnings.empty() ? 0 : 2;
         return r;
@@ -2011,6 +2030,10 @@ std::string Result::toJson() const {
     // when at least one triangle was absorbed.
     if (absorbed > 0)
         jsonAppendFmt(o, ",\"meshTJunctionsAbsorbed\":%d", absorbed);
+    // Same rule (GitHub #24): the key appears only when BRepCheck did not run.
+    // Not a warning -- the exit code is unchanged.
+    if (validityCheckSkippedOf(input, output))
+        o += ",\"validityCheck\":\"skipped\"";
     o += '}';
     return o;
 }
