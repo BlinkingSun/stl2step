@@ -1,3 +1,26 @@
+# MYCNC3D Mesh2CAD — fork de stl2step
+
+Ce fork constitue la nouvelle base du moteur de **MYCNC3D Mesh2CAD**, application
+Windows hors ligne de conversion de maillages en géométrie CAD.
+
+Le moteur C++/OpenCASCADE et son historique proviennent de
+[BlinkingSun/stl2step](https://github.com/BlinkingSun/stl2step). La licence MIT
+et les attributions sont conservées. L'interface SolidOut n'est pas incluse.
+
+**État : initialisation du fork.** Le moteur est celui de l'amont ; l'interface
+Mesh2CAD n'est pas encore intégrée et aucun nouvel installateur n'est fourni.
+Le prototype [MYCNC3D-Mesh2CAD](https://github.com/Mycnc3d/MYCNC3D-Mesh2CAD)
+reste disponible comme source des fonctions à migrer.
+
+- [Architecture et étapes de migration](docs/MESH2CAD.md)
+- [Provenance et dépendances](docs/MESH2CAD-PROVENANCE.md)
+
+La documentation d'origine ci-dessous décrit stl2step et les produits de son
+auteur, pas une distribution MYCNC3D. Certaines descriptions historiques des
+capacités sont à confronter au code et aux tests de la version retenue.
+
+---
+
 # stl2step
 
 **A universal engine that converts triangle meshes (STL) into parametric B-Rep
