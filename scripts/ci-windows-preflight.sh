@@ -193,12 +193,17 @@ while IFS= read -r e; do
   # falling back off its twin). A standalone gitdir is shipped below instead.
   if [ "$e" = ".git" ] && [ -f "$REPO_ROOT/.git" ]; then continue; fi
   if [[ "$e" == "tests" ]]; then
+    # Files and symlinks only. Printing a directory (tests, tests/gates, ...)
+    # makes tar recurse into it, which re-adds the pruned baseline .build and
+    # .worktree-* trees (measured 2026-10-20: a Mac CMakeCache reached the
+    # node, G0.1 XFAIL on every fixture, G0.3 FAIL on cross_bores). tar creates
+    # parent directories on extract; git tracks no empty ones.
     while IFS= read -r rel; do
       entries+=("$rel")
     done < <(cd "$REPO_ROOT" && find tests \
       \( -path 'tests/gates/baseline/.worktree-*' -o -path 'tests/gates/baseline/.worktree-*/*' \
           -o -path 'tests/gates/baseline/.build' -o -path 'tests/gates/baseline/.build/*' \) -prune \
-      -o -print)
+      -o \( -type f -o -type l \) -print)
     continue
   fi
   entries+=("$e")
@@ -236,8 +241,10 @@ for wt in repo/tests/gates/baseline/.worktree-*; do
     rm -rf "$wt"
   fi
 done
-if [[ -f repo/tests/gates/baseline/.build/CMakeCache.txt ]] \
-    && grep -q '/Users/' repo/tests/gates/baseline/.build/CMakeCache.txt 2>/dev/null; then
+# repo/ is recreated every run, so a baseline .build here can only have come
+# from the Mac. Matching '/Users/' in its cache missed checkouts elsewhere
+# (a /private/tmp worktree records /tmp/...).
+if [[ -d repo/tests/gates/baseline/.build ]]; then
   echo "== preflight: removing Mac-synced baseline build cache"
   rm -rf repo/tests/gates/baseline/.build
 fi
