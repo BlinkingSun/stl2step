@@ -47,7 +47,9 @@
     "S28_varradius_negative": "D-fc-1.14 first measure on fc/instr-patch; overCap at seed (polylineTier2=41).",
     "handle-pickup": "D-130-23 / 082194b red lines not relaxed",
     "linkage_bores_chamfer": "D-130-23 / 082194b red lines not relaxed",
-    "shelf_bracket": "D-140-3 §4(b) first measure; overCap at seed (D-130-24)"
+    "shelf_bracket": "D-140-3 §4(b) first measure; overCap at seed (D-130-24)",
+    "S29_hex_law": "D-fc-6.3 (fc-7 integrate 2026-10-23): S29 no longer reverts (Class-B heal fx-classb-rw2, D-fc-6.7/6.9); overCap=12 at the healed shell's plane joins. Count ceiling in edge-class-ratchet expectedRedCount.",
+    "cyl_meets_chamfer": "D-fc-6.3 (fc-7 integrate 2026-10-23): cyl_meets_chamfer no longer reverts (fx-cmc-r1, D-fc-6.4); overCap=29 at the IntAna cyl|cyl polylines of the healed shell; the chamfer cone still does not ship. Count ceiling in edge-class-ratchet expectedRedCount."
   },
   "gate_130": {
     "cyl_meets_chamfer": "D-130-23 (B6 deferred)"

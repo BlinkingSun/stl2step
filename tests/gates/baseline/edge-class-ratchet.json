@@ -105,7 +105,7 @@
     "S26_funnel_rev": 104,
     "S27_sphere_corner_fine": 0,
     "S28_varradius_negative": 41,
-    "S29_hex_law": 0,
+    "S29_hex_law": 12,
     "S30-open-crack": 0,
     "boss_cone_chamfer": 0,
     "build_fixtures/counterbore": 0,
@@ -122,7 +122,7 @@
     "chamfer_straight_ring": 0,
     "counterbore_chamfer": 0,
     "cross_bores": 2,
-    "cyl_meets_chamfer": 0,
+    "cyl_meets_chamfer": 74,
     "handle-lock": 0,
     "handle-pickup": 94,
     "linkage_bores_chamfer": 159,
@@ -141,10 +141,11 @@
     "S26_funnel_rev": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=4186 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 4353, Windows 4353; ceiling = max = 4353. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 4353 -> 104 (fx-hubtori).",
     "S27_sphere_corner_fine": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=1617 (macOS), overCap at seed. D-130-24 cross-platform seed 2026-10-16 from hosted CI run 38806527484: Linux 1670, Windows 1670; ceiling = max = 1670. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1670 -> 0 (fx-sphere: R3 sphere corner, D-fc-5.16).",
     "S28_varradius_negative": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=41, overCap at seed.",
-    "S29_hex_law": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
+    "S29_hex_law": "D-fc-6.3 (fc-7 integrate 2026-10-23, orchestrator): heal-not-revert landed (fx-classb-rw2, D-fc-6.7/6.9); the 0 seeded on fc/instr-patch existed only because the component reverted whole. Re-baselined at the measured macOS values polylineTier2=12, overCap=12; Linux/Windows from the 3-OS round per D-130-24.",
     "S16-R2-ChainUnstable": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): RAISE 0 -> 27: D-fc-5.13/5.19 — S16-R2 no longer reverts (95 -> 44 faces); its four bottom R1 rounds meet at the plate corners through 24 tier-2 cyl|cyl chords (D-fc-5.17: uncertified contact stays a polyline + warning) and 3 more; 27 on all three platforms (supersedes the d508c32 platform note).",
     "S20_cross_bore_union": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): RAISE 0 -> 2: D-fc-5.17 (fx-cylcyl e770212/051d9f9) — the cross-bore union now builds; its two cyl|cyl contacts are tau-certified approximated curves recorded as tier 2; 2 on all three platforms.",
     "S30-open-crack": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): SEED 0: D-fc-5.10 fixture (fx-heal132); measured 0 on all three platforms.",
+    "cyl_meets_chamfer": "D-fc-6.3 (fc-7 integrate 2026-10-23, orchestrator): heal-not-revert landed (fx-cmc-r1, D-fc-6.4); the 0 existed only because the component reverted whole. Re-baselined at the measured macOS values polylineTier2=74, overCap=29; Linux/Windows from the 3-OS round per D-130-24.",
     "handle-pickup": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 358 -> 94 (fx-hubtori hub tori).",
     "shelf_bracket": "fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 52 -> 30 (fx-s1closed)."
   },
@@ -180,6 +181,12 @@
     "S28_varradius_negative": [
       "overCap"
     ],
+    "S29_hex_law": [
+      "overCap"
+    ],
+    "cyl_meets_chamfer": [
+      "overCap"
+    ],
     "handle-pickup": [
       "overCap",
       "overTol",
@@ -206,6 +213,8 @@
     "S25_peg_fillet": {"overCap": {"macos": 1, "linux": 1, "windows": 1}},
     "S26_funnel_rev": {"overCap": {"macos": 104, "linux": 104, "windows": 104}},
     "S28_varradius_negative": {"overCap": {"macos": 46}},
+    "S29_hex_law": {"overCap": {"macos": 12}},
+    "cyl_meets_chamfer": {"overCap": {"macos": 29}},
     "handle-pickup": {"overCap": {"macos": 35, "linux": 35, "windows": 35}},
     "linkage_bores_chamfer": {"overCap": {"macos": 34, "linux": 34, "windows": 34}},
     "shelf_bracket": {"overCap": {"macos": 7, "linux": 7, "windows": 7}}

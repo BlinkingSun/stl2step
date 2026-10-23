@@ -284,6 +284,15 @@ struct TorusTopologySnapshot {
 
 struct SegmentWork;  // refit_internal.hpp; opaque here (RegionSet::preTorusWork)
 
+struct ClassBRegionMetric {
+    int rid = -1;
+    double area = 0;
+    double swept = 0;
+    double maxVertexDev = 0;
+    double dVolPredicted = 0;
+    bool shippedAnalytic = false;
+};
+
 struct RegionSet {                  // exactly one per CLEAN component
     int compRoot = -1;
     std::vector<Region>        regions;   // accepted only (reject == None)
@@ -305,6 +314,10 @@ struct RegionSet {                  // exactly one per CLEAN component
     // Opaque: segment()'s working state just before stage T, kept when a torus was
     // admitted, so resegmentTorus() re-runs only the stages from T on.
     std::shared_ptr<const SegmentWork> preTorusWork;
+    // D-fc-6.7: caller sets region ids to explode before build; buildFaces clears
+    // after applying. classBMetrics is filled on each successful buildFaces return.
+    std::vector<int> classBExplode;
+    std::vector<ClassBRegionMetric> classBMetrics;
 };
 
 // P1 entry point. Pure math. Links no OCCT topology: gp_ value types and math_ solvers

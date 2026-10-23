@@ -6,6 +6,7 @@
 #include "refit_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -315,8 +316,18 @@ bool loopUsesChain(const Loop& lp, int ci) {
 
 }  // namespace
 
-bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                    SegmentWork& work, RegionSet& out) {
+// dropTri: triangles already dissolved out of the accepted set (D-fc-6.1(b)).
+// Null on the first pass, so a pass that classifies every region takes the
+// original intake. The mask is indexed by local triangle id.
+// nextDrop: on a per-region classification failure, filled with the mask for
+// the next iterative pass (dropTri plus that region's triangles). Left empty
+// on success and on a structural failure. This function does not call itself;
+// buildTopologyD owns the retry and releases this attempt's RegionSet first.
+static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                               SegmentWork& work, RegionSet& out,
+                               const std::vector<char>* dropTri,
+                               std::vector<char>* nextDrop) {
+    if (nextDrop) nextDrop->clear();
     (void)p;
     const int nTri = (int)mv.nTri;
     const int nVtx = (int)mv.nVtx;
@@ -345,6 +356,19 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
     std::vector<Acc> acc;
     acc.reserve(work.accepted.size());
     for (int i = 0; i < (int)work.accepted.size(); ++i) {
+        // D-fc-6.1(b): a dissolved region's triangles are unclaimed. Skip the
+        // region and keep its original accepted index so torus-pending remap
+        // still addresses the survivors. Null mask → this branch is not taken.
+        if (dropTri) {
+            bool dropped = false;
+            for (int t : work.accepted[i].tris) {
+                if (t >= 0 && t < nTri && (*dropTri)[(size_t)t]) {
+                    dropped = true;
+                    break;
+                }
+            }
+            if (dropped) continue;
+        }
         Acc a;
         a.r = work.accepted[i];
         std::sort(a.r.tris.begin(), a.r.tris.end());
@@ -809,6 +833,14 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
 
     auto classifyAndPush = [&](Region& reg, std::vector<Loop>& loops) -> bool {
         if (loops.empty()) return false;
+        // D-fc-6.1(a): one boundary cycle is not two caps. Demote before
+        // scoring so the existing partial arm computes shoelace and assigns
+        // one Outer. The torus-mouth one-loop arm stays closed360. The cycle
+        // count is the census already in hand — no new threshold.
+        const bool torusMouth = reg.closed360 && reg.type == SurfType::Torus &&
+                                reg.origin == Origin::TorusBlend && loops.size() == 1;
+        if (reg.closed360 && !torusMouth && loops.size() < 2)
+            reg.closed360 = false;
 
         struct Scored {
             Loop lp;
@@ -1020,6 +1052,27 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                      reg.id, reg.tris.size(), reg.closed360 ? 1 : 0, reg.vMin, reg.vMax, why);
     };
 
+    // D-fc-6.1(b): a per-region classification failure dissolves THAT region.
+    // The mask grows by its triangles and this pass returns; the caller
+    // releases this RegionSet and rebuilds. The island pass of the retry
+    // emits the triangles. A mask that cannot grow still fails the stage
+    // (nextDrop left empty). Structural returns above stay fatal.
+    auto dissolveRegion = [&](const Region& reg) -> bool {
+        std::vector<char> next((size_t)std::max(nTri, 0), 0);
+        if (dropTri && (int)dropTri->size() == nTri) next = *dropTri;
+        bool grew = false;
+        for (int t : reg.tris) {
+            if (t < 0 || t >= nTri) continue;
+            if (!next[(size_t)t]) {
+                next[(size_t)t] = 1;
+                grew = true;
+            }
+        }
+        if (!grew || nextDrop == nullptr) return false;
+        *nextDrop = std::move(next);
+        return false;
+    };
+
     for (Region& reg : out.regions) {
         std::vector<char> usedCh(out.chains.size(), 0);
         std::vector<Loop> loops;
@@ -1121,7 +1174,7 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             }
             if (!closedOk || lp.chainIdx.empty()) {
                 diagTopoFail(reg, "stitch-open-chain");
-                return false;
+                return dissolveRegion(reg);
             }
             loops.push_back(std::move(lp));
         }
@@ -1149,13 +1202,13 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             for (const Loop& lp : loops) if (loopUsesChain(lp, ci)) ++hits;
             if (hits != 1) {
                 diagTopoFail(reg, "chain-hits");
-                return false;
+                return dissolveRegion(reg);
             }
         }
 
         if (!classifyAndPush(reg, loops)) {
             diagTopoFail(reg, "classify");
-            return false;
+            return dissolveRegion(reg);
         }
 
         // D-130-14: a union face's SEAM is a generator of that same face, so it
@@ -1269,20 +1322,20 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
             if (reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend) {
                 if (nOuter > 1) {
                     diagTopoFail(reg, "cap-census");
-                    return false;
+                    return dissolveRegion(reg);
                 }
                 if (nLow != 0 || nHigh != 0) {
                     if (nLow != 1 || nHigh != 1 || nOuter != 0) {
                         diagTopoFail(reg, "cap-census");
-                        return false;
+                        return dissolveRegion(reg);
                     }
                 } else if (nOuter != 1) {
                     diagTopoFail(reg, "cap-census");
-                    return false;
+                    return dissolveRegion(reg);
                 }
             } else if (nLow != 1 || nHigh != 1 || nOuter != 0) {
                 diagTopoFail(reg, "cap-census");
-                return false;
+                return dissolveRegion(reg);
             }
         } else {
             int nOuter = 0, nCap = 0;
@@ -1290,7 +1343,7 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
                 if (lp.role == LoopRole::Outer) ++nOuter;
                 if (lp.role == LoopRole::CapLow || lp.role == LoopRole::CapHigh) ++nCap;
             }
-            if (nOuter != 1 || nCap != 0) return false;
+            if (nOuter != 1 || nCap != 0) return dissolveRegion(reg);
         }
     }
 
@@ -1442,6 +1495,65 @@ bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTol
     st.maxEdgeTol = maxEdge;
     out.stats = st;
     return true;
+}
+
+bool buildTopologyD(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                    SegmentWork& work, RegionSet& out) {
+    // D-fc-6.1(b) retry is iterative. One attempt is live: the drop mask
+    // grows, and a failed attempt's RegionSet is released before the next
+    // rebuild. No recursion.
+    //
+    // Bound: each dissolve adds at least one triangle to the mask, and intake
+    // skips every accepted region that touches a masked triangle, so a growing
+    // mask removes at least one accepted region. A dissolve that does not grow
+    // the mask fails the stage. Rebuilds are therefore at most
+    // work.accepted.size() + 1 (one pass per removed region, plus the pass
+    // that succeeds or proves the mask cannot grow).
+    const int root = out.compRoot;
+    out = RegionSet{};
+    out.compRoot = root;
+
+    const char* diag = std::getenv("STL2STEP_DIAG_130");
+    const bool topoDiag = diag && diag[0] && diag[0] != '0';
+    const auto t0 = std::chrono::steady_clock::now();
+
+    std::vector<char> mask;
+    const std::size_t maxRebuilds = work.accepted.size() + 1;
+    std::size_t rebuilds = 0;
+    auto publish = [&](bool ok, RegionSet& attemptRs) -> bool {
+        if (topoDiag) {
+            const double ms = std::chrono::duration<double, std::milli>(
+                                  std::chrono::steady_clock::now() - t0)
+                                  .count();
+            std::fprintf(stderr, "DIAG_TOPO_RETRY rebuilds=%zu ms=%.3f\n", rebuilds, ms);
+        }
+        out = std::move(attemptRs);
+        return ok;
+    };
+
+    for (std::size_t attempt = 0; attempt < maxRebuilds; ++attempt) {
+        RegionSet attemptRs;
+        attemptRs.compRoot = root;
+        std::vector<char> grown;
+        const std::vector<char>* drop = mask.empty() ? nullptr : &mask;
+        ++rebuilds;
+        const bool ok = buildTopologyDDrop(mv, p, tol, work, attemptRs, drop, &grown);
+        if (ok) return publish(true, attemptRs);
+        bool grew = false;
+        for (std::size_t i = 0; i < grown.size(); ++i) {
+            const char was = (i < mask.size()) ? mask[i] : 0;
+            if (grown[i] && !was) {
+                grew = true;
+                break;
+            }
+        }
+        if (!grew) return publish(false, attemptRs);
+        attemptRs = RegionSet{};
+        mask = std::move(grown);
+    }
+    RegionSet none;
+    none.compRoot = root;
+    return publish(false, none);
 }
 
 }  // namespace refit

@@ -598,6 +598,53 @@ set_tests_properties(relational_arc_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# fc/fx-cmc-cylmeet (D-fc-5.17): partial counterbore sheet budget and certificates.
+add_executable(relational_cylmeet_unit relational_cylmeet_unit.cpp)
+target_compile_features(relational_cylmeet_unit PRIVATE cxx_std_17)
+set_target_properties(relational_cylmeet_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_cylmeet_unit PRIVATE stl2step::core)
+target_include_directories(relational_cylmeet_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(relational_cylmeet_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_cylmeet_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_cylmeet_unit)
+endif()
+add_test(NAME relational_cylmeet_unit COMMAND relational_cylmeet_unit)
+set_tests_properties(relational_cylmeet_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+add_executable(relational_classb_unit relational_classb_unit.cpp)
+target_compile_features(relational_classb_unit PRIVATE cxx_std_17)
+set_target_properties(relational_classb_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_classb_unit PRIVATE stl2step::core)
+target_include_directories(relational_classb_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(relational_classb_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_classb_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_classb_unit)
+endif()
+add_test(NAME relational_classb_unit COMMAND relational_classb_unit)
+set_tests_properties(relational_classb_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 # fc/fx-craftpolish (D-fc-3.2.10, D-fc-4.3, D-fc-4.6 build): one-edge cap arcs of
 # a multi-component strip, the partial-torus wire retry, and the robbing of
 # uncertified prior strips.
@@ -722,6 +769,53 @@ endif()
 add_test(NAME relational_ruled_unit
     COMMAND relational_ruled_unit "${CMAKE_CURRENT_BINARY_DIR}")
 set_tests_properties(relational_ruled_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# fc/fx-signvol (D-fc-6.2): shell volume gate compares magnitude with magnitude.
+add_executable(shell_volume_unit shell_volume_unit.cpp)
+target_compile_features(shell_volume_unit PRIVATE cxx_std_17)
+set_target_properties(shell_volume_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(shell_volume_unit PRIVATE stl2step::core)
+target_include_directories(shell_volume_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(shell_volume_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(shell_volume_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(shell_volume_unit)
+endif()
+add_test(NAME shell_volume_unit COMMAND shell_volume_unit)
+set_tests_properties(shell_volume_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# fc/fx-t2-heal-r1 (D-fc-6.1): one-cycle closed360 demotion and per-region dissolve.
+add_executable(relational_topo_heal_unit relational_topo_heal_unit.cpp)
+target_compile_features(relational_topo_heal_unit PRIVATE cxx_std_17)
+set_target_properties(relational_topo_heal_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_topo_heal_unit PRIVATE stl2step::core)
+target_include_directories(relational_topo_heal_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_topo_heal_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_topo_heal_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_topo_heal_unit)
+endif()
+add_test(NAME relational_topo_heal_unit COMMAND relational_topo_heal_unit)
+set_tests_properties(relational_topo_heal_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 

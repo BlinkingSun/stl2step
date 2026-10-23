@@ -25,6 +25,7 @@
 #include "refit_slit_heal.hpp"
 #include "refit_relational_ruled.hpp"
 #include "refit_cylcyl_contact.hpp"
+#include "refit_cyl_meet.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -12815,6 +12816,188 @@ bool buildPlanarFace(const Region& r, const RegionSet& rs, const MeshView& mv,
     }
 }
 
+struct CylMeetFit {
+    gp_Ax3 ax;
+    double R = 0;
+    double storedDev = 0;
+    double tau = 0;
+    double gap = 0;
+    double budget = 0;
+    double sectorCentre = 0;
+    double sectorSpan = 0;
+    double z0 = 0;
+    double z1 = 0;
+    bool sectorOk = false;
+    bool haveZ = false;
+    bool intervene = false;
+};
+
+double meshViewVolume(const MeshView& mv);
+double regionChordVol(const MeshView& mv, const Region& r);
+double faceVolExact(const TopoDS_Face& f, int* unsupported);
+
+// Regions whose stored cylinder was replaced by the certified outer rho.
+// Cleared at buildFaces entry; survives try_rebuild so the corrected surface
+// is not put back on a rectangular trim.
+thread_local std::unordered_set<int> gCylMeetIds;
+
+double cylMeetRho(const gp_Ax3& ax, const gp_XYZ& p) {
+    const gp_XYZ w = p - ax.Location().XYZ();
+    const gp_XYZ rad = w - ax.Direction().XYZ() * w.Dot(ax.Direction().XYZ());
+    return rad.Modulus();
+}
+
+double cylMeetAxial(const gp_Ax3& ax, const gp_XYZ& p) {
+    return (p - ax.Location().XYZ()).Dot(ax.Direction().XYZ());
+}
+
+bool cylMeetFitOf(const Region& r, const RegionSet& rs, const MeshView& mv, CylMeetFit& out) {
+    out = CylMeetFit{};
+    out.ax = r.ax;
+    out.R = r.radius;
+    const double tau = tauOf(mv);
+    out.tau = tau;
+    if (r.type != SurfType::Cylinder || r.closed360 || !(tau > 0.0) || !(r.radius > 0.0))
+        return false;
+    if (!mv.pts || !mv.tris || !mv.compTris) return false;
+    std::vector<int> gids;
+    for (int t : r.tris) {
+        if (t < 0 || static_cast<std::size_t>(t) >= mv.nTri) return false;
+        const int g = mv.compTris[t];
+        if (g < 0) return false;
+        for (int k = 0; k < 3; ++k) gids.push_back(mv.tris[g][k]);
+    }
+    std::sort(gids.begin(), gids.end());
+    gids.erase(std::unique(gids.begin(), gids.end()), gids.end());
+    if (static_cast<int>(gids.size()) < minStations(kParamsCircle)) return false;
+    double storedDev = 0;
+    for (int gid : gids)
+        storedDev = std::max(storedDev, std::fabs(cylMeetRho(r.ax, mv.pts[gid]) - r.radius));
+    out.storedDev = storedDev;
+    if (!(storedDev > tau)) return false;
+    bool crossing = false;
+    const double vSpanStored = std::fabs(r.vMax - r.vMin);
+    const gp_Dir ax = r.ax.Direction();
+    for (const Loop& lp : r.loops) {
+        if (lp.role != LoopRole::Outer) continue;
+        for (int ci : lp.chainIdx) {
+            if (ci < 0 || static_cast<std::size_t>(ci) >= rs.chains.size()) continue;
+            const BoundaryChain& ch = rs.chains[ci];
+            const Region* o = regionById(rs, otherReg(ch, r.id));
+            if (!o || !isAnalytic(o)) continue;
+            if (o->type != SurfType::Cylinder && o->type != SurfType::Cone) continue;
+            double length = vSpanStored;
+            if (ch.meshVerts.size() >= 2) {
+                const double chord =
+                    pntOf(mv, ch.meshVerts.front()).Distance(pntOf(mv, ch.meshVerts.back()));
+                if (chord > length) length = chord;
+            }
+            const double cross = ax.XYZ().Crossed(o->ax.Direction().XYZ()).Modulus();
+            if (axesCross(cross, tau, length)) {
+                crossing = true;
+            } else if (o->type == SurfType::Cone) {
+                const gp_XYZ w = o->ax.Location().XYZ() - r.ax.Location().XYZ();
+                if (w.Crossed(ax.XYZ()).Modulus() > tau) crossing = true;
+            }
+        }
+    }
+    if (!crossing) return false;
+    // Coaxial donor: a closed cylinder, axis parallel within τ across the wall
+    // extent, whose own vertex residual is within τ or within its measured
+    // chord sagitta (an N-gon wall the builder already accepts). The wall
+    // radius is the outer rho of THIS region's vertices about that axis.
+    const double extent = std::max(vSpanStored, r.radius);
+    int bestIn = -1;
+    int bestId = 0;
+    bool haveDonor = false;
+    RhoCertificate bestRho;
+    gp_Ax3 bestAx;
+    for (const Region& d : rs.regions) {
+        if (d.id == r.id || d.type != SurfType::Cylinder || !d.closed360 || !(d.radius > 0.0))
+            continue;
+        const double donorCap = std::max(tau, d.chordSagitta);
+        if (!(d.maxVertexDev <= donorCap) || !std::isfinite(d.maxVertexDev)) continue;
+        const double dot = std::fabs(d.ax.Direction().Dot(ax.XYZ()));
+        if (!planeNormalParallelAxis(dot, extent, tau)) continue;
+        std::vector<double> rho(gids.size()), zz(gids.size());
+        for (std::size_t i = 0; i < gids.size(); ++i) {
+            const gp_XYZ p = mv.pts[gids[i]];
+            rho[i] = cylMeetRho(d.ax, p);
+            zz[i] = cylMeetAxial(d.ax, p);
+        }
+        RhoCertificate rc;
+        if (!certifyOuterRho(rho.data(), zz.data(), static_cast<int>(gids.size()), tau, rc))
+            continue;
+        if (!haveDonor || rc.inliers > bestIn || (rc.inliers == bestIn && d.id < bestId)) {
+            haveDonor = true;
+            bestIn = rc.inliers;
+            bestId = d.id;
+            bestRho = rc;
+            bestAx = d.ax;
+        }
+    }
+    if (!haveDonor) return false;
+    std::vector<double> ang;
+    ang.reserve(gids.size());
+    double z0 = 0, z1 = 0;
+    bool haveZ = false;
+    for (int gid : gids) {
+        const gp_XYZ p = mv.pts[gid];
+        const double rho = cylMeetRho(bestAx, p);
+        const double zz = cylMeetAxial(bestAx, p);
+        if (!haveZ || zz < z0) z0 = zz;
+        if (!haveZ || zz > z1) z1 = zz;
+        haveZ = true;
+        if (std::fabs(rho - bestRho.R) > tau) continue;
+        const gp_XYZ w = p - bestAx.Location().XYZ();
+        const gp_XYZ rad = w - bestAx.Direction().XYZ() * w.Dot(bestAx.Direction().XYZ());
+        if (!(rad.Modulus() > tau)) continue;
+        ang.push_back(std::atan2(rad.Dot(bestAx.YDirection().XYZ()),
+                                 rad.Dot(bestAx.XDirection().XYZ())));
+    }
+    SectorCentre sector;
+    double uSpan = 0;
+    if (cylMeetSectorCentre(ang.data(), static_cast<int>(ang.size()), sector)) {
+        uSpan = sector.span;
+        out.sectorOk = true;
+        out.sectorCentre = sector.centre;
+        out.sectorSpan = sector.span;
+    }
+    out.z0 = z0;
+    out.z1 = z1;
+    out.haveZ = haveZ;
+    const double vSpan = haveZ ? (z1 - z0) : 0.0;
+    const double gap = cylinderSectorGap(r.radius, bestRho.R, uSpan, vSpan);
+    int nAnalytic = 0;
+    for (const Region& q : rs.regions)
+        if (isAnalytic(&q)) ++nAnalytic;
+    const double budget =
+        partialSheetVolBudget(std::fabs(meshViewVolume(mv)), nAnalytic, r.dVolPredicted);
+    out.ax = gp_Ax3(bestAx.Location(), bestAx.Direction(), bestAx.XDirection());
+    out.R = bestRho.R;
+    out.gap = gap;
+    out.budget = budget;
+    CylMeetQuantities qq;
+    qq.cylinder = true;
+    qq.closed360 = false;
+    qq.tau = tau;
+    qq.storedDev = storedDev;
+    qq.rStored = r.radius;
+    qq.rFit = bestRho.R;
+    qq.fitOk = true;
+    qq.crossingMate = true;
+    qq.gap = gap;
+    qq.budget = budget;
+    out.intervene = cylMeetIntervene(qq);
+    if (diagRelEnabled())
+        std::fprintf(stderr,
+                     "DIAG_CYLMEET fit rid=%d R0=%.6f R=%.6f devTau=%.3f inliers=%d "
+                     "gap=%.6f budget=%.6f intervene=%d\n",
+                     r.id, r.radius, bestRho.R, storedDev / tau, bestRho.inliers, gap, budget,
+                     out.intervene ? 1 : 0);
+    return out.intervene;
+}
+
 bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& mv,
                           const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                           const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
@@ -13121,6 +13304,78 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         ow = owSaved;
         return false;
     };
+    if (gCylMeetIds.count(r.id)) {
+        // The stored cylinder missed τ. The face is the untrimmed certified
+        // cylinder (axis of the coaxial donor, radius = outer rho). A rectangular
+        // UV box is not tried: its face volume is the refusal.
+        surfTag = "cyl-meet";
+        int nAnalytic = 0;
+        for (const Region& q : rs.regions)
+            if (isAnalytic(&q)) ++nAnalytic;
+        const double budget =
+            partialSheetVolBudget(std::fabs(meshViewVolume(mv)), nAnalytic, r.dVolPredicted);
+        Handle(Geom_CylindricalSurface) surfMeet =
+            Handle(Geom_CylindricalSurface)::DownCast(regionSurf(r, SurfVar::CylBase));
+        int nExact = 0;
+        if (outer) {
+            for (int ci : outer->chainIdx) {
+                if (ci >= 0 && static_cast<std::size_t>(ci) < geom.size() &&
+                    geom[static_cast<std::size_t>(ci)].collapsed &&
+                    !geom[static_cast<std::size_t>(ci)].edges.empty())
+                    ++nExact;
+            }
+        }
+        auto sheetAgrees = [&](const TopoDS_Face& f) {
+            return partialSheetVolumeAgrees(faceVolExact(f, nullptr), regionChordVol(mv, r),
+                                            r.dVolPredicted, budget);
+        };
+        auto logMeet = [&](const char* why) {
+            if (!diagRelEnabled()) return;
+            std::fprintf(stderr,
+                         "DIAG_CYLMEET rid=%d R=%.6f budget=%.6f nExact=%d why=%s\n",
+                         r.id, r.radius, budget, nExact, why);
+        };
+        auto volumeOk = [&]() -> bool {
+            if (outF.IsNull() || !faceIsValid(outF)) return false;
+            if (sheetAgrees(outF)) return true;
+            TopoDS_Face flipped = outF;
+            flipped.Reverse();
+            if (faceIsValid(flipped) && sheetAgrees(flipped)) {
+                outF = flipped;
+                return true;
+            }
+            return false;
+        };
+        // nTri >= 500 makes tryPartial rebuild the forward wire, so the other
+        // sense has to be handed to makeFaceKeep directly.
+        auto trySense = [&](const TopoDS_Wire& wire, const char* tag) -> bool {
+            wireTag = tag;
+            TopoDS_Wire saved = ow;
+            ow = wire;
+            TopoDS_Face cand;
+            const bool kept = makeFaceKeep(surfMeet, ow, inners, r.outwardNormal, cand) &&
+                              finishPartial(cand) && volumeOk();
+            ow = saved;
+            return kept;
+        };
+        if (surfMeet.IsNull() || !refreshOuterWire()) {
+            logMeet("invalid");
+            return false;
+        }
+        wireTag = "fwd";
+        if (tryPartial(surfMeet) && volumeOk()) {
+            logMeet("agree");
+            return true;
+        }
+        TopoDS_Wire rev = ow;
+        rev.Reverse();
+        if (trySense(rev, "rev")) {
+            logMeet("agree");
+            return true;
+        }
+        logMeet("refuse");
+        return false;
+    }
     if (mv.nTri < 500) {
         wireTag = "fwd";
         if (tryAllSurfs(ow)) return true;
@@ -16340,7 +16595,6 @@ void collectResidualCulprits(const MeshView& mv, const RegionSet& rs, const Topo
                      shippedAbs, meshVol);
     if (nAnalytic <= 0) return;
     const double meshAbs = std::fabs(meshVol);
-    const double kR = 3.0;      // unchanged
     const double kArc = 1.05;   // D4 §3: max plate ratio 235.37/224.2 = 1.050, +5% margin
     struct ResidRow {
         int rid = -1;
@@ -16364,8 +16618,8 @@ void collectResidualCulprits(const MeshView& mv, const RegionSet& rs, const Topo
         const bool predictorBlind = (r.type == SurfType::Plane
                                      && std::fabs(r.dVolPredicted) < 1e-6);
         const double arcTerm = predictorBlind ? kArc * std::fabs(resid) : 0.0;
-        const double sub = std::max({1e-4 * meshAbs / (double)nAnalytic,
-                                     kR * std::fabs(r.dVolPredicted),
+        const double sub = std::max({kTightRelFloor * meshAbs / (double)nAnalytic,
+                                     kCascadeResidFactor * std::fabs(r.dVolPredicted),
                                      arcTerm});
         row.vface = vface;
         row.vchord = vchord;
@@ -17499,15 +17753,230 @@ void fitAnalyticTolerances(const TopoDS_Shape& shape) {
 
 bool tryStageP(const MeshView& mv, RegionSet& rs, std::vector<TopoDS_Face>& out);
 
+namespace {
+gp_XYZ classBClosestPoint(const BRepAdaptor_Surface& sa, const gp_XYZ& x, bool& ok) {
+    ok = true;
+    switch (sa.GetType()) {
+        case GeomAbs_Plane: {
+            const gp_Pln pl = sa.Plane();
+            const gp_XYZ n = pl.Axis().Direction().XYZ(), p = pl.Location().XYZ();
+            return x - n * (x - p).Dot(n);
+        }
+        case GeomAbs_Cylinder: {
+            const gp_Cylinder cy = sa.Cylinder();
+            const gp_XYZ o = cy.Position().Location().XYZ(), a = cy.Position().Direction().XYZ();
+            const gp_XYZ v = x - o;
+            const double h = v.Dot(a);
+            const gp_XYZ r = v - a * h;
+            const double rho = r.Modulus();
+            if (rho <= gp::Resolution()) break;
+            return o + a * h + r * (cy.Radius() / rho);
+        }
+        case GeomAbs_Cone: {
+            const gp_Cone co = sa.Cone();
+            const gp_XYZ ap = co.Apex().XYZ(), a = co.Position().Direction().XYZ();
+            const double al = co.SemiAngle();
+            const gp_XYZ v = x - ap;
+            const double h = v.Dot(a);
+            const gp_XYZ r = v - a * h;
+            const double rho = r.Modulus();
+            if (rho <= gp::Resolution()) break;
+            const gp_XYZ g = (r / rho) * std::sin(al) + a * std::cos(al);
+            return ap + g * v.Dot(g);
+        }
+        case GeomAbs_Sphere: {
+            const gp_Sphere sp = sa.Sphere();
+            const gp_XYZ c = sp.Location().XYZ();
+            const gp_XYZ d = x - c;
+            const double m = d.Modulus();
+            if (m <= gp::Resolution()) break;
+            return c + d * (sp.Radius() / m);
+        }
+        case GeomAbs_Torus: {
+            const gp_Torus to = sa.Torus();
+            const gp_XYZ o = to.Position().Location().XYZ(), a = to.Position().Direction().XYZ();
+            const gp_XYZ v = x - o;
+            const gp_XYZ r = v - a * v.Dot(a);
+            const double rho = r.Modulus();
+            if (rho <= gp::Resolution()) break;
+            const gp_XYZ c = o + r * (to.MajorRadius() / rho);
+            const gp_XYZ d = x - c;
+            const double m = d.Modulus();
+            if (m <= gp::Resolution()) break;
+            return c + d * (to.MinorRadius() / m);
+        }
+        default:
+            break;
+    }
+    ok = false;
+    return x;
+}
+
+void measureClassBShipMetrics(const MeshView& mv, const RegionSet& rs,
+                              const std::vector<TopoDS_Face>& built,
+                              const std::vector<int>& builtRid,
+                              const std::vector<char>& exploded,
+                              std::vector<ClassBRegionMetric>& out) {
+    out.clear();
+    const double tauB = tauOf(mv);
+    const double mvol = meshViewVolume(mv);
+    const double sgn = mvol < 0.0 ? -1.0 : 1.0;
+    std::unordered_map<int, std::vector<size_t>> facesOf;
+    for (size_t fi = 0; fi < built.size(); fi++) {
+        const int rid = fi < builtRid.size() ? builtRid[fi] : -1;
+        if (rid >= 0) facesOf[rid].push_back(fi);
+    }
+    auto P = [&](int t, int j) -> gp_XYZ { return mv.pts[mv.tris[mv.compTris[t]][j]]; };
+    static const double kW[7] = {3 / 60., 3 / 60., 3 / 60., 8 / 60., 8 / 60., 8 / 60., 27 / 60.};
+    for (const Region& r : rs.regions) {
+        ClassBRegionMetric row;
+        row.rid = r.id;
+        row.maxVertexDev = r.maxVertexDev;
+        row.dVolPredicted = r.dVolPredicted;
+        row.shippedAnalytic = regionShippedAnalytic(r, exploded);
+        double A = 0.0;
+        for (int t : r.tris) {
+            if (t < 0 || (size_t)t >= mv.nTri) continue;
+            const gp_XYZ a = P(t, 0), b = P(t, 1), c = P(t, 2);
+            const gp_XYZ cr = (b - a).Crossed(c - a);
+            A += 0.5 * cr.Modulus();
+        }
+        row.area = A;
+        const TopoDS_Face* rep = nullptr;
+        auto it = facesOf.find(r.id);
+        if (it != facesOf.end()) {
+            for (size_t fi : it->second) {
+                if (!built[fi].IsNull()) {
+                    rep = &built[fi];
+                    break;
+                }
+            }
+        }
+        if (row.shippedAnalytic && rep) {
+            BRepAdaptor_Surface sa(*rep, Standard_False);
+            double sw = 0.0;
+            for (int t : r.tris) {
+                if (t < 0 || (size_t)t >= mv.nTri) continue;
+                const gp_XYZ a = P(t, 0), b = P(t, 1), c = P(t, 2);
+                const gp_XYZ cr = (b - a).Crossed(c - a);
+                const double m = cr.Modulus();
+                if (m <= 0.0) continue;
+                const gp_XYZ n = cr / m;
+                const gp_XYZ S[7] = {a, b, c, (a + b) * 0.5, (b + c) * 0.5, (c + a) * 0.5,
+                                     (a + b + c) / 3.0};
+                double acc = 0.0;
+                for (int k = 0; k < 7; k++) {
+                    bool okp = true;
+                    const gp_XYZ y = classBClosestPoint(sa, S[k], okp);
+                    if (!okp) continue;
+                    acc += kW[k] * (y - S[k]).Dot(n);
+                }
+                sw += 0.5 * m * acc;
+            }
+            row.swept = sgn * sw;
+        }
+        out.push_back(row);
+    }
+}
+}  // namespace
+
+void forgetCylMeetSurf(int id) {
+    for (int v = static_cast<int>(SurfVar::Plane); v <= static_cast<int>(SurfVar::TorusBase); ++v) {
+        gRegionSurf.erase(regionSurfKey(id, static_cast<SurfVar>(v)));
+    }
+    for (auto it = gSurfIdent.begin(); it != gSurfIdent.end();) {
+        if (it->second.first == id) it = gSurfIdent.erase(it);
+        else ++it;
+    }
+}
+
+// D-fc-6.4(b). The stats' maxEdgeTol starts as segment()'s chord census,
+// measured against the surfaces segment() stored. Once a wall is corrected,
+// that census describes surfaces nothing builds, so it is measured again on
+// the set that builds: every chain mesh edge against each side that is still
+// analytic and not exploded. An E' demoted side ships facets, and its chain
+// edges are mesh edges of those facets; rebuildCollapsed measures the
+// analytic side of every such mixed chain.
+double buildSetChordCensus(const MeshView& mv, const RegionSet& rs,
+                           const std::vector<char>& exploded) {
+    double maxEdge = 0.0;
+    for (const BoundaryChain& c : rs.chains) {
+        const int nV = static_cast<int>(c.meshVerts.size());
+        for (int i = 0; i < static_cast<int>(c.meshEdges.size()); ++i) {
+            if (nV < 2 || (!c.closedLoop && i + 1 >= nV)) break;
+            const gp_XYZ pa = pntOf(mv, c.meshVerts[i]).XYZ();
+            const gp_XYZ pb = pntOf(mv, c.meshVerts[(i + 1) % nV]).XYZ();
+            for (const int rid : {c.regA, c.regB}) {
+                const Region* r = regionById(rs, rid);
+                if (!r || regionExploded(exploded, r->id) || !isAnalytic(r)) continue;
+                if (r->type == SurfType::Plane)
+                    maxEdge = std::max(maxEdge, chordMidDevPlane(r->ax, pa, pb));
+                else if (r->type == SurfType::Cylinder)
+                    maxEdge = std::max(maxEdge, chordMidDevCylinder(r->ax, r->radius, pa, pb));
+            }
+        }
+    }
+    return maxEdge;
+}
+
+// Replace an open counterbore wall's stored cylinder with the certified outer
+// rho about a coaxial donor, before chain collapse, so plane|cylinder and
+// cone|cylinder contacts are built by the existing constructed generators.
+// Every wall is measured on the uncorrected set first, so the order of
+// rs.regions never decides another wall's donor or mate.
+void correctCylMeetSurfaces(RegionSet& rs, const MeshView& mv, const std::vector<char>& exploded) {
+    std::vector<std::pair<std::size_t, CylMeetFit>> fits;
+    for (std::size_t i = 0; i < rs.regions.size(); ++i) {
+        const Region& r = rs.regions[i];
+        if (regionExploded(exploded, r.id)) continue;
+        if (gCylMeetIds.count(r.id)) continue;
+        CylMeetFit fit;
+        if (!cylMeetFitOf(r, rs, mv, fit) || !fit.intervene) continue;
+        fits.emplace_back(i, fit);
+    }
+    for (const auto& item : fits) {
+        Region& r = rs.regions[item.first];
+        const CylMeetFit& fit = item.second;
+        r.ax = fit.ax;
+        // The donor frame's angle origin can split this wall. Rotate about the
+        // axis so the measured sector is centred at U=0; the cylinder is the
+        // same line and radius. u/v then match that frame, so a later pcurve
+        // is one period and the seam test does not fire on a stale span.
+        if (fit.sectorOk) {
+            r.ax.Rotate(gp_Ax1(r.ax.Location(), r.ax.Direction()), fit.sectorCentre);
+            r.uMin = -0.5 * fit.sectorSpan;
+            r.uMax = 0.5 * fit.sectorSpan;
+        }
+        if (fit.haveZ) {
+            r.vMin = fit.z0;
+            r.vMax = fit.z1;
+        }
+        r.radius = fit.R;
+        gCylMeetIds.insert(r.id);
+        forgetCylMeetSurf(r.id);
+        if (diagRelEnabled())
+            std::fprintf(stderr, "DIAG_CYLMEET correct rid=%d R=%.6f gap=%.6f budget=%.6f\n",
+                         r.id, fit.R, fit.gap, fit.budget);
+    }
+    if (fits.empty()) return;
+    const double segmentCensus = rs.stats.maxEdgeTol;
+    rs.stats.maxEdgeTol = buildSetChordCensus(mv, rs, exploded);
+    if (diagRelEnabled())
+        std::fprintf(stderr, "DIAG_CYLMEET census segment=%.6f buildSet=%.6f\n", segmentCensus,
+                     rs.stats.maxEdgeTol);
+}
+
 bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vertex>& verts,
                 std::vector<TopoDS_Face>& out, WarnFn warn) {
     out.clear();
     rs.torusFailedTris.clear();
+    rs.classBMetrics.clear();
     try {
         gCompNTri = (int)mv.nTri;
         gReconnectFires = 0;
         gOriNotDetermined = 0;
         lastCanonClearPass = -1;
+        gCylMeetIds.clear();
         if (mv.nTri == 0) return false;
         if (verts.size() < mv.nVtx) return false;
         if (!regionSetConsistent(mv, rs, verts)) {
@@ -21001,6 +21470,31 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
             if (sawAnalytic) rs.stats.maxVertexDev = devMax;
         }
+        // D-fc-6.7: dissolve caller-selected regions before the first collapse.
+        if (!rs.classBExplode.empty()) {
+            std::vector<int> ids = rs.classBExplode;
+            std::sort(ids.begin(), ids.end());
+            ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+            double devMax = 0.0;
+            bool sawAnalytic = false;
+            for (int id : ids) {
+                Region* rg = regionByIdMut(rs, id);
+                if (!rg || regionExploded(exploded, id)) continue;
+                rs.stats.dVolPredicted -= rg->dVolPredicted;
+                rs.stats.facetTriangles += (int)rg->tris.size();
+                rg->dVolPredicted = 0.0;
+                explodeRegion(id);
+            }
+            for (const Region& rg : rs.regions) {
+                if (regionExploded(exploded, rg.id)) continue;
+                if (!std::isfinite(rg.maxVertexDev)) continue;
+                devMax = std::max(devMax, rg.maxVertexDev);
+                sawAnalytic = true;
+            }
+            if (sawAnalytic) rs.stats.maxVertexDev = devMax;
+            rs.stats.maxEdgeTol = buildSetChordCensus(mv, rs, exploded);
+            rs.classBExplode.clear();
+        }
         auto explodeNonSeamed = [&]() -> bool {
             bool any = false;
             for (const Region& r : rs.regions) {
@@ -21050,6 +21544,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         builtRid.clear();
         const int kMaxRounds = 2;
         while (true) {
+            correctCylMeetSurfaces(rs, mv, exploded);
             rebuildCollapsed();
             built.clear();
             builtRid.clear();
@@ -21181,6 +21676,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             rounds++;
             if (rounds > kMaxRounds) {
                 // Rebuild once more. Remaining fails ⇒ ChainUnstable / R2.
+                correctCylMeetSurfaces(rs, mv, exploded);
                 rebuildCollapsed();
                 built.clear();
                 builtRid.clear();
@@ -21455,7 +21951,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             return true;
         }();
         double spCap = meshTolCap(mv, nullptr);
-        for (const Region& rg : rs.regions) spCap = std::max(spCap, meshTolCap(mv, &rg));
+        for (const Region& rg : rs.regions) {
+            if (regionExploded(exploded, rg.id) || rg.builtAs == BuiltAs::ExplodedToFacets) continue;
+            spCap = std::max(spCap, meshTolCap(mv, &rg));
+        }
         spCap = std::max(spCap, 0.05 * (mv.diag > 0.0 ? mv.diag : 1.0));
         spCap = std::max(spCap, 25.0);  // same floor as live tolOk; blocks 10^3 mm poison
         if (mv.nTri < 10000) {
@@ -22059,7 +22558,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                     allAbs, shippedAbs);
             const double shellVol = shapeVolSafe(sh);
             const double meshAbs = std::fabs(meshVol);
-            const double tightBudget = std::max(1e-4 * meshAbs, 3.0 * shippedAbs);
+            const double tightBudget = shellVolBudget(meshAbs, shippedAbs);
             const bool tightFail = std::fabs(shellVol - meshVol) > tightBudget;
             if (tightFail && residHits.empty()) {
                 // Aggregate-only miss: explode the landmine-class worst |dVol|.
@@ -22156,6 +22655,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         dumpTolBindSummary();
         dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
         dumpVolAttrib("ship", mv, rs, built, builtRid, eprimeFill, exploded);
+        measureClassBShipMetrics(mv, rs, built, builtRid, exploded, rs.classBMetrics);
         std::fprintf(stderr, "DIAG_RECONNECT_SUM fires=%d nTri=%d notDetermined=%d\n",
                      gReconnectFires, (int)mv.nTri, gOriNotDetermined);
         out = std::move(built);

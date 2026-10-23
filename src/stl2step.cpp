@@ -25,6 +25,9 @@
 #include "mesh_heal.hpp"
 #include "parallel.hpp"
 #include "refit.hpp"
+#include "refit_classb.hpp"
+#include "refit_cyl_meet.hpp"
+#include "shell_volume.hpp"
 #include "stl_quant.hpp"
 
 #include <algorithm>
@@ -1223,7 +1226,13 @@ Result Converter::run() {
                 fillMeshView(cs, mv);
                 refit::RegionSet rs;
                 rs.compRoot = root;
-                refit::segment(mv, segp, rs, nullptr);
+                // D-fc-6.1(c). segment()'s WarnFn sites are the global wipe
+                // ("stage failed") and the catch-all ("unknown error"). The
+                // catch-all does not fire on the owned inputs: every other
+                // revert builds faces, and the only stage-false wipe is the
+                // one-region abort (a)(b) remove. resegmentTorus is a different
+                // call and keeps a null sink.
+                refit::segment(mv, segp, rs, [&](const std::string& m) { warn(m); });
                 std::lock_guard<std::mutex> lk(planMu);
                 if (const char* e = std::getenv("STL2STEP_SEGMENT_SUMMARY");
                     e && e[0] && e[0] != '0')
@@ -1273,6 +1282,7 @@ Result Converter::run() {
                 refit::MeshView mv{};
                 fillMeshView(cs, mv);
                 refit::RegionSet rs = pit->second;
+                refit::RegionSet healBase = rs;
                 std::vector<TopoDS_Face> rf;
                 std::vector<std::string> torusProbeWarn;
                 auto tryBuild = [&](refit::RegionSet& rset, bool capture) -> bool {
@@ -1287,8 +1297,12 @@ Result Converter::run() {
                 };
                 const bool torusProbe = rs.torusRevertValid && !rs.torusRevertApplied;
                 torusProbeWarn.clear();
-                // The shipped shell's own test: closed, valid, inside the volume
-                // budget. U-3 covers every torus (D-fc-1.3), so a probe whose
+                int skWhy = -1;
+                // The shipped shell's own test: closed, valid, and |shell| inside
+                // the volume budget (D-fc-6.2: magnitude with magnitude). An
+                // inward shell whose |V| matches |mesh| is the same solid the
+                // makeSolids orientation step turns outward, as on the Verbatim
+                // path. U-3 covers every torus (D-fc-1.3), so a probe whose
                 // faces built but whose shell fails this test takes the pre-T
                 // snapshot too, before the verbatim revert (D-fc-4.6).
                 auto shellOk = [&]() -> bool {
@@ -1297,6 +1311,7 @@ Result Converter::run() {
                     pb.MakeShell(probe);
                     for (auto& f : rf) pb.Add(probe, f);
                     bool good = BRep_Tool::IsClosed(probe);
+                    skWhy = good ? 0 : 1;
                     if (good) {
                         try {
                             BRepCheck_Analyzer an(probe, Standard_True, Standard_True);
@@ -1304,18 +1319,24 @@ Result Converter::run() {
                         } catch (const Standard_Failure&) {
                             good = false;
                         }
+                        if (!good) skWhy = 2;
                     }
                     if (good) {
                         double dVolAbs = 0;
                         for (const auto& reg : rs.regions)
                             dVolAbs += std::fabs(reg.dVolPredicted);
                         const double meshVol = std::fabs(cs.vol);
-                        const double budget = std::max(1e-4 * meshVol, 3.0 * dVolAbs);
+                        const double budget =
+                            refit::shellVolBudget(meshVol, dVolAbs);
                         try {
                             const double shellVol = shapeVolume(probe);
-                            if (std::fabs(shellVol - meshVol) > budget) good = false;
+                            if (!shellMagnitudesAgree(shellVol, meshVol, budget)) {
+                                good = false;
+                                skWhy = 3;
+                            }
                         } catch (const Standard_Failure&) {
                             good = false;
+                            skWhy = 4;
                         }
                     }
                     return good;
@@ -1367,6 +1388,7 @@ Result Converter::run() {
                         bb.MakeVertex(verts[i], gp_Pnt(pts[cs.vtx[i]]), Precision::Confusion());
                     });
                     held.compRoot = rs.compRoot;
+                    healBase = held;
                     rs = std::move(held);
                     torusProbeWarn.clear();
                     ok = tryBuild(rs, true);
@@ -1398,24 +1420,72 @@ Result Converter::run() {
                     pre.stats = rs.torusRevert.stats;
                     pre.stats.tori = 0;
                     rs = pre;
+                    healBase = pre;
+                    skWhy = -1;
                     ok = tryBuild(rs, false);
                 } else if (ok && torusProbe) {
                     for (const auto& m : torusProbeWarn) warn(m);
                 }
-                if (ok) {
-                    if (!shellChecked) ok = shellOk();
-                    if (ok) {
-                        usedRefit = true;
-                        built = std::move(rf);
-                        out.keepShapes = built;
-                        out.usedRefit = true;
-                        out.refitSt = rs.stats;
-                        for (const auto& reg : rs.regions)
-                            out.refitDVolAbs += std::fabs(reg.dVolPredicted);
+                if (ok && !shellChecked) ok = shellOk();
+                bool classBRevertNamed = false;
+                if (!ok && skWhy == 3) {
+                    const double tauH = refit::tauOf(mv);
+                    std::vector<int> healed;
+                    if (tauH > 0.0) {
+                        for (;;) {
+                            std::vector<int> add;
+                            for (const auto& w : rs.classBMetrics) {
+                                if (!refit::classBDissolveQualifies(
+                                        w.shippedAnalytic, w.maxVertexDev, tauH, w.swept,
+                                        w.dVolPredicted, w.area))
+                                    continue;
+                                if (!std::binary_search(healed.begin(), healed.end(), w.rid))
+                                    add.push_back(w.rid);
+                            }
+                            if (!refit::classBHealPassHasCandidates(add.data(),
+                                                                    static_cast<int>(add.size())))
+                                break;
+                            std::sort(add.begin(), add.end());
+                            for (int id : add) {
+                                if (!std::binary_search(healed.begin(), healed.end(), id))
+                                    healed.push_back(id);
+                            }
+                            std::sort(healed.begin(), healed.end());
+                            rs = healBase;
+                            rs.classBExplode = healed;
+                            parallelFor(subThreads, nV, [&](size_t i) {
+                                BRep_Builder bb;
+                                bb.MakeVertex(verts[i], gp_Pnt(pts[cs.vtx[i]]),
+                                              Precision::Confusion());
+                            });
+                            ok = tryBuild(rs, false);
+                            if (!ok) {
+                                if (skWhy != 3) break;
+                                continue;
+                            }
+                            ok = shellOk();
+                            if (ok) break;
+                            if (skWhy != 3) break;
+                        }
                     }
+                    if (!ok) classBRevertNamed = true;
                 }
-                if (!ok)
-                    warn("smooth: analytic rebuild reverted on one component -- kept faceted");
+                if (ok) {
+                    usedRefit = true;
+                    built = std::move(rf);
+                    out.keepShapes = built;
+                    out.usedRefit = true;
+                    out.refitSt = rs.stats;
+                    for (const auto& reg : rs.regions)
+                        out.refitDVolAbs += std::fabs(reg.dVolPredicted);
+                }
+                if (!ok) {
+                    if (classBRevertNamed)
+                        warn("smooth: analytic rebuild reverted on one component "
+                             "(classB-no-region-qualifies) -- kept faceted");
+                    else
+                        warn("smooth: analytic rebuild reverted on one component -- kept faceted");
+                }
             }
             std::atomic<long long> degenSkipped{ 0 };
             if (!usedRefit) {
@@ -1725,7 +1795,11 @@ Result Converter::run() {
                 }
                 if (!refitPlans.count(order[ci])) continue;
                 const refit::RefitStats& st = o.refitSt;
-                if (o.usedRefit && (cyls > 0 || (st.cylinders == 0 && st.planes > 0))) {
+                // usedRefit means the shell passed shellOk and was shipped.
+                // A seamed cylinder face can fail BRepCheck on its own and
+                // contribute no GeomAbs_Cylinder (D-130-10 still counts cyls
+                // off the written shape) without the component having reverted.
+                if (o.usedRefit) {
                     builtCo++;
                     builtPl += st.planes;
                     builtCy += cyls;
