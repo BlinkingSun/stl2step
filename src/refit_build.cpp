@@ -23,6 +23,7 @@
 #include "refit_cap_arc.hpp"
 #include "refit_edge_bound.hpp"
 #include "refit_slit_heal.hpp"
+#include "refit_wire_clip.hpp"
 #include "refit_relational_ruled.hpp"
 #include "refit_cylcyl_contact.hpp"
 #include "refit_cyl_meet.hpp"
@@ -6606,8 +6607,8 @@ void dumpShellCheck(const TopoDS_Shell& sh, const std::vector<TopoDS_Face>& buil
                 for (BRepCheck_ListOfStatus::Iterator it(fr->Status()); it.More(); it.Next())
                     if (it.Value() != BRepCheck_NoError) faceBad = true;
             }
-            if (!faceBad) continue;
             const Region* rr = regionById(rs, rid);
+            if (!faceBad) continue;
             const char* ty = "facet";
             double R = 0.0;
             int nTri = 0;
@@ -19435,6 +19436,197 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         };
 
+        // D-fc-6.1(d) / RQ-8. A polyline chord of an analytic plane that enters a
+        // certified circle of the same wire by more than tau is replaced, at the
+        // shared tangent vertex, by the tangent arc through the same vertices.
+        // The certified circle is not moved. Runs after each rebuildCollapsed,
+        // before faces are built, so both sides of the shared edge see the arc.
+        auto clipTangentChords = [&]() {
+            const double tau = tauOf(mv);
+            if (!(tau > 0.0)) return;
+            std::vector<char> done(meshE.size(), 0);
+            for (const Region& R : rs.regions) {
+                if (R.type != SurfType::Plane || !isAnalytic(&R)) continue;
+                if (regionExploded(exploded, R.id)) continue;
+                for (const Loop& lp : R.loops) {
+                    const size_t nCh = lp.chainIdx.size();
+                    if (nCh < 2 || lp.reversed.size() != nCh) continue;
+                    for (size_t k = 0; k < nCh; ++k) {
+                        const int cs[2] = {lp.chainIdx[k], lp.chainIdx[(k + 1) % nCh]};
+                        for (int ord = 0; ord < 2; ++ord) {
+                            const int circCi = cs[ord];
+                            const int polyCi = cs[1 - ord];
+                            if (circCi < 0 || polyCi < 0) continue;
+                            if ((size_t)circCi >= rs.chains.size() ||
+                                (size_t)polyCi >= rs.chains.size() ||
+                                (size_t)circCi >= geom.size() || (size_t)polyCi >= collapsed.size())
+                                continue;
+                            const ChainGeom& cg = geom[(size_t)circCi];
+                            const bool circOk = collapsed[(size_t)circCi] && cg.collapsed &&
+                                                !cg.tier2Polyline &&
+                                                cg.curve.kind == AnalyticCurve::Circ &&
+                                                !cg.edges.empty();
+                            const bool polyOk =
+                                !(collapsed[(size_t)polyCi] && geom[(size_t)polyCi].collapsed);
+                            if (!circOk || !polyOk) continue;
+                            const BoundaryChain& pc = rs.chains[(size_t)polyCi];
+                            const BoundaryChain& cc = rs.chains[(size_t)circCi];
+                            if (pc.meshVerts.size() < 2 || pc.meshEdges.empty() ||
+                                cc.meshVerts.size() < 2)
+                                continue;
+                            const int c0 = cc.meshVerts.front();
+                            const int c1 = cc.meshVerts.back();
+                            int shared = -1;
+                            if (pc.meshVerts.front() == c0 || pc.meshVerts.front() == c1)
+                                shared = pc.meshVerts.front();
+                            else if (pc.meshVerts.back() == c0 || pc.meshVerts.back() == c1)
+                                shared = pc.meshVerts.back();
+                            if (shared < 0) continue;
+                            int eid = -1, farLv = -1;
+                            for (int e : pc.meshEdges) {
+                                if (e < 0 || (size_t)e >= mv.nEdge) continue;
+                                const int a = mv.compEdges[e].first;
+                                const int b = mv.compEdges[e].second;
+                                if (a == shared) {
+                                    eid = e;
+                                    farLv = b;
+                                    break;
+                                }
+                                if (b == shared) {
+                                    eid = e;
+                                    farLv = a;
+                                    break;
+                                }
+                            }
+                            if (eid < 0 || farLv < 0 || (size_t)eid >= meshE.size() ||
+                                done[(size_t)eid])
+                                continue;
+                            if ((size_t)eid >= edgeOk.size() || !edgeOk[(size_t)eid] ||
+                                meshE[(size_t)eid].IsNull())
+                                continue;
+                            Standard_Real ef = 0, el = 0;
+                            Handle(Geom_Curve) c3 = BRep_Tool::Curve(meshE[(size_t)eid], ef, el);
+                            if (c3.IsNull() || c3->DynamicType() != STANDARD_TYPE(Geom_Line))
+                                continue;
+                            TopoDS_Vertex va, vb;
+                            TopExp::Vertices(meshE[(size_t)eid], va, vb);
+                            if (va.IsNull() || vb.IsNull()) continue;
+                            const gp_Pnt pShared = pntOf(mv, shared);
+                            const bool aIsShared =
+                                BRep_Tool::Pnt(va).Distance(pShared) <=
+                                BRep_Tool::Pnt(vb).Distance(pShared);
+                            const TopoDS_Vertex& vS = aIsShared ? va : vb;
+                            const TopoDS_Vertex& vF = aIsShared ? vb : va;
+                            const gp_Circ cert = cg.curve.circ;
+                            const double snap = std::max(
+                                tau, std::max(BRep_Tool::Tolerance(vS), BRep_Tool::Tolerance(vF)));
+                            const TangentClipArc preview = tangentClipArc(
+                                cert, BRep_Tool::Pnt(vS), BRep_Tool::Pnt(vF), tau, snap);
+                            if (!preview.ok) continue;
+                            int other = -1;
+                            if (pc.regA == R.id) other = pc.regB;
+                            else if (pc.regB == R.id) other = pc.regA;
+                            const Region* partner = regionById(rs, other);
+                            double distP = 0.0;
+                            for (int s = 1; s <= 4; ++s) {
+                                const gp_Pnt q =
+                                    ElCLib::Value(preview.sweep * (double)s / 4.0, preview.circ);
+                                if (!partner) continue;
+                                if (partner->type == SurfType::Plane) {
+                                    distP = std::max(
+                                        distP, std::fabs(gp_Vec(partner->ax.Location(), q)
+                                                             .Dot(partner->ax.Direction())));
+                                } else if (partner->type == SurfType::Cylinder &&
+                                           partner->radius > 0.0) {
+                                    const gp_XYZ ax = partner->ax.Direction().XYZ();
+                                    const gp_XYZ d = q.XYZ() - partner->ax.Location().XYZ();
+                                    distP = std::max(
+                                        distP, std::fabs((d - ax * d.Dot(ax)).Modulus() -
+                                                         partner->radius));
+                                }
+                            }
+                            const double existing = BRep_Tool::Tolerance(meshE[(size_t)eid]);
+                            const double cap = std::max(existing, g5EdgeTolCap(cert.Radius()));
+                            const double need = std::max(existing, std::max(preview.sagitta, distP));
+                            const int applied = (need <= cap) ? 1 : 0;
+                            if (collapseDiagEnabled()) {
+                                std::fprintf(stderr,
+                                             "DIAG_CLIP rid=%d partner=%d penTau=%.2f sagTau=%.2f "
+                                             "distTau=%.2f applied=%d\n",
+                                             R.id, other, preview.penetration / tau,
+                                             preview.sagitta / tau, distP / tau, applied);
+                            }
+                            if (!applied) continue;
+                            TopoDS_Edge ne = tangentClipEdge(cert, vS, vF, tau,
+                                                             std::max(existing, distP), cap);
+                            if (ne.IsNull()) continue;
+                            // A Geom2d_Line is unit-speed, so on this angle-parameterized
+                            // arc it misses the chord by about the chord length (measured
+                            // on the refused keep). The same-parameter chord is a degree-1
+                            // spline on the curve's own knots; a 2d circle wins only when
+                            // the arc actually lies in that plane. Stamp both faces before
+                            // the plane binder, which keeps a pcurve it already finds.
+                            // The gap is the sagitta, under g5EdgeTolCap, so the shell's
+                            // forced SameParameter raises the edge tolerance to that gap.
+                            Standard_Real fE = 0, lE = 0;
+                            Handle(Geom_Curve) c3E = BRep_Tool::Curve(ne, fE, lE);
+                            if (c3E.IsNull() || !(lE > fE)) continue;
+                            auto stampPlane = [&](const Region* face, double& dCirc,
+                                                 double& dChord) -> double {
+                                dCirc = -1.0;
+                                dChord = -1.0;
+                                if (!face || face->type != SurfType::Plane || !isAnalytic(face))
+                                    return 0.0;
+                                Handle(Geom_Surface) srf = regionSurf(*face, SurfVar::Plane);
+                                Handle(Geom_Plane) pl = Handle(Geom_Plane)::DownCast(srf);
+                                if (pl.IsNull()) return 1.0e300;
+                                Handle(Geom2d_Curve) best;
+                                double bestDev = 1.0e300;
+                                Handle(Geom2d_Curve) circ2 =
+                                    makePCurveOnSurf(c3E, fE, lE, srf, "circ");
+                                dCirc = curveSurfaceDeviation(c3E, fE, lE, srf, circ2);
+                                if (!circ2.IsNull() && dCirc < bestDev) {
+                                    bestDev = dCirc;
+                                    best = circ2;
+                                }
+                                Handle(Geom2d_Curve) chord = planeSameParameterChord(
+                                    pl->Pln(), c3E->Value(fE), c3E->Value(lE), fE, lE);
+                                dChord = curveSurfaceDeviation(c3E, fE, lE, srf, chord);
+                                if (!chord.IsNull() && dChord < bestDev) {
+                                    bestDev = dChord;
+                                    best = chord;
+                                }
+                                if (best.IsNull() || !(bestDev < 1.0e299)) return 1.0e300;
+                                const double tolE = std::max(BRep_Tool::Tolerance(ne), bestDev);
+                                BRep_Builder B;
+                                const TopLoc_Location loc;
+                                B.UpdateEdge(ne, best, srf, loc, tolE);
+                                B.Range(ne, srf, loc, fE, lE);
+                                B.UpdateEdge(ne, tolE);
+                                B.SameParameter(ne, Standard_True);
+                                return bestDev;
+                            };
+                            double dCircH = -1, dChordH = -1, dCircP = -1, dChordP = -1;
+                            const double devH = stampPlane(&R, dCircH, dChordH);
+                            const double devP = stampPlane(partner, dCircP, dChordP);
+                            const double worst = std::max(devH, devP);
+                            if (collapseDiagEnabled()) {
+                                std::fprintf(stderr,
+                                             "DIAG_CLIP_KEEP rid=%d partner=%d df=%.6f "
+                                             "dCircHTau=%.2f dChordHTau=%.2f dCircPTau=%.2f "
+                                             "dChordPTau=%.2f worstTau=%.2f capTau=%.2f\n",
+                                             R.id, other, lE - fE, dCircH / tau, dChordH / tau,
+                                             dCircP / tau, dChordP / tau, worst / tau, cap / tau);
+                            }
+                            if (!(worst <= cap)) continue;
+                            meshE[(size_t)eid] = ne;
+                            done[(size_t)eid] = 1;
+                        }
+                    }
+                }
+            }
+        };
+
         // D-fc-5.11 F3: zero-area fins (refit_slit_heal.hpp), decided per build round
         // on that round's collapsed edges. A fin is cut from a host built before it in
         // the round; a host that fails or explodes leaves the fin its own face, so the
@@ -21600,6 +21792,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // torus does (closedTorusPartnerFailed); read once the naming regions
             // are built, the only builds that can change it.
             bool partnerRead = false, partnerFailed = false;
+            clipTangentChords();
             decideFins(buildOrder);
             for (size_t k = 0; k < buildOrder.size(); k++) {
                 if (!partnerRead && k >= namingEnd) {
@@ -21682,7 +21875,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 builtRid.clear();
                 anyFail = false;
                 failedIds.clear();
-                decideFins(buildOrder);
+                clipTangentChords();
+            decideFins(buildOrder);
                 for (size_t oi : buildOrder) {
                     Region& r = rs.regions[oi];
                     if (regionExploded(exploded, r.id)) continue;

@@ -67,6 +67,7 @@ add_library(stl2step_core
     src/refit_grow.cpp
     src/refit_fillet.cpp
     src/refit_chains.cpp
+    src/refit_island_absorb.cpp
     src/refit_segment.cpp
     src/refit_build.cpp
     src/refit_lawband.cpp

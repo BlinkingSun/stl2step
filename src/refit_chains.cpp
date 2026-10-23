@@ -316,6 +316,20 @@ bool loopUsesChain(const Loop& lp, int ci) {
 
 }  // namespace
 
+// D-fc-6.1(d). Predicates are defined in refit_island_absorb.cpp. This TU is on
+// the D5.3 include allowlist, so it does not include that header. torusRails is
+// defined in refit_relational_reclaim.cpp; the struct matches its header.
+bool uniqueF1Host(const MeshView& mv, const std::vector<Region>& regions,
+                  const std::vector<int>& island, double lateralSin, int& host, double& sag,
+                  double& hostSag);
+
+struct TorusRails {
+    double gap = 0;      // largest vertex-azimuth gap (rad)
+    double maxStep = 0;  // largest boundary-edge azimuth step (rad)
+    bool full = false;
+};
+TorusRails torusRails(const MeshView& mv, const Region& torus);
+
 // dropTri: triangles already dissolved out of the accepted set (D-fc-6.1(b)).
 // Null on the first pass, so a pass that classifies every region takes the
 // original intake. The mask is indexed by local triangle id.
@@ -500,6 +514,87 @@ static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const
     out.nIslands = (int)islands.size();
     for (int id = 0; id < (int)islOrd.size(); ++id) {
         for (int t : islands[islOrd[id]].tris) out.triIsland[t] = id;
+    }
+
+    // D-fc-6.1(d). One pass against the hosts as they stand: an unclaimed island
+    // whose vertices already belong to exactly one closed360 cylinder, whose
+    // sagitta does not exceed that cylinder's own, and whose triangles are
+    // lateral, joins that cylinder. closed360 is then the F4 rail rule on the
+    // triangles. Incomplete coverage demotes; it does not refit.
+    {
+        const double lateralSin = std::sin(tol.thetaSharp);
+        const bool f1Diag = [] {
+            const char* v = std::getenv("STL2STEP_COLLAPSE_DIAG");
+            return v && v[0] && v[0] != '0';
+        }();
+        const double tau = (mv.quantFloor > 0.0) ? 2.0 * mv.quantFloor : 0.0;
+        struct Plan {
+            int slot = -1;
+            int host = -1;
+            double sag = 0;
+            double hostSag = 0;
+        };
+        std::vector<Plan> plans;
+        for (int slot : islOrd) {
+            const std::vector<int>& tris = islands[(size_t)slot].tris;
+            bool clean = !tris.empty();
+            for (int t : tris)
+                if (t < 0 || t >= nTri || out.triRegion[t] >= 0) clean = false;
+            if (!clean) continue;
+            Plan pl;
+            pl.slot = slot;
+            if (!uniqueF1Host(mv, out.regions, tris, lateralSin, pl.host, pl.sag, pl.hostSag))
+                continue;
+            plans.push_back(pl);
+        }
+        std::vector<char> grew(out.regions.size(), 0);
+        for (const Plan& pl : plans) {
+            Region& H = out.regions[(size_t)pl.host];
+            for (int t : islands[(size_t)pl.slot].tris) {
+                H.tris.push_back(t);
+                out.triRegion[t] = H.id;
+                out.triIsland[t] = -1;
+            }
+            std::sort(H.tris.begin(), H.tris.end());
+            H.tris.erase(std::unique(H.tris.begin(), H.tris.end()), H.tris.end());
+            grew[(size_t)pl.host] = 1;
+            if (f1Diag) {
+                std::fprintf(stderr,
+                             "DIAG_F1 absorb host=%d nTri=%zu hostSag=%.6g sag=%.6g tau=%.6g\n",
+                             H.id, islands[(size_t)pl.slot].tris.size(), pl.hostSag, pl.sag, tau);
+            }
+        }
+        constexpr double kTwoPiF1 = 6.28318530717958647692;
+        for (size_t i = 0; i < out.regions.size(); ++i) {
+            if (!grew[i]) continue;
+            const TorusRails rails = torusRails(mv, out.regions[i]);
+            if (rails.full) {
+                out.regions[i].closed360 = true;
+                out.regions[i].uMin = 0.0;
+                out.regions[i].uMax = kTwoPiF1;
+            } else {
+                out.regions[i].closed360 = false;
+            }
+            if (f1Diag) {
+                std::fprintf(stderr, "DIAG_F1 cover host=%d full=%d gap=%.6g maxStep=%.6g\n",
+                             out.regions[i].id, rails.full ? 1 : 0, rails.gap, rails.maxStep);
+            }
+        }
+        if (!plans.empty()) {
+            std::vector<int> remap((size_t)std::max(out.nIslands, 0), -1);
+            int nLeft = 0;
+            for (int t = 0; t < nTri; ++t) {
+                if (out.triRegion[t] >= 0) {
+                    out.triIsland[t] = -1;
+                    continue;
+                }
+                const int id = out.triIsland[t];
+                if (id < 0 || (size_t)id >= remap.size()) continue;
+                if (remap[(size_t)id] < 0) remap[(size_t)id] = nLeft++;
+                out.triIsland[t] = remap[(size_t)id];
+            }
+            out.nIslands = nLeft;
+        }
     }
 
     // I1

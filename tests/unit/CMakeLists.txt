@@ -721,6 +721,53 @@ set_tests_properties(relational_slit_heal_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# fc/fx-t2-wire (D-fc-6.1(d), RQ-8): tangent chord clip and F1 island absorb.
+add_executable(relational_wire_clip_unit relational_wire_clip_unit.cpp)
+target_compile_features(relational_wire_clip_unit PRIVATE cxx_std_17)
+set_target_properties(relational_wire_clip_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_wire_clip_unit PRIVATE stl2step::core)
+target_include_directories(relational_wire_clip_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(relational_wire_clip_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_wire_clip_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_wire_clip_unit)
+endif()
+add_test(NAME relational_wire_clip_unit COMMAND relational_wire_clip_unit)
+set_tests_properties(relational_wire_clip_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+add_executable(relational_island_absorb_unit relational_island_absorb_unit.cpp)
+target_compile_features(relational_island_absorb_unit PRIVATE cxx_std_17)
+set_target_properties(relational_island_absorb_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_island_absorb_unit PRIVATE stl2step::core)
+target_include_directories(relational_island_absorb_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(relational_island_absorb_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_island_absorb_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_island_absorb_unit)
+endif()
+add_test(NAME relational_island_absorb_unit COMMAND relational_island_absorb_unit)
+set_tests_properties(relational_island_absorb_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 # fc/fx-sphere (D-fc-5.11 F8): sphere corners of three certified rounds.
 add_executable(relational_sphere_unit relational_sphere_unit.cpp)
 target_compile_features(relational_sphere_unit PRIVATE cxx_std_17)
