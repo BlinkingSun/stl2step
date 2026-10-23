@@ -866,6 +866,29 @@ set_tests_properties(relational_topo_heal_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# fc/fx-t2-holes2 (D-fc-6.10): chord vertex, one-vertex cover, rim certificate.
+add_executable(relational_ringwall_unit relational_ringwall_unit.cpp)
+target_compile_features(relational_ringwall_unit PRIVATE cxx_std_17)
+set_target_properties(relational_ringwall_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_ringwall_unit PRIVATE stl2step::core)
+target_include_directories(relational_ringwall_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_ringwall_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_ringwall_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_ringwall_unit)
+endif()
+add_test(NAME relational_ringwall_unit COMMAND relational_ringwall_unit)
+set_tests_properties(relational_ringwall_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

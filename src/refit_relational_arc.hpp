@@ -8,6 +8,7 @@
 
 #include "refit_relational_torus.hpp"
 
+#include <gp_Circ.hxx>
 #include <gp_XYZ.hxx>
 #include <array>
 #include <vector>
@@ -134,8 +135,20 @@ PartialConeCert certifyPartialCone(const std::vector<std::vector<gp_XYZ>>& famil
 // cone's rim circle only when it is coaxial with the cone (axis direction and
 // line within tau at the rims' arm) and its radius is one rim's within
 // tanDistTol(tau, tau). partialConeSide: either region is a partial cone.
+// D-fc-6.8 RQ-7: the chain overload waives the axis-offset proxy when every
+// shared-chain vertex lies within tau of both surfaces and the rim radii
+// still agree within tanDistTol(tau, tau). Otherwise the 3-argument test.
 bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshView& mv);
+bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshView& mv,
+                           const BoundaryChain& ch);
 bool partialConeSide(const Region* A, const Region* B);
+
+// D-fc-6.8 RQ-7. Two ChamferCone regions: one coneIsoCircle at the rim the
+// shared chain lies on, when every chain vertex is within tau of both cones,
+// the axes are parallel within tau at the rims' arm, and the two rim radii
+// agree within tanDistTol(tau, tau). No IntAna. Otherwise the polyline stays.
+bool coneConeRimIso(const Region& a, const Region& b, const MeshView& mv,
+                    const BoundaryChain& ch, gp_Circ& iso);
 
 // D-fc-5.5 F-2 (D-fc-1.11(ii)(a), the D-fc-4.6 leave-one-out). The fewest
 // section stations (points merged at tau in the plane normal to axis) of a

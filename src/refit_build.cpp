@@ -27,6 +27,7 @@
 #include "refit_relational_ruled.hpp"
 #include "refit_cylcyl_contact.hpp"
 #include "refit_cyl_meet.hpp"
+#include "refit_ringwall.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -3691,10 +3692,20 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
             // D-fc-5.5: a partial cone may touch a cylinder of another axis
             // (a cap round at a wall end); only a coaxial cylinder carries its
             // rim circle. Otherwise the mesh polyline is the edge.
-            if (!cn.closed360 && !partialConeRimCoaxial(cyl, cn, mv)) return {};
+            if (!cn.closed360 && !partialConeRimCoaxial(cyl, cn, mv, ch)) return {};
             AnalyticCurve c = constructedCylConeRim(cyl, cn);
             if (c.kind == AnalyticCurve::None)
                 emit(warn, "smooth: cyl|cone empty — keeping mesh polyline");
+            return c;
+        }
+        // D-fc-6.8 RQ-7. Two chamfer cones that share a rim: one cone v-iso.
+        // A pair that does not certify keeps today's silent mesh polyline.
+        if (isChamferConeR(A) && isChamferConeR(B)) {
+            gp_Circ iso;
+            if (!coneConeRimIso(A, B, mv, ch, iso)) return {};
+            AnalyticCurve c;
+            c.kind = AnalyticCurve::Circ;
+            c.circ = iso;
             return c;
         }
     } catch (const Standard_Failure&) {
@@ -18712,7 +18723,32 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     // D-fc-5.17: a τ-certified contact is not discarded for sitting
                     // farther than sewTol from the mesh vertices. The vertices of
                     // an N-gon lie on the chords; the contact lies on the cylinders.
-                    if (fb && !curve.contactCertified) {
+                    // D-fc-6.10 RQ-H4: the same exemption for the plane|cylinder
+                    // IntAna circle of a closed360 wall, when every chain vertex
+                    // is a corner or a chord vertex (rimChordCertified).
+                    bool chordCert = false;
+                    if (fb && !curve.contactCertified && curve.kind == AnalyticCurve::Circ && A &&
+                        B &&
+                        ((A->type == SurfType::Plane && B->type == SurfType::Cylinder &&
+                          B->closed360) ||
+                         (B->type == SurfType::Plane && A->type == SurfType::Cylinder &&
+                          A->closed360))) {
+                        const double tauC = tauOf(mv);
+                        std::vector<gp_XYZ> rimPts;
+                        rimPts.reserve(ch.meshVerts.size());
+                        for (int lv : ch.meshVerts) rimPts.push_back(pntOf(mv, lv).XYZ());
+                        const RimChordCert rc = rimChordCertified(
+                            curve.circ, rimPts, ch.closedLoop, tauC, minStations(kParamsCircle));
+                        chordCert = rc.ok;
+                        if (diagRelEnabled() && recoverPass == 0 && rounds == 0 &&
+                            fallbackGuardPass == 0 && j6UncollapsePass == 0)
+                            std::fprintf(stderr,
+                                         "DIAG_REL_RIMCHORD ci=%d regA=%d regB=%d n=%zu "
+                                         "corners=%d chordV=%d cert=%d\n",
+                                         (int)ci, geom[ci].regA, geom[ci].regB, ch.meshVerts.size(),
+                                         rc.corners, rc.chords, (int)chordCert);
+                    }
+                    if (fb && !curve.contactCertified && !chordCert) {
                         const bool pass0 = recoverPass == 0 && rounds == 0 &&
                                            fallbackGuardPass == 0 && j6UncollapsePass == 0;
                         const ChainSpanRuns sp = chainSpanRuns(curve, mv, ch, A, B, sewTol);
@@ -22863,12 +22899,114 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
     }
 }
 
+namespace {
+
+// Distance from a mesh vertex id to a point. False when the id does not
+// address this mesh (a missing vertex is not on the surface).
+bool chainPnt(const MeshView& mv, int lv, gp_Pnt& p) {
+    if (lv < 0 || mv.nVtx == 0 || (size_t)lv >= mv.nVtx || !mv.compVtx || !mv.pts) return false;
+    p = gp_Pnt(mv.pts[mv.compVtx[lv]]);
+    return true;
+}
+
+// Geometric distance to the chamfer cone: |rho - R(v)| / sqrt(1 + k^2), the
+// same profile-line residual certifyPartialCone admits at tau.
+double chamferConeDistance(const Region& cone, const gp_Pnt& p) {
+    const double h = chamferHeightOf(cone);
+    const gp_Vec from(cone.ax.Location(), p);
+    const gp_Vec axis(cone.ax.Direction());
+    const double v = from.Dot(axis);
+    const double radial = (from - axis * v).Magnitude();
+    const double Rhi = chamferRhiOf(cone);
+    const bool haveH = std::fabs(h) > Precision::Confusion();
+    const double t = haveH ? (v / h) : 0.0;
+    const double R = cone.radius + t * (Rhi - cone.radius);
+    const double k = haveH ? ((Rhi - cone.radius) / h) : 0.0;
+    return std::fabs(radial - R) / std::sqrt(1.0 + k * k);
+}
+
+double radialAbout(const gp_Ax3& ax, const gp_Pnt& p) {
+    const gp_Vec from(ax.Location(), p);
+    const gp_Vec axis(ax.Direction());
+    return (from - axis * from.Dot(axis)).Magnitude();
+}
+
+bool chainWithinTauOfCone(const Region& cone, const MeshView& mv, const BoundaryChain& ch,
+                          double tau) {
+    if (!(tau > 0.0) || ch.meshVerts.empty()) return false;
+    for (int lv : ch.meshVerts) {
+        gp_Pnt p;
+        if (!chainPnt(mv, lv, p)) return false;
+        if (!(chamferConeDistance(cone, p) <= tau)) return false;
+    }
+    return true;
+}
+
+bool chainWithinTauOfCylinder(const Region& cyl, const MeshView& mv, const BoundaryChain& ch,
+                              double tau) {
+    if (!(tau > 0.0) || ch.meshVerts.empty()) return false;
+    for (int lv : ch.meshVerts) {
+        gp_Pnt p;
+        if (!chainPnt(mv, lv, p)) return false;
+        if (!(distToCylinder(cyl.ax, cyl.radius, p) <= tau)) return false;
+    }
+    return true;
+}
+
+// The cone rim (v = 0 or v = chamferHeightOf) the chain lies on: the rim
+// whose radius is closer to every chain vertex, and only when that residual
+// is within tanDistTol(tau, tau). A chain that spans both rims matches neither.
+struct ConeRimAt {
+    bool ok = false;
+    double v = 0;
+    double R = 0;
+};
+
+ConeRimAt coneRimAtChain(const Region& cone, const MeshView& mv, const BoundaryChain& ch,
+                         double tau) {
+    ConeRimAt out;
+    if (!(tau > 0.0) || ch.meshVerts.empty()) return out;
+    const double tol = tanDistTol(tau, tau);
+    const double Rs[2] = {cone.radius, chamferRhiOf(cone)};
+    const double vs[2] = {0.0, chamferHeightOf(cone)};
+    double best = 0;
+    int pick = -1;
+    for (int i = 0; i < 2; ++i) {
+        double mx = 0;
+        for (int lv : ch.meshVerts) {
+            gp_Pnt p;
+            if (!chainPnt(mv, lv, p)) return out;
+            mx = std::max(mx, std::fabs(radialAbout(cone.ax, p) - Rs[i]));
+        }
+        if (pick < 0 || mx < best) {
+            best = mx;
+            pick = i;
+        }
+    }
+    if (pick < 0 || !(best <= tol)) return out;
+    out.ok = true;
+    out.v = vs[pick];
+    out.R = Rs[pick];
+    return out;
+}
+
+double cylConeRimGap(const Region& cylR, const Region& coneR) {
+    return std::min(std::fabs(cylR.radius - coneR.radius),
+                    std::fabs(cylR.radius - chamferRhiOf(coneR)));
+}
+
+double rimArm(const Region& a, const Region& b) {
+    return std::max(std::max(a.radius, chamferRhiOf(a)), std::max(b.radius, chamferRhiOf(b)));
+}
+
+}  // namespace
+
 // D-fc-5.5. A cylinder carries a partial cone's rim circle when it is coaxial
 // with the cone and its radius is the radius of one of the cone's rims, each
-// within tau = 2q at the rim's arm: the rim vertices lie within tau of both
-// certified surfaces, so the two radii agree within tanDistTol(tau, tau) = 2 tau.
+// within tau = tauOf = 2q at the rim's arm: the rim vertices lie within tau of
+// both certified surfaces, so the two radii agree within tanDistTol(tau, tau).
 bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshView& mv) {
-    const double tau = 2.0 * std::max(mv.quantFloor, 0.0);
+    const double tau = tauOf(mv);
     if (!(tau > 0.0)) return false;
     const gp_Vec ac(coneR.ax.Direction());
     const gp_Vec ay(cylR.ax.Direction());
@@ -22876,9 +23014,47 @@ bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshVi
     if (ac.Crossed(ay).Magnitude() * arm > tau) return false;
     const gp_Vec d(cylR.ax.Location(), coneR.ax.Location());
     if ((d - ay * d.Dot(ay)).Magnitude() > tau) return false;
-    const double dr = std::min(std::fabs(cylR.radius - coneR.radius),
-                               std::fabs(cylR.radius - chamferRhiOf(coneR)));
-    return dr <= tau + tau;
+    return cylConeRimGap(cylR, coneR) <= tanDistTol(tau, tau);
+}
+
+// D-fc-6.8 RQ-7. The axis-offset proxy is waived only when the shared chain
+// itself certifies: directions still within tau at the arm, rim radii within
+// tanDistTol(tau, tau), every chain vertex within tau of both surfaces.
+// Otherwise the 3-argument test is unchanged.
+bool partialConeRimCoaxial(const Region& cylR, const Region& coneR, const MeshView& mv,
+                           const BoundaryChain& ch) {
+    const double tau = tauOf(mv);
+    if (tau > 0.0 && !ch.meshVerts.empty()) {
+        const gp_Vec ac(coneR.ax.Direction());
+        const gp_Vec ay(cylR.ax.Direction());
+        const double arm = std::max(std::max(coneR.radius, chamferRhiOf(coneR)), cylR.radius);
+        const bool parallel = !(ac.Crossed(ay).Magnitude() * arm > tau);
+        if (parallel && cylConeRimGap(cylR, coneR) <= tanDistTol(tau, tau) &&
+            chainWithinTauOfCylinder(cylR, mv, ch, tau) &&
+            chainWithinTauOfCone(coneR, mv, ch, tau))
+            return true;
+    }
+    return partialConeRimCoaxial(cylR, coneR, mv);
+}
+
+bool coneConeRimIso(const Region& a, const Region& b, const MeshView& mv, const BoundaryChain& ch,
+                    gp_Circ& iso) {
+    if (!isChamferConeR(a) || !isChamferConeR(b)) return false;
+    const double tau = tauOf(mv);
+    if (!(tau > 0.0) || ch.meshVerts.empty()) return false;
+    const double arm = rimArm(a, b);
+    const gp_Vec da(a.ax.Direction());
+    const gp_Vec db(b.ax.Direction());
+    if (da.Crossed(db).Magnitude() * arm > tau) return false;
+    if (!chainWithinTauOfCone(a, mv, ch, tau) || !chainWithinTauOfCone(b, mv, ch, tau))
+        return false;
+    const ConeRimAt ra = coneRimAtChain(a, mv, ch, tau);
+    const ConeRimAt rb = coneRimAtChain(b, mv, ch, tau);
+    if (!ra.ok || !rb.ok) return false;
+    if (!(std::fabs(ra.R - rb.R) <= tanDistTol(tau, tau))) return false;
+    const bool aFirst = a.id <= b.id;
+    iso = coneIsoCircle(aFirst ? a : b, aFirst ? ra.v : rb.v);
+    return true;
 }
 
 // D-fc-5.5: one side of the chain is a partial cone (ChamferCone, !closed360).

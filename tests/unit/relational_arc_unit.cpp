@@ -800,6 +800,98 @@ static void caseEqualStepCircleCircle() {
     expect(got == 1, "circle|circle: one section fillet, no atom");
 }
 
+// D-fc-6.8 RQ-7. Axes 1.1 tau apart: the offset proxy refuses, the chain
+// certificate accepts when every vertex is within tau of both surfaces.
+static void caseRq7Rim() {
+    const double R = 10;
+    const double zRim = 20;
+    const double zLo = 21;
+    Synth s;
+    std::vector<int> ids;
+    for (int i = 0; i <= 8; ++i) {
+        const double a = kPi / 3.0 + (kPi / 3.0) * (double)i / 8.0;
+        ids.push_back(s.add(R * std::cos(a), R * std::sin(a), zRim));
+    }
+    s.finish();
+    MeshView mv = s.view();
+    BoundaryChain ch;
+    ch.meshVerts = ids;
+
+    Region cone;
+    cone.id = 1;
+    cone.type = SurfType::Cone;
+    cone.origin = Origin::ChamferCone;
+    cone.ax = gp_Ax3(gp_Pnt(0, 0, zLo), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    cone.radius = 9;
+    cone.vMin = 9;
+    cone.vMax = R;
+    cone.maxVertexSnap = -1;
+    cone.closed360 = false;
+    Region cyl;
+    cyl.id = 2;
+    cyl.type = SurfType::Cylinder;
+    cyl.origin = Origin::FilletStrip;
+    cyl.ax = gp_Ax3(gp_Pnt(1.1 * kTau, 0, zRim), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    cyl.radius = R;
+    expect(!partialConeRimCoaxial(cyl, cone, mv), "RQ-7: offset 1.1 tau still refuses without the chain");
+    expect(partialConeRimCoaxial(cyl, cone, mv, ch),
+           "RQ-7: axes 1.1 tau apart, chain within tau, builds the rim");
+
+    Synth sOff;
+    std::vector<int> offIds;
+    for (int i = 0; i <= 8; ++i) {
+        const double a = kPi / 3.0 + (kPi / 3.0) * (double)i / 8.0;
+        double y = R * std::sin(a);
+        double z = zRim;
+        if (i == 4) {
+            const double n = 2.0 * kTau / std::sqrt(2.0);
+            y += n;
+            z += n;
+        }
+        offIds.push_back(sOff.add(R * std::cos(a), y, z));
+    }
+    sOff.finish();
+    MeshView mvOff = sOff.view();
+    BoundaryChain chOff;
+    chOff.meshVerts = offIds;
+    expect(!partialConeRimCoaxial(cyl, cone, mvOff, chOff),
+           "RQ-7: one chain vertex 2 tau off stays a polyline");
+
+    Region hi = cone;
+    hi.id = 3;
+    Region lo;
+    lo.id = 4;
+    lo.type = SurfType::Cone;
+    lo.origin = Origin::ChamferCone;
+    lo.ax = gp_Ax3(gp_Pnt(0, 0, zRim), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    lo.radius = R;
+    lo.vMin = R;
+    lo.vMax = 11;
+    lo.maxVertexSnap = -1;
+    lo.closed360 = false;
+    gp_Circ iso;
+    expect(coneConeRimIso(hi, lo, mv, ch, iso), "RQ-7: coaxial chamfer cones share one iso circle");
+    expect(std::fabs(iso.Radius() - R) <= kTau && iso.Location().Distance(gp_Pnt(0, 0, zRim)) <= kTau,
+           "RQ-7: iso is the cone v-iso at the shared rim");
+    gp_Circ isoSwap;
+    expect(coneConeRimIso(lo, hi, mv, ch, isoSwap) &&
+               std::fabs(isoSwap.Radius() - iso.Radius()) <= kTau &&
+               isoSwap.Location().Distance(iso.Location()) <= kTau,
+           "RQ-7: one circle either argument order");
+
+    Region shifted = lo;
+    shifted.ax = gp_Ax3(gp_Pnt(1.0, 0, zRim), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    gp_Circ unused;
+    expect(!coneConeRimIso(hi, shifted, mv, ch, unused), "RQ-7: non-coaxial cones are refused");
+    Region tilted = lo;
+    tilted.ax = gp_Ax3(gp_Pnt(0, 0, zRim), gp_Dir(0.001, 0, 1), gp_Dir(1, 0, -0.001));
+    expect(!coneConeRimIso(hi, tilted, mv, ch, unused), "RQ-7: tilted cones are refused");
+
+    mv.quantFloor = 0;
+    expect(!partialConeRimCoaxial(cyl, cone, mv, ch) && !coneConeRimIso(hi, lo, mv, ch, unused),
+           "RQ-7: q <= 0 admits nothing");
+}
+
 int main() {
     caseGeomFailed();
     casePredicates();
@@ -813,6 +905,7 @@ int main() {
     caseEqualStepOneAnchor();
     caseEqualStepRefusals();
     caseEqualStepCircleCircle();
+    caseRq7Rim();
     std::fprintf(stderr, "relational_arc_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS", gFail);
     return gFail ? 1 : 0;
 }
