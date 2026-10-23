@@ -1253,6 +1253,103 @@ static void caseConeApex() {
            "apex: apex is a line station, not an azimuth column");
 }
 
+// D-fc-6.8 RQ-4. A quarter-round of three equal 30 deg rows (four stations on
+// the round's minor circle) between a wall cylinder and a cap plane. The outer
+// rows see the profile circle on their own window; the middle row's own two
+// windows reach past the round, onto the wall and onto the plane. It is a row of
+// the same round (its rings are the interior stations of the outer rows'
+// window), so Line mode claims no cone on it.
+static void addPlane(Part& p, std::vector<int> tris, double z) {
+    Region r;
+    r.id = 0;
+    r.type = SurfType::Plane;
+    r.origin = Origin::PlaneGrow;
+    r.ax = gp_Ax3(gp_Pnt(0, 0, z), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    r.tris = std::move(tris);
+    p.work.accepted.push_back(std::move(r));
+}
+
+static Part roundPart(int N, double Rmaj, double rad, int rows) {
+    Part p;
+    std::vector<std::vector<int>> rings;
+    for (int j = 0; j <= rows; ++j) {
+        const double phi = kPi - 0.5 * kPi * (double)j / (double)rows;
+        rings.push_back(ring(p.mesh, Rmaj + rad * std::cos(phi), rad * std::sin(phi), N));
+    }
+    auto lower = ring(p.mesh, Rmaj - rad, -5.0, N);
+    auto outer = ring(p.mesh, Rmaj + 7.0, rad, N);
+    std::vector<int> wall, cap;
+    band(p.mesh, lower, rings[0], N, wall);
+    for (int j = 0; j < rows; ++j)
+        band(p.mesh, rings[(std::size_t)j], rings[(std::size_t)j + 1], N, p.feature);
+    band(p.mesh, rings[(std::size_t)rows], outer, N, cap);
+    p.mesh.finish();
+    addCyl(p, wall, Rmaj - rad, -2.5);
+    addPlane(p, cap, rad);
+    Provisional pr;
+    pr.claim = ProvClaim::Unclaimed;
+    pr.tris = p.feature;
+    p.work.provisionals.push_back(pr);
+    return p;
+}
+
+static void caseRoundMiddleRow() {
+    Part p = roundPart(32, 20.0, 0.2, 3);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    Grab g;
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+    const std::string diag = g.stop();
+    const int cones = countType(p.work, SurfType::Cone, Origin::ChamferCone);
+    expect(cones == 0, "round: middle row is not a cone");
+    std::size_t rows = 0;
+    for (std::size_t at = diag.find("why=profile-row"); at != std::string::npos;
+         at = diag.find("why=profile-row", at + 1))
+        ++rows;
+    expect(rows == 3, "round: all three rows are profile rows");
+    if (cones != 0 || rows != 3) std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+}
+
+// D-fc-3.5's own case stays a cone: a 45 deg 2-ring chamfer from a wall
+// cylinder to a cap plane (no profile circle on either side).
+static void caseChamferToCap() {
+    Part p;
+    const int N = 32;
+    auto w0 = ring(p.mesh, 10.0, -5.0, N);
+    auto w1 = ring(p.mesh, 10.0, 0.0, N);
+    auto c1 = ring(p.mesh, 8.0, 2.0, N);
+    auto c2 = ring(p.mesh, 3.0, 2.0, N);
+    std::vector<int> wall, cap;
+    band(p.mesh, w0, w1, N, wall);
+    band(p.mesh, w1, c1, N, p.feature);
+    band(p.mesh, c1, c2, N, cap);
+    p.mesh.finish();
+    addCyl(p, wall, 10.0, -2.5);
+    addPlane(p, cap, 2.0);
+    Provisional pr;
+    pr.tris = p.feature;
+    p.work.provisionals.push_back(pr);
+    MeshView mv = p.mesh.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol, 1);
+    Grab g;
+    claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+    const std::string diag = g.stop();
+    const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+    expect(c != nullptr && c->closed360 && c->tris.size() == p.feature.size(),
+           "chamfer to cap: cone claimed");
+    expect(!hasWhy(diag, "profile-row"), "chamfer to cap: not a profile row");
+    if (!c) {
+        std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+        return;
+    }
+    const double ang = std::atan((c->vMax - c->radius) / std::fabs(c->maxVertexSnap)) * 180.0 / kPi;
+    expect(std::fabs(ang - 45.0) <= 1e-4, "chamfer to cap: 45 deg");
+}
+
 // F2: a same-radius coaxial band merges into its member by the D-fc-4.4 closure.
 struct MergePart {
     Synth mesh;
@@ -1369,6 +1466,8 @@ int main() {
     caseRingDonorCone();
     caseConeApex();
     caseSameSurfaceMerge();
+    caseRoundMiddleRow();
+    caseChamferToCap();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;
