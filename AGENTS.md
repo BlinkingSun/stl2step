@@ -338,7 +338,10 @@ Because each invocation is independent, batch with `xargs -P` /
 - Exit `2` → file written; iterate `warnings` and decide if acceptable
   (open shell? volume mismatch?). `warn()` appends to `Result::warnings` and
   maps to exit 2. Example from the `--smooth` path: `smooth: analytic rebuild
-  reverted on one component -- kept faceted` (R2 revert). Dirty-skip
+  reverted on one component -- kept faceted` (R2 revert); since 1.7.0 a
+  component that reverts after the Class-B heal found no region to dissolve
+  carries the reason in parentheses: `... one component
+  (classB-no-region-qualifies) -- kept faceted`. Dirty-skip
   (`N component(s) skipped (dirty mesh, repaired path)`) and NYI rejects
   (cones, spheres, tori left faceted) are `note()`, **not** warnings — a dirty
   input converted with `--smooth` keeps its exit code versus the same input
@@ -364,7 +367,7 @@ line appends the `smooth*` keys after `warnings`. Those keys are present
 **only when `smooth == true`**; they are omitted (never zero-valued) on the
 off path so the RESULT string stays character-identical to 1.0.0. The C++
 `Result` members are always present and default to zero (the dual contract).
-`validityCheck` (added after 1.6.0) follows the same additive rule: emitted last, only
+`validityCheck` (1.7.0+) follows the same additive rule: emitted last, only
 when the validity check was skipped (more than 50,000 faces).
 
 ---

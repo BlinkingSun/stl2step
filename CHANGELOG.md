@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-23
+
+TrueForm heals what it used to discard. A component whose analytic rebuild failed in one place
+was reverted whole and shipped faceted; 1.7.0 dissolves only what failed, stops rejecting shells
+whose volume check failed for the wrong reason, and recognises the mechanical features those
+reverts were hiding (task `stl2step-fc`, phase fc-7).
+
+On a new training part, a flanged wheel full of bolt-circle holes, bores and spoke windows, every
+cylinder used to be thrown away with the rest of the part. It now ships as one closed solid of
+analytic planes and cylinders, holes and spoke windows included, in seconds, with only a few
+small faceted regions left (a small lip round that is not a torus within tolerance, two window
+walls and three holes). In the corpus, S29_hex_law, cyl_meets_chamfer and the build fixtures
+full_360_hole, r8_360_explode_caps and seamed360_capseam no longer revert, the tray's three
+coaxial chamfer rims ship as exact circles, and the handle-pickup gains two coaxial bands as
+cylinders. The grip still reverts, now with a named reason. Every other training file and corpus file
+converts byte-identically to 1.6.0.
+
 ### Added
 
 - RESULT reports `"validityCheck":"skipped"` when the B-Rep validity check did not run because
@@ -13,6 +30,43 @@ All notable changes to this project are documented here. The format follows
   progress log, so a host reading RESULT could not tell an unchecked file from a checked one.
   The key is absent whenever the check ran, so RESULT is unchanged at or under the cap, and the
   exit code is unchanged either way. New ctest `result_validity_check`.
+
+- Heal instead of revert: a region that fails topology classification no longer aborts the
+  stage. A closed-360 cylinder whose boundary is one cycle is classified as a partial cylinder;
+  any other failing region alone is dissolved to facets and the pass repeats. The retry is
+  iterative and bounded by the number of accepted regions.
+- Class-B heal: when a closed, valid shell misses the mesh volume, every analytic region that
+  fails both its own certificate and its own share of the volume budget is dissolved to facets
+  and the shell is re-tested. Only when no region qualifies does the component revert, and the
+  warning names the reason: `smooth: analytic rebuild reverted on one component
+  (classB-no-region-qualifies) -- kept faceted`.
+- Holes split into pieces close into one cylinder from their certified mouth rings; chord
+  (T-junction) vertices are kept out of the circle fit, and the plane|cylinder rims ship as
+  exact circles.
+- Closed coaxial walls whose mesh carries chord vertices ship as one closed cylinder; a partial
+  coaxial wall with no certified tangent plane is anchored by a certified tangent parallel
+  cylinder (for example a corner fillet).
+- A coaxial chamfer rim certified by its shared chain vertices ships as one circle.
+- An unclaimed slit whose vertices all belong to an adjacent closed-360 cylinder is absorbed into
+  it.
+
+### Fixed
+
+- The shell volume gate compared a signed shell volume with the absolute mesh volume, so a
+  closed, valid shell built from an inward-wound mesh was rejected; it now compares magnitudes.
+- A plane face whose mesh-polyline boundary crossed a certified circle edge of the same wire
+  built a self-intersecting wire; the segment is clipped at their shared tangent vertex.
+- A small round's middle profile chord was claimed as a cone, leaving its plane|cone edges as
+  mesh polylines with a warning each; a profile already certified as a circle is no longer
+  re-claimed as a line.
+- Edge tolerances on planar faces are measured the way BRepCheck measures them when tier-2
+  spline edges are present (an under-stated tolerance made a face invalid and discarded every
+  cylinder of the part).
+
+### Changed
+
+- The edge-class ratchet re-baselines S29_hex_law and cyl_meets_chamfer at their measured values:
+  their old ceilings of 0 held only because both components reverted whole.
 
 ### Documentation
 
