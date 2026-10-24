@@ -494,10 +494,22 @@ foreach(_fc_unit IN ITEMS relational_extrude relational_revolve tesslaw relation
         target_include_directories(${_fc_unit}_unit PRIVATE
             "${_stl2step_root}/tests/support")
     endif()
-    add_test(NAME ${_fc_unit}_unit COMMAND ${_fc_unit}_unit)
-    set_tests_properties(${_fc_unit}_unit PROPERTIES
-        LABELS "unit;fc-contract"
-        TIMEOUT 60)
+    if(_fc_unit STREQUAL "relational_reclaim")
+        add_test(NAME ${_fc_unit}_unit
+            COMMAND ${_fc_unit}_unit "${_stl2step_root}/tests/corpus/handle-pickup.stl")
+    else()
+        add_test(NAME ${_fc_unit}_unit COMMAND ${_fc_unit}_unit)
+    endif()
+    # The reclaim unit also converts the public handle-pickup corpus.
+    if(_fc_unit STREQUAL "relational_reclaim")
+        set_tests_properties(${_fc_unit}_unit PROPERTIES
+            LABELS "unit;fc-contract"
+            TIMEOUT 90)
+    else()
+        set_tests_properties(${_fc_unit}_unit PROPERTIES
+            LABELS "unit;fc-contract"
+            TIMEOUT 60)
+    endif()
 endforeach()
 unset(_fc_unit)
 
@@ -910,6 +922,30 @@ if(COMMAND stl2step_adhoc_sign)
 endif()
 add_test(NAME relational_coax_closed_unit COMMAND relational_coax_closed_unit)
 set_tests_properties(relational_coax_closed_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# fc/fx-pk-rehost (D-fc-7.3 RQ-HUB-5): a short arc within tau of a certified
+# coaxial member takes that member's surface; one vertex outside keeps its own.
+add_executable(relational_rehost_unit relational_rehost_unit.cpp)
+target_compile_features(relational_rehost_unit PRIVATE cxx_std_17)
+set_target_properties(relational_rehost_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_rehost_unit PRIVATE stl2step::core)
+target_include_directories(relational_rehost_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_rehost_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_rehost_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_rehost_unit)
+endif()
+add_test(NAME relational_rehost_unit COMMAND relational_rehost_unit)
+set_tests_properties(relational_rehost_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 

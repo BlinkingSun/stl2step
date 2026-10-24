@@ -242,6 +242,51 @@ int main() {
                "pcurve: SameParameter at sew scale keeps both planes inside the G5 cap");
     }
 
+    // D-fc-7.3 RQ-HUB-3 (b), D-fc-7.6: the tangency point of two circles of one plane.
+    {
+        const gp_Pnt o0(0, 0, 0);
+        const double tol = 2 * kTau;
+        gp_Pnt T;
+        const gp_Pnt o1(12.0 - 0.5 * kTau, 0, 0);
+        expect(circleTangencyPoint(o0, 9.0, o1, 3.0, tol, T) &&
+                   std::fabs(T.X() - (9.0 - 0.25 * kTau)) < 1e-12 && std::fabs(T.Y()) < 1e-15,
+               "tangency: external pair meets on the line of centres");
+        const gp_Pnt o2(0, 6.0 + 0.3 * kTau, 0);
+        expect(circleTangencyPoint(o0, 10.0, o2, 4.0, tol, T) &&
+                   std::fabs(T.Y() - (10.0 + 0.15 * kTau)) < 1e-12,
+               "tangency: internal pair meets beyond the small centre");
+        expect(circleTangencyPoint(o2, 4.0, o0, 10.0, tol, T) &&
+                   std::fabs(T.Y() - (10.0 + 0.15 * kTau)) < 1e-12,
+               "tangency: the order of the pair does not matter");
+        expect(!circleTangencyPoint(o0, 9.0, gp_Pnt(12.0 + 3 * tol, 0, 0), 3.0, tol, T),
+               "tangency: circles apart by more than tanDistTol are not tangent");
+        expect(!circleTangencyPoint(o0, 9.0, gp_Pnt(0.5 * tol, 0, 0), 9.0, tol, T),
+               "tangency: concentric circles have no line of centres");
+    }
+    // D-fc-7.6: an arc of one exact rim split at a vertex on its circle.
+    {
+        const gp_Circ c(gp_Ax2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0)), 2.0);
+        const TopoDS_Vertex a = vtx(ElCLib::Value(0.0, c)), b = vtx(ElCLib::Value(0.5 * kPi, c));
+        Handle(Geom_TrimmedCurve) tc =
+            new Geom_TrimmedCurve(new Geom_Circle(c), 0.0, 0.5 * kPi, Standard_True);
+        const TopoDS_Edge arc = BRepBuilderAPI_MakeEdge(tc, a, b).Edge();
+        const TopoDS_Vertex m = vtx(ElCLib::Value(0.25 * kPi, c));
+        TopoDS_Edge e1, e2;
+        expect(splitArcAt(arc, m, e1, e2) && sameEnds(e1, a, m) && sameEnds(e2, m, b),
+               "split arc: two arcs through the shared vertices");
+        Standard_Real f1 = 0, l1 = 0, f2 = 0, l2 = 0;
+        Handle(Geom_Curve) c1 = BRep_Tool::Curve(e1, f1, l1);
+        Handle(Geom_Curve) c2 = BRep_Tool::Curve(e2, f2, l2);
+        expect(!c1.IsNull() && !c2.IsNull() && std::fabs(f1) < 1e-12 &&
+                   std::fabs(l1 - 0.25 * kPi) < 1e-12 && std::fabs(f2 - 0.25 * kPi) < 1e-12 &&
+                   std::fabs(l2 - 0.5 * kPi) < 1e-12,
+               "split arc: the same circle, the parameter range divided at the vertex");
+        expect(!splitArcAt(arc, vtx(ElCLib::Value(kPi, c)), e1, e2),
+               "split arc: a vertex off the arc's range does not split it");
+        expect(!splitArcAt(BRepBuilderAPI_MakeEdge(a, b).Edge(), m, e1, e2),
+               "split arc: a line is not an arc");
+    }
+
     if (gFail) std::fprintf(stderr, "%d FAIL\n", gFail);
     else std::fprintf(stderr, "ALL PASS\n");
     return gFail ? 1 : 0;

@@ -8,7 +8,12 @@
 #include "refit_relational.hpp"
 #include "refit_relational_sphere.hpp"
 
+#include <ElSLib.hxx>
 #include <Precision.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Circ.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
 
 #include <algorithm>
 #include <array>
@@ -135,7 +140,8 @@ static void casePredicates() {
     expect(!lineSpinesPoint({lx, lx2}, c), "parallel lines give no point");
     expect(!lineSpinesPoint({lx}, c), "one line gives no point");
 
-    // sphereOfRounds: zero free parameters, every threshold tau.
+    // sphereOfRounds: the anchor centre and the anchor radius. The shipped
+    // radius is fitted later, on the corner's vertices.
     lx.r = ly.r = lz.r = 2.0;
     SphereCornerFit f = sphereOfRounds({lx, ly, lz}, kTau);
     expect(f.ok && std::strcmp(f.why, "accept") == 0 && std::fabs(f.r - 2.0) < 1e-12 &&
@@ -170,6 +176,41 @@ static void casePredicates() {
     tor.r = 2;
     f = sphereOfRounds({lx, lz, tor}, kTau);
     expect(f.ok, "two lines and a torus spine through the corner: accept");
+
+    // Least-squares radius with the centre held: the mean of the distances.
+    {
+        const gp_XYZ o(0, 0, 0);
+        const std::vector<gp_XYZ> pts = {gp_XYZ(3, 0, 0), gp_XYZ(0, 4, 0), gp_XYZ(0, 0, 5)};
+        expect(std::fabs(sphereRadiusLeastSquares(o, pts) - 4.0) < 1e-12,
+               "least-squares radius is the mean distance");
+        const std::vector<gp_XYZ> none;
+        expect(!std::isfinite(sphereRadiusLeastSquares(o, none)), "no vertices: no radius");
+        const std::vector<gp_XYZ> bad = {gp_XYZ(1, 0, 0),
+                                         gp_XYZ(std::numeric_limits<double>::quiet_NaN(), 0, 0)};
+        expect(!std::isfinite(sphereRadiusLeastSquares(o, bad)), "a non-finite vertex: no radius");
+    }
+    // Contact at tau, not a wider band. A cylinder on the axis and a torus
+    // whose tube circle holds the centre.
+    {
+        RoundSpine cyl;
+        cyl.o = gp_XYZ(1, 1, 4);
+        cyl.a = gp_XYZ(0, 0, 1);
+        cyl.r = 2.0;
+        expect(sphereRoundContact(gp_XYZ(1, 1, 1), 2.0 + 0.5 * kTau, cyl, kTau),
+               "cylinder contact within tau");
+        expect(!sphereRoundContact(gp_XYZ(1, 1, 1), 2.0 + 1.5 * kTau, cyl, kTau),
+               "cylinder contact beyond tau: refuse");
+        RoundSpine torC;
+        torC.circle = true;
+        torC.o = gp_XYZ(0, 0, 0);
+        torC.a = gp_XYZ(0, 0, 1);
+        torC.R = 10.0;
+        torC.r = 3.0;
+        expect(sphereRoundContact(gp_XYZ(10, 0, 0), 3.0 + 0.5 * kTau, torC, kTau),
+               "torus contact within tau");
+        expect(!sphereRoundContact(gp_XYZ(10, 0, 0), 3.0 + 1.5 * kTau, torC, kTau),
+               "torus contact beyond tau: refuse");
+    }
 
     // Plane first.
     std::vector<gp_XYZ> pl = {gp_XYZ(0, 0, 0), gp_XYZ(1, 0, 0), gp_XYZ(0, 1, 0),
@@ -236,6 +277,46 @@ static void casePredicates() {
     expect(!sphereCylinderContact(gp_XYZ(1, 1 + 3 * kTau, 1), 2.0, gp_XYZ(1, 1, 4), Z, 2.0,
                                   2 * kTau, vv),
            "cylinder contact: centre off the axis by more than tol: none");
+
+    // A torus spine within tanDistTol still meets; past it does not.
+    tor.R = 10.0 - 1.5 * kTau;
+    f = sphereOfRounds({lx, lz, tor}, kTau);
+    expect(f.ok, "torus spine within tanDistTol of the centre: accept");
+    tor.R = 10.0 - (tanDistTol(kTau, kTau) + kTau);
+    f = sphereOfRounds({lx, lz, tor}, kTau);
+    expect(!f.ok && std::strcmp(f.why, "not-blend") == 0,
+           "torus spine beyond tanDistTol of the centre: refuse");
+    tor.R = 10.0;
+
+    // Torus contact: the centre lies on the major circle. A point on the tube
+    // surface is one minor radius off that circle and is not the contact.
+    const gp_Ax3 fr(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    double u = -1.0;
+    const double tolT = tanDistTol(kTau, kTau);
+    expect(sphereTorusContact(gp_XYZ(10, 0, 0), 3.0, fr, 10.0, 3.0, tolT, u) &&
+               std::fabs(u) < 1e-12,
+           "torus contact: centre on the tube circle at u=0");
+    u = -1.0;
+    const bool atHalf = sphereTorusContact(gp_XYZ(0, 10, 0), 3.0, fr, 10.0, 3.0, tolT, u) &&
+                        std::fabs(u - 0.5 * kPi) < 1e-12;
+    expect(atHalf, "torus contact: centre on the tube circle at u=pi/2");
+    if (atHalf) {
+        const gp_Circ iso = ElSLib::TorusUIso(fr, 10.0, 3.0, u);
+        expect(std::fabs(iso.Radius() - 3.0) < 1e-12 &&
+                   iso.Location().Distance(gp_Pnt(0, 10, 0)) < 1e-9,
+               "torus contact azimuth is the u-iso through the centre");
+    } else {
+        expect(false, "torus contact azimuth is the u-iso through the centre");
+    }
+    expect(!sphereTorusContact(gp_XYZ(13, 0, 0), 3.0, fr, 10.0, 3.0, tolT, u),
+           "torus contact: a tube-surface point is not the centre");
+    expect(!sphereTorusContact(gp_XYZ(10, 0, 0), 3.0 + 3.0 * kTau, fr, 10.0, 3.0, tolT, u),
+           "torus contact: minor radius disagrees by more than tol");
+    expect(!sphereTorusContact(gp_XYZ(2, 0, 0), 3.0, fr, 2.0, 3.0, tolT, u),
+           "torus contact: a spindle is not a ring");
+    expect(!sphereTorusContact(gp_XYZ(10, 0, 0) + gp_XYZ(0, 0, tolT + kTau), 3.0, fr, 10.0, 3.0,
+                               tolT, u),
+           "torus contact: centre off the tube circle by more than tol");
 }
 
 // --- round certificate --------------------------------------------------
@@ -402,7 +483,7 @@ static void caseCorner() {
         expect(ns == 1 && (int)g.tris.size() == n * n, "the claim is the whole octant");
         expect(ns == 1 && std::fabs(g.radius - r) < 1e-12 &&
                    g.ax.Location().XYZ().Modulus() < 1e-12,
-               "centre and radius are the rounds'");
+               "centre is the rounds' and the fitted radius matches them");
         expect(ns == 1 && g.outwardNormal, "convex corner: outward");
         // Polar frame: one round perpendicular to the other two gives the axis.
         const gp_XYZ zd = g.ax.Direction().XYZ();
@@ -435,11 +516,162 @@ static void caseCorner() {
         expect(runCorner(k, r, Origin::CylGrow, 3 * kTau, nullptr, nullptr) == 0,
                "an uncertified round (CylGrow, 3 tau): no sphere");
     }
+    {
+        // One interior vertex 0.8 tau off the anchor radius. The least-squares
+        // radius moves with it and every vertex stays within tau, so the
+        // corner ships. The shipped radius is that fit, not the anchor mean.
+        const Corner k = makeCorner(r, n, 5.0, r, 0.8 * kTau);
+        Region g;
+        const int ns = runCorner(k, r, Origin::FilletStrip, 0.0, &g, nullptr);
+        const MeshView mv = k.s.view();
+        double sum = 0.0;
+        int nv = 0;
+        std::vector<char> seen(k.s.pts.size(), 0);
+        if (ns == 1) {
+            for (int t : g.tris) {
+                const int gt = mv.compTris ? mv.compTris[t] : t;
+                for (int q = 0; q < 3; ++q) {
+                    const int vi = mv.tris[gt][q];
+                    if (vi < 0 || (std::size_t)vi >= seen.size() || seen[(std::size_t)vi]) continue;
+                    seen[(std::size_t)vi] = 1;
+                    sum += (k.s.pts[(std::size_t)vi] - g.ax.Location().XYZ()).Modulus();
+                    ++nv;
+                }
+            }
+        }
+        const double want = nv > 0 ? sum / (double)nv : -1.0;
+        expect(ns == 1 && nv > 0 && std::fabs(g.radius - want) < 1e-9,
+               "shipped radius is the least-squares mean of the corner vertices");
+        expect(ns == 1 && std::fabs(g.radius - r) > 1e-9 && g.maxVertexDev <= kTau,
+               "the fitted radius leaves the anchor mean and still certifies");
+    }
 }
 
 // A dissolved uncertified region leaves a hole in the accepted list. A torus
 // whose neighbour index named that hole is cleared. A torus whose neighbour
 // sat above the hole takes the dense index, not the stale one.
+// The Z round of the box corner, retargeted onto a ring torus whose tube-centre
+// circle passes through the origin. Axis Y, centre (-Rmaj, 0, 0), X along +X,
+// so u = 0 is the origin and the contact meridian is the XY quarter circle the
+// octant already shares. The far ring sits at azimuth u1, on the z < 0 side.
+static void retargetFarRingToTorus(Synth& s, double r, double Rmaj, double u1, double L) {
+    const gp_XYZ X(1, 0, 0), Yd(0, 0, -1), Za(0, 1, 0);
+    const gp_XYZ O(-Rmaj, 0, 0);
+    for (gp_XYZ& p : s.pts) {
+        if (!(p.Z() < -0.5 * L)) continue;
+        const double v = std::atan2(p.Y(), p.X());
+        const gp_XYZ radial = X * std::cos(u1) + Yd * std::sin(u1);
+        p = O + radial * (Rmaj + r * std::cos(v)) + Za * (r * std::sin(v));
+    }
+}
+
+static Region torusRoundRegion(const gp_Ax3& fr, double Rmaj, double Rmin,
+                               const std::vector<int>& tris, double dev) {
+    Region g;
+    g.type = SurfType::Torus;
+    g.origin = Origin::TorusBlend;
+    g.ax = fr;
+    g.radius = Rmaj;
+    g.radius2 = Rmin;
+    g.tris = tris;
+    g.maxVertexDev = dev;
+    g.closed360 = false;
+    return g;
+}
+
+static int runTorusCorner(const Corner& k, const gp_Ax3& fr, double Rmaj, double dev,
+                          Region* out) {
+    const double r = 2.0;
+    SegmentWork w;
+    w.accepted.push_back(roundRegion(0, r, k.roundTris[0], Origin::FilletStrip, 0.0));
+    w.accepted.push_back(roundRegion(1, r, k.roundTris[1], Origin::FilletStrip, 0.0));
+    w.accepted.push_back(torusRoundRegion(fr, Rmaj, r, k.roundTris[2], dev));
+    Provisional pr;
+    pr.tris = k.sphereTris;
+    std::sort(pr.tris.begin(), pr.tris.end());
+    pr.claim = ProvClaim::Unclaimed;
+    w.provisionals.push_back(pr);
+    const MeshView mv = k.s.view();
+    SegmentParams p;
+    DerivedTols tol;
+    if (!claimSphereCorners(mv, p, tol, w)) return -1;
+    int nSph = 0;
+    for (const Region& g : w.accepted)
+        if (g.type == SurfType::Sphere && g.origin == Origin::SphereCorner) {
+            ++nSph;
+            if (out) *out = g;
+        }
+    return nSph;
+}
+
+static void caseTorusCorner() {
+    const double r = 2.0;
+    const double Rmaj = 10.0;
+    const double L = 5.0;
+    const double u1 = 0.4;
+    const int n = 6;
+    const gp_Ax3 fr(gp_Pnt(-Rmaj, 0, 0), gp_Dir(0, 1, 0), gp_Dir(1, 0, 0));
+    Corner k = makeCorner(r, n, L, r, 0.0);
+    retargetFarRingToTorus(k.s, r, Rmaj, u1, L);
+    {
+        Region g;
+        const int ns = runTorusCorner(k, fr, Rmaj, 0.0, &g);
+        expect(ns == 1, "two cylinders and one torus of equal radius: one sphere");
+        expect(ns == 1 && std::fabs(g.radius - r) < 1e-9 && g.ax.Location().XYZ().Modulus() < 1e-8,
+               "the sphere centre and radius are the rounds'");
+        double u = -1.0;
+        const bool hit = ns == 1 && sphereTorusContact(g.ax.Location().XYZ(), g.radius, fr, Rmaj, r,
+                                                       tanDistTol(kTau, kTau), u);
+        const gp_Circ iso = ElSLib::TorusUIso(fr, Rmaj, r, hit ? u : 0.0);
+        const gp_Pnt ring(r, 0, 0);
+        expect(hit && std::fabs(u) < 1e-8 && std::fabs(iso.Radius() - r) < 1e-9 &&
+                   iso.Distance(ring) < 1e-8,
+               "the torus contact is the u-iso through the corner");
+    }
+    {
+        // Shift the tube circle so the corner centre is past tanDistTol.
+        const double off = tanDistTol(kTau, kTau) + kTau;
+        const gp_Ax3 far(gp_Pnt(-Rmaj + off, 0, 0), gp_Dir(0, 1, 0), gp_Dir(1, 0, 0));
+        expect(runTorusCorner(k, far, Rmaj, 0.0, nullptr) == 0,
+               "corner centre off the tube circle by more than tanDistTol: refused");
+    }
+    {
+        expect(runTorusCorner(k, fr, Rmaj, 3.0 * kTau, nullptr) == 0,
+               "a torus whose maxVertexDev exceeds tau is not a round");
+    }
+}
+
+// A CylGrow that owns the corner and one triangle off the sphere is not one
+// preimage. F-D leaves it whole: no sphere, and the region is not dissolved.
+static void casePartialRob() {
+    const double r = 2.0;
+    const int n = 6;
+    Corner k = makeCorner(r, n, 5.0, r, 0.0);
+    const int a = k.s.add(gp_XYZ(8, 0, 0));
+    const int b = k.s.add(gp_XYZ(8, 1, 0));
+    const int c = k.s.add(gp_XYZ(8, 0, 1));
+    const int far = k.s.addTri(a, b, c);
+    k.s.finish();
+    SegmentWork w;
+    for (int q = 0; q < 3; ++q)
+        w.accepted.push_back(roundRegion(q, r, k.roundTris[(std::size_t)q], Origin::FilletStrip, 0.0));
+    std::vector<int> held = k.sphereTris;
+    held.push_back(far);
+    w.accepted.push_back(roundRegion(0, r, held, Origin::CylGrow, 3 * kTau));
+    const int nBefore = (int)held.size();
+    const MeshView mv = k.s.view();
+    SegmentParams p;
+    DerivedTols tol;
+    expect(claimSphereCorners(mv, p, tol, w), "partial rob returns");
+    int nSph = 0, heldLeft = -1;
+    for (const Region& g : w.accepted) {
+        if (g.type == SurfType::Sphere && g.origin == Origin::SphereCorner) ++nSph;
+        if (g.origin == Origin::CylGrow && g.maxVertexDev > kTau) heldLeft = (int)g.tris.size();
+    }
+    expect(nSph == 0, "a partial CylGrow is not a sphere preimage");
+    expect(heldLeft == nBefore, "a partial CylGrow is not dissolved");
+}
+
 static void caseDissolveNbr() {
     const double r = 2.0;
     const int n = 6;
@@ -501,6 +733,8 @@ int main() {
     casePredicates();
     caseRoundCert();
     caseCorner();
+    caseTorusCorner();
+    casePartialRob();
     caseDissolveNbr();
     std::fprintf(stderr, "relational_sphere_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS",
                  gFail);

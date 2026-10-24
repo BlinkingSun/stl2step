@@ -219,6 +219,13 @@ struct Region {
     // stored {P00, P10, P01, P11}; u, v in [0, 1]. The face is bounded by its
     // iso-lines: v = 0 / v = 1 lie in the cap planes, u = 0 / u = 1 on the rails.
     std::array<gp_XYZ, 4> ruledPoles{};
+    // D-fc-7.6 (T): the round was refit with its tangency to a committed coaxial
+    // wall held exact (D-fc-1.4 anchored mode). The wall surface it is tangent to,
+    // as it stood at that fit: the builder's tangency-point junction (RQ-HUB-3 b)
+    // applies only between this round and that same surface.
+    bool   tangentExact = false;
+    gp_XYZ tangentWallOrigin{0, 0, 0}, tangentWallAxis{0, 0, 0};
+    double tangentWallRadius = 0;
 };
 
 struct BoundaryChain {

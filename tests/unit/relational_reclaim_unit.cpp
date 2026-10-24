@@ -4,7 +4,9 @@
 // SPDX-License-Identifier: MIT
 
 #include "posix_compat.hpp"
+#include "refit_partial_cyl.hpp"
 #include "refit_relational.hpp"
+#include "stl2step/stl2step.hpp"
 
 #include <algorithm>
 #include <array>
@@ -413,6 +415,124 @@ static void caseRingClosureSeamBlocked() {
            "ring_closure_blocked_seam_deferred");
 }
 
+// D-fc-7.4 Fix 1. One certified partial, a gap of on-surface triangles inside its
+// angular extent (one vertex 50 tau inside: cover), and a dent triangle inside
+// the same slab whose every vertex is 100 tau off — inside the chord bound,
+// and with no vertex within tau, so Cover refuses it.
+static void caseSingleMemberCover() {
+    Synth s;
+    SegmentWork w;
+    const double tau = 2 * s.q;
+    const Grid g = cylGrid(s, 3.0, 0.0, 10 * kDeg, 18, false, {0.0, 5.0, 10.0});
+    pushRadial(s, g.col[1][9], -50 * tau);
+    const double th = 90 * kDeg;
+    const double Rd = 3.0 - 100 * tau;
+    const int d0 = s.add(gp_XYZ(Rd * std::cos(th), Rd * std::sin(th), 2.0));
+    const int d1 = s.add(gp_XYZ(Rd * std::cos(th + 2 * kDeg), Rd * std::sin(th + 2 * kDeg), 2.0));
+    const int d2 = s.add(gp_XYZ(Rd * std::cos(th + kDeg), Rd * std::sin(th + kDeg), 6.0));
+    const int dent = s.addTri(d0, d1, d2);
+    s.finish();
+    std::vector<int> owned = sectors(g, 0, 6);
+    const std::vector<int> right = sectors(g, 10, 17);
+    owned.insert(owned.end(), right.begin(), right.end());
+    std::sort(owned.begin(), owned.end());
+    const std::vector<int> gap = sectors(g, 7, 9);
+    w.accepted.push_back(cylRegion(owned, 3.0, 0.0));
+    std::vector<int> free = gap;
+    free.push_back(dent);
+    addProv(w, free, ProvClaim::Unclaimed);
+    const std::string d = run(s, w);
+    const Region* r = firstCyl(w);
+    expect(w.accepted.size() == 1 && r && r->tris.size() == owned.size() + gap.size(),
+           "single_member_cover_joins");
+    expect(has(d, "mode=closure") && has(d, "members=1") && has(d, "why=accept"),
+           "single_member_cover_diag");
+    expect(r && r->maxVertexDev > tau && r->maxVertexDev <= 51 * tau, "single_member_cover_dev");
+    expect(r && !r->closed360, "single_member_cover_stays_partial");
+    bool dentLeft = false;
+    for (const Provisional& pr : w.provisionals) {
+        if (pr.claim != ProvClaim::Unclaimed) continue;
+        for (int t : pr.tris)
+            if (t == dent) dentLeft = true;
+    }
+    expect(dentLeft && r && std::find(r->tris.begin(), r->tris.end(), dent) == r->tris.end(),
+           "single_member_dent_stays");
+}
+
+// A certified partial with nothing to fill is not refit and not reported.
+static void caseSingleMemberNoop() {
+    Synth s;
+    SegmentWork w;
+    const Grid g = cylGrid(s, 3.0, 0.0, 10 * kDeg, 12, false, {0.0, 5.0, 10.0});
+    s.finish();
+    const std::vector<int> owned = sectors(g, 0, 11);
+    w.accepted.push_back(cylRegion(owned, 3.0, 0.0));
+    const std::string d = run(s, w);
+    expect(w.accepted.size() == 1 && w.accepted[0].tris.size() == owned.size() &&
+               !has(d, "mode=closure"),
+           "single_member_nofill_unchanged");
+}
+
+// An on-surface triangle outside the partial's angular extent does not extend it.
+static void caseSingleMemberOutsideArc() {
+    Synth s;
+    SegmentWork w;
+    const Grid g = cylGrid(s, 3.0, 0.0, 10 * kDeg, 18, false, {0.0, 5.0, 10.0});
+    s.finish();
+    const std::vector<int> owned = sectors(g, 0, 14);
+    const std::vector<int> out = sectors(g, 17, 17);
+    w.accepted.push_back(cylRegion(owned, 3.0, 0.0));
+    addProv(w, out, ProvClaim::Unclaimed);
+    const std::string d = run(s, w);
+    expect(w.accepted.size() == 1 && w.accepted[0].tris.size() == owned.size() &&
+               w.provisionals[0].claim == ProvClaim::Unclaimed &&
+               w.provisionals[0].tris.size() == out.size() && !has(d, "why=accept"),
+           "single_member_outside_arc_unchanged");
+}
+
+// D-fc-7.3 F-F (the pickup bore behind its cross hole). Two certified partials of
+// one closed R10 wall meet on one side, so their union is ONE disk (a C); the
+// arc they leave holds a window (level gap 2 of sectors 16-18, held by another
+// face) and the Unclaimed strip round it (the window-edge cover). The partial
+// fill stops at the group's own angular extent and keeps the C; the whole-turn
+// fill closes it into one closed wall carrying the window.
+static RingClose ringCloseDiskPart() {
+    RingClose c;
+    c.g = cylGrid(c.s, 10.0, 0.0, 10 * kDeg, 36, true, {0.0, 4.0, 8.0, 12.0, 16.0, 20.0});
+    c.s.finish();
+    std::vector<int> a, b;
+    for (int i = 0; i < 36; ++i)
+        for (std::size_t k = 0; k < c.g.sect[(std::size_t)i].size(); ++k) {
+            const int t = c.g.sect[(std::size_t)i][k];
+            if (i >= 16 && i <= 18) {
+                if (k / 2 == 2) c.windowTris.push_back(t);
+                else c.stripTris.push_back(t);
+            } else if (i < 16) {
+                a.push_back(t);
+            } else {
+                b.push_back(t);
+            }
+        }
+    std::sort(c.windowTris.begin(), c.windowTris.end());
+    c.w.accepted.push_back(cylRegion(a, 10.0, 0.0));
+    c.w.accepted.push_back(cylRegion(b, 10.0, 0.0));
+    c.w.accepted.push_back(planeRegion(c.windowTris));
+    addProv(c.w, c.stripTris, ProvClaim::Unclaimed);
+    return c;
+}
+
+static void caseRingClosureFromDisk() {
+    RingClose c = ringCloseDiskPart();
+    const std::string d = run(c.s, c.w);
+    const Region* r = firstCyl(c.w);
+    const std::size_t nAll = c.s.triFlat.size() / 3;
+    expect(nCyl(c.w) == 1 && r && r->closed360 && r->tris.size() == nAll - c.windowTris.size(),
+           "ring_closure_from_disk_one_closed_region");
+    expect(has(d, "DIAG_REL_RING_CLOSURE") && has(d, "windows=1") && has(d, "closedWall=1"),
+           "ring_closure_from_disk_one_window");
+    expect(c.w.provisionals[0].claim == ProvClaim::ConsumedCylinder, "ring_closure_from_disk_strip_peeled");
+}
+
 // Stacked coaxial walls (no strict axial overlap) and a different radius never join.
 static void caseClosureStackedAndRadius() {
     {
@@ -726,16 +846,54 @@ static void caseRingVertexOff() {
     expect(nCyl(r.w) == 0 && ringWhys(d, 120) == "vertex-off", "ring_band_refit_off_tau_refused");
 }
 
-// A third of the wall is already a certified cylinder: the band reaches it on its own
-// surface, so the wall is that region's surface (one face per surface).
+// Triangles of the peg wall (every sector). The plate and the cap are not in the grid.
+static std::size_t wallTriCount(const Grid& g) {
+    std::size_t n = 0;
+    for (const std::vector<int>& sec : g.sect) n += sec.size();
+    return n;
+}
+
+// D-fc-7.8. A third of the wall is already one certified cylinder. The single-member
+// fill and the whole-turn fill commit that wall as one face (one face per surface).
+// The ring stage adds no cylinder, and the band's charts are consumed.
 static void caseRingSameSurface() {
     Ring r = ringPart(7.5, 120, false);
     r.w.accepted.push_back(cylRegion(sectors(r.peg, 0, 39), 7.5, 0.0));
     for (std::size_t i = 1; i <= 40; ++i) r.w.provisionals[i].claim = ProvClaim::ConsumedCylinder;
     const std::string d = run(r.s, r.w);
-    expect(nCyl(r.w) == 1 && r.w.accepted[0].tris.size() == 80 && ringWhys(d, 120) == "same-surface",
-           "ring_band_on_claimed_surface_refused");
-    expect(r.w.provisionals[41].claim == ProvClaim::Unclaimed, "ring_same_surface_claims_nothing");
+    const std::size_t wall = wallTriCount(r.peg);
+    const Region& a = r.w.accepted[0];
+    expect(nCyl(r.w) == 1 && a.tris.size() == wall && a.closed360 && ringWhys(d, 120).empty(),
+           "ring_same_surface_whole_turn_fill");
+    expect(r.w.provisionals[41].claim == ProvClaim::ConsumedCylinder,
+           "ring_same_surface_fill_consumes_band");
+}
+
+// D-fc-7.8 AMENDED. Same part. One vertex of a not-yet-claimed sector (a column the
+// certified member does not own) is pushed out by s + τ. s is claimChordSagitta of
+// that member: the cover bound closeSameSurface uses. The triangles on the vertex
+// are neither inliers nor cover, the wall keeps a window, and the fill rolls back.
+static void caseRingSameSurfaceFillRefused() {
+    Ring r = ringPart(7.5, 120, false);
+    const std::vector<int> claim = sectors(r.peg, 0, 39);
+    r.w.accepted.push_back(cylRegion(claim, 7.5, 0.0));
+    for (std::size_t i = 1; i <= 40; ++i) r.w.provisionals[i].claim = ProvClaim::ConsumedCylinder;
+    const MeshView mv = r.s.view();
+    const Region& member = r.w.accepted[0];
+    const double tau = tauOf(mv);
+    const double s = claimChordSagitta(mv, member.tris,
+                                        gp_Ax1(member.ax.Location(), member.ax.Direction()),
+                                        member.radius);
+    // Claimed sectors 0..39 own columns 0..40. Column 41 is only on unclaimed sectors,
+    // and level 1 is the far rim, not the hole loop.
+    pushRadial(r.s, r.peg.col[1][41], s + tau);
+    const std::string d = run(r.s, r.w);
+    const Region& a = r.w.accepted[0];
+    expect(nCyl(r.w) == 1 && a.tris.size() == 80 && claim.size() == 80 && !a.closed360 &&
+               ringWhys(d, 120) == "same-surface",
+           "ring_same_surface_fill_refused");
+    expect(r.w.provisionals[41].claim == ProvClaim::Unclaimed,
+           "ring_same_surface_refused_band_unclaimed");
 }
 
 // A wall under two sectors of the hole: three stations cannot over-determine the
@@ -858,6 +1016,57 @@ static void caseTorusCapGuards() {
     }
 }
 
+// D-fc-7.4 Q2. The period shift the partial-cylinder face builder applies.
+// Chart is a quarter turn. An edge one whole turn off the chart is pulled back;
+// an edge already on the chart, and an edge that only overhangs it, are not.
+static void casePartialCylPeriodShift() {
+    const double twoPi = 2.0 * kPi;
+    const double u0 = -1.0;
+    const double u1 = u0 + 0.5 * kPi;
+    const double mid = 0.5 * (u0 + u1);
+    const double shift = partialCylPeriodShift(mid + twoPi, u0, u1);
+    expect(std::abs(shift + twoPi) < 1e-12, "period_shift_one_turn");
+    expect(std::abs((mid + twoPi + shift) - mid) < 1e-12, "period_shift_lands_on_chart");
+    expect(partialCylPeriodShift(u0, u0, u1) == 0.0, "period_shift_chart_end_stays");
+    expect(partialCylPeriodShift(u1, u0, u1) == 0.0, "period_shift_chart_other_end_stays");
+    expect(partialCylPeriodShift(mid, u0, u1) == 0.0, "period_shift_on_chart_stays");
+    // Overhanging the chart by much less than half a turn must not flip a period.
+    expect(partialCylPeriodShift(u0 - 0.01, u0, u1) == 0.0, "period_shift_overhang_stays");
+    expect(partialCylPeriodShift(mid, 0.0, twoPi) == 0.0, "period_shift_full_turn_refused");
+}
+
+// D-fc-7.4 Q2. The public corpus quarter-round is certified and, before this
+// repair, dropped at face build. It must ship as one cylindrical surface.
+static void caseQuarterCylinderShips(const char* stlPath) {
+    const std::string step = "partial-cyl-quarter.step";
+    stl2step::Options opt;
+    opt.input = stlPath;
+    opt.output = step;
+    opt.smooth = true;
+    opt.verify = false;
+    opt.threads = 1;
+    const stl2step::Result r = stl2step::convert(opt);
+    expect(r.ok && r.solids >= 1 && r.smoothRevertedComponents == 0, "quarter_cyl_convert");
+    std::ifstream in(step);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    const std::string text = ss.str();
+    std::remove(step.c_str());
+    int nQuarter = 0;
+    const std::string key = "CYLINDRICAL_SURFACE";
+    for (std::size_t at = 0; (at = text.find(key, at)) != std::string::npos; at += key.size()) {
+        const std::size_t lp = text.find('(', at);
+        const std::size_t rp = (lp == std::string::npos) ? std::string::npos : text.find(')', lp);
+        if (lp == std::string::npos || rp == std::string::npos) break;
+        const std::string inside = text.substr(lp + 1, rp - lp - 1);
+        const std::size_t comma = inside.rfind(',');
+        if (comma == std::string::npos) continue;
+        const double rad = std::atof(inside.c_str() + comma + 1);
+        if (std::abs(rad - 0.5) < 1e-3) ++nQuarter;
+    }
+    expect(nQuarter == 1, "quarter_cyl_one_face");
+}
+
 // ---- gates ------------------------------------------------------------------------
 
 static void caseNoQuantum() {
@@ -873,13 +1082,17 @@ static void caseTorusModeIsNotLine() {
     expect(c.w.accepted.size() == 2 && !has(d, "mode=closure"), "torus_mode_runs_no_line_pass");
 }
 
-int main() {
+int main(int argc, char** argv) {
     caseClosureAccept();
     caseClosureNotJoined();
     caseClosureUncertified();
     caseClosureNotDisk();
     caseRingClosureAccept();
     caseRingClosureSeamBlocked();
+    caseSingleMemberCover();
+    caseSingleMemberNoop();
+    caseSingleMemberOutsideArc();
+    caseRingClosureFromDisk();
     caseClosureStackedAndRadius();
     caseHealAccept();
     caseHealNoPartner();
@@ -896,6 +1109,7 @@ int main() {
     caseRingLoopNotCircle();
     caseRingVertexOff();
     caseRingSameSurface();
+    caseRingSameSurfaceFillRefused();
     caseRingUnderdetermined();
     caseRingNotAnnulus();
     caseRingOpenWall();
@@ -903,6 +1117,9 @@ int main() {
     caseTorusCapGuards();
     caseNoQuantum();
     caseTorusModeIsNotLine();
+    casePartialCylPeriodShift();
+    if (argc > 1) caseQuarterCylinderShips(argv[1]);
+    else expect(false, "quarter_cyl_corpus_path");
     if (gFail) std::fprintf(stderr, "relational_reclaim_unit: %d FAIL\n", gFail);
     return gFail ? 1 : 0;
 }

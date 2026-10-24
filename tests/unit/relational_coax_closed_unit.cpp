@@ -165,7 +165,52 @@ static void casePredicates() {
     expect(!coaxClosedWall(true, 2, {1, -1}), "closed wall: two components");
     expect(!coaxClosedWall(true, 1, {1, -1, 0}), "closed wall: a window is not committed here");
     expect(!coaxClosedWall(true, 1, {0}), "closed wall: a disk");
+    // D-fc-7.3 RQ-HUB-2: the window clause. Two rims winding once in opposite
+    // senses plus winding-0 loops that one seam generator clears.
+    {
+        double seamU = -1;
+        expect(coaxClosedWallWithWindows(true, 1, {1, -1}, {}, seamU) && seamU == 0.0,
+               "window clause: a wall with no window is coaxClosedWall's");
+        const std::vector<double> win{0.10, 0.20, 0.20, 0.10};
+        expect(coaxClosedWallWithWindows(true, 1, {1, -1, 0}, {win}, seamU) &&
+                   std::fabs(std::remainder(seamU - (0.20 + 0.5 * (2 * kPi - 0.10)), 2 * kPi)) <= 1e-12,
+               "window clause: one window, seam opposite it");
+        expect(coaxClosedWallWithWindows(true, 1, {-1, 0, 1, 0}, {win, {2.0, 2.2, 2.1}}, seamU),
+               "window clause: two windows");
+        expect(!coaxClosedWallWithWindows(false, 1, {1, -1, 0}, {win}, seamU), "window clause: D2 open");
+        expect(!coaxClosedWallWithWindows(true, 2, {1, -1, 0}, {win}, seamU),
+               "window clause: two components");
+        expect(!coaxClosedWallWithWindows(true, 1, {1, 1, 0}, {win}, seamU),
+               "window clause: rims winding the same sense");
+        expect(!coaxClosedWallWithWindows(true, 1, {1, -1, 2}, {}, seamU),
+               "window clause: a loop winding twice is no window");
+        expect(!coaxClosedWallWithWindows(true, 1, {0}, {win}, seamU), "window clause: a disk");
+        // Two windows (at different heights) whose arcs together cover the whole
+        // turn: no generator clears both.
+        std::vector<double> w1, w2;
+        for (int k = 0; k <= 40; ++k) {
+            w1.push_back(4.0 * k / 40.0);
+            w2.push_back(3.0 + 4.0 * k / 40.0);
+        }
+        expect(!coaxClosedWallWithWindows(true, 1, {1, -1, 0, 0}, {w1, w2}, seamU),
+               "window clause: no seam clears every window");
+    }
     expect(coaxLiftRoutes(false) && !coaxLiftRoutes(true), "route: an annulus preimage is F1's");
+    // D-fc-7.3 RQ-HUB-1: above the fold floor a closed wall needs every triangle
+    // free AND the RQ-3 (i) anchor; under it neither is asked.
+    {
+        const double lo = 5 * kPi / 180, under = 4 * kPi / 180, over = 9 * kPi / 180;
+        expect(coaxClosedLiftInScope(under, lo, false, false), "lift scope: under the floor as before");
+        expect(coaxClosedLiftInScope(over, lo, true, true), "lift scope: free and anchored above the floor");
+        expect(!coaxClosedLiftInScope(over, lo, true, false), "lift scope: no anchor above the floor");
+        expect(!coaxClosedLiftInScope(over, lo, false, true), "lift scope: a claimed triangle above the floor");
+        // Corollary: a set inside a D2-closed closure the stage measured is no partial.
+        const std::vector<std::vector<int>> closures{{1, 2, 3, 5, 8}, {20, 21}};
+        expect(coaxInsideClosure({2, 5, 8}, closures), "closure: a subset of a measured closure");
+        expect(!coaxInsideClosure({2, 5, 9}, closures), "closure: a set reaching outside every closure");
+        expect(!coaxInsideClosure({}, closures) && !coaxInsideClosure({2}, {}),
+               "closure: an empty set or no closure decides nothing");
+    }
     // Fill: two edges shared with I + Cover, the third along the top rim (z = 5),
     // every vertex within s but none within tau.
     {
@@ -185,6 +230,66 @@ static void casePredicates() {
         const std::array<std::array<gp_XYZ, 2>, 3> ee{{{{p0h, q1}}, {{q1, q2}}, {{q2, p0h}}}};
         expect(!coaxFillAdmits(ear, ee, {{true, true, false}}, o, a, R, kTau, s, 0, 5),
                "fill: a one-level ear is never a fill");
+    }
+    // D-fc-7.6 (T): a round's vertices on an arc facing the wall, its free-fit
+    // centre a fraction of tau too close (the overlap the cusp crossing came from).
+    {
+        const gp_XYZ ow(0, 0, 0), aw(0, 0, 1);
+        const double Rw = 8, rr = 3;
+        auto roundPts = [&](double cx, double cy, double r, double a0, double a1) {
+            std::vector<gp_XYZ> v;
+            for (int i = 0; i <= 12; ++i) {
+                const double t = a0 + (a1 - a0) * i / 12.0;
+                for (double z : {0.0, 5.0}) v.emplace_back(cx + r * std::cos(t), cy + r * std::sin(t), z);
+            }
+            return v;
+        };
+        // External round centred exactly at R + r on +x; the free fit read it
+        // 0.4 tau closer. Its arc faces the wall (azimuths around pi).
+        const std::vector<gp_XYZ> ext = roundPts(Rw + rr, 0, rr, kPi - 0.5, kPi + 0.5);
+        for (const bool fitR : {false, true}) {
+            const AnchoredTangentFit f = anchoredTangentFit(
+                ext, ow, aw, Rw, false, gp_XYZ(Rw + rr - 0.4 * kTau, 0, 0), rr, 8, fitR);
+            const gp_XYZ c = f.centre - ow;
+            const double d = (c - aw * c.Dot(aw)).Modulus();
+            expect(f.ok && std::fabs(d - (Rw + f.radius)) <= 1e-12 && f.maxDev <= kTau,
+                   fitR ? "anchored tangent: phi and r, exact external tangency, certified"
+                        : "anchored tangent: phi alone, exact external tangency, certified");
+            if (!fitR) expect(f.radius == rr, "anchored tangent: phi alone keeps the free fit's r");
+        }
+        // Internal: a radius-3 round inside the wall, its centre at R - r on +y.
+        const std::vector<gp_XYZ> inn = roundPts(0, Rw - rr, rr, kPi / 2 - 0.5, kPi / 2 + 0.5);
+        const AnchoredTangentFit fi =
+            anchoredTangentFit(inn, ow, aw, Rw, true, gp_XYZ(0, Rw - rr + 0.3 * kTau, 0), rr, 8, false);
+        const gp_XYZ ci = fi.centre - ow;
+        expect(fi.ok && std::fabs((ci - aw * ci.Dot(aw)).Modulus() - (Rw - rr)) <= 1e-12 &&
+                   fi.maxDev <= kTau,
+               "anchored tangent: internal tangency held exact");
+        // A round that is not tangent (5 tau apart): the anchored fit deviates by
+        // about that much -- the caller refuses it at tau and keeps the free fit.
+        const std::vector<gp_XYZ> far = roundPts(Rw + rr + 5 * kTau, 0, rr, kPi - 0.5, kPi + 0.5);
+        const AnchoredTangentFit ff = anchoredTangentFit(
+            far, ow, aw, Rw, false, gp_XYZ(Rw + rr + 5 * kTau, 0, 0), rr, 8, false);
+        expect(ff.ok && ff.maxDev > kTau, "anchored tangent: a round 5 tau off does not certify");
+        expect(!anchoredTangentFit({}, ow, aw, Rw, false, gp_XYZ(Rw + rr, 0, 0), rr, 8).ok,
+               "anchored tangent: no vertices, no fit");
+        // The builder's identity: a round fitted to this very wall surface.
+        Region wall, round;
+        wall.type = SurfType::Cylinder;
+        wall.ax = gp_Ax3(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        wall.radius = Rw;
+        round.type = SurfType::Cylinder;
+        round.tangentExact = true;
+        round.tangentWallOrigin = wall.ax.Location().XYZ();
+        round.tangentWallAxis = wall.ax.Direction().XYZ();
+        round.tangentWallRadius = wall.radius;
+        expect(roundTangentToWall(round, wall), "tangent identity: the recorded wall");
+        Region moved = wall;
+        moved.radius = Rw + kTau;
+        expect(!roundTangentToWall(round, moved), "tangent identity: a wall changed after the fit");
+        Region plain = round;
+        plain.tangentExact = false;
+        expect(!roundTangentToWall(plain, wall), "tangent identity: a free-fit round");
     }
     // Tangent parallel cylinder: internal (R - r) and external (R + r).
     const double L = 6, tolA = kTau, rA = 5;
@@ -345,6 +450,185 @@ static void caseClosedWall() {
     expect(o.n == 0, "closed wall: q <= 0 admits nothing");
 }
 
+// D-fc-7.3 RQ-HUB-2 end to end: a closed R wall of n columns and `rows` rows on
+// the R10 family, T-junctions on the low rim of the `tAt` columns (the chord
+// triangles split the tau-preimage). Row `winRow` leaves the columns
+// [winAt, winAt + winCols) out: a window through the wall (a cross hole), a
+// boundary loop winding zero times between the two rims.
+static WallOut windowWall(double R, int n, int rows, const std::vector<int>& tAt, int winRow,
+                          int winAt, int winCols) {
+    Synth s;
+    SegmentWork w;
+    const double h = 20;
+    std::vector<int> donorTris, wallTris;
+    addDonor(s, w, donorTris, h);
+    std::vector<std::vector<int>> g((std::size_t)n + 1);
+    for (int i = 0; i < n; ++i) {
+        const double az = 2 * kPi * (double)i / (double)n;
+        for (int k = 0; k <= rows; ++k)
+            g[(std::size_t)i].push_back(
+                s.add(R * std::cos(az), R * std::sin(az), h * (double)k / (double)rows));
+    }
+    g[(std::size_t)n] = g.front();
+    for (int k = 0; k < rows; ++k)
+        for (int i = 0; i < n; ++i) {
+            if (k == winRow && i >= winAt && i < winAt + winCols) continue;
+            const int a0 = g[(std::size_t)i][(std::size_t)k], a1 = g[(std::size_t)i][(std::size_t)k + 1];
+            const int b0 = g[(std::size_t)i + 1][(std::size_t)k], b1 = g[(std::size_t)i + 1][(std::size_t)k + 1];
+            if (k == 0 && std::find(tAt.begin(), tAt.end(), i) != tAt.end()) {
+                const gp_XYZ m = s.pts[(std::size_t)a0] + (s.pts[(std::size_t)b0] - s.pts[(std::size_t)a0]) / 3.0;
+                s.quadT(a0, a1, b0, b1, s.add(m.X(), m.Y(), m.Z()), wallTris);
+            } else {
+                s.quad(a0, a1, b0, b1, wallTris);
+            }
+        }
+    s.finish();
+    acceptDonor(w, donorTris);
+    Provisional band;
+    band.claim = ProvClaim::Unclaimed;
+    band.tris = wallTris;
+    band.plane = gp_Ax3(gp_Pnt(R, 0, 0), gp_Dir(1, 0, 0));
+    band.maxVertexDev = 1.0;
+    w.provisionals.push_back(band);
+    const MeshView mv = s.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol);
+    claimRelRevolve(mv, sp, tol, w, RelRevolveMode::Line);
+    WallOut o;
+    for (const Region& r : w.accepted)
+        if (r.type == SurfType::Cylinder && std::fabs(r.radius - R) <= kTau) {
+            ++o.n;
+            o.closed = r.closed360;
+            o.nTri = r.tris.size();
+            o.radius = r.radius;
+        }
+    return o;
+}
+
+static void caseWindowWall() {
+    const std::vector<int> tAt{10, 40, 70, 100};
+    const std::size_t all = 120 * 3 * 2 + 4;
+    // No window: the low-rim chord triangles leave rows 1-2 an annulus preimage,
+    // the F1 ring path's (closed-deferred here), unchanged.
+    WallOut o = windowWall(8, 120, 3, tAt, 1, 0, 0);
+    expect(o.n == 0, "window wall: no window, an annulus preimage stays closed-deferred");
+    // A two-column window through the middle row: ONE closed cylinder whose face
+    // carries the window as an inner wire.
+    o = windowWall(8, 120, 3, tAt, 1, 55, 2);
+    expect(o.n == 1 && o.closed && o.nTri == all - 4, "window wall: a window, ONE closed cylinder");
+    // A window that reaches the low rim is no window (it opens the rim): not a
+    // closed wall, and no passing subset of it ships.
+    o = windowWall(8, 120, 3, tAt, 0, 55, 2);
+    expect(o.n == 0 || !o.closed, "window wall: an opening on the rim is not a window");
+}
+
+// D-fc-7.3 RQ-HUB-1 end to end: a closed R wall of n columns (folds of 360/n
+// degrees, at or above B1's seed floor for n <= 72) on the R10 family, its
+// preimage split by T-junctions. `anchor`: an accepted R3 cylinder externally
+// tangent to the wall along its 0-degree column (axis at R + 3), sharing that
+// column's low vertex (the contact; sharing the whole column would make its edge
+// non-manifold) -- the RQ-3 (i) certified tangent parallel cylinder.
+struct AnchorOut {
+    bool tangentExact = false;
+    double tanResid = 1e300;  // |dist(axes) - (R + r)| after the stage
+    double maxDev = 0;
+    double radius = 0;
+};
+
+static WallOut anchoredWall(int n, bool anchor, double shift = 0.0, AnchorOut* ao = nullptr) {
+    Synth s;
+    SegmentWork w;
+    const double h = 20, R = 8, r = 3;
+    std::vector<int> donorTris, wallTris, anchorTris;
+    addDonor(s, w, donorTris, h);
+    auto bc = arcCols(s, 0, 0, R, 0, 2 * kPi, n, h);
+    bc.back() = bc.front();
+    const std::vector<int> tAt{1, n / 4, n / 2, 3 * n / 4};
+    for (int i = 0; i + 1 < (int)bc.size(); ++i) {
+        if (std::find(tAt.begin(), tAt.end(), i) != tAt.end()) {
+            const gp_XYZ a0 = s.pts[(std::size_t)bc[(std::size_t)i][0]];
+            const gp_XYZ b0 = s.pts[(std::size_t)bc[(std::size_t)i + 1][0]];
+            const gp_XYZ m = a0 + (b0 - a0) / 3.0;
+            s.quadT(bc[(std::size_t)i][0], bc[(std::size_t)i][1], bc[(std::size_t)i + 1][0],
+                    bc[(std::size_t)i + 1][1], s.add(m.X(), m.Y(), m.Z()), wallTris);
+        } else {
+            s.quad(bc[(std::size_t)i][0], bc[(std::size_t)i][1], bc[(std::size_t)i + 1][0],
+                   bc[(std::size_t)i + 1][1], wallTris);
+        }
+    }
+    const double cx = R + r + shift;
+    if (anchor) {
+        auto ac = arcCols(s, cx, 0, r, kPi, kPi / 2, 6, h);
+        ac.front()[0] = bc.front()[0];
+        for (std::size_t i = 0; i + 1 < ac.size(); ++i)
+            s.quad(ac[i + 1][0], ac[i + 1][1], ac[i][0], ac[i][1], anchorTris);
+    }
+    s.finish();
+    acceptDonor(w, donorTris);
+    if (anchor) {
+        Region a;
+        a.type = SurfType::Cylinder;
+        a.origin = Origin::CylGrow;
+        a.ax = gp_Ax3(gp_Pnt(cx, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        a.radius = r;
+        a.maxVertexDev = 0;
+        a.tris = anchorTris;
+        w.accepted.push_back(a);
+    }
+    Provisional band;
+    band.claim = ProvClaim::Unclaimed;
+    band.tris = wallTris;
+    band.plane = gp_Ax3(gp_Pnt(R, 0, 0), gp_Dir(1, 0, 0));
+    band.maxVertexDev = 1.0;
+    w.provisionals.push_back(band);
+    const MeshView mv = s.view();
+    SegmentParams sp;
+    DerivedTols tol;
+    params(sp, tol);
+    claimRelRevolve(mv, sp, tol, w, RelRevolveMode::Line);
+    WallOut o;
+    for (const Region& reg : w.accepted)
+        if (reg.type == SurfType::Cylinder && std::fabs(reg.radius - R) <= kTau) {
+            ++o.n;
+            o.closed = reg.closed360;
+            o.nTri = reg.tris.size();
+            o.radius = reg.radius;
+        }
+    if (ao)
+        for (const Region& reg : w.accepted)
+            if (reg.type == SurfType::Cylinder && std::fabs(reg.radius - r) <= kTau &&
+                reg.tris == anchorTris) {
+                const gp_XYZ d = reg.ax.Location().XYZ();
+                ao->tangentExact = reg.tangentExact;
+                ao->tanResid = std::fabs(std::hypot(d.X(), d.Y()) - (R + reg.radius));
+                ao->maxDev = reg.maxVertexDev;
+                ao->radius = reg.radius;
+            }
+    return o;
+}
+
+static void caseAnchoredWall() {
+    // 40 columns: 9-degree folds, above B1's 5-degree seed floor.
+    WallOut o = anchoredWall(40, true);
+    expect(o.n == 1 && o.closed && o.nTri == 40 * 2 + 4,
+           "anchored wall: above the fold floor, free and anchored, ONE closed cylinder");
+    o = anchoredWall(40, false);
+    expect(o.n == 0, "anchored wall: above the fold floor with no anchor, refused (not-blend)");
+    // D-fc-7.6 (T): an anchor a fraction of tau off tangency is refit with the
+    // tangency exact once the wall is committed; it still certifies at tau.
+    AnchorOut ao;
+    o = anchoredWall(40, true, -0.4 * kTau, &ao);
+    expect(o.n == 1 && o.closed && ao.tangentExact && ao.tanResid <= 1e-12 && ao.maxDev <= kTau,
+           "anchored wall: its anchoring round is refit exactly tangent");
+    // A closed wall under the fold floor commits on its own scope, not on the
+    // round: the round keeps its free fit.
+    AnchorOut au;
+    o = anchoredWall(120, true, -0.4 * kTau, &au);
+    expect(o.n == 1 && o.closed && !au.tangentExact && au.tanResid > 1e-12,
+           "anchored wall: under the fold floor the tangent round keeps its free fit");
+}
+
 // D-fc-6.8 RQ-3 end to end: a partial wall (30 degrees, 10 columns) on the
 // family, with no tangent plane. `anchor`: an accepted small cylinder whose axis
 // stands at offset (R - r + shift) on the wall's 0-degree column, sharing that
@@ -412,6 +696,8 @@ static void casePartialWall() {
 int main() {
     casePredicates();
     caseClosedWall();
+    caseWindowWall();
+    caseAnchoredWall();
     casePartialWall();
     std::fprintf(stderr, "relational_coax_closed_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS",
                  gFail);

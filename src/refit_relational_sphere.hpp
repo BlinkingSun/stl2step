@@ -5,6 +5,7 @@
 #ifndef STL2STEP_REFIT_RELATIONAL_SPHERE_HPP
 #define STL2STEP_REFIT_RELATIONAL_SPHERE_HPP
 
+#include <gp_Ax3.hxx>
 #include <gp_XYZ.hxx>
 
 #include <array>
@@ -42,13 +43,16 @@ bool spineTangentAt(const RoundSpine& s, const gp_XYZ& x, gp_XYZ& t);
 // when the lines are parallel (the normal matrix is singular).
 bool lineSpinesPoint(const std::vector<RoundSpine>& spines, gp_XYZ& c);
 
-// D-fc-5.11 F8. The sphere of three rounds meeting at a corner. The centre is
-// the point their spines share -- the least-squares point of the line spines,
-// which needs at least two of them -- and the radius is the rounds' mean
-// radius. It certifies only when the three radii agree within tau and the
-// centre lies within tau of every spine: zero free parameters, nothing fitted
-// to the corner's own triangles. why: "accept" | "underdetermined" (fewer than
-// two line spines) | "not-blend" (radii or spines disagree).
+// D-fc-5.11 F8. The anchor sphere of three rounds meeting at a corner. The
+// centre is the point their spines share -- the least-squares point of the
+// line spines, which needs at least two of them -- and the anchor radius is
+// the rounds' mean radius. It certifies only when the three radii agree within
+// tau, the centre lies within tau of every line spine, and the centre lies
+// within tanDistTol(tau, tau) of every circle spine (a torus tube-centre
+// circle). The shipped radius is not this anchor radius: the claim fits it by
+// least squares on the corner's own vertices (D-fc-7.3).
+// why: "accept" | "underdetermined" (fewer than two line spines) | "not-blend"
+// (radii or spines disagree).
 struct SphereCornerFit {
     bool ok = false;
     const char* why = "underdetermined";
@@ -58,6 +62,16 @@ struct SphereCornerFit {
     double radiusSpread = 0;  // max - min of the three radii
 };
 SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double tau);
+
+// D-fc-7.3 RQ-HUB-6. Least-squares radius of a sphere whose centre is held:
+// the mean of the distances from the centre to the vertices. Empty, or a
+// non-finite distance, returns a non-finite radius (no fit).
+double sphereRadiusLeastSquares(const gp_XYZ& centre, const std::vector<gp_XYZ>& pts);
+
+// D-fc-7.3. The fitted sphere meets this one round within tol. A line spine
+// uses sphereCylinderContact; a circle spine uses sphereTorusContact. tol at
+// the call is tau.
+bool sphereRoundContact(const gp_XYZ& c, double r, const RoundSpine& s, double tol);
 
 // Largest distance of the points from their own least-squares plane (0 for
 // fewer than four points). HUGE_VAL when the eigensolve fails or the normal
@@ -121,6 +135,16 @@ inline bool onPatchSide(const gp_XYZ& x, const gp_XYZ& c, const gp_XYZ& t, doubl
 // within tol of the axis and |R - r| <= tol; v is the iso's axial parameter.
 bool sphereCylinderContact(const gp_XYZ& c, double r, const gp_XYZ& o, const gp_XYZ& a,
                            double R, double tol, double& v);
+
+// D-fc-5.11 F8 / D-fc-5.16. A sphere corner (centre c, radius r) meets a torus
+// blend (frame, major Rmaj, minor Rmin) along the torus u-iso through c. The
+// centre lies on the tube-centre circle — spine distance, not distance to the
+// tube surface (that distance is the minor radius). It exists only when
+// |Rmin - r| <= tol and the centre is within tol of that circle. tol at the
+// call is tanDistTol(tau, tau). u is the meridian's azimuth in the torus
+// frame, in [0, 2 pi). A horn or a spindle is not a ring and returns false.
+bool sphereTorusContact(const gp_XYZ& c, double r, const gp_Ax3& frame, double Rmaj, double Rmin,
+                        double tol, double& u);
 
 // D-fc-5.11 F8 build. A circle C(t) = C0 + rho (cos t Xc + sin t Yc) against a
 // sphere iso-curve traced by a 2-D line pcurve of unit speed in the circle's

@@ -17,10 +17,12 @@
 #include "refit_torus_math.hpp"
 #include "refit_internal.hpp"
 #include "refit_relational.hpp"
+#include "refit_coax_closed.hpp"
 #include "refit_relational_arc.hpp"
 #include "refit_relational_sphere.hpp"
 #include "refit_axis_seam.hpp"
 #include "refit_cap_arc.hpp"
+#include "refit_partial_cyl.hpp"
 #include "refit_edge_bound.hpp"
 #include "refit_slit_heal.hpp"
 #include "refit_wire_clip.hpp"
@@ -52,6 +54,7 @@
 #include <BRep_CurveRepresentation.hxx>
 #include <BRep_ListOfCurveRepresentation.hxx>
 #include <BRep_TEdge.hxx>
+#include <BRep_TVertex.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepGProp.hxx>
 #include <BRepAdaptor_Curve.hxx>
@@ -79,7 +82,12 @@
 #include <ElSLib.hxx>
 #include <BRep_CurveOnSurface.hxx>
 #include <Geom2d_Curve.hxx>
+#include <Geom2dAdaptor_Curve.hxx>
+#include <Geom2dInt_GInter.hxx>
 #include <Geom2d_Line.hxx>
+#include <IntRes2d_Domain.hxx>
+#include <IntRes2d_IntersectionPoint.hxx>
+#include <IntRes2d_Transition.hxx>
 #include <Geom2d_Circle.hxx>
 #include <Geom2d_Ellipse.hxx>
 #include <Geom2d_BSplineCurve.hxx>
@@ -3091,11 +3099,16 @@ AnalyticCurve sphereCornerContact(const Region& sph, const Region& oth, const Me
             out.kind = AnalyticCurve::Circ;
             out.circ = cylinderIsoCircle(oth, v);
         }
+    } else if (oth.type == SurfType::Torus && oth.origin == Origin::TorusBlend) {
+        // D-fc-5.16: the contact is the torus meridian through the centre,
+        // ElSLib::TorusUIso in the torus frame. A mesh polyline between the
+        // two curved faces is not a contact.
+        double u = 0.0;
+        if (sphereTorusContact(c, sph.radius, oth.ax, oth.radius, oth.radius2, tolC, u)) {
+            out.kind = AnalyticCurve::Circ;
+            out.circ = ElSLib::TorusUIso(oth.ax, oth.radius, oth.radius2, u);
+        }
     }
-    // Only cylinder rounds reach here: the claim takes no torus round (the
-    // partial-torus face does not yet take a u-iso edge -- its pcurves land a
-    // whole period off on both parameters -- and a polyline contact between
-    // two curved faces leaves the shell open by its chord lunes).
     return out;
 }
 
@@ -3559,10 +3572,10 @@ AnalyticCurve intersectSurfaces(const Region& A, const Region& B, const MeshView
     const double tolAng = Precision::Angular();
     const double tol = std::max(sewTol, Precision::Confusion());
     try {
-        // D-fc-5.11 F8: a sphere corner meets a cylinder round tangentially,
-        // along the cylinder's v-iso through the sphere's centre. It is
-        // constructed, never intersected. Any other neighbour keeps the mesh
-        // polyline.
+        // D-fc-5.11 F8 / D-fc-5.16: a sphere corner meets a cylinder round on
+        // the cylinder's v-iso, and a torus blend on the torus u-iso. Both
+        // are constructed, never intersected. Any other neighbour keeps the
+        // mesh polyline.
         if (isSphereCornerR(A) || isSphereCornerR(B))
             return sphereCornerContact(isSphereCornerR(A) ? A : B, isSphereCornerR(A) ? B : A, mv);
         if (A.type == SurfType::Plane && B.type == SurfType::Plane) {
@@ -7973,7 +7986,9 @@ int countSeamEdgesOnWire(const TopoDS_Wire& w) {
 void dumpDiagCylFail(const Region& r, const Loop* outer, const char* stage, const char* reason,
                      const TopoDS_Wire& ow, const Handle(Geom_Surface)& surf,
                      const TopoDS_Face& cand) {
-    if (!diagP2Enabled()) return;
+    // D-fc-7.4 Q2: a face-build failure is not silent under STL2STEP_DIAG_REL.
+    // STL2STEP_P2_DIAG keeps the same line.
+    if (!diagP2Enabled() && !diagRelEnabled()) return;
     const int nE = countWireEdges(ow);
     const int nChains = outer ? (int)outer->chainIdx.size() : 0;
     const int pcurveMissing = pcurveMissingOnWireSurf(ow, surf);
@@ -10216,6 +10231,48 @@ const char* seamPairKind(AnalyticCurve::Kind a, AnalyticCurve::Kind b) {
     return "other";
 }
 
+// D-fc-7.6. Two chains that bound one analytic plane, whose other regions are an
+// exactly tangent round and its wall (roundTangentToWall).
+bool exactTangentCirclePair(const RegionSet& rs, const ChainGeom& g0, const ChainGeom& g1) {
+    int plane = -1;
+    for (int ra : {g0.regA, g0.regB})
+        for (int rb : {g1.regA, g1.regB}) {
+            const Region* R = ra >= 0 && ra == rb ? regionById(rs, ra) : nullptr;
+            if (R && R->type == SurfType::Plane && isAnalytic(R)) plane = ra;
+        }
+    if (plane < 0) return false;
+    const Region* X = regionById(rs, g0.regA == plane ? g0.regB : g0.regA);
+    const Region* Y = regionById(rs, g1.regA == plane ? g1.regB : g1.regA);
+    if (!X || !Y || X->type != SurfType::Cylinder || Y->type != SurfType::Cylinder) return false;
+    return roundTangentToWall(*X, *Y) || roundTangentToWall(*Y, *X);
+}
+
+// D-fc-7.6. The contact chain of an exactly tangent round and its wall is their
+// common generator (constructedCylCylGenerator); its end vertices are on it within
+// their tolerance, raised to the measured distance from the generator (the bump
+// snapVertexToCurve gives every vertex, made before the junction probe needs it).
+// No vertex moves: an end is shared with curves built before this (torus rims,
+// tier-2 polylines), which end where it stands.
+void pinTangentGenerators(const RegionSet& rs, const std::vector<ChainGeom>& geom,
+                          const std::vector<TopoDS_Vertex>& verts) {
+    for (const ChainGeom& g : geom) {
+        if (g.curve.kind != AnalyticCurve::Lin) continue;
+        const Region* A = regionById(rs, g.regA);
+        const Region* B = regionById(rs, g.regB);
+        if (!A || !B || !(roundTangentToWall(*A, *B) || roundTangentToWall(*B, *A))) continue;
+        for (int vid : {g.ia, g.ib}) {
+            if (vid < 0 || (size_t)vid >= verts.size() || verts[(size_t)vid].IsNull()) continue;
+            const gp_Pnt P = BRep_Tool::Pnt(verts[(size_t)vid]);
+            const double d = g.curve.lin.Distance(P);
+            if (!(d > 0.0)) continue;
+            bumpVertexTol(verts[(size_t)vid], d);
+            if (diagP2Enabled() || diagPlatesEnabled())
+                std::fprintf(stderr, "DIAG_TANGENT_PIN vid=%d regA=%d regB=%d dist=%.3g\n", vid,
+                             g.regA, g.regB, d);
+        }
+    }
+}
+
 int snapSeamVertices(const RegionSet& rs, const MeshView& mv, const std::vector<ChainGeom>& geom,
                      const std::vector<TopoDS_Vertex>& verts, std::unordered_set<int>& seamLocked) {
     int nExamined = 0, nMoved = 0, nNamed = 0, nSkipDeg = 0;
@@ -10357,8 +10414,22 @@ int snapSeamVertices(const RegionSet& rs, const MeshView& mv, const std::vector<
                                     g1.curve.kind == AnalyticCurve::Lin);
                 seamKind = mixed ? "junction" : "junction-same";
                 gp_Pnt p1, p2;
-                const int nInt = intersectAnalyticCurves(g0.curve, g1.curve, p1, p2);
-                if (nInt <= 0) {
+                // D-fc-7.6: where the anchored-tangent fit (T) made a round exactly
+                // tangent to its committed coaxial wall, their two circles on a
+                // plane they both bound meet at the tangency point on the line of
+                // centres (RQ-HUB-3 b, now exact), not at an intersection root.
+                const bool tangentJ =
+                    g0.curve.kind == AnalyticCurve::Circ && g1.curve.kind == AnalyticCurve::Circ &&
+                    exactTangentCirclePair(rs, g0, g1) &&
+                    circleTangencyPoint(g0.curve.circ.Location(), g0.curve.circ.Radius(),
+                                        g1.curve.circ.Location(), g1.curve.circ.Radius(),
+                                        tanDistTol(tauOf(mv), tauOf(mv)), p1);
+                const int nInt = tangentJ ? 1 : intersectAnalyticCurves(g0.curve, g1.curve, p1, p2);
+                if (tangentJ) {
+                    seamKind = "tangent";
+                    target = p1;
+                    targetOk = true;
+                } else if (nInt <= 0) {
                     seamKind = "no-intersect";
                 } else {
                     target = (nInt == 1 || p1.Distance(meshP) <= p2.Distance(meshP)) ? p1 : p2;
@@ -10423,6 +10494,15 @@ int snapSeamVertices(const RegionSet& rs, const MeshView& mv, const std::vector<
             TopoDS_Vertex nv;
             BRep_Builder Bb;
             Bb.MakeVertex(nv, target, t0 > 0.0 ? t0 : Precision::Confusion());
+            // D-fc-7.6: the tangency point lies on the common generator; each
+            // plane|cylinder iso circle sits at its own axis' height on the plane,
+            // so the point is off those circles by the measured offset. A moved
+            // vertex is seam-locked (no later snapVertexToCurve bump), so it takes
+            // that measured distance here -- the bump every other vertex gets.
+            if (std::strcmp(seamKind, "tangent") == 0)
+                for (int ci : allCh)
+                    if (ci >= 0 && (size_t)ci < geom.size())
+                        bumpVertexTol(nv, curveResidual(geom[(size_t)ci].curve, target));
             const_cast<TopoDS_Vertex&>(verts[(size_t)vid]) = nv;
             bool okProbe = true;
             int probeFailCi = -1;
@@ -10440,6 +10520,25 @@ int snapSeamVertices(const RegionSet& rs, const MeshView& mv, const std::vector<
                 }
             }
             if (!okProbe) {
+                if ((diagP2Enabled() || diagPlatesEnabled()) && probeFailCi >= 0 &&
+                    (size_t)probeFailCi < geom.size()) {
+                    const ChainGeom& fg = geom[(size_t)probeFailCi];
+                    auto endInfo = [&](int vi, double& d, double& tl) {
+                        d = -1;
+                        tl = -1;
+                        if (vi < 0 || (size_t)vi >= verts.size() || verts[(size_t)vi].IsNull()) return;
+                        d = curveResidual(fg.curve, BRep_Tool::Pnt(verts[(size_t)vi]));
+                        tl = BRep_Tool::Tolerance(verts[(size_t)vi]);
+                    };
+                    double da, ta, db, tb;
+                    endInfo(fg.ia, da, ta);
+                    endInfo(fg.ib, db, tb);
+                    std::fprintf(stderr,
+                                 "DIAG_SEAMVTX_PROBE vid=%d ci=%d kind=%d regA=%d regB=%d ia=%d "
+                                 "dA=%.3g tolA=%.3g ib=%d dB=%.3g tolB=%.3g\n",
+                                 vid, probeFailCi, (int)fg.curve.kind, fg.regA, fg.regB, fg.ia, da,
+                                 ta, fg.ib, db, tb);
+                }
                 const_cast<TopoDS_Vertex&>(verts[(size_t)vid]) = saved;
                 nNamed++;
                 bumpKind(pk, 1, 0, 1);
@@ -13010,6 +13109,768 @@ bool cylMeetFitOf(const Region& r, const RegionSet& rs, const MeshView& mv, CylM
     return out.intervene;
 }
 
+// D-fc-7.4 Q2. A partial cylinder has no seam, but its circle pcurves and its
+// generators can still sit a whole turn apart — the D-130-16 branch split,
+// measured on a certified quarter cylinder as UnorientableShape on the face
+// and SelfIntersectingWire on the wire. Two repairs, each undone unless the
+// face becomes valid, so a face that already ships is not rewritten:
+//   1. shift each pcurve by a whole period onto the region's chart [uMin, uMax]
+//      (exact; the half-period test is the cone chart's branch fold);
+//   2. if the corners still do not meet, rewrite each pcurve as the line through
+//      its own vertices' (u, v) on that chart. The rewrite's midpoint must stay
+//      within the partial-face cap already used for this face.
+bool rebranchPartialCylChart(TopoDS_Face& f, const Region& r, double sewTol, double cap) {
+    if (f.IsNull() || r.closed360 || !(r.radius > Precision::Confusion())) return false;
+    double u0 = r.uMin, u1 = r.uMax;
+    if (u1 < u0) u1 += 2.0 * kPi;
+    if (!(cap > 0.0)) cap = std::max(sewTol, Precision::Confusion());
+
+    struct Saved {
+        TopoDS_Edge e;
+        Handle(Geom2d_Curve) pc;
+        Standard_Real a, b;
+        double tol;
+        Handle(Geom_Surface) basis;
+        Handle(Geom2d_Curve) basisPc;
+        Standard_Real ba = 0, bb = 0;
+        bool wroteBasis = false;
+        bool hadBasis = false;
+    };
+    auto restore = [&](BRep_Builder& B, const std::vector<Saved>& saved) {
+        for (const Saved& s : saved) {
+            if (!s.pc.IsNull()) {
+                B.UpdateEdge(s.e, s.pc, f, s.tol);
+                B.Range(s.e, f, s.a, s.b);
+            }
+            B.UpdateEdge(s.e, s.tol);
+            if (!s.wroteBasis || s.basis.IsNull()) continue;
+            if (s.hadBasis && !s.basisPc.IsNull()) {
+                B.UpdateEdge(s.e, s.basisPc, s.basis, TopLoc_Location(), s.tol);
+                B.Range(s.e, s.basis, TopLoc_Location(), s.ba, s.bb);
+            } else {
+                B.UpdateEdge(s.e, Handle(Geom2d_Curve)(), s.basis, TopLoc_Location(), s.tol);
+            }
+        }
+    };
+    auto eitherWay = [&](TopoDS_Face& face) -> bool {
+        TopoDS_Face want = face, other = face;
+        setFaceOutward(want, r.outwardNormal);
+        setFaceOutward(other, !r.outwardNormal);
+        if (faceIsValid(want)) {
+            face = want;
+            return true;
+        }
+        if (faceIsValid(other)) {
+            face = other;
+            return true;
+        }
+        return false;
+    };
+
+    BRep_Builder B;
+    std::vector<Saved> saved;
+    for (TopExp_Explorer it(f, TopAbs_EDGE); it.More(); it.Next()) {
+        TopoDS_Edge e = TopoDS::Edge(it.Current());
+        Standard_Real a = 0, b = 0;
+        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+        if (pc.IsNull()) continue;
+        const double uMid = 0.5 * (pc->Value(a).X() + pc->Value(b).X());
+        const double shift = partialCylPeriodShift(uMid, u0, u1);
+        if (shift == 0.0) continue;
+        Handle(Geom2d_Curve) shifted =
+            Handle(Geom2d_Curve)::DownCast(pc->Translated(gp_Vec2d(shift, 0.0)));
+        if (shifted.IsNull()) continue;
+        const double tol = BRep_Tool::Tolerance(e);
+        Saved slot{e, pc, a, b, tol, {}, {}, 0, 0, false, false};
+        // The period shift is exact. Keep the edge's own tolerance: raising it
+        // would rewrite a shared neighbour edge.
+        B.UpdateEdge(e, shifted, f, tol);
+        B.Range(e, f, a, b);
+        Standard_Real ra = 0, rb = 0;
+        Handle(Geom2d_Curve) back = BRep_Tool::CurveOnSurface(e, f, ra, rb);
+        const double uWant = uMid + shift;
+        const double uBack = back.IsNull() ? uMid : back->Value(0.5 * (ra + rb)).X();
+        if (std::fabs(uBack - uWant) > 0.5 * std::fabs(shift)) {
+            Handle(Geom_CylindricalSurface) basis = basisCylOf(BRep_Tool::Surface(f));
+            if (!basis.IsNull()) {
+                Standard_Real ba = 0, bb = 0;
+                Standard_Boolean has = Standard_False;
+                Handle(Geom2d_Curve) bpc =
+                    BRep_Tool::CurveOnSurface(e, basis, TopLoc_Location(), ba, bb, &has);
+                slot.basis = basis;
+                slot.basisPc = bpc;
+                slot.ba = ba;
+                slot.bb = bb;
+                slot.wroteBasis = true;
+                slot.hadBasis = has == Standard_True;
+                B.UpdateEdge(e, shifted, basis, TopLoc_Location(), tol);
+                B.Range(e, basis, TopLoc_Location(), a, b);
+            }
+        }
+        saved.push_back(slot);
+    }
+    if (!saved.empty() && eitherWay(f)) return true;
+    restore(B, saved);
+
+    // Corners still miss after the period move. Each edge is rewritten from its
+    // own vertices on the certified chart; a midpoint off the 3D curve by more
+    // than the partial-face cap rejects the whole rewrite.
+    Handle(Geom_CylindricalSurface) cyl = basisCylOf(BRep_Tool::Surface(f));
+    if (cyl.IsNull()) return false;
+    const gp_Cylinder gc = cyl->Cylinder();
+    Handle(Geom_Surface) srf = BRep_Tool::Surface(f);
+    Standard_Real bu0 = 0, bu1 = 0, bv0 = 0, bv1 = 0;
+    srf->Bounds(bu0, bu1, bv0, bv1);
+    const bool partialU = (bu1 > bu0) && ((bu1 - bu0) < 2.0 * kPi);
+    const bool partialV = (bv1 > bv0) && std::isfinite(bv0) && std::isfinite(bv1);
+    auto chartU = [&](double u) {
+        const double twoPi = 2.0 * kPi;
+        const double x = u - std::floor((u - u0) / twoPi) * twoPi;
+        const double y = x - twoPi;
+        auto dist = [&](double t) {
+            if (t >= u0 && t <= u1) return 0.0;
+            return std::min(std::fabs(t - u0), std::fabs(t - u1));
+        };
+        return dist(y) < dist(x) ? y : x;
+    };
+    auto clampTo = [&](double t, double a, double b, double scale) {
+        if (!(b > a) || (t >= a && t <= b)) return t;
+        const double c = std::min(std::max(t, a), b);
+        if (std::fabs(c - t) * scale > cap) return t;
+        return c;
+    };
+
+    saved.clear();
+    bool wrote = false;
+    bool overCap = false;
+    for (TopExp_Explorer it(f, TopAbs_EDGE); it.More() && !overCap; it.Next()) {
+        TopoDS_Edge e = TopoDS::Edge(it.Current());
+        Standard_Real a = 0, b = 0;
+        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, f, a, b);
+        Standard_Real f3 = 0, l3 = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f3, l3);
+        TopoDS_Vertex vf, vl;
+        TopExp::Vertices(e, vf, vl, Standard_False);
+        if (pc.IsNull() || c3.IsNull() || vf.IsNull() || vl.IsNull()) continue;
+        if (!(l3 > f3)) continue;
+        const double tol = BRep_Tool::Tolerance(e);
+        saved.push_back(Saved{e, pc, a, b, tol});
+        Standard_Real uA = 0, vA = 0, uB = 0, vB = 0;
+        ElSLib::Parameters(gc, BRep_Tool::Pnt(vf), uA, vA);
+        ElSLib::Parameters(gc, BRep_Tool::Pnt(vl), uB, vB);
+        uA = chartU(uA);
+        uB = chartU(uB);
+        if (partialU) {
+            uA = clampTo(uA, bu0, bu1, r.radius);
+            uB = clampTo(uB, bu0, bu1, r.radius);
+        }
+        if (partialV) {
+            vA = clampTo(vA, bv0, bv1, 1.0);
+            vB = clampTo(vB, bv0, bv1, 1.0);
+        }
+        const gp_Vec2d d2((uB - uA) / (l3 - f3), (vB - vA) / (l3 - f3));
+        if (d2.SquareMagnitude() <= Precision::Confusion() * Precision::Confusion()) continue;
+        Handle(Geom2d_Line) line =
+            new Geom2d_Line(gp_Pnt2d(uA - f3 * d2.X(), vA - f3 * d2.Y()), gp_Dir2d(d2));
+        double dev = 0.0;
+        for (double s : {0.0, 0.5, 1.0}) {
+            const double t = f3 + s * (l3 - f3);
+            const gp_Pnt2d uv = line->Value(t);
+            dev = std::max(dev, ElSLib::Value(uv.X(), uv.Y(), gc).Distance(c3->Value(t)));
+        }
+        if (dev > cap) {
+            overCap = true;
+            break;
+        }
+        const double useTol = dev > tol ? std::min(dev * 1.001 + Precision::Confusion(), cap) : tol;
+        B.UpdateEdge(e, line, f, useTol);
+        B.Range(e, f, f3, l3);
+        if (useTol > tol) B.UpdateEdge(e, useTol);
+        wrote = true;
+    }
+    if (overCap || !wrote) {
+        restore(B, saved);
+        return false;
+    }
+    if (eitherWay(f)) return true;
+    if (diagRelEnabled()) {
+        try {
+            BRepCheck_Analyzer an(f, Standard_True);
+            char faceSt[64] = "[]";
+            char wireSt[64] = "[]";
+            formatStatusList(an.Result(f), faceSt, sizeof(faceSt));
+            for (TopExp_Explorer wx(f, TopAbs_WIRE); wx.More(); wx.Next()) {
+                formatStatusList(an.Result(wx.Current()), wireSt, sizeof(wireSt));
+                break;
+            }
+            std::fprintf(stderr,
+                         "DIAG_REL_BAND stage=build mode=partial-cyl rid=%d faceSt=%s wireSt=%s "
+                         "why=pin-invalid\n",
+                         r.id, faceSt, wireSt);
+        } catch (const Standard_Failure&) {
+        }
+    }
+    restore(B, saved);
+    return false;
+}
+
+}  // namespace
+
+// D-fc-7.10. See the declaration. A chart is installed on an edge only when
+// its curve-on-surface deviation is within `cap` (the caller's existing
+// partial-face budget). The edge tolerance becomes that measured deviation
+// when the deviation is larger; it is never clamped down. A failed rebuild
+// writes the saved pcurves and the saved tolerance back, so a face that
+// stays invalid keeps today's path.
+bool healInvalidPartialTrimChart(TopoDS_Face& face, double cap, double tau) {
+    if (face.IsNull()) return false;
+    if (faceIsValid(face)) return false;
+    if (!(cap > 0.0)) return false;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) srf = BRep_Tool::Surface(face, loc);
+    if (srf.IsNull()) return false;
+    Handle(Geom_RectangularTrimmedSurface) trim =
+        Handle(Geom_RectangularTrimmedSurface)::DownCast(srf);
+    if (trim.IsNull()) return false;
+    if (Handle(Geom_CylindricalSurface)::DownCast(trim->BasisSurface()).IsNull()) return false;
+
+    struct Saved {
+        TopoDS_Edge e;
+        Handle(Geom2d_Curve) pc;
+        Standard_Real a = 0, b = 0;
+        double tol = 0;
+        bool hadPc = false;
+        bool sameParam = false;
+        bool sameRange = false;
+    };
+    std::vector<Saved> saved;
+    std::vector<const void*> seen;
+    BRep_Builder B;
+    bool wrote = false;
+    int nNull = 0, nExactSkip = 0, nDevSkip = 0, nWrote = 0;
+    try {
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            TopoDS_Edge e = TopoDS::Edge(it.Current());
+            const void* ts = diagTShapePtr(e);
+            if (!ts) continue;
+            bool dup = false;
+            for (const void* p : seen)
+                if (p == ts) dup = true;
+            if (dup) continue;
+            seen.push_back(ts);
+            Standard_Real a = 0, b = 0;
+            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, face, a, b);
+            const double tol = BRep_Tool::Tolerance(e);
+            saved.push_back(Saved{e, pc, a, b, tol, !pc.IsNull(),
+                                  BRep_Tool::SameParameter(e) == Standard_True,
+                                  BRep_Tool::SameRange(e) == Standard_True});
+            Standard_Real f = 0, l = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+            if (c3.IsNull() || !(l > f)) continue;
+            Handle(Geom2d_Curve) chart = partialTrimChartPCurve(e, c3, f, l, srf);
+            if (chart.IsNull()) {
+                ++nNull;
+                continue;
+            }
+            const char* cls = "chart";
+            const double exact = exactMaxAtBind(c3, f, l, srf, chart, loc, &cls);
+            if (!(exact >= 0.0) || exact > cap) {
+                ++nExactSkip;
+                continue;
+            }
+            double dev = exact;
+            for (double s : {0.0, 0.5, 1.0}) {
+                const double t = f + s * (l - f);
+                const gp_Pnt2d uv = chart->Value(t);
+                dev = std::max(dev, srf->Value(uv.X(), uv.Y()).Distance(c3->Value(t)));
+            }
+            if (!(dev <= cap)) {
+                ++nDevSkip;
+                continue;
+            }
+            const double useTol = dev > tol ? dev : tol;
+            B.UpdateEdge(e, chart, face, useTol);
+            B.Range(e, face, f, l);
+            B.SameRange(e, Standard_True);
+            B.SameParameter(e, Standard_True);
+            wrote = true;
+            ++nWrote;
+        }
+    } catch (const Standard_Failure&) {
+        wrote = true;
+    }
+    auto chartDiag = [&](int post) {
+        if (!diagRelEnabled()) return;
+        std::fprintf(stderr,
+                     "DIAG_REL_BAND stage=build mode=partial-cyl why=trim-chart-try "
+                     "wrote=%d null=%d exactSkip=%d devSkip=%d post=%d\n",
+                     nWrote, nNull, nExactSkip, nDevSkip, post);
+    };
+    auto restore = [&]() {
+        for (const Saved& s : saved) {
+            if (s.hadPc && !s.pc.IsNull()) {
+                B.UpdateEdge(s.e, s.pc, face, s.tol);
+                B.Range(s.e, face, s.a, s.b);
+            } else {
+                B.UpdateEdge(s.e, Handle(Geom2d_Curve)(), face, s.tol);
+            }
+            if (Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(s.e.TShape()))
+                te->Tolerance(s.tol);
+            B.SameParameter(s.e, s.sameParam ? Standard_True : Standard_False);
+            B.SameRange(s.e, s.sameRange ? Standard_True : Standard_False);
+        }
+    };
+    if (!wrote) {
+        chartDiag(0);
+        return false;
+    }
+    TopoDS_Face fwd = face;
+    TopoDS_Face rev = face;
+    rev.Reverse();
+    if (faceIsValid(fwd)) {
+        chartDiag(1);
+        face = fwd;
+        return true;
+    }
+    if (faceIsValid(rev)) {
+        chartDiag(1);
+        face = rev;
+        return true;
+    }
+    // The chart is on the face and it is still invalid. The corner fallback
+    // measures this face, not the restored one. A miss above tau is refused
+    // inside the fallback, which restores any tolerance it raised.
+    if (tau > 0.0 && raiseMeasuredCornerTol(face, tau)) {
+        chartDiag(1);
+        return true;
+    }
+    chartDiag(0);
+    restore();
+    return false;
+}
+
+// D-fc-7.10 fallback. See the declaration. The distance is the 3D gap
+// BRepCheck_Wire::SelfIntersect measures: both curves evaluated at the
+// pcurve-intersection parameters, then the greater gap to the shared
+// vertex. The checker's common-vertex test accepts the crossing once that
+// gap is inside 1.1 times the vertex tolerance, so setting the tolerance
+// to the measured gap (never lower, never past tau) makes the test pass
+// without a new threshold. 1.1 is the checker's own factor; this function
+// does not apply it. tau is the only gate.
+bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau) {
+    if (face.IsNull() || !(tau > 0.0)) return false;
+    if (faceIsValid(face)) return false;
+    TopLoc_Location faceLoc;
+    Handle(Geom_Surface) srf = BRep_Tool::Surface(face, faceLoc);
+
+    struct Raise {
+        TopoDS_Vertex v;
+        double oldTol = 0;
+        double measured = 0;
+        bool refused = false;
+    };
+    std::vector<Raise> raises;
+    int nMiss = 0, nRefuse = 0;
+    double maxDist = 0;
+    auto slotFor = [&](const TopoDS_Vertex& v) -> Raise& {
+        for (Raise& s : raises)
+            if (s.v.IsSame(v)) return s;
+        raises.push_back(Raise{v, BRep_Tool::Tolerance(v), 0.0, false});
+        return raises.back();
+    };
+    auto note = [&](const TopoDS_Vertex& v, double measured) {
+        if (!(measured > 0.0)) return;
+        maxDist = std::max(maxDist, measured);
+        ++nMiss;
+        Raise& s = slotFor(v);
+        if (measured > s.oldTol && !(measured <= tau)) {
+            s.refused = true;
+            ++nRefuse;
+            return;
+        }
+        if (measured > s.oldTol && measured > s.measured) s.measured = measured;
+    };
+    try {
+        std::vector<TopoDS_Edge> edges;
+        std::vector<const void*> seen;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            TopoDS_Edge e = TopoDS::Edge(it.Current());
+            if (BRep_Tool::Degenerated(e)) continue;
+            const void* ts = diagTShapePtr(e);
+            if (!ts) continue;
+            bool dup = false;
+            for (const void* p : seen)
+                if (p == ts) dup = true;
+            if (dup) continue;
+            seen.push_back(ts);
+            edges.push_back(e);
+        }
+        const double tol2d = Precision::PConfusion();
+        for (size_t i = 0; i < edges.size(); ++i) {
+            for (size_t j = i + 1; j < edges.size(); ++j) {
+                const TopoDS_Edge& e1 = edges[i];
+                const TopoDS_Edge& e2 = edges[j];
+                TopoDS_Vertex a, b, c, d;
+                TopExp::Vertices(e1, a, b, Standard_False);
+                TopExp::Vertices(e2, c, d, Standard_False);
+                TopoDS_Vertex common[2];
+                int nCom = 0;
+                auto take = [&](const TopoDS_Vertex& v) {
+                    if (v.IsNull() || nCom >= 2) return;
+                    if (!((v.IsSame(a) || v.IsSame(b)) && (v.IsSame(c) || v.IsSame(d)))) return;
+                    for (int k = 0; k < nCom; ++k)
+                        if (common[k].IsSame(v)) return;
+                    common[nCom++] = v;
+                };
+                take(a);
+                take(b);
+                if (nCom == 0) continue;
+                Standard_Real f1 = 0, l1 = 0, f2 = 0, l2 = 0;
+                Handle(Geom2d_Curve) c1 = BRep_Tool::CurveOnSurface(e1, face, f1, l1);
+                Handle(Geom2d_Curve) c2 = BRep_Tool::CurveOnSurface(e2, face, f2, l2);
+                if (c1.IsNull() || c2.IsNull() || !(l1 > f1) || !(l2 > f2)) continue;
+                Standard_Real cf1 = 0, cl1 = 0, cf2 = 0, cl2 = 0;
+                TopLoc_Location L1, L2;
+                Handle(Geom_Curve) g1 = BRep_Tool::Curve(e1, L1, cf1, cl1);
+                Handle(Geom_Curve) g2 = BRep_Tool::Curve(e2, L2, cf2, cl2);
+                Geom2dAdaptor_Curve a1(c1);
+                Geom2dAdaptor_Curve a2(c2);
+                IntRes2d_Domain d1(c1->Value(f1), f1, tol2d, c1->Value(l1), l1, tol2d);
+                IntRes2d_Domain d2(c2->Value(f2), f2, tol2d, c2->Value(l2), l2, tol2d);
+                Geom2dInt_GInter inter(a1, d1, a2, d2, tol2d, tol2d);
+                if (!inter.IsDone()) continue;
+                auto at3d = [&](const Handle(Geom_Curve)& g, const TopLoc_Location& L,
+                                const Handle(Geom2d_Curve)& pc, double t, gp_Pnt& out) -> bool {
+                    if (!g.IsNull()) {
+                        out = g->Value(t);
+                        out.Transform(L.Transformation());
+                        return true;
+                    }
+                    if (srf.IsNull() || pc.IsNull()) return false;
+                    const gp_Pnt2d uv = pc->Value(t);
+                    out = srf->Value(uv.X(), uv.Y());
+                    out.Transform(faceLoc.Transformation());
+                    return true;
+                };
+                auto consider = [&](double p1, double p2, bool mid) {
+                    if (!mid) return;
+                    if (f1 - p1 > Precision::PConfusion() || p1 - l1 > Precision::PConfusion()) return;
+                    if (f2 - p2 > Precision::PConfusion() || p2 - l2 > Precision::PConfusion()) return;
+                    if (!g1.IsNull() &&
+                        (cf1 - p1 > Precision::PConfusion() || p1 - cl1 > Precision::PConfusion()))
+                        return;
+                    if (!g2.IsNull() &&
+                        (cf2 - p2 > Precision::PConfusion() || p2 - cl2 > Precision::PConfusion()))
+                        return;
+                    gp_Pnt p3, p3b;
+                    if (!at3d(g1, L1, c1, p1, p3) || !at3d(g2, L2, c2, p2, p3b)) return;
+                    int best = 0;
+                    double bestD = p3.Distance(BRep_Tool::Pnt(common[0]));
+                    for (int k = 1; k < nCom; ++k) {
+                        const double dk = p3.Distance(BRep_Tool::Pnt(common[k]));
+                        if (dk < bestD) {
+                            bestD = dk;
+                            best = k;
+                        }
+                    }
+                    const double measured =
+                        std::max(bestD, p3b.Distance(BRep_Tool::Pnt(common[best])));
+                    note(common[best], measured);
+                };
+                for (int p = 1; p <= inter.NbPoints(); ++p) {
+                    const IntRes2d_IntersectionPoint& ip = inter.Point(p);
+                    const bool mid =
+                        ip.TransitionOfFirst().PositionOnCurve() == IntRes2d_Middle ||
+                        ip.TransitionOfSecond().PositionOnCurve() == IntRes2d_Middle;
+                    consider(ip.ParamOnFirst(), ip.ParamOnSecond(), mid);
+                }
+                for (int s = 1; s <= inter.NbSegments(); ++s) {
+                    const IntRes2d_IntersectionSegment& seg = inter.Segment(s);
+                    if (!seg.HasFirstPoint() || !seg.HasLastPoint()) continue;
+                    const IntRes2d_IntersectionPoint ends[2] = {seg.FirstPoint(), seg.LastPoint()};
+                    for (const IntRes2d_IntersectionPoint& ip : ends) {
+                        const bool mid =
+                            ip.TransitionOfFirst().PositionOnCurve() == IntRes2d_Middle ||
+                            ip.TransitionOfSecond().PositionOnCurve() == IntRes2d_Middle;
+                        consider(ip.ParamOnFirst(), ip.ParamOnSecond(), mid);
+                    }
+                }
+            }
+        }
+    } catch (const Standard_Failure&) {
+        raises.clear();
+    }
+    auto restore = [&]() {
+        for (const Raise& s : raises) {
+            if (Handle(BRep_TVertex) tv = Handle(BRep_TVertex)::DownCast(s.v.TShape()))
+                tv->Tolerance(s.oldTol);
+        }
+    };
+    bool any = false;
+    for (const Raise& s : raises) {
+        if (s.refused || !(s.measured > s.oldTol) || !(s.measured <= tau)) continue;
+        if (Handle(BRep_TVertex) tv = Handle(BRep_TVertex)::DownCast(s.v.TShape())) {
+            tv->Tolerance(s.measured);
+            any = true;
+        }
+    }
+    TopoDS_Face fwd = face;
+    TopoDS_Face rev = face;
+    rev.Reverse();
+    const bool okF = any && faceIsValid(fwd);
+    const bool okR = any && !okF && faceIsValid(rev);
+    char faceSt[64] = "[]";
+    char wireSt[64] = "[]";
+    char wireCtx[64] = "[]";
+    int siSt = -1, oriSt = -1, clsSt = -1;
+    if (diagRelEnabled()) {
+        try {
+            const TopoDS_Face& looked = any ? fwd : face;
+            BRepCheck_Analyzer an(looked, Standard_True);
+            formatStatusList(an.Result(looked), faceSt, sizeof(faceSt));
+            int ei = 0;
+            for (TopExp_Explorer wx(looked, TopAbs_WIRE); wx.More(); wx.Next()) {
+                const TopoDS_Wire w = TopoDS::Wire(wx.Current());
+                formatStatusList(an.Result(w), wireSt, sizeof(wireSt));
+                formatStatusInContext(an.Result(w), looked, wireCtx, sizeof(wireCtx));
+                BRepCheck_Wire chk(w);
+                chk.GeometricControls(Standard_True);
+                TopoDS_Edge se1, se2;
+                siSt = (int)chk.SelfIntersect(looked, se1, se2, Standard_False);
+                oriSt = (int)chk.Orientation(looked, Standard_False);
+                clsSt = (int)chk.Closed2d(looked, Standard_False);
+                for (TopExp_Explorer ex(w, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+                    char est[64] = "[]";
+                    formatStatusInContext(an.Result(ex.Current()), looked, est, sizeof(est));
+                    if (est[1] == ']') continue;
+                    std::fprintf(stderr,
+                                 "DIAG_REL_BAND stage=build mode=partial-cyl why=trim-corner-edge "
+                                 "ei=%d edgeSt=%s\n",
+                                 ei, est);
+                }
+                break;
+            }
+            int nW = 0;
+            for (TopExp_Explorer wc(looked, TopAbs_WIRE); wc.More(); wc.Next()) ++nW;
+            BRepTopAdaptor_FClass2d fcls(looked, Precision::PConfusion());
+            const int inf = (int)fcls.PerformInfinitePoint();
+            TopoDS_Face flipped = looked;
+            flipped.Reverse();
+            BRepTopAdaptor_FClass2d fclsR(flipped, Precision::PConfusion());
+            const int infR = (int)fclsR.PerformInfinitePoint();
+            BRepCheck_Face bcf(looked);
+            const int oriW = (int)bcf.OrientationOfWires(Standard_False);
+            double area = 0;
+            int nUv = 0;
+            gp_Pnt2d prev(0, 0);
+            bool havePrev = false;
+            TopoDS_Wire wUv;
+            for (TopExp_Explorer wx(looked, TopAbs_WIRE); wx.More(); wx.Next()) {
+                wUv = TopoDS::Wire(wx.Current());
+                break;
+            }
+            for (BRepTools_WireExplorer ex(wUv, looked); ex.More(); ex.Next(), ++nUv) {
+                const TopoDS_Edge e = ex.Current();
+                Standard_Real f = 0, l = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, looked, f, l);
+                if (pc.IsNull()) continue;
+                const bool revE = e.Orientation() == TopAbs_REVERSED;
+                const gp_Pnt2d a = pc->Value(revE ? l : f);
+                const gp_Pnt2d b = pc->Value(revE ? f : l);
+                if (havePrev) area += prev.X() * b.Y() - b.X() * prev.Y();
+                prev = b;
+                havePrev = true;
+                if (nMiss == 0)
+                    std::fprintf(stderr,
+                                 "DIAG_REL_BAND stage=build mode=partial-cyl why=trim-uv "
+                                 "ei=%d ori=%d uA=%.5f vA=%.5f uB=%.5f vB=%.5f\n",
+                                 nUv, revE ? 1 : 0, a.X(), a.Y(), b.X(), b.Y());
+            }
+            area *= 0.5;
+            std::fprintf(stderr,
+                         "DIAG_REL_BAND stage=build mode=partial-cyl why=trim-corner-face "
+                         "nW=%d inf=%d infRev=%d oriW=%d uvArea=%.6g nUv=%d\n",
+                         nW, inf, infR, oriW, area, nUv);
+        } catch (const Standard_Failure&) {
+        }
+        std::fprintf(stderr,
+                     "DIAG_REL_BAND stage=build mode=partial-cyl why=trim-corner "
+                     "nRaise=%d nMiss=%d nRefuse=%d maxDist=%.9g tau=%.9g valid=%d "
+                     "faceSt=%s wireSt=%s wireCtx=%s si=%d ori=%d closed2d=%d\n",
+                     any ? 1 : 0, nMiss, nRefuse, maxDist, tau, (okF || okR) ? 1 : 0, faceSt,
+                     wireSt, wireCtx, siSt, oriSt, clsSt);
+    }
+    if (okF) {
+        face = fwd;
+        return true;
+    }
+    if (okR) {
+        face = rev;
+        return true;
+    }
+    restore();
+    return false;
+}
+
+// D-fc-7.16. See the declaration. The chart is partialTrimChartPCurve on the
+// rotated trim, so a pcurve that sat on the periodic image (u = 2π while the
+// trim starts at u = 0) is rewritten inside (0, 2π). The face orientation is
+// the one the caller built; a reverse that is valid alone is not substituted.
+// Edge tolerances move only up to the measured curve-on-surface deviation,
+// and only when that deviation is within `cap`. A failed rebuild clears the
+// pcurves it added on the rotated surface and writes the saved tolerance back.
+bool healPartialCylSeamFrame(TopoDS_Face& face, double cap) {
+    if (face.IsNull() || !(cap > 0.0)) return false;
+    if (faceIsValid(face)) return false;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) srf = BRep_Tool::Surface(face, loc);
+    if (srf.IsNull()) return false;
+    Handle(Geom_RectangularTrimmedSurface) trim =
+        Handle(Geom_RectangularTrimmedSurface)::DownCast(srf);
+    if (trim.IsNull()) return false;
+    Handle(Geom_CylindricalSurface) cyl =
+        Handle(Geom_CylindricalSurface)::DownCast(trim->BasisSurface());
+    if (cyl.IsNull()) return false;
+    Standard_Real uLo = 0, uHi = 0, vLo = 0, vHi = 0;
+    trim->Bounds(uLo, uHi, vLo, vHi);
+    int nSeam = 0;
+    {
+        std::vector<const void*> seen;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More(); it.Next()) {
+            const void* ts = diagTShapePtr(it.Current());
+            if (!ts || !gSeamTShapes.count(ts)) continue;
+            bool dup = false;
+            for (const void* p : seen)
+                if (p == ts) dup = true;
+            if (dup) continue;
+            seen.push_back(ts);
+            ++nSeam;
+        }
+    }
+    if (!partialCylSeamFrameApplies(uLo, uHi, nSeam)) return false;
+
+    const double theta = partialCylSeamFrameAngle(uLo, uHi);
+    const double span = uHi - uLo;
+    const double pi = std::acos(-1.0);
+    const double uLoN = pi - 0.5 * span;
+    const double uHiN = pi + 0.5 * span;
+    gp_Ax3 ax = cyl->Position();
+    ax.Rotate(gp_Ax1(ax.Location(), ax.Direction()), theta);
+    Handle(Geom_RectangularTrimmedSurface) trimN;
+    try {
+        Handle(Geom_CylindricalSurface) basis =
+            new Geom_CylindricalSurface(gp_Cylinder(ax, cyl->Radius()));
+        trimN = new Geom_RectangularTrimmedSurface(basis, uLoN, uHiN, vLo, vHi);
+    } catch (const Standard_Failure&) {
+        return false;
+    }
+    if (trimN.IsNull()) return false;
+
+    struct Slot {
+        TopoDS_Edge e;
+        double tol = 0;
+        bool wrote = false;
+    };
+    std::vector<Slot> slots;
+    BRep_Builder B;
+    bool failed = false;
+    try {
+        std::vector<const void*> seen;
+        for (TopExp_Explorer it(face, TopAbs_EDGE); it.More() && !failed; it.Next()) {
+            TopoDS_Edge e = TopoDS::Edge(it.Current());
+            if (BRep_Tool::Degenerated(e)) continue;
+            const void* ts = diagTShapePtr(e);
+            if (!ts) continue;
+            bool dup = false;
+            for (const void* p : seen)
+                if (p == ts) dup = true;
+            if (dup) continue;
+            seen.push_back(ts);
+            Standard_Real f = 0, l = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+            const double tol = BRep_Tool::Tolerance(e);
+            slots.push_back(Slot{e, tol, false});
+            if (c3.IsNull() || !(l > f)) {
+                failed = true;
+                break;
+            }
+            Handle(Geom2d_Curve) chart = partialTrimChartPCurve(e, c3, f, l, trimN);
+            if (chart.IsNull()) {
+                failed = true;
+                break;
+            }
+            const char* cls = "chart";
+            const double exact = exactMaxAtBind(c3, f, l, trimN, chart, loc, &cls);
+            if (!(exact >= 0.0) || exact > cap) {
+                failed = true;
+                break;
+            }
+            double dev = exact;
+            for (double s : {0.0, 0.5, 1.0}) {
+                const double t = f + s * (l - f);
+                const gp_Pnt2d uv = chart->Value(t);
+                dev = std::max(dev, trimN->Value(uv.X(), uv.Y()).Distance(c3->Value(t)));
+            }
+            if (!(dev <= cap)) {
+                failed = true;
+                break;
+            }
+            const double useTol = dev > tol ? dev : tol;
+            B.UpdateEdge(e, chart, trimN, loc, useTol);
+            B.Range(e, trimN, loc, f, l);
+            slots.back().wrote = true;
+        }
+    } catch (const Standard_Failure&) {
+        failed = true;
+    }
+    auto restore = [&]() {
+        for (const Slot& s : slots) {
+            if (!s.wrote) continue;
+            B.UpdateEdge(s.e, Handle(Geom2d_Curve)(), trimN, loc, s.tol);
+            if (Handle(BRep_TEdge) te = Handle(BRep_TEdge)::DownCast(s.e.TShape()))
+                te->Tolerance(s.tol);
+        }
+    };
+    auto note = [&](int valid) {
+        if (!diagRelEnabled()) return;
+        std::fprintf(stderr,
+                     "DIAG_REL_BAND stage=build mode=partial-cyl why=seam-frame-try "
+                     "touches=%d nSeam=%d theta=%.6f u0=%.5f u1=%.5f valid=%d\n",
+                     partialTrimTouchesPeriodicSeam(uLo, uHi) ? 1 : 0, nSeam, theta, uLoN, uHiN,
+                     valid);
+    };
+    if (failed) {
+        restore();
+        note(0);
+        return false;
+    }
+    TopoDS_Face neu;
+    try {
+        B.MakeFace(neu, trimN, Precision::Confusion());
+        if (!loc.IsIdentity()) neu.Location(loc);
+        for (TopExp_Explorer wx(face, TopAbs_WIRE); wx.More(); wx.Next())
+            B.Add(neu, wx.Current());
+        neu.Orientation(face.Orientation());
+    } catch (const Standard_Failure&) {
+        restore();
+        note(0);
+        return false;
+    }
+    TopoDS_Shell sh;
+    B.MakeShell(sh);
+    B.Add(sh, neu);
+    if (!faceIsValid(neu) || !shellIsValid(sh)) {
+        restore();
+        note(0);
+        return false;
+    }
+    note(1);
+    face = neu;
+    return true;
+}
+
+namespace {
+
 bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& mv,
                           const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                           const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
@@ -13410,7 +14271,118 @@ bool buildPartialCylinder(const Region& r, const RegionSet& rs, const MeshView& 
         if (tryAllSurfs(rev)) return true;
     }
     diagPartial("all-failed");
-    if (!cylFailPrinted && diagP2Enabled()) {
+    // D-fc-7.4 Q2. Every surface attempt failed BRepCheck. Rebuild on the
+    // region's own cylinder and pull pcurves onto its angular chart by whole
+    // periods. A face that becomes valid ships; one that does not is exploded
+    // below, and its status is reported under STL2STEP_DIAG_REL (and P2).
+    // Doing this only after every attempt has failed leaves a face that
+    // already ships on a later attempt untouched.
+    {
+        auto repairChart = [&](const Handle(Geom_Surface)& surf, TopoDS_Wire wire) -> bool {
+            if (surf.IsNull() || wire.IsNull()) return false;
+            TopoDS_Face cand;
+            if (!makeFaceKeep(surf, wire, inners, r.outwardNormal, cand)) return false;
+            addPcurvesOnFace(cand, sewTol, false);
+            char faceSt[64] = "[]";
+            char wireSt[64] = "[]";
+            if (diagRelEnabled()) {
+                try {
+                    BRepCheck_Analyzer an(cand, Standard_True);
+                    formatStatusList(an.Result(cand), faceSt, sizeof(faceSt));
+                    for (TopExp_Explorer wx(cand, TopAbs_WIRE); wx.More(); wx.Next()) {
+                        formatStatusList(an.Result(wx.Current()), wireSt, sizeof(wireSt));
+                        break;
+                    }
+                    double u0 = r.uMin, u1 = r.uMax;
+                    if (u1 < u0) u1 += 2.0 * kPi;
+                    int ei = 0;
+                    for (TopExp_Explorer ex(cand, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+                        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+                        Standard_Real a = 0, b = 0;
+                        Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(e, cand, a, b);
+                        const double uA = pc.IsNull() ? 0.0 : pc->Value(a).X();
+                        const double uB = pc.IsNull() ? 0.0 : pc->Value(b).X();
+                        const double uM = 0.5 * (uA + uB);
+                        std::fprintf(stderr,
+                                     "DIAG_REL_BAND stage=build mode=partial-cyl rid=%d ei=%d "
+                                     "u0=%.5f u1=%.5f uA=%.5f uB=%.5f shift=%.5f faceSt=%s "
+                                     "wireSt=%s why=invalid\n",
+                                     r.id, ei, u0, u1, uA, uB, partialCylPeriodShift(uM, u0, u1),
+                                     faceSt, wireSt);
+                    }
+                } catch (const Standard_Failure&) {
+                }
+            }
+            // D-fc-7.10 / D-fc-7.16. rebranch is today's repair. Only a face it
+            // leaves invalid is rebuilt. The trim chart ships when BRepCheck
+            // then passes; otherwise it restores today's pcurves. The corner
+            // fallback then sets the shared corner's vertex tolerance to the
+            // measured pcurve-intersection distance, and only when that
+            // distance is <= tau. Still invalid, and only when the trim
+            // touches the periodic seam (or the face carries a seam edge),
+            // the face is rebuilt on the same cylinder with XDirection rotated
+            // so the trim is centred at π, charted in that frame. It ships
+            // only when the face and a shell that contains it both pass
+            // BRepCheck. Anything still invalid keeps today's path. An
+            // isolated-valid reversed wire is not shipped from here: that
+            // face closes the shell and the shell's own BRepCheck fails.
+            // faceSt/wireSt are the status before any of these repairs.
+            bool byChart = false;
+            bool byCorner = false;
+            bool byFrame = false;
+            if (!rebranchPartialCylChart(cand, r, sewTol, cap)) {
+                if (faceIsValid(cand)) {
+                    if (diagRelEnabled())
+                        std::fprintf(stderr,
+                                     "DIAG_REL_BAND stage=build mode=partial-cyl rid=%d "
+                                     "faceSt=%s wireSt=%s why=isolated-valid-unshipped\n",
+                                     r.id, faceSt, wireSt);
+                    return false;
+                }
+                const double tau = tauOf(mv);
+                if (!healInvalidPartialTrimChart(cand, cap, tau)) {
+                    if (!raiseMeasuredCornerTol(cand, tau)) {
+                        if (!healPartialCylSeamFrame(cand, cap)) {
+                            if (diagRelEnabled())
+                                std::fprintf(stderr,
+                                             "DIAG_REL_BAND stage=build mode=partial-cyl rid=%d "
+                                             "faceSt=%s wireSt=%s why=trim-chart-kept\n",
+                                             r.id, faceSt, wireSt);
+                            return false;
+                        }
+                        byFrame = true;
+                    } else {
+                        byCorner = true;
+                    }
+                } else {
+                    byChart = true;
+                }
+            }
+            if (!ensureFaceValid(cand, cap) || !faceIsValid(cand)) return false;
+            outF = cand;
+            if (diagRelEnabled()) {
+                const double tau = tauOf(mv);
+                const char* why = byChart ? "trim-chart"
+                                          : (byCorner ? "trim-corner-tol"
+                                                      : (byFrame ? "seam-frame" : "repaired"));
+                std::fprintf(stderr,
+                             "DIAG_REL_BAND stage=build mode=partial-cyl rid=%d nTri=%zu "
+                             "radii=%.9g maxDevTau=%.4f faceSt=%s wireSt=%s why=%s\n",
+                             r.id, r.tris.size(), r.radius,
+                             (tau > 0.0) ? r.maxVertexDev / tau : 0.0, faceSt, wireSt, why);
+            }
+            return true;
+        };
+        refreshOuterWire();
+        Handle(Geom_Surface) base = regionSurf(r, SurfVar::CylBase);
+        Handle(Geom_Surface) trim = regionSurf(r, SurfVar::CylRectTrim);
+        TopoDS_Wire rev = ow;
+        rev.Reverse();
+        if (repairChart(trim, ow) || repairChart(trim, rev) || repairChart(base, ow) ||
+            repairChart(base, rev))
+            return true;
+    }
+    if (!cylFailPrinted && (diagP2Enabled() || diagRelEnabled())) {
         Handle(Geom_Surface) surf = regionSurf(r, SurfVar::CylBase);
         const char* stage = "other";
         const char* reason = "all-failed";
@@ -14927,10 +15899,13 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // (already-shared circle) path keeps meshTolCap so B0 is inert.
         const double faceCap =
             publishSimple ? meshTolCap(mv, &r) : partialFaceTolCap(mv, r);
-        if ((crossingCap || seamMinted) && !faceIsValid(got))
+        // D-fc-7.3 F-F: a closed wall's window is a mesh polyline whose chords stray
+        // off the cylinder between their ends; like a crossing or minted rim, every
+        // edge then carries its own measured deviation from the face (capped).
+        if ((crossingCap || seamMinted || !inners.empty()) && !faceIsValid(got))
             fitEdgeTolerancesToFace(got, faceCap);
         if (!faceIsValid(got) && !ensureFaceValid(got, faceCap)) {
-            if (diagP2Enabled()) {
+            if (diagP2Enabled() || diagPlatesEnabled()) {
                 char faceSt[256] = "[]", wireSt[256] = "[]";
                 try {
                     BRepCheck_Analyzer an(got, Standard_True);
@@ -14952,6 +15927,50 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 std::fprintf(stderr,
                              "DIAG_SEAM360FAIL rid=%d R=%.4f inners=%zu faceSt=%s wireSt=%s\n",
                              r.id, r.radius, inners.size(), faceSt, wireSt);
+                for (const Loop& lp : r.loops)
+                    for (int ci : lp.chainIdx) {
+                        if (ci < 0 || (size_t)ci >= rs.chains.size() || (size_t)ci >= geom.size())
+                            continue;
+                        const BoundaryChain& ch = rs.chains[(size_t)ci];
+                        const ChainGeom& g = geom[(size_t)ci];
+                        const gp_Pnt a = pntOf(mv, ch.meshVerts.front());
+                        const gp_Pnt b = pntOf(mv, ch.meshVerts.back());
+                        std::fprintf(stderr,
+                                     "DIAG_SEAM360LOOP rid=%d role=%d ci=%d regA=%d regB=%d "
+                                     "coll=%d kind=%d tier2=%d nE=%zu nV=%zu uA=%.5f vA=%.5f "
+                                     "uB=%.5f vB=%.5f\n",
+                                     r.id, (int)lp.role, ci, ch.regA, ch.regB,
+                                     (int)((size_t)ci < collapsed.size() && collapsed[(size_t)ci]),
+                                     (int)g.curve.kind, (int)g.tier2Polyline, g.edges.size(),
+                                     ch.meshVerts.size(), azimuthOf(r, a),
+                                     gp_Vec(r.ax.Location(), a).Dot(gp_Vec(r.ax.Direction())),
+                                     azimuthOf(r, b),
+                                     gp_Vec(r.ax.Location(), b).Dot(gp_Vec(r.ax.Direction())));
+                    }
+                // In-context statuses (the ones that make the analyzer call the
+                // face unorientable): every edge and wire whose status on this
+                // face is not NoError.
+                try {
+                    BRepCheck_Analyzer an(got, Standard_True);
+                    auto inCtx = [&](const TopoDS_Shape& sub, const char* tag, int idx) {
+                        const Handle(BRepCheck_Result)& res = an.Result(sub);
+                        if (res.IsNull() || !res->IsStatusOnShape(got)) return;
+                        for (BRepCheck_ListIteratorOfListOfStatus it(res->StatusOnShape(got));
+                             it.More(); it.Next())
+                            if (it.Value() != BRepCheck_NoError)
+                                std::fprintf(stderr, "DIAG_SEAM360CTX rid=%d %s=%d st=%d\n", r.id,
+                                             tag, idx, (int)it.Value());
+                    };
+                    int wi = 0;
+                    for (TopExp_Explorer wx(got, TopAbs_WIRE); wx.More(); wx.Next(), ++wi) {
+                        inCtx(wx.Current(), "wire", wi);
+                        int ei = 0;
+                        for (BRepTools_WireExplorer ex(TopoDS::Wire(wx.Current())); ex.More();
+                             ex.Next(), ++ei)
+                            inCtx(ex.Current(), wi == 0 ? "e0" : "e1", ei);
+                    }
+                } catch (const Standard_Failure&) {
+                }
                 try {
                     TopLoc_Location L;
                     Handle(Geom_Surface) sF = BRep_Tool::Surface(got, L);
@@ -14969,6 +15988,19 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                                 continue;
                             }
                             const gp_Pnt2d q0 = pc->Value(a2), q1 = pc->Value(b2);
+                            {
+                                Standard_Real f3 = 0, l3 = 0;
+                                Handle(Geom_Curve) cc = BRep_Tool::Curve(ee, f3, l3);
+                                if (!cc.IsNull() && cc->IsKind(STANDARD_TYPE(Geom_Circle))) {
+                                    const gp_Circ gc = Handle(Geom_Circle)::DownCast(cc)->Circ();
+                                    std::fprintf(stderr,
+                                                 "DIAG_SEAMUV3 w=%d e=%d circ R=%.6f "
+                                                 "O=(%.6f,%.6f,%.6f) etol=%.3g\n",
+                                                 wi, ei, gc.Radius(), gc.Location().X(),
+                                                 gc.Location().Y(), gc.Location().Z(),
+                                                 BRep_Tool::Tolerance(ee));
+                                }
+                            }
                             std::fprintf(stderr,
                                          "DIAG_SEAMUV w=%d e=%d ori=%s uv0=(%.5f,%.5f) "
                                          "uv1=(%.5f,%.5f) rng=[%.5f,%.5f] pc=%s c3=%s\n",
@@ -15638,6 +16670,117 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
             if (diagP2Enabled())
                 std::fprintf(stderr, "DIAG_SEAMSENSE rid=%d sweepH=%.4f sweepL=%.4f nH=%zu nL=%zu\n",
                              r.id, sweepH, sweepL, pathH.size(), pathL.size());
+            // D-fc-7.6 (the D-fc-6.11 (c) mint, rim published as several arcs). The
+            // seam is ONE generator. When the two seam vertices stand off one
+            // generator by more than tau (2q: both are surface points, so on one
+            // generator they agree within it) and one cap is collapsed arcs of ONE
+            // exact circle published as two or more edges, that cap's vertex is
+            // minted on the generator through the other cap's seam vertex: the arc
+            // it crosses is split there (a chain mesh vertex within tau is reused,
+            // as the mint does), and both faces take the two arcs (geom, as
+            // mintedExact does). A single-edge rim is the existing mint's.
+            if (!crossingCap && !VL.IsNull() && !VH.IsNull()) {
+                const gp_Lin genL(BRep_Tool::Pnt(VL), r.ax.Direction());
+                const double off = genL.Distance(BRep_Tool::Pnt(VH));
+                auto arcsOfOneCircle = [&](const Loop* cp, gp_Circ& cc) -> bool {
+                    if (!cp || cp->chainIdx.empty()) return false;
+                    bool first = true;
+                    std::size_t nEdges = 0;
+                    for (int ci : cp->chainIdx) {
+                        if (ci < 0 || (size_t)ci >= geom.size()) return false;
+                        const ChainGeom& g = geom[(size_t)ci];
+                        if (!g.collapsed || g.curve.kind != AnalyticCurve::Circ || g.edges.empty())
+                            return false;
+                        nEdges += g.edges.size();
+                        if (first) {
+                            cc = g.curve.circ;
+                            first = false;
+                        } else if (!(g.curve.circ.Location().Distance(cc.Location()) <=
+                                         Precision::Confusion() &&
+                                     std::fabs(g.curve.circ.Radius() - cc.Radius()) <=
+                                         Precision::Confusion() &&
+                                     g.curve.circ.Axis().IsParallel(cc.Axis(),
+                                                                   Precision::Angular()))) {
+                            return false;
+                        }
+                    }
+                    return nEdges >= 2;
+                };
+                gp_Circ cc;
+                const double tauS = tauOf(mv);
+                const bool lowArcs = tauS > 0.0 && off > tauS && arcsOfOneCircle(capL, cc);
+                const bool highArcs =
+                    !lowArcs && tauS > 0.0 && off > tauS && arcsOfOneCircle(capH, cc);
+                if (diagP2Enabled() || diagPlatesEnabled())
+                    std::fprintf(stderr,
+                                 "DIAG_SEAMARCS rid=%d off=%.6g tolL=%.3g tolH=%.3g nL=%zu nH=%zu "
+                                 "lowArcs=%d highArcs=%d\n",
+                                 r.id, off, BRep_Tool::Tolerance(VL), BRep_Tool::Tolerance(VH),
+                                 capL->chainIdx.size(), capH->chainIdx.size(), (int)lowArcs,
+                                 (int)highArcs);
+                gp_Pnt X;
+                if ((lowArcs || highArcs) &&
+                    capPointOnGenerator(cc.Position(),
+                                        gp_Lin(BRep_Tool::Pnt(lowArcs ? VH : VL), r.ax.Direction()),
+                                        X)) {
+                    X = ElCLib::Value(ElCLib::Parameter(cc, X), cc);
+                    const Loop* cp = lowArcs ? capL : capH;
+                    std::vector<TopoDS_Edge>& path = lowArcs ? pathL : pathH;
+                    bool split = false;
+                    for (int ci : cp->chainIdx) {
+                        ChainGeom& g = geom[(size_t)ci];
+                        for (size_t k = 0; k < g.edges.size() && !split; ++k) {
+                            const TopoDS_Edge E = g.edges[k];
+                            const int lv = chainVertexWithinTau(X, verts, rs.chains[(size_t)ci].meshVerts,
+                                                                TopoDS_Vertex(), 2.0 * mv.quantFloor);
+                            TopoDS_Vertex VE;
+                            if (lv >= 0) {
+                                VE = verts[(size_t)lv];
+                                bumpVertexTol(VE, curveResidual(g.curve, BRep_Tool::Pnt(VE)));
+                            } else {
+                                BRep_Builder().MakeVertex(VE, X, Precision::Confusion());
+                            }
+                            TopoDS_Edge E1, E2;
+                            if (!splitArcAt(E, VE, E1, E2)) continue;
+                            const bool fwd = E.Orientation() != TopAbs_REVERSED;
+                            std::vector<TopoDS_Edge> two =
+                                fwd ? std::vector<TopoDS_Edge>{E1, E2}
+                                    : std::vector<TopoDS_Edge>{TopoDS::Edge(E2.Reversed()),
+                                                               TopoDS::Edge(E1.Reversed())};
+                            bool inPath = false;
+                            for (size_t j = 0; j < path.size(); ++j) {
+                                if (!path[j].IsSame(E)) continue;
+                                const bool pf = path[j].Orientation() != TopAbs_REVERSED;
+                                std::vector<TopoDS_Edge> rep =
+                                    pf ? std::vector<TopoDS_Edge>{E1, E2}
+                                       : std::vector<TopoDS_Edge>{TopoDS::Edge(E2.Reversed()),
+                                                                  TopoDS::Edge(E1.Reversed())};
+                                path.erase(path.begin() + (std::ptrdiff_t)j);
+                                path.insert(path.begin() + (std::ptrdiff_t)j, rep.begin(), rep.end());
+                                inPath = true;
+                                break;
+                            }
+                            if (!inPath) continue;
+                            g.edges.erase(g.edges.begin() + (std::ptrdiff_t)k);
+                            g.edges.insert(g.edges.begin() + (std::ptrdiff_t)k, two.begin(), two.end());
+                            (lowArcs ? VL : VH) = VE;
+                            seamVL = VL;
+                            split = rotateEdgesToVertex(path, VE);
+                            if (diagP2Enabled() || diagPlatesEnabled())
+                                std::fprintf(stderr,
+                                             "DIAG_SEAMARCSPLIT rid=%d ci=%d low=%d off=%.6g reused=%d "
+                                             "rotated=%d\n",
+                                             r.id, ci, lowArcs ? 1 : 0, off, lv >= 0 ? 1 : 0,
+                                             split ? 1 : 0);
+                            if (!split) {
+                                emit(warn, "seamed360: cap wire does not pass seam vertex — try TwoHalves");
+                                return false;
+                            }
+                        }
+                        if (split) break;
+                    }
+                }
+            }
             try {
                 gp_Lin lin2(BRep_Tool::Pnt(VL), r.ax.Direction());
                 AnalyticCurve acs2;
@@ -18432,6 +19575,10 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                             curve = constructedGenerator(*A, *B);
                         else if (B->type == SurfType::Cylinder && A->type == SurfType::Plane)
                             curve = constructedGenerator(*B, *A);
+                        else if (bothCyl && roundTangentToWall(*A, *B))
+                            curve = constructedCylCylGenerator(*B, *A);  // D-fc-7.6: exact
+                        else if (bothCyl && roundTangentToWall(*B, *A))
+                            curve = constructedCylCylGenerator(*A, *B);
                         else if (bothCyl) {
                             curve = bestCylCylConstructed(
                                 *A, *B, mv, ch, intAnaAcceptResidual(mv, ch, sewTol, A, B));
@@ -18882,6 +20029,34 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                              "DIAG_SPAN_GUARD ci=%d guardB=1 runsCert=%d\n",
                                              (int)ci, sp.runsCert);
                         }
+                        // D-fc-5.16. The sphere|torus edge is the constructed
+                        // u-iso, not the mesh chords. sewTol is the gate for an
+                        // intersected curve. The terminals already lie within
+                        // the snap cap this chain carries (analyticSnapCap).
+                        if (!kept && curve.kind == AnalyticCurve::Circ && A && B &&
+                            ((isSphereCornerR(*A) && isTorusBlendR(*B)) ||
+                             (isSphereCornerR(*B) && isTorusBlendR(*A)))) {
+                            const double dA =
+                                curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ia]));
+                            const double dB =
+                                curveResidual(curve, BRep_Tool::Pnt(verts[(size_t)ib]));
+                            const double endDist = std::max(std::isfinite(dA) ? dA : 0.0,
+                                                            std::isfinite(dB) ? dB : 0.0);
+                            if (endDist <= geom[ci].chainSnapCap) {
+                                kept = true;
+                                if (pass0 && diagRelEnabled())
+                                    std::fprintf(stderr,
+                                                 "DIAG_SPHERE_TORUS_SEW ci=%d keep=1 endDist=%.6g "
+                                                 "maxDist=%.6g cap=%.6g\n",
+                                                 (int)ci, endDist, maxDist,
+                                                 geom[ci].chainSnapCap);
+                            } else if (pass0 && diagRelEnabled()) {
+                                std::fprintf(stderr,
+                                             "DIAG_SPHERE_TORUS_SEW ci=%d keep=0 endDist=%.6g "
+                                             "maxDist=%.6g cap=%.6g\n",
+                                             (int)ci, endDist, maxDist, geom[ci].chainSnapCap);
+                            }
+                        }
                         if (!kept) {
                             if (publishFilletTier2(ci, ch, A, B)) {
                                 nOk++;
@@ -18899,6 +20074,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             alignTorusSeamRims(mv, rs, seamFams, geom, verts, exploded, eprimeFill, seamPlaced);
             std::unordered_set<int> seamLocked;
             gSeamFailFirst = 0;
+            pinTangentGenerators(rs, geom, verts);
             snapSeamVertices(rs, mv, geom, verts, seamLocked);
             for (size_t ci = 0; ci < rs.chains.size(); ci++) {
                 if (geom[ci].curve.kind == AnalyticCurve::None) continue;
@@ -19518,10 +20694,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     const int anaA = (A && isAnalytic(A)) ? 1 : 0;
                     const int anaB = (B && isAnalytic(B)) ? 1 : 0;
                     const int coll = ((size_t)ci < collapsed.size() && collapsed[ci]) ? 1 : 0;
+                    const AnalyticCurve::Kind ck =
+                        ci < geom.size() ? geom[ci].curve.kind : AnalyticCurve::None;
                     std::fprintf(stderr,
                                  "DIAG_COLLAPSE_CI ci=%zu regA=%d regB=%d anaA=%d anaB=%d "
-                                 "collapsed=%d\n",
-                                 ci, ch.regA, ch.regB, anaA, anaB, coll);
+                                 "collapsed=%d kind=%d circR=%.6f\n",
+                                 ci, ch.regA, ch.regB, anaA, anaB, coll, (int)ck,
+                                 ck == AnalyticCurve::Circ ? geom[ci].curve.circ.Radius() : 0.0);
                     if (anaA != anaB) nMixed++;
                     if (anaA != anaB && coll) nMixedCollapsed++;
                 }
@@ -21511,6 +22690,20 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                     shift = -std::floor(uMid / (2.0 * kPi)) * 2.0 * kPi;
                                 else if (uMid > uSpan)
                                     shift = -std::ceil((uMid - uSpan) / (2.0 * kPi)) * 2.0 * kPi;
+                                // floor/ceil of a fraction is ±1, so a meridian that
+                                // already sits on the trim (a hair past 0 or uSpan)
+                                // is walked a whole period out of this face's window.
+                                // Keep that shift only when both ends land inside.
+                                // Precision::PConfusion is the pcurve parameter slack
+                                // the trim already admits. No new tolerance.
+                                if (shift != 0.0 && std::isfinite(shift)) {
+                                    const double eps = Precision::PConfusion();
+                                    const double aS = q0.X() + shift;
+                                    const double bS = q1.X() + shift;
+                                    if (!(aS >= -eps && aS <= uSpan + eps &&
+                                          bS >= -eps && bS <= uSpan + eps))
+                                        shift = 0.0;
+                                }
                                 // A short 3D chord whose pcurve takes the long way
                                 // around the period is the branch cut, not a rim.
                                 // Flip onto the short branch when that UV length is

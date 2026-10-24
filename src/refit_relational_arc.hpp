@@ -212,6 +212,13 @@ bool mergeSameSurfaceBand(const MeshView& mv, const SegmentParams& p, const Deri
 // empty when its boundary is not a union of simple loops.
 std::vector<std::vector<int>> triSetLoops(const MeshView& mv, const std::vector<int>& tris);
 
+// The same loops, same order and first vertex, each read in its own triangles'
+// sense: a loop runs as the boundary edge from its first vertex to its second does
+// in the set's triangle that owns it (the sense windingLoops reads). A closed
+// wall's two rims then wind once in OPPOSITE senses, which closedWallWithWindows
+// tests (D-fc-7.3 RQ-HUB-2); a window winds zero times either way.
+std::vector<std::vector<int>> triSetOrientedLoops(const MeshView& mv, const std::vector<int>& tris);
+
 }  // namespace refit
 }  // namespace stl2step
 

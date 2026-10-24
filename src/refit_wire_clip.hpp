@@ -27,6 +27,7 @@
 #include <TColStd_Array1OfReal.hxx>
 #include <TColgp_Array1OfPnt2d.hxx>
 #include <TopExp.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <gp_Ax2.hxx>
@@ -54,6 +55,74 @@ inline double segmentDiskPenetration(const gp_Pnt& O, double R, const gp_Pnt& A,
     const gp_Pnt C = A.Translated(AB * t);
     const double pen = R - C.Distance(O);
     return pen > 0.0 ? pen : 0.0;
+}
+
+// D-fc-7.3 RQ-HUB-3 (b), D-fc-7.6. Two circles of one plane wire (centres o0, o1,
+// radii r0, r1) tangent within `tol` -- externally (|o0 o1| = r0 + r1) or
+// internally (|o0 o1| = |r0 - r1|) -- meet at their tangency point on the line of
+// centres: the midpoint of the two circles' own points there. Their intersection
+// roots lie +-sqrt(2 r_eff delta) along the common tangent for an overlap delta
+// (ill-conditioned); the tangency point is not. False when the centres coincide
+// within `tol` or the circles are not tangent within it.
+inline bool circleTangencyPoint(const gp_Pnt& o0, double r0, const gp_Pnt& o1, double r1,
+                                double tol, gp_Pnt& T) {
+    if (!(tol > 0.0) || !(r0 > 0.0) || !(r1 > 0.0)) return false;
+    const double d = o0.Distance(o1);
+    if (!(d > tol)) return false;
+    const double ext = std::fabs(d - (r0 + r1));
+    const double inn = std::fabs(d - std::fabs(r0 - r1));
+    if (!(std::min(ext, inn) <= tol)) return false;
+    const gp_Vec u = gp_Vec(o0, o1) / d;
+    // External: o0's point faces o1 and o1's faces o0. Internal: both points lie
+    // on the side of the larger circle's centre away from the smaller one.
+    double s0 = 1.0, s1 = -1.0;
+    if (inn < ext) {
+        s0 = r0 >= r1 ? 1.0 : -1.0;
+        s1 = s0;
+    }
+    const gp_Pnt t0 = o0.Translated(u * (s0 * r0));
+    const gp_Pnt t1 = o1.Translated(u * (s1 * r1));
+    T = gp_Pnt(0.5 * (t0.XYZ() + t1.XYZ()));
+    return true;
+}
+
+// D-fc-7.6 (the D-fc-6.11 (c) mint on a rim published as several arcs). Split the
+// circular arc edge `e` at the vertex V standing on its circle: two edges on the same
+// circle, e's first vertex to V and V to e's last vertex (parameter order of e's own
+// curve), each FORWARD. False when e is not an arc of a circle or V's parameter is
+// not strictly inside the arc. No geometry moves; e's tolerance is kept.
+inline bool splitArcAt(const TopoDS_Edge& e, const TopoDS_Vertex& V, TopoDS_Edge& e1,
+                       TopoDS_Edge& e2) {
+    if (e.IsNull() || V.IsNull()) return false;
+    try {
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c = BRep_Tool::Curve(e, f, l);
+        if (c.IsNull() || !(l > f)) return false;
+        Handle(Geom_Curve) b = c;
+        if (b->IsKind(STANDARD_TYPE(Geom_TrimmedCurve)))
+            b = Handle(Geom_TrimmedCurve)::DownCast(b)->BasisCurve();
+        Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(b);
+        if (gc.IsNull()) return false;
+        constexpr double kTwoPi = 6.28318530717958647692;
+        double t = ElCLib::Parameter(gc->Circ(), BRep_Tool::Pnt(V));
+        while (t < f) t += kTwoPi;
+        while (t >= f + kTwoPi) t -= kTwoPi;
+        if (!(t > f + Precision::PConfusion() && t < l - Precision::PConfusion())) return false;
+        const TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+        TopoDS_Vertex vf, vl;
+        TopExp::Vertices(ef, vf, vl);
+        if (vf.IsNull() || vl.IsNull()) return false;
+        BRepBuilderAPI_MakeEdge m1(gc, vf, V, f, t), m2(gc, V, vl, t, l);
+        if (!m1.IsDone() || !m2.IsDone()) return false;
+        e1 = m1.Edge();
+        e2 = m2.Edge();
+        BRep_Builder B;
+        B.UpdateEdge(e1, BRep_Tool::Tolerance(e));
+        B.UpdateEdge(e2, BRep_Tool::Tolerance(e));
+        return true;
+    } catch (const Standard_Failure&) {
+        return false;
+    }
 }
 
 // D-fc-6.7. An edge tolerance may not exceed a tenth of the certified radius.

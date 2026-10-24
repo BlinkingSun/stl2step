@@ -14,6 +14,7 @@
 #include "refit_relational_torus.hpp"
 #include "refit_band_volume.hpp"
 #include "refit_coax_closed.hpp"
+#include "refit_coax_rehost.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1271,7 +1272,9 @@ struct CoaxFamily {
     std::size_t nDonors = 0;
     bool ring = false;  // D-fc-5.11 F1: the donor groups are rings, not surfaces
     std::vector<int> bandRegion;  // work.accepted index of each claimed band
-    std::vector<char> bandLifted;  // D-fc-6.8: the band was lifted (closed wall / anchored)
+    // D-fc-6.8: the band was lifted (closed wall / anchored): 1; D-fc-7.3 RQ-HUB-1: a
+    // closed wall committed above the fold floor on its RQ-3 (i) anchor: 2.
+    std::vector<char> bandLifted;
     std::vector<int> donorAcc;    // work.accepted index of each donor group (-1: a ring)
     bool moved = false;           // the axis changed after a band was placed on it
 };
@@ -1290,6 +1293,9 @@ struct LineFamilies {
     std::vector<PendingMerge> merges;
     std::vector<CoaxFamily> fams;
     std::vector<int> famOfAcc;  // work.accepted index -> family, -1 when not a donor
+    // Every coaxial closure the stage measured D2-closed (sorted triangle sets),
+    // D-fc-7.3 RQ-HUB-1 corollary.
+    std::vector<std::vector<int>> d2Closures;
     const DerivedTols* tol = nullptr;
     const SegmentParams* sp = nullptr;
 };
@@ -2096,6 +2102,7 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
             // every edge component anchored by a certified tangent parallel
             // cylinder. Otherwise the band keeps its refusal.
             const char* lifted = nullptr;  // "closed" | "anchored"
+            bool liftedOnAnchor = false;   // closed, above the fold floor on its anchor
             double liftMaxDev = 0, liftRms = 0;
             ClosedM liftCl;
             if (cc.ok && stable && sameG < 0 && lf.tol &&
@@ -2242,6 +2249,76 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     rms = p.empty() ? 0.0 : std::sqrt(s2 / (double)p.size());
                     return mx;
                 };
+                auto gidsOf = [&](const std::vector<int>& tris) {
+                    std::vector<int> g;
+                    for (int t : tris) {
+                        if (t < 0 || t >= nTri) continue;
+                        const int gt = mv.compTris ? mv.compTris[t] : t;
+                        for (int k = 0; k < 3; ++k) g.push_back(mv.tris[gt][k]);
+                    }
+                    std::sort(g.begin(), g.end());
+                    g.erase(std::unique(g.begin(), g.end()), g.end());
+                    return g;
+                };
+                // D-fc-6.8 RQ-3 (i): the certified tangent parallel cylinders of a
+                // set C on the wall (o, a, R) over its length L, in accepted order.
+                // A region already on the wall's own set is no anchor.
+                struct TangentAnchors {
+                    std::vector<std::vector<int>> g;
+                    std::vector<int> acc;
+                };
+                auto tangentAnchors = [&](const std::vector<int>& C, const gp_XYZ& o,
+                                          const gp_XYZ& a, double R, double L) {
+                    TangentAnchors an;
+                    std::vector<char> inC((std::size_t)nTri, 0);
+                    for (int t : C) inC[(std::size_t)t] = 1;
+                    for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
+                        const Region& ar = work.accepted[(std::size_t)ai];
+                        if (ar.type != SurfType::Cylinder || ar.tris.empty()) continue;
+                        if (!anchorCertified(tau, ar.maxVertexDev)) continue;
+                        if (bandHoldsAny(ar.tris, inC)) continue;
+                        const double tolA = anchorTol(tau, ar.maxVertexDev);
+                        const CoaxTangent tg = coaxTangentCylinder(
+                            o, a, R, ar.ax.Location().XYZ(), ar.ax.Direction().XYZ(), ar.radius,
+                            tolA, tau, L);
+                        if (!tg.ok) continue;
+                        an.g.push_back(gidsOf(ar.tris));
+                        an.acc.push_back(ai);
+                    }
+                    return an;
+                };
+                // A component of the wall is anchored when one of the anchors shares a
+                // contact vertex with it (coaxContact), first anchor in accepted order.
+                auto anchorContact = [&](const TangentAnchors& an, const std::vector<int>& comp,
+                                         const gp_XYZ& o, const gp_XYZ& a, double R, double L) {
+                    const std::vector<int> cg = gidsOf(comp);
+                    for (std::size_t k = 0; k < an.acc.size(); ++k) {
+                        const Region& ar = work.accepted[(std::size_t)an.acc[k]];
+                        const double tolA = anchorTol(tau, ar.maxVertexDev);
+                        for (int g : an.g[k]) {
+                            if (!std::binary_search(cg.begin(), cg.end(), g)) continue;
+                            if (!coaxContact(mv.pts[g], o, a, R, ar.ax.Location().XYZ(),
+                                             ar.ax.Direction().XYZ(), ar.radius, tolA, tau))
+                                continue;
+                            if (diagOn()) {
+                                const CoaxTangent tg = coaxTangentCylinder(
+                                    o, a, R, ar.ax.Location().XYZ(), ar.ax.Direction().XYZ(),
+                                    ar.radius, tolA, tau, L);
+                                std::fprintf(stderr,
+                                             "DIAG_REL_COAX_ANCHOR seed=%d comp=%d "
+                                             "acc=%d origin=%d r=%.9g nTri=%zu "
+                                             "devTau=%.4f dist=%.9g internal=%d "
+                                             "tanDistTau=%.4f crossTau=%.4g contact=%d\n",
+                                             cb.seed, minTriOf(comp), an.acc[k], (int)ar.origin,
+                                             ar.radius, ar.tris.size(), ar.maxVertexDev / tau,
+                                             tg.dist, (int)tg.internal, tg.tanDist / tau,
+                                             tg.cross * L / tau, g);
+                            }
+                            return true;
+                        }
+                    }
+                    return false;
+                };
                 const char* liftWhy = "unstable";
                 Lift W = grow(true);
                 // D-fc-6.11 (a): the closure's holes take their fills (triangles
@@ -2290,8 +2367,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     }
                     std::sort(W.C.begin(), W.C.end());
                 }
-                int compsC = 0, nLoops = 0, d2 = 0;
-                double foldMax = 0, coverDev = 0;
+                int compsC = 0, nLoops = 0, d2 = 0, nWindows = 0;
+                double foldMax = 0, coverDev = 0, seamU = 0;
                 std::string wind;
                 if (W.ok) {
                     const gp_XYZ o = W.cert.fit.origin;
@@ -2306,13 +2383,15 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     const ClosedM wcl = closedOf(mv, fr, W.C, wb.verts, wm.thetaBin);
                     d2 = wcl.closed ? 1 : 0;
                     std::vector<int> windings;
-                    for (const std::vector<int>& loop : triSetLoops(mv, W.C)) {
+                    std::vector<std::vector<double>> winU;  // each window's loop azimuths
+                    for (const std::vector<int>& loop : triSetOrientedLoops(mv, W.C)) {
                         std::vector<double> az;
                         for (int lv : loop) {
                             const gp_XYZ d = mv.pts[mv.compVtx ? mv.compVtx[lv] : lv] - o;
                             az.push_back(std::atan2(d.Dot(af.e2), d.Dot(af.e1)));
                         }
                         windings.push_back(windingNumber(az));
+                        if (windings.back() == 0) winU.push_back(az);
                         wind += (wind.empty() ? "" : ",") + std::to_string(windings.back());
                     }
                     nLoops = (int)windings.size();
@@ -2328,13 +2407,31 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                             }
                     double rms = 0;
                     coverDev = devOver(W.C, o, a, R, rms);
-                    if (!coaxClosedWall(d2 != 0, compsC, windings)) liftWhy = "not-closed-wall";
-                    else if (!coaxFoldInScope(foldMax, lf.tol->thetaCylLo)) liftWhy = "not-blend";
+                    nWindows = (int)winU.size();
+                    const bool wall =
+                        coaxClosedWallWithWindows(d2 != 0, compsC, windings, winU, seamU);
+                    // D-fc-7.3 RQ-HUB-1: above the fold floor the wall needs every
+                    // triangle free and the RQ-3 (i) anchor (measured only there).
+                    bool everyFree = false, anchoredWall = false;
+                    if (wall && !coaxFoldInScope(foldMax, lf.tol->thetaCylLo)) {
+                        everyFree = std::all_of(W.C.begin(), W.C.end(), [&](int t) {
+                            return t >= 0 && t < nTri && wm.freeTri[(std::size_t)t];
+                        });
+                        const double L = std::max(W.zHi - W.zLo, tau);
+                        anchoredWall =
+                            everyFree && anchorContact(tangentAnchors(W.C, o, a, R, L), W.C, o, a, R, L);
+                    }
+                    if (d2 != 0) lf.d2Closures.push_back(W.C);
+                    if (!wall) liftWhy = "not-closed-wall";
+                    else if (!coaxClosedLiftInScope(foldMax, lf.tol->thetaCylLo, everyFree,
+                                                    anchoredWall))
+                        liftWhy = "not-blend";
                     else if (!coaxLiftRoutes(preimageAnnulus)) liftWhy = "ring-path";
                     else if (sameSurfaceCyl(wm, work, wb, o, a, R)) liftWhy = "same-surface";
                     else liftWhy = "accept";
                     if (std::strcmp(liftWhy, "accept") == 0) {
                         lifted = "closed";
+                        liftedOnAnchor = anchoredWall;
                         liftCl = wcl;
                         liftMaxDev = coverDev;
                         liftRms = rms;
@@ -2358,69 +2455,10 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                         const double R = P.cert.fit.radius.back();
                         const std::vector<std::vector<int>> comps = edgeComps(P.C);
                         nComp = (int)comps.size();
-                        std::vector<char> inC((std::size_t)nTri, 0);
-                        for (int t : P.C) inC[(std::size_t)t] = 1;
                         const double L = std::max(P.zHi - P.zLo, tau);
-                        auto gidsOf = [&](const std::vector<int>& tris) {
-                            std::vector<int> g;
-                            for (int t : tris) {
-                                if (t < 0 || t >= nTri) continue;
-                                const int gt = mv.compTris ? mv.compTris[t] : t;
-                                for (int k = 0; k < 3; ++k) g.push_back(mv.tris[gt][k]);
-                            }
-                            std::sort(g.begin(), g.end());
-                            g.erase(std::unique(g.begin(), g.end()), g.end());
-                            return g;
-                        };
-                        // Certified tangent parallel cylinders, in accepted order. A
-                        // region already on the wall's own set is no anchor.
-                        std::vector<std::vector<int>> anchorG;
-                        std::vector<int> anchorAcc;
-                        for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
-                            const Region& ar = work.accepted[(std::size_t)ai];
-                            if (ar.type != SurfType::Cylinder || ar.tris.empty()) continue;
-                            if (!anchorCertified(tau, ar.maxVertexDev)) continue;
-                            if (bandHoldsAny(ar.tris, inC)) continue;
-                            const double tolA = anchorTol(tau, ar.maxVertexDev);
-                            const CoaxTangent tg = coaxTangentCylinder(
-                                o, a, R, ar.ax.Location().XYZ(), ar.ax.Direction().XYZ(), ar.radius,
-                                tolA, tau, L);
-                            if (!tg.ok) continue;
-                            anchorG.push_back(gidsOf(ar.tris));
-                            anchorAcc.push_back(ai);
-                        }
-                        for (const std::vector<int>& comp : comps) {
-                            const std::vector<int> cg = gidsOf(comp);
-                            bool found = false;
-                            for (std::size_t k = 0; k < anchorAcc.size() && !found; ++k) {
-                                const Region& ar = work.accepted[(std::size_t)anchorAcc[k]];
-                                const double tolA = anchorTol(tau, ar.maxVertexDev);
-                                for (int g : anchorG[k]) {
-                                    if (!std::binary_search(cg.begin(), cg.end(), g)) continue;
-                                    if (coaxContact(mv.pts[g], o, a, R, ar.ax.Location().XYZ(),
-                                                    ar.ax.Direction().XYZ(), ar.radius, tolA, tau)) {
-                                        found = true;
-                                        if (diagOn()) {
-                                            const CoaxTangent tg = coaxTangentCylinder(
-                                                o, a, R, ar.ax.Location().XYZ(),
-                                                ar.ax.Direction().XYZ(), ar.radius, tolA, tau, L);
-                                            std::fprintf(stderr,
-                                                         "DIAG_REL_COAX_ANCHOR seed=%d comp=%d "
-                                                         "acc=%d origin=%d r=%.9g nTri=%zu "
-                                                         "devTau=%.4f dist=%.9g internal=%d "
-                                                         "tanDistTau=%.4f crossTau=%.4g contact=%d\n",
-                                                         cb.seed, minTriOf(comp), anchorAcc[k],
-                                                         (int)ar.origin, ar.radius, ar.tris.size(),
-                                                         ar.maxVertexDev / tau, tg.dist,
-                                                         (int)tg.internal, tg.tanDist / tau,
-                                                         tg.cross * L / tau, g);
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            if (found) ++anchored;
-                        }
+                        const TangentAnchors an = tangentAnchors(P.C, o, a, R, L);
+                        for (const std::vector<int>& comp : comps)
+                            if (anchorContact(an, comp, o, a, R, L)) ++anchored;
                         Band pb;
                         pb.tris = P.C;
                         collectBand(mv, fr, wm.g2l, pb);
@@ -2428,7 +2466,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                         coverDev = devOver(P.C, o, a, R, rms);
                         if (nComp == 0 || anchored != nComp) liftWhy = "no-anchor";
                         else if (sameSurfaceCyl(wm, work, pb, o, a, R)) liftWhy = "same-surface";
-                        else if (closedOf(mv, fr, P.C, pb.verts, wm.thetaBin).closed)
+                        else if (closedOf(mv, fr, P.C, pb.verts, wm.thetaBin).closed ||
+                                 coaxInsideClosure(P.C, lf.d2Closures))
                             liftWhy = "not-closed-wall";
                         else liftWhy = "accept";
                         if (std::strcmp(liftWhy, "accept") == 0) {
@@ -2444,14 +2483,15 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                     std::fprintf(stderr,
                                  "DIAG_REL_COAX_LIFT seed=%d family=%d from=%s radius=%.9g nI0=%zu "
                                  "preimageAnnulus=%d nI=%zu nC=%zu nCover=%zu nFill=%d compsC=%d loops=%d "
-                                 "windings=%s d2Closed=%d foldDeg=%.4f thetaCylLoDeg=%.4f "
-                                 "sTau=%.4f certDevTau=%.4f coverDevTau=%.4f partialComps=%d "
-                                 "anchored=%d why=%s\n",
+                                 "windings=%s windows=%d seamU=%.6f d2Closed=%d foldDeg=%.4f "
+                                 "thetaCylLoDeg=%.4f sTau=%.4f certDevTau=%.4f coverDevTau=%.4f "
+                                 "partialComps=%d anchored=%d why=%s\n",
                                  cb.seed, famId, why, R, I0.size(), (int)preimageAnnulus,
                                  G.I.size(), G.C.size(),
                                  G.C.size() - G.I.size() - (std::size_t)(triedPartial ? 0 : nFill),
                                  triedPartial ? 0 : nFill, compsC, nLoops,
-                                 wind.empty() ? "-" : wind.c_str(), d2, foldMax * 180.0 / kPi,
+                                 wind.empty() ? "-" : wind.c_str(), nWindows, seamU, d2,
+                                 foldMax * 180.0 / kPi,
                                  lf.tol->thetaCylLo * 180.0 / kPi, G.s / tau,
                                  (G.cert.fit.maxDev.empty() ? 0.0 : G.cert.fit.maxDev.back()) / tau,
                                  coverDev / tau, nComp, anchored, liftWhy);
@@ -2519,7 +2559,7 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
                 fam.axis = cc.fit.axis;
                 fam.groups.push_back(bpts);
                 fam.bandRegion.push_back((int)work.accepted.size());
-                fam.bandLifted.push_back(lifted ? 1 : 0);
+                fam.bandLifted.push_back(lifted ? (liftedOnAnchor ? 2 : 1) : 0);
                 work.accepted.push_back(std::move(r));
                 for (int t : cb.tris)
                     if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
@@ -3655,7 +3695,315 @@ std::vector<Donor> ringDonors(const MeshView& mv, const SegmentWork& work, doubl
     return out;
 }
 
+// D-fc-7.3 RQ-HUB-5. Write the member's cylinder onto the region. The axis
+// line and radius are the member's; the placement origin is the region's own
+// centroid projected onto that line, and the X direction is one of its own
+// vertices, so a partial keeps a real azimuth. closed360 is kept: this is a
+// surface swap, not a reclassification. Triangles stay (not a merge).
+void rehostRegionOnto(const MeshView& mv, Region& r, const gp_XYZ& origin, const gp_XYZ& axisIn,
+                      double R, double thetaBin) {
+    gp_XYZ axis = axisIn;
+    const double am = axis.Modulus();
+    if (!(am > 0.0) || !(R > 0.0) || r.tris.empty()) return;
+    axis /= am;
+    if (axis.Dot(r.ax.Direction().XYZ()) < 0.0)
+        axis = gp_XYZ(-axis.X(), -axis.Y(), -axis.Z());
+
+    gp_XYZ cent(0, 0, 0);
+    double areaSum = 0;
+    for (int t : r.tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        areaSum += a;
+        cent += triCentroid(mv, t) * a;
+    }
+    if (areaSum > 0.0) cent /= areaSum;
+    const gp_XYZ loc = origin + axis * ((cent - origin).Dot(axis));
+
+    std::vector<gp_XYZ> pts;
+    pts.reserve(r.tris.size() * 3);
+    for (int t : r.tris)
+        for (int k = 0; k < 3; ++k) pts.push_back(triVert(mv, t, k));
+    gp_XYZ xHint(1, 0, 0);
+    for (const gp_XYZ& p : pts) {
+        gp_XYZ rad = p - loc;
+        rad -= axis * rad.Dot(axis);
+        if (rad.Modulus() > gp::Resolution()) {
+            xHint = rad;
+            break;
+        }
+    }
+    const Frame fr = makeFrame(loc, axis, xHint);
+    std::vector<Vtx> uniq;
+    uniq.reserve(pts.size());
+    double vMin = 1e300, vMax = -1e300, maxD = 0, sum2 = 0;
+    for (const gp_XYZ& p : pts) {
+        Vtx v;
+        v.p = p;
+        v.pr = profOfPoint(p, fr, 0);
+        uniq.push_back(v);
+        vMin = std::min(vMin, v.pr.z);
+        vMax = std::max(vMax, v.pr.z);
+        const double d = std::fabs(v.pr.rho - R);
+        maxD = std::max(maxD, d);
+        sum2 += d * d;
+    }
+    const ClosedM cl = closedOf(mv, fr, r.tris, uniq, thetaBin);
+    double sigma = 0;
+    for (int t : r.tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        gp_XYZ rad = triCentroid(mv, t) - loc;
+        rad -= axis * rad.Dot(axis);
+        const double rm = rad.Modulus();
+        if (rm > gp::Resolution()) sigma += a * n.Dot(rad / rm);
+    }
+    const bool outward = sigma > 0.0;
+    const int nSides = std::max(cl.nSides, 1);
+    const bool wasClosed = r.closed360;
+    r.type = SurfType::Cylinder;
+    r.ax = gp_Ax3(gp_Pnt(loc.X(), loc.Y(), loc.Z()), gp_Dir(axis.X(), axis.Y(), axis.Z()),
+                  gp_Dir(fr.e1.X(), fr.e1.Y(), fr.e1.Z()));
+    r.radius = R;
+    r.uMin = wasClosed ? 0.0 : cl.uMin;
+    r.uMax = wasClosed ? kTwoPi : cl.uMax;
+    r.vMin = (vMin > vMax) ? 0.0 : vMin;
+    r.vMax = (vMin > vMax) ? 0.0 : vMax;
+    r.closed360 = wasClosed;
+    r.outwardNormal = outward;
+    r.maxVertexDev = maxD;
+    r.rmsVertexDev = pts.empty() ? 0.0 : std::sqrt(sum2 / (double)pts.size());
+    r.nSides = nSides;
+    r.chordSagitta = chordSagitta(R, nSides);
+    r.dVolPredicted = dVolCylinderSector(areaSum, R, nSides, outward);
+}
+
+// D-fc-7.3 RQ-HUB-5 (F-E). Called from claimRelRevolve's Torus mode, after the
+// coaxial families of the accepted cylinder donors are known and the torus
+// gather has run on the original fits. A cylinder region whose every vertex
+// certifies within tau on an accepted, certified family member takes that
+// member's stored (axis, R). Faces stay separate.
+void rehostCoaxialSurfaces(const MeshView& mv, SegmentWork& work,
+                           const std::vector<CoaxialFamily>& fams, const std::vector<Donor>& donors,
+                           double tau, double thetaBin) {
+    if (!(tau > 0.0) || !mv.pts || !mv.tris) return;
+    const int nAcc = (int)work.accepted.size();
+    const int nTri = (int)mv.nTri;
+    std::vector<CoaxRehostMember> mems;
+    std::vector<char> seen((std::size_t)std::max(nAcc, 0), 0);
+    for (const CoaxialFamily& fam : fams) {
+        for (int di : fam.members) {
+            if (di < 0 || (std::size_t)di >= donors.size()) continue;
+            const int acc = donors[(std::size_t)di].idx;
+            if (acc < 0 || acc >= nAcc || seen[(std::size_t)acc]) continue;
+            const Region& m = work.accepted[(std::size_t)acc];
+            if (m.type != SurfType::Cylinder || !(m.radius > tau)) continue;
+            if (!anchorCertified(tau, m.maxVertexDev)) continue;
+            seen[(std::size_t)acc] = 1;
+            CoaxRehostMember mm;
+            mm.acc = acc;
+            mm.origin = m.ax.Location().XYZ();
+            mm.axis = m.ax.Direction().XYZ();
+            mm.radius = m.radius;
+            mm.certified = true;
+            mems.push_back(mm);
+        }
+    }
+    if (mems.empty()) return;
+    auto vertsOf = [&](const Region& reg) {
+        std::vector<int> gids;
+        for (int t : reg.tris) {
+            if (t < 0 || t >= nTri) continue;
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3; ++k) gids.push_back(mv.tris[gt][k]);
+        }
+        std::sort(gids.begin(), gids.end());
+        gids.erase(std::unique(gids.begin(), gids.end()), gids.end());
+        std::vector<gp_XYZ> verts;
+        verts.reserve(gids.size());
+        for (int g : gids)
+            if (g >= 0) verts.push_back(mv.pts[g]);
+        return verts;
+    };
+    std::vector<CoaxRehostMember> stable;
+    stable.reserve(mems.size());
+    for (const CoaxRehostMember& m : mems) {
+        const std::vector<gp_XYZ> mvts = vertsOf(work.accepted[(std::size_t)m.acc]);
+        if (!coaxRehostStable(mvts, m.acc, mems, tau)) continue;
+        stable.push_back(m);
+    }
+    if (stable.empty()) return;
+    for (int i = 0; i < nAcc; ++i) {
+        Region& r = work.accepted[(std::size_t)i];
+        if (r.type != SurfType::Cylinder || r.tris.empty()) continue;
+        const std::vector<gp_XYZ> verts = vertsOf(r);
+        if (verts.empty()) continue;
+        // Self is not a target: the region's own fit is what a short arc must
+        // be allowed to leave. The lowest other stable member wins.
+        std::vector<CoaxRehostMember> others;
+        others.reserve(stable.size());
+        for (const CoaxRehostMember& m : stable)
+            if (m.acc != i) others.push_back(m);
+        const CoaxRehostDecision d = coaxRehostChoose(verts, others, tau);
+        if (!d.take) continue;
+        const double len = std::max(r.vMax - r.vMin, tau);
+        if (coaxRehostAlready(r.ax.Location().XYZ(), r.ax.Direction().XYZ(), r.radius, len,
+                              d.origin, d.axis, d.radius, tau))
+            continue;
+        const double oldR = r.radius;
+        rehostRegionOnto(mv, r, d.origin, d.axis, d.radius, thetaBin);
+        if (!diagOn()) continue;
+        DiagRec rec;
+        rec.mode = "rehost";
+        rec.seed = minTriOf(r.tris);
+        rec.nTri = (int)r.tris.size();
+        rec.nV = (int)verts.size();
+        rec.fit = "anchored";
+        rec.params = 0;
+        rec.r0 = oldR;
+        rec.r1 = r.radius;
+        rec.axis = r.ax.Direction().XYZ();
+        rec.maxDev = r.maxVertexDev;
+        rec.maxDevTau = r.maxVertexDev / tau;
+        rec.why = "accept";
+        printBand(rec);
+    }
+}
+
+// D-fc-7.6 (T). Each round that is a D-fc-6.8 RQ-3 (i) anchor of a closed coaxial
+// wall committed above the fold floor ON that anchor (D-fc-7.3 RQ-HUB-1: the
+// anchor is that wall's certificate) -- a certified cylinder with its axis
+// parallel to the wall's, tangent to it within tanDistTol(tau, tau) and sharing a
+// contact vertex with it -- is refit in the D-fc-1.4 anchored mode with that
+// tangency held exact (anchoredTangentFit: phi first, then phi and r, fewest
+// parameters first). It ships only if its vertices still certify at tau;
+// otherwise the free fit stays. A round that anchors more than one such wall keeps
+// its free fit. Runs after the family's final axis placement, so the tangency is
+// to the wall surface the builder receives.
+void anchoredTangentRounds(WorkMesh& wm, SegmentWork& work, const LineFamilies& lf) {
+    const MeshView& mv = *wm.mv;
+    const int nTri = (int)mv.nTri;
+    const double tau = wm.tau;
+    if (!(tau > 0.0)) return;
+    auto gidsOf = [&](const std::vector<int>& tris) {
+        std::vector<int> g;
+        for (int t : tris) {
+            if (t < 0 || t >= nTri) continue;
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3; ++k) g.push_back(mv.tris[gt][k]);
+        }
+        std::sort(g.begin(), g.end());
+        g.erase(std::unique(g.begin(), g.end()), g.end());
+        return g;
+    };
+    struct Hit {
+        int wall = -1;
+        bool internal = false;
+        double tanDist = 0;
+        double overlap = 0;  // > 0: the free fits cross (external: R + r - d; internal: d - |R - r|)
+    };
+    std::map<int, std::vector<Hit>> anchorsOf;  // round (accepted index) -> walls it anchors
+    for (const CoaxFamily& fam : lf.fams)
+        for (std::size_t k = 0; k < fam.bandRegion.size(); ++k) {
+            if (!(k < fam.bandLifted.size() && fam.bandLifted[k] == 2)) continue;
+            const int wi = fam.bandRegion[k];
+            const Region& wall = work.accepted[(std::size_t)wi];
+            if (wall.type != SurfType::Cylinder || wall.tris.empty()) continue;
+            const gp_XYZ o = wall.ax.Location().XYZ();
+            const gp_XYZ a = wall.ax.Direction().XYZ();
+            const double R = wall.radius;
+            std::vector<char> inW((std::size_t)nTri, 0);
+            for (int t : wall.tris)
+                if (t >= 0 && t < nTri) inW[(std::size_t)t] = 1;
+            const std::vector<int> wg = gidsOf(wall.tris);
+            const double L = std::max(wall.vMax - wall.vMin, tau);
+            for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
+                if (ai == wi) continue;
+                const Region& ar = work.accepted[(std::size_t)ai];
+                if (ar.type != SurfType::Cylinder || ar.tris.empty()) continue;
+                if (!anchorCertified(tau, ar.maxVertexDev)) continue;
+                if (bandHoldsAny(ar.tris, inW)) continue;
+                const double tolA = anchorTol(tau, ar.maxVertexDev);
+                const CoaxTangent tg = coaxTangentCylinder(o, a, R, ar.ax.Location().XYZ(),
+                                                           ar.ax.Direction().XYZ(), ar.radius,
+                                                           tolA, tau, L);
+                if (!tg.ok || !(tg.tanDist <= tanDistTol(tau, tau))) continue;
+                bool contact = false;
+                for (int g : gidsOf(ar.tris)) {
+                    if (!std::binary_search(wg.begin(), wg.end(), g)) continue;
+                    if (coaxContact(mv.pts[g], o, a, R, ar.ax.Location().XYZ(),
+                                    ar.ax.Direction().XYZ(), ar.radius, tolA, tau)) {
+                        contact = true;
+                        break;
+                    }
+                }
+                if (contact)
+                    anchorsOf[ai].push_back({wi, tg.internal, tg.tanDist,
+                                             tg.internal ? tg.dist - std::fabs(R - ar.radius)
+                                                         : R + ar.radius - tg.dist});
+            }
+        }
+    for (const auto& kv : anchorsOf) {
+        Region& ar = work.accepted[(std::size_t)kv.first];
+        const char* why = "accept";
+        AnchoredTangentFit f;
+        if (kv.second.size() != 1) {
+            why = "multi-wall";
+        } else {
+            const Region& wall = work.accepted[(std::size_t)kv.second.front().wall];
+            std::vector<gp_XYZ> pts;
+            for (int g : gidsOf(ar.tris)) pts.push_back(mv.pts[g]);
+            // Fewest parameters first (D-fc-1.6): phi alone with the free fit's r,
+            // then phi and r (D-fc-7.6), each certified at tau.
+            for (const bool fitR : {false, true}) {
+                f = anchoredTangentFit(pts, wall.ax.Location().XYZ(), wall.ax.Direction().XYZ(),
+                                       wall.radius, kv.second.front().internal,
+                                       ar.ax.Location().XYZ(), ar.radius, wm.maxIter, fitR);
+                if (f.ok && f.maxDev <= tau) break;
+            }
+            if (!f.ok) why = "degenerate";
+            else if (!(f.maxDev <= tau)) why = "vertex-off";
+        }
+        if (diagOn())
+            std::fprintf(stderr,
+                         "DIAG_REL_COAX_TANGENT round=%d nTri=%zu walls=%zu r=%.9g -> %.9g "
+                         "devTau=%.4f -> %.4f tanDistTau=%.4f overlapTau=%.4f internal=%d "
+                         "why=%s\n",
+                         minTriOf(ar.tris), ar.tris.size(), kv.second.size(), ar.radius,
+                         f.ok ? f.radius : 0.0, ar.maxVertexDev / tau, f.ok ? f.maxDev / tau : 0.0,
+                         kv.second.front().tanDist / tau, kv.second.front().overlap / tau,
+                         (int)kv.second.front().internal, why);
+        if (std::strcmp(why, "accept") != 0) continue;
+        const Region& wall = work.accepted[(std::size_t)kv.second.front().wall];
+        const gp_XYZ o = wall.ax.Location().XYZ();
+        gp_XYZ a = wall.ax.Direction().XYZ();
+        if (ar.ax.Direction().XYZ().Dot(a) < 0.0) a.Reverse();
+        const double v0 = (ar.ax.Location().XYZ() - o).Dot(a);
+        gp_XYZ xd = ar.ax.XDirection().XYZ();
+        xd -= a * xd.Dot(a);
+        if (!(xd.Modulus() > gp::Resolution())) continue;
+        ar.ax = gp_Ax3(gp_Pnt(f.centre + a * v0), gp_Dir(a), gp_Dir(xd));
+        ar.radius = f.radius;
+        ar.maxVertexDev = f.maxDev;
+        ar.rmsVertexDev = f.rmsDev;
+        if (ar.nSides > 0) {
+            double area = 0;
+            for (int t : ar.tris) {
+                gp_XYZ n;
+                area += triAreaNormal(mv, t, n);
+            }
+            ar.chordSagitta = chordSagitta(ar.radius, ar.nSides);
+            ar.dVolPredicted = dVolCylinderSector(area, ar.radius, ar.nSides, ar.outwardNormal);
+        }
+        ar.tangentExact = true;
+        ar.tangentWallOrigin = o;
+        ar.tangentWallAxis = wall.ax.Direction().XYZ();
+        ar.tangentWallRadius = wall.radius;
+    }
+}
+
 }  // namespace
+
 
 bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                      SegmentWork& work, RelRevolveMode mode) {
@@ -3859,6 +4207,7 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                                  wm.thetaBin);
                 }
             }
+            anchoredTangentRounds(wm, work, lf);
             // D-fc-5.2: section fillets need the circles certified above (the
             // donors and the coaxial bands), so they follow the Line gather.
             std::vector<SectionCircle> circles;
@@ -3988,6 +4337,11 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
             // D-fc-5.11 F1: ring donors scan after every region family.
             for (Donor& donor : ringDonors(mv, work, tau, wm.maxIter))
                 gatherTori(wm, work, donor, axisScans, atomOf, atomDead, claimed, refused);
+            // D-fc-7.3 RQ-HUB-5 (F-E). Coaxial families are known; the torus
+            // gather above already consumed the original fits. A region whose
+            // every vertex certifies on a member takes that member's surface.
+            // Not a merge: the region's triangles stay its own face.
+            rehostCoaxialSurfaces(mv, work, fams, donors, tau, wm.thetaBin);
             // An atom a withheld band would have absorbed stays (D-fc-4.11 (a)).
             for (std::size_t i = 0; i < atomDead.size() && i < wm.atomHeld.size(); ++i)
                 if (wm.atomHeld[i]) atomDead[i] = 0;

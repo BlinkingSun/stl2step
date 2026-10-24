@@ -14,16 +14,24 @@
 #include <BRep_Tool.hxx>
 #include <ElCLib.hxx>
 #include <ElSLib.hxx>
+#include <Geom2d_BSplineCurve.hxx>
+#include <Geom2d_Line.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Curve.hxx>
+#include <Geom_CylindricalSurface.hxx>
 #include <Geom_Ellipse.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
 #include <Geom_Surface.hxx>
 #include <Geom_TrimmedCurve.hxx>
+#include <TColStd_Array1OfInteger.hxx>
+#include <TColStd_Array1OfReal.hxx>
+#include <TColgp_Array1OfPnt2d.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <gp.hxx>
 #include <gp_Ax1.hxx>
@@ -31,7 +39,9 @@
 #include <gp_Ax3.hxx>
 #include <gp_Circ.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Dir2d.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Vec2d.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
@@ -491,6 +501,164 @@ inline bool closedAnalyticRim(const std::vector<TopoDS_Edge>& edges) {
     TopExp::Vertices(edges.back(), c2, d2, Standard_True);
     return !a.IsSame(b) && b.IsSame(c2) && d2.IsSame(a);
 }
+
+// D-fc-7.10. The u-chart of one edge on a partial-cylinder rectangular trim:
+// the straight UV segment through the edge's own vertices on that trim's
+// [uLo, uHi]. Two edges that share a vertex then meet at that vertex's UV.
+// A full-turn image is used only when both ends land in the trim. The slack
+// is the edge's own tolerance over the cylinder radius (the angle that
+// tolerance subtends). Null when the edge is not on this trim — the caller
+// keeps its other construction. Installed only by healInvalidPartialTrimChart,
+// and only on a face whose BRepCheck already failed.
+inline Handle(Geom2d_Curve) partialTrimChartPCurve(const TopoDS_Edge& e, const Handle(Geom_Curve)& c3,
+                                                   Standard_Real f, Standard_Real l,
+                                                   const Handle(Geom_Surface)& srf) {
+    if (e.IsNull() || c3.IsNull() || srf.IsNull()) return {};
+    Handle(Geom_RectangularTrimmedSurface) trim =
+        Handle(Geom_RectangularTrimmedSurface)::DownCast(srf);
+    if (trim.IsNull()) return {};
+    Handle(Geom_CylindricalSurface) cyl =
+        Handle(Geom_CylindricalSurface)::DownCast(trim->BasisSurface());
+    if (cyl.IsNull()) return {};
+    Standard_Real uLo = 0, uHi = 0, vLo = 0, vHi = 0;
+    trim->Bounds(uLo, uHi, vLo, vHi);
+    const double halfTurn = std::acos(-1.0);
+    const double twoPi = 2.0 * halfTurn;
+    const double span = uHi - uLo;
+    if (!(span > Precision::Confusion() && span < twoPi - Precision::Confusion())) return {};
+    if (l - f <= Precision::PConfusion()) return {};
+    TopoDS_Vertex vf, vl;
+    TopExp::Vertices(e, vf, vl, Standard_False);
+    if (vf.IsNull() || vl.IsNull() || vf.IsSame(vl)) return {};
+    const gp_Ax3 ax = cyl->Position();
+    const double radius = cyl->Radius();
+    if (!(radius > Precision::Confusion())) return {};
+    auto uvOf = [&](const gp_Pnt& p) {
+        gp_Vec rho(ax.Location(), p);
+        const double v = rho.Dot(ax.Direction());
+        gp_Vec rad = rho - gp_Vec(ax.Direction()) * v;
+        double u = 0.0;
+        if (rad.Magnitude() > Precision::Confusion())
+            u = std::atan2(rad.Dot(ax.YDirection()), rad.Dot(ax.XDirection()));
+        return gp_Pnt2d(u, v);
+    };
+    const gp_Pnt2d a0 = uvOf(BRep_Tool::Pnt(vf));
+    gp_Pnt2d b0 = uvOf(BRep_Tool::Pnt(vl));
+    double du = b0.X() - a0.X();
+    Handle(Geom_TrimmedCurve) tr = Handle(Geom_TrimmedCurve)::DownCast(c3);
+    Handle(Geom_Curve) src = (!tr.IsNull() && !tr->BasisCurve().IsNull()) ? tr->BasisCurve() : c3;
+    Handle(Geom_Circle) gc = Handle(Geom_Circle)::DownCast(src);
+    if (!gc.IsNull()) {
+        const double sgn = gc->Circ().Axis().Direction().Dot(ax.Direction()) >= 0.0 ? 1.0 : -1.0;
+        const double want = sgn * (l - f);
+        du += twoPi * std::round((want - du) / twoPi);
+    } else {
+        while (du > halfTurn) du -= twoPi;
+        while (du < -halfTurn) du += twoPi;
+    }
+    b0.SetX(a0.X() + du);
+    const double uSlack =
+        std::max(BRep_Tool::Tolerance(e), std::max(BRep_Tool::Tolerance(vf), BRep_Tool::Tolerance(vl))) /
+        radius;
+    auto inside = [&](double u) { return u >= uLo - uSlack && u <= uHi + uSlack; };
+    int useK = 0;
+    bool fit = false;
+    for (int kk : {0, 1, -1}) {
+        if (inside(a0.X() + twoPi * kk) && inside(b0.X() + twoPi * kk)) {
+            useK = kk;
+            fit = true;
+            break;
+        }
+    }
+    if (!fit) return {};
+    const gp_Pnt2d a(a0.X() + twoPi * useK, a0.Y());
+    const gp_Pnt2d b(b0.X() + twoPi * useK, b0.Y());
+    const double df = l - f;
+    const gp_Vec2d d2((b.X() - a.X()) / df, (b.Y() - a.Y()) / df);
+    if (d2.SquareMagnitude() <= Precision::PConfusion() * Precision::PConfusion()) return {};
+    try {
+        // Geom2d_Line is unit-speed. Iso-curves of the cylinder (circle, generator)
+        // have UV speed 1 on the 3D parameter, so the line hits both vertices.
+        // A chord's UV step is not that parameter length; a degree-1 spline carries
+        // the same segment on [f, l].
+        if (std::abs(d2.Magnitude() - 1.0) <= Precision::PConfusion())
+            return new Geom2d_Line(gp_Pnt2d(a.X() - f * d2.X(), a.Y() - f * d2.Y()), gp_Dir2d(d2));
+        TColgp_Array1OfPnt2d poles(1, 2);
+        poles.SetValue(1, a);
+        poles.SetValue(2, b);
+        TColStd_Array1OfReal knots(1, 2);
+        knots.SetValue(1, f);
+        knots.SetValue(2, l);
+        TColStd_Array1OfInteger mults(1, 2);
+        mults.SetValue(1, 2);
+        mults.SetValue(2, 2);
+        return new Geom2d_BSplineCurve(poles, knots, mults, 1);
+    } catch (const Standard_Failure&) {
+        return {};
+    }
+}
+
+// D-fc-7.10. `cap` is the caller's existing partial-face budget. A face that
+// is already BRepCheck-valid is returned untouched — the chart is not
+// installed. An invalid face whose surface is a partial-cylinder trim is
+// rebuilt by installing partialTrimChartPCurve on each edge that lies on that
+// trim within `cap`. The edge tolerance is the measured deviation when that
+// is larger, and it is restored with the pcurves if the rebuild fails.
+// The rebuild is kept
+// only when BRepCheck then passes; otherwise every pcurve, range, tolerance
+// and parameter flag is restored and today's path stands. True only when an
+// invalid face became valid.
+// `tau` is tauOf (2q). When the chart is installed and the face is still
+// invalid, the D-fc-7.10 corner fallback runs on that face before the
+// pcurves are restored. tau <= 0 skips the fallback.
+bool healInvalidPartialTrimChart(TopoDS_Face& face, double cap, double tau = 0);
+
+// D-fc-7.10 fallback, used only when the chart above cannot validate the
+// face. `tau` is tauOf (2q). A face that is already BRepCheck-valid is
+// returned untouched. On an invalid face, a shared corner whose pcurves
+// cross away from the vertex takes that vertex's tolerance equal to the
+// measured 3D distance from the vertex to the crossing, and only when that
+// distance is <= tau. A larger distance is refused, not clamped. The saved
+// tolerance is restored unless BRepCheck then passes. True only when an
+// invalid face became valid.
+bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau);
+
+// D-fc-7.16. Either trim bound lies within Precision::PConfusion() of the
+// periodic seam (0 and 2π are the same angle). The tolerance is OCCT's
+// parametric confusion, not a new length.
+inline bool partialTrimTouchesPeriodicSeam(double uLo, double uHi) {
+    const double twoPi = 2.0 * std::acos(-1.0);
+    const double tol = Precision::PConfusion();
+    auto nearSeam = [&](double u) { return std::fabs(std::remainder(u, twoPi)) <= tol; };
+    return nearSeam(uLo) || nearSeam(uHi);
+}
+
+// D-fc-7.16. XDirection rotation about the cylinder axis that centres this
+// trim at u = π. Measured from the trim's own bounds. No new threshold.
+inline double partialCylSeamFrameAngle(double uLo, double uHi) {
+    return 0.5 * (uLo + uHi) - std::acos(-1.0);
+}
+
+// D-fc-7.16. The rotated frame applies only to a partial (not full-turn)
+// cylinder whose trim touches the seam, or whose face already carries a seam
+// edge (nSeamE > 0). A full turn is a closed cylinder and is not this heal.
+inline bool partialCylSeamFrameApplies(double uLo, double uHi, int nSeamEdges) {
+    const double twoPi = 2.0 * std::acos(-1.0);
+    const double span = uHi - uLo;
+    if (!(span > Precision::Confusion() && span < twoPi - Precision::Confusion())) return false;
+    return partialTrimTouchesPeriodicSeam(uLo, uHi) || nSeamEdges > 0;
+}
+
+// D-fc-7.16. A face that is already BRepCheck-valid is returned untouched.
+// An invalid partial cylinder whose trim touches the periodic seam (or whose
+// wire carries a seam edge) is rebuilt on the same cylinder — same axis,
+// radius and location — with XDirection rotated by partialCylSeamFrameAngle
+// so the trim is centred at π. Every boundary edge gets one pcurve from
+// partialTrimChartPCurve on that rotated trim. The rebuild ships only when
+// the face and a shell that contains it both pass BRepCheck; otherwise the
+// added pcurves and any raised edge tolerance are restored. True only when
+// an invalid face became valid.
+bool healPartialCylSeamFrame(TopoDS_Face& face, double cap);
 
 }  // namespace refit
 }  // namespace stl2step

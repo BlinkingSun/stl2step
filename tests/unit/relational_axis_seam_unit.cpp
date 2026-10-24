@@ -16,8 +16,10 @@
 #include <vector>
 
 #include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakeWire.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepCheck_ListOfStatus.hxx>
 #include <BRepLib.hxx>
 #include <BRep_Builder.hxx>
 #include <Geom2d_Line.hxx>
@@ -39,6 +41,7 @@
 #include <BRep_Tool.hxx>
 #include <Geom_Circle.hxx>
 #include <Geom_Ellipse.hxx>
+#include <Geom_Line.hxx>
 #include <Geom_ToroidalSurface.hxx>
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
@@ -57,6 +60,126 @@ static void expect(bool ok, const char* name) {
     std::fprintf(stderr, "%s %s\n", ok ? "PASS" : "FAIL", name);
     if (!ok) ++gFail;
 }
+
+static const char* brepCheckStatusName(int st) {
+    switch (st) {
+        case BRepCheck_NoError: return "NoError";
+        case BRepCheck_InvalidPointOnCurve: return "InvalidPointOnCurve";
+        case BRepCheck_InvalidPointOnCurveOnSurface: return "InvalidPointOnCurveOnSurface";
+        case BRepCheck_InvalidPointOnSurface: return "InvalidPointOnSurface";
+        case BRepCheck_No3DCurve: return "No3DCurve";
+        case BRepCheck_Multiple3DCurve: return "Multiple3DCurve";
+        case BRepCheck_Invalid3DCurve: return "Invalid3DCurve";
+        case BRepCheck_NoCurveOnSurface: return "NoCurveOnSurface";
+        case BRepCheck_InvalidCurveOnSurface: return "InvalidCurveOnSurface";
+        case BRepCheck_InvalidCurveOnClosedSurface: return "InvalidCurveOnClosedSurface";
+        case BRepCheck_InvalidSameRangeFlag: return "InvalidSameRangeFlag";
+        case BRepCheck_InvalidSameParameterFlag: return "InvalidSameParameterFlag";
+        case BRepCheck_InvalidDegeneratedFlag: return "InvalidDegeneratedFlag";
+        case BRepCheck_FreeEdge: return "FreeEdge";
+        case BRepCheck_InvalidMultiConnexity: return "InvalidMultiConnexity";
+        case BRepCheck_InvalidRange: return "InvalidRange";
+        case BRepCheck_EmptyWire: return "EmptyWire";
+        case BRepCheck_RedundantEdge: return "RedundantEdge";
+        case BRepCheck_SelfIntersectingWire: return "SelfIntersectingWire";
+        case BRepCheck_NoSurface: return "NoSurface";
+        case BRepCheck_InvalidWire: return "InvalidWire";
+        case BRepCheck_RedundantWire: return "RedundantWire";
+        case BRepCheck_IntersectingWires: return "IntersectingWires";
+        case BRepCheck_InvalidImbricationOfWires: return "InvalidImbricationOfWires";
+        case BRepCheck_EmptyShell: return "EmptyShell";
+        case BRepCheck_RedundantFace: return "RedundantFace";
+        case BRepCheck_InvalidImbricationOfShells: return "InvalidImbricationOfShells";
+        case BRepCheck_UnorientableShape: return "UnorientableShape";
+        case BRepCheck_NotClosed: return "NotClosed";
+        case BRepCheck_NotConnected: return "NotConnected";
+        case BRepCheck_SubshapeNotInShape: return "SubshapeNotInShape";
+        case BRepCheck_BadOrientation: return "BadOrientation";
+        case BRepCheck_BadOrientationOfSubshape: return "BadOrientationOfSubshape";
+        case BRepCheck_InvalidPolygonOnTriangulation: return "InvalidPolygonOnTriangulation";
+        case BRepCheck_InvalidToleranceValue: return "InvalidToleranceValue";
+        case BRepCheck_EnclosedRegion: return "EnclosedRegion";
+        case BRepCheck_CheckFail: return "CheckFail";
+        default: return "?";
+    }
+}
+
+static void fprintfBrepResultStatuses(const char* label, const Handle(BRepCheck_Result)& res) {
+    if (res.IsNull()) {
+        std::fprintf(stderr, "  %s: (null BRepCheck_Result)\n", label);
+        return;
+    }
+    std::fprintf(stderr, "  %s:", label);
+    bool any = false;
+    for (BRepCheck_ListOfStatus::Iterator it(res->Status()); it.More(); it.Next()) {
+        const int st = static_cast<int>(it.Value());
+        std::fprintf(stderr, "%s%s", any ? "," : " ", brepCheckStatusName(st));
+        any = true;
+    }
+    if (!any) std::fprintf(stderr, " NoError");
+    std::fprintf(stderr, "\n");
+}
+
+static void dumpFaceBrepCheck(const TopoDS_Face& face) {
+    BRepCheck_Analyzer an(face, Standard_True);
+    std::fprintf(stderr, "BRepCheck dump (IsValid=%d):\n", an.IsValid() ? 1 : 0);
+    fprintfBrepResultStatuses("face", an.Result(face));
+    for (TopExp_Explorer wx(face, TopAbs_WIRE); wx.More(); wx.Next())
+        fprintfBrepResultStatuses("wire", an.Result(wx.Current()));
+    int ei = 0;
+    for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More(); ex.Next(), ++ei) {
+        const TopoDS_Edge e = TopoDS::Edge(ex.Current());
+        std::fprintf(stderr, "  edge[%d] tol=%.9g:", ei, BRep_Tool::Tolerance(e));
+        const Handle(BRepCheck_Result) er = an.Result(e);
+        if (er.IsNull()) {
+            std::fprintf(stderr, " (null)\n");
+            continue;
+        }
+        bool any = false;
+        for (BRepCheck_ListOfStatus::Iterator it(er->Status()); it.More(); it.Next()) {
+            const int st = static_cast<int>(it.Value());
+            std::fprintf(stderr, "%s%s", any ? "," : " ", brepCheckStatusName(st));
+            any = true;
+        }
+        if (!any) std::fprintf(stderr, " NoError");
+        std::fprintf(stderr, "\n");
+    }
+}
+
+static void expectFaceValidBeforeHeal(const TopoDS_Face& face, Standard_Boolean wantValid,
+                                     const char* name) {
+    BRepCheck_Analyzer before(face, Standard_True);
+    const bool got = before.IsValid() == Standard_True;
+    const bool want = wantValid == Standard_True;
+    if (got != want) dumpFaceBrepCheck(face);
+    expect(got == want, name);
+}
+
+// Same dense sampling and margin as fitEdgeTolerancesToFace (refit_build.cpp:11551-11560).
+static double maxCurveOnSurfaceDeviation(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
+                                         const Handle(Geom_Surface)& srf,
+                                         const Handle(Geom2d_Curve)& pc,
+                                         const TopLoc_Location& loc) {
+    if (c3.IsNull() || pc.IsNull() || srf.IsNull() || l <= f) return 0.0;
+    Handle(Geom_Surface) sb =
+        Handle(Geom_Surface)::DownCast(srf->Transformed(loc.Transformation()));
+    if (sb.IsNull()) sb = srf;
+    const gp_Trsf tr = loc.Transformation();
+    double maxD = 0.0;
+    auto atT = [&](double t) {
+        const gp_Pnt2d uv = pc->Value(t);
+        gp_Pnt ps = sb->Value(uv.X(), uv.Y());
+        if (!loc.IsIdentity()) ps.Transform(tr);
+        maxD = std::max(maxD, c3->Value(t).Distance(ps));
+    };
+    for (int k = 0; k <= 64; ++k) atT(f + (l - f) * (static_cast<double>(k) / 64.0));
+    atT(f);
+    atT(l);
+    atT(0.5 * (f + l));
+    return maxD;
+}
+
+static double edgeTolFromMeasuredDeviation(double d) { return d * 1.001 + Precision::Confusion(); }
 
 static constexpr double kPi = 3.14159265358979323846264338327950288;
 static constexpr double kTau = 1e-4;
@@ -787,6 +910,625 @@ int main() {
                    "c1: the antipode pick is chainVertexWithinTau at the antipode");
         } else {
             expect(false, "c1: the full ellipse has an antipode");
+        }
+    }
+
+    // D-fc-7.2 (4). A partial cylinder whose u-span straddles 0, bounded by the
+    // rot-trim / rev-hole edges (circle, two generators, one chord), is one valid
+    // face when every edge takes the trim's own u-chart.
+    {
+        const double R = 5.0;
+        const double uLo = -0.45;
+        const double uHi = 0.70;
+        const double vLo = 0.0;
+        const double vHi = 4.0;
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_CylindricalSurface) basis =
+            new Geom_CylindricalSurface(gp_Cylinder(ax, R));
+        const Handle(Geom_RectangularTrimmedSurface) trim =
+            new Geom_RectangularTrimmedSurface(basis, uLo, uHi, vLo, vHi);
+        auto at = [&](double u, double v) { return gp_Pnt(R * std::cos(u), R * std::sin(u), v); };
+        BRep_Builder bb;
+        TopoDS_Vertex v00, v10, v11, v01;
+        bb.MakeVertex(v00, at(uLo, vLo), Precision::Confusion());
+        bb.MakeVertex(v10, at(uHi, vLo), Precision::Confusion());
+        bb.MakeVertex(v11, at(uHi, vHi), Precision::Confusion());
+        bb.MakeVertex(v01, at(uLo, vHi), Precision::Confusion());
+        const gp_Ax2 cax(gp_Pnt(0, 0, vLo), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_TrimmedCurve) arc = new Geom_TrimmedCurve(new Geom_Circle(cax, R), uLo, uHi);
+        const Handle(Geom_Line) genHi = new Geom_Line(at(uHi, vLo), gp_Dir(0, 0, 1));
+        const gp_Vec chordDir(at(uHi, vHi), at(uLo, vHi));
+        const Handle(Geom_Line) chord = new Geom_Line(at(uHi, vHi), gp_Dir(chordDir));
+        const Handle(Geom_Line) genLo = new Geom_Line(at(uLo, vHi), gp_Dir(0, 0, -1));
+        BRepBuilderAPI_MakeEdge eArc(arc, v00, v10);
+        BRepBuilderAPI_MakeEdge eGenHi(genHi, v10, v11);
+        BRepBuilderAPI_MakeEdge eChord(chord, v11, v01);
+        BRepBuilderAPI_MakeEdge eGenLo(genLo, v01, v00);
+        expect(eArc.IsDone() && eGenHi.IsDone() && eChord.IsDone() && eGenLo.IsDone(),
+               "partial chart: rot-trim / rev-hole edges built");
+        TopoDS_Edge edges[4] = {eArc.Edge(), eGenHi.Edge(), eChord.Edge(), eGenLo.Edge()};
+        bool charts = true;
+        for (const TopoDS_Edge& e : edges) {
+            Standard_Real f = 0, l = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+            Handle(Geom2d_Curve) c2d = partialTrimChartPCurve(e, c3, f, l, trim);
+            if (c2d.IsNull()) {
+                charts = false;
+                continue;
+            }
+            Standard_Real buLo = 0, buHi = 0, bvLo = 0, bvHi = 0;
+            trim->Bounds(buLo, buHi, bvLo, bvHi);
+            double dev = 0.0;
+            for (int i = 0; i <= 32; ++i) {
+                const double t = f + (l - f) * (static_cast<double>(i) / 32.0);
+                const gp_Pnt2d uv = c2d->Value(t);
+                if (uv.X() < buLo - Precision::Confusion() || uv.X() > buHi + Precision::Confusion())
+                    charts = false;
+                dev = std::max(dev, c3->Value(t).Distance(trim->Value(uv.X(), uv.Y())));
+            }
+            const double tol = std::max(Precision::Confusion(), dev);
+            const TopLoc_Location loc;
+            bb.UpdateEdge(e, c2d, trim, loc, tol);
+            bb.Range(e, trim, loc, f, l);
+        }
+        expect(charts, "partial chart: every edge lies on the straddling trim");
+        // A trim of the same span that does not contain the vertices is not the
+        // chart (the rotated-basis trim whose parameter window is the mirror).
+        {
+            const Handle(Geom_RectangularTrimmedSurface) mirror =
+                new Geom_RectangularTrimmedSurface(basis, 0.0, 0.40, vLo, vHi);
+            TopoDS_Vertex na, nb;
+            bb.MakeVertex(na, at(-0.40, vLo), Precision::Confusion());
+            bb.MakeVertex(nb, at(-0.40, vHi), Precision::Confusion());
+            const Handle(Geom_Line) genNeg = new Geom_Line(at(-0.40, vLo), gp_Dir(0, 0, 1));
+            BRepBuilderAPI_MakeEdge eNeg(genNeg, na, nb);
+            expect(eNeg.IsDone(), "partial chart: generator off the mirror trim");
+            if (eNeg.IsDone()) {
+                Standard_Real f = 0, l = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(eNeg.Edge(), f, l);
+                expect(partialTrimChartPCurve(eNeg.Edge(), c3, f, l, mirror).IsNull(),
+                       "partial chart: mirrored trim is refused");
+                const Handle(Geom_RectangularTrimmedSurface) own =
+                    new Geom_RectangularTrimmedSurface(basis, -0.40, 0.0, vLo, vHi);
+                expect(!partialTrimChartPCurve(eNeg.Edge(), c3, f, l, own).IsNull(),
+                       "partial chart: the region's own trim is accepted");
+            }
+        }
+        BRepBuilderAPI_MakeWire mkW;
+        for (const TopoDS_Edge& e : edges) mkW.Add(e);
+        expect(mkW.IsDone(), "partial chart: wire closed");
+        if (mkW.IsDone()) {
+            BRepBuilderAPI_MakeFace mkF(trim, mkW.Wire());
+            expect(mkF.IsDone(), "partial chart: face built");
+            if (mkF.IsDone()) {
+                BRepCheck_Analyzer an(mkF.Face(), Standard_True);
+                expect(an.IsValid() == Standard_True, "partial chart: one valid face");
+                const TopoDS_Edge& arcE = edges[0];
+                const TopoDS_Edge& genE = edges[1];
+                Standard_Real fa = 0, la = 0, fg = 0, lg = 0;
+                const TopLoc_Location loc;
+                Handle(Geom2d_Curve) pa = BRep_Tool::CurveOnSurface(arcE, trim, loc, fa, la);
+                Handle(Geom2d_Curve) pg = BRep_Tool::CurveOnSurface(genE, trim, loc, fg, lg);
+                expect(!pa.IsNull() && !pg.IsNull() &&
+                           pa->Value(la).Distance(pg->Value(fg)) <= Precision::Confusion(),
+                       "partial chart: circle and generator meet at the shared vertex");
+            }
+        }
+    }
+
+    // D-fc-7.10. A partial cylinder that is already valid keeps its own pcurves
+    // when the heal runs. The chart object is not written onto the face.
+    {
+        const double R = 5.0;
+        const double uLo = 0.40;
+        const double uHi = 1.10;
+        const double vLo = 0.0;
+        const double vHi = 3.0;
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_CylindricalSurface) basis =
+            new Geom_CylindricalSurface(gp_Cylinder(ax, R));
+        const Handle(Geom_RectangularTrimmedSurface) trim =
+            new Geom_RectangularTrimmedSurface(basis, uLo, uHi, vLo, vHi);
+        auto at = [&](double u, double v) { return gp_Pnt(R * std::cos(u), R * std::sin(u), v); };
+        BRep_Builder bb;
+        const double vt = Precision::Confusion();
+        TopoDS_Vertex v00, v10, v11, v01;
+        bb.MakeVertex(v00, at(uLo, vLo), vt);
+        bb.MakeVertex(v10, at(uHi, vLo), vt);
+        bb.MakeVertex(v11, at(uHi, vHi), vt);
+        bb.MakeVertex(v01, at(uLo, vHi), vt);
+        const gp_Ax2 cax(gp_Pnt(0, 0, vLo), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_TrimmedCurve) arc =
+            new Geom_TrimmedCurve(new Geom_Circle(cax, R), uLo, uHi);
+        const Handle(Geom_Line) genHi = new Geom_Line(at(uHi, vLo), gp_Dir(0, 0, 1));
+        const gp_Vec chordDir(at(uHi, vHi), at(uLo, vHi));
+        const Handle(Geom_Line) chord = new Geom_Line(at(uHi, vHi), gp_Dir(chordDir));
+        const Handle(Geom_Line) genLo = new Geom_Line(at(uLo, vHi), gp_Dir(0, 0, -1));
+        BRepBuilderAPI_MakeEdge eArc(arc, v00, v10);
+        BRepBuilderAPI_MakeEdge eGenHi(genHi, v10, v11);
+        BRepBuilderAPI_MakeEdge eChord(chord, v11, v01);
+        BRepBuilderAPI_MakeEdge eGenLo(genLo, v01, v00);
+        expect(eArc.IsDone() && eGenHi.IsDone() && eChord.IsDone() && eGenLo.IsDone(),
+               "valid partial: edges built");
+        TopoDS_Edge edges[4] = {eArc.Edge(), eGenHi.Edge(), eChord.Edge(), eGenLo.Edge()};
+        const TopLoc_Location loc;
+        bool placed = true;
+        for (const TopoDS_Edge& e : edges) {
+            Standard_Real f = 0, l = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+            Handle(Geom2d_Curve) src = partialTrimChartPCurve(e, c3, f, l, trim);
+            if (src.IsNull()) {
+                placed = false;
+                continue;
+            }
+            Handle(Geom2d_Curve) own = Handle(Geom2d_Curve)::DownCast(src->Copy());
+            if (own.IsNull() || own.get() == src.get()) {
+                placed = false;
+                continue;
+            }
+            const double dev = maxCurveOnSurfaceDeviation(c3, f, l, trim, own, loc);
+            const double tol = std::max(vt, edgeTolFromMeasuredDeviation(dev));
+            bb.UpdateEdge(e, own, trim, loc, tol);
+            bb.Range(e, trim, loc, f, l);
+        }
+        expect(placed, "valid partial: own pcurves, not the chart object");
+        BRepBuilderAPI_MakeWire mkW;
+        for (const TopoDS_Edge& e : edges) mkW.Add(e);
+        expect(mkW.IsDone(), "valid partial: wire closed");
+        if (mkW.IsDone() && placed) {
+            TopoDS_Face face;
+            bb.MakeFace(face, trim, vt);
+            bb.Add(face, mkW.Wire());
+            expectFaceValidBeforeHeal(face, Standard_True, "valid partial: face valid before the heal");
+            const Geom2d_Curve* raw[4] = {};
+            double tol0[4] = {};
+            gp_Pnt2d end0[4][2] = {};
+            for (int i = 0; i < 4; ++i) {
+                Standard_Real a = 0, b = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(edges[i], face, a, b);
+                raw[i] = pc.get();
+                tol0[i] = BRep_Tool::Tolerance(edges[i]);
+                if (!pc.IsNull()) {
+                    end0[i][0] = pc->Value(a);
+                    end0[i][1] = pc->Value(b);
+                }
+            }
+            const bool healed = healInvalidPartialTrimChart(face, kTau);
+            expect(!healed, "valid partial: the heal does not rebuild a valid face");
+            const double vtBefore = BRep_Tool::Tolerance(v00);
+            const bool raised = raiseMeasuredCornerTol(face, kTau);
+            expect(!raised && std::fabs(BRep_Tool::Tolerance(v00) - vtBefore) <= Precision::Confusion(),
+                   "valid partial: a valid face does not take the corner tolerance");
+            bool same = true;
+            for (int i = 0; i < 4; ++i) {
+                Standard_Real a = 0, b = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(edges[i], face, a, b);
+                if (pc.get() != raw[i]) same = false;
+                if (std::fabs(BRep_Tool::Tolerance(edges[i]) - tol0[i]) > Precision::Confusion())
+                    same = false;
+                if (pc.IsNull() || pc->Value(a).Distance(end0[i][0]) > Precision::Confusion() ||
+                    pc->Value(b).Distance(end0[i][1]) > Precision::Confusion())
+                    same = false;
+                Standard_Real f = 0, l = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(edges[i], f, l);
+                Handle(Geom2d_Curve) chart = partialTrimChartPCurve(edges[i], c3, f, l, trim);
+                if (!chart.IsNull() && chart.get() == pc.get()) same = false;
+            }
+            BRepCheck_Analyzer after(face, Standard_True);
+            expect(same && after.IsValid() == Standard_True,
+                   "valid partial: pcurves byte-identical, chart not installed");
+        }
+    }
+
+    // D-fc-7.10. A partial-cylinder wire that still self-intersects after the
+    // chart (the two diagonals cross) keeps today's pcurves.
+    {
+        const double R = 5.0;
+        const double uLo = 0.20;
+        const double uHi = 1.00;
+        const double vLo = 0.0;
+        const double vHi = 2.0;
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_CylindricalSurface) basis =
+            new Geom_CylindricalSurface(gp_Cylinder(ax, R));
+        const Handle(Geom_RectangularTrimmedSurface) trim =
+            new Geom_RectangularTrimmedSurface(basis, uLo, uHi, vLo, vHi);
+        auto at = [&](double u, double v) { return gp_Pnt(R * std::cos(u), R * std::sin(u), v); };
+        BRep_Builder bb;
+        const double vt = Precision::Confusion();
+        TopoDS_Vertex a, b, c, d;
+        bb.MakeVertex(a, at(uLo, vLo), vt);
+        bb.MakeVertex(b, at(uHi, vHi), vt);
+        bb.MakeVertex(c, at(uHi, vLo), vt);
+        bb.MakeVertex(d, at(uLo, vHi), vt);
+        auto lineEdge = [&](const TopoDS_Vertex& p, const TopoDS_Vertex& q) {
+            const gp_Pnt P = BRep_Tool::Pnt(p);
+            const gp_Pnt Q = BRep_Tool::Pnt(q);
+            return BRepBuilderAPI_MakeEdge(new Geom_Line(P, gp_Dir(gp_Vec(P, Q))), p, q);
+        };
+        BRepBuilderAPI_MakeEdge e0 = lineEdge(a, b);
+        BRepBuilderAPI_MakeEdge e1 = lineEdge(b, c);
+        BRepBuilderAPI_MakeEdge e2 = lineEdge(c, d);
+        BRepBuilderAPI_MakeEdge e3 = lineEdge(d, a);
+        expect(e0.IsDone() && e1.IsDone() && e2.IsDone() && e3.IsDone(),
+               "unrepaired partial: bowtie edges built");
+        TopoDS_Edge edges[4] = {e0.Edge(), e1.Edge(), e2.Edge(), e3.Edge()};
+        const gp_Pnt2d uvCorner[4][2] = {{gp_Pnt2d(uLo, vLo), gp_Pnt2d(uHi, vHi)},
+                                         {gp_Pnt2d(uHi, vHi), gp_Pnt2d(uHi, vLo)},
+                                         {gp_Pnt2d(uHi, vLo), gp_Pnt2d(uLo, vHi)},
+                                         {gp_Pnt2d(uLo, vHi), gp_Pnt2d(uLo, vLo)}};
+        const TopLoc_Location loc;
+        for (int i = 0; i < 4; ++i) {
+            Standard_Real f = 0, l = 0;
+            Handle(Geom_Curve) c3 = BRep_Tool::Curve(edges[i], f, l);
+            const gp_Vec2d step(uvCorner[i][1].X() - uvCorner[i][0].X(),
+                                uvCorner[i][1].Y() - uvCorner[i][0].Y());
+            const double df = l - f;
+            Handle(Geom2d_Line) own = new Geom2d_Line(
+                gp_Pnt2d(uvCorner[i][0].X() - f * step.X() / df,
+                         uvCorner[i][0].Y() - f * step.Y() / df),
+                gp_Dir2d(step));
+            bb.UpdateEdge(edges[i], own, trim, loc, vt);
+            bb.Range(edges[i], trim, loc, f, l);
+        }
+        BRepBuilderAPI_MakeWire mkW;
+        for (const TopoDS_Edge& e : edges) mkW.Add(e);
+        expect(mkW.IsDone(), "unrepaired partial: wire built");
+        if (mkW.IsDone()) {
+            TopoDS_Face face;
+            bb.MakeFace(face, trim, vt);
+            bb.Add(face, mkW.Wire());
+            expectFaceValidBeforeHeal(face, Standard_False,
+                                      "unrepaired partial: face invalid before the heal");
+            const Geom2d_Curve* raw[4] = {};
+            bool lines = true;
+            for (int i = 0; i < 4; ++i) {
+                Standard_Real a0 = 0, b0 = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(edges[i], face, a0, b0);
+                raw[i] = pc.get();
+                if (Handle(Geom2d_Line)::DownCast(pc).IsNull()) lines = false;
+            }
+            expect(lines, "unrepaired partial: today's pcurves are lines");
+            const bool healed = healInvalidPartialTrimChart(face, kTau);
+            expect(!healed, "unrepaired partial: the chart does not validate the bowtie");
+            bool kept = true;
+            for (int i = 0; i < 4; ++i) {
+                Standard_Real a0 = 0, b0 = 0;
+                Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(edges[i], face, a0, b0);
+                if (pc.get() != raw[i]) kept = false;
+                if (Handle(Geom2d_Line)::DownCast(pc).IsNull()) kept = false;
+                if (std::fabs(BRep_Tool::Tolerance(edges[i]) - vt) > Precision::Confusion())
+                    kept = false;
+            }
+            BRepCheck_Analyzer after(face, Standard_True);
+            expect(kept && after.IsValid() == Standard_False,
+                   "unrepaired partial: today's pcurves kept, face still invalid");
+        }
+    }
+
+    // D-fc-7.10 fallback. A shared corner whose pcurves meet within tau of
+    // the vertex is eligible for the measured tolerance. The tolerance is
+    // written only when BRepCheck then passes; this face stays invalid, so
+    // the vertex tolerance is restored and today's path stands. The same
+    // corner beyond tau is refused. A face that is already valid is not
+    // touched (covered above).
+    {
+        const double R = 5.0;
+        const double vHi = 2.0;
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_CylindricalSurface) basis =
+            new Geom_CylindricalSurface(gp_Cylinder(ax, R));
+        auto at = [&](double u, double v) { return gp_Pnt(R * std::cos(u), R * std::sin(u), v); };
+        auto linePc = [&](double u0, double v0, double u1, double v1, double f, double l) {
+            const double df = l - f;
+            const gp_Vec2d d((u1 - u0) / df, (v1 - v0) / df);
+            return Handle(Geom2d_Line)(
+                new Geom2d_Line(gp_Pnt2d(u0 - f * d.X(), v0 - f * d.Y()), gp_Dir2d(d)));
+        };
+        // Build the face twice: once with the crossing inside tau, once past it.
+        // The arc runs nearly a full turn so the crossing parameter sits far
+        // from the shared vertex's parameter (the checker's yawn then fails)
+        // while the 3D point stays within the requested gap of that vertex.
+        auto build = [&](double gap, TopoDS_Face& face, TopoDS_Vertex& corner, TopoDS_Edge& shifted,
+                         double& measured) -> bool {
+            const double eps = gap / R;
+            const double uEnd = 2.0 * kPi - 0.5 * eps;
+            const double uCross = 2.0 * kPi - eps;
+            const Handle(Geom_RectangularTrimmedSurface) trim =
+                new Geom_RectangularTrimmedSurface(basis, 0.0, uEnd, 0.0, vHi);
+            BRep_Builder bb;
+            const double vt = Precision::Confusion();
+            TopoDS_Vertex A, B, C, D;
+            bb.MakeVertex(A, at(0.0, 0.0), vt);
+            bb.MakeVertex(B, at(uEnd, 0.0), vt);
+            bb.MakeVertex(C, at(uEnd, vHi), vt);
+            bb.MakeVertex(D, at(0.0, vHi), vt);
+            const gp_Ax2 cax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+            const Handle(Geom_TrimmedCurve) arc =
+                new Geom_TrimmedCurve(new Geom_Circle(cax, R), 0.0, uEnd);
+            BRepBuilderAPI_MakeEdge eArc(arc, A, B);
+            BRepBuilderAPI_MakeEdge eGen(new Geom_Line(at(uEnd, 0.0), gp_Dir(0, 0, 1)), B, C);
+            const gp_Pnt top0 = at(uEnd, vHi), top1 = at(0.0, vHi);
+            BRepBuilderAPI_MakeEdge eTop(new Geom_Line(top0, gp_Dir(gp_Vec(top0, top1))), C, D);
+            BRepBuilderAPI_MakeEdge eShift(new Geom_Line(at(0.0, vHi), gp_Dir(0, 0, -1)), D, A);
+            if (!eArc.IsDone() || !eGen.IsDone() || !eTop.IsDone() || !eShift.IsDone()) return false;
+            const TopLoc_Location loc;
+            auto place = [&](const TopoDS_Edge& e, const Handle(Geom2d_Curve)& pc, double tol) {
+                Standard_Real f = 0, l = 0;
+                Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, f, l);
+                (void)c3;
+                bb.UpdateEdge(e, pc, trim, loc, tol);
+                bb.Range(e, trim, loc, f, l);
+            };
+            Standard_Real fa = 0, la = 0, fg = 0, lg = 0, ft = 0, lt = 0, fs = 0, ls = 0;
+            BRep_Tool::Curve(eArc.Edge(), fa, la);
+            BRep_Tool::Curve(eGen.Edge(), fg, lg);
+            BRep_Tool::Curve(eTop.Edge(), ft, lt);
+            BRep_Tool::Curve(eShift.Edge(), fs, ls);
+            place(eArc.Edge(), linePc(0.0, 0.0, uEnd, 0.0, fa, la), vt);
+            place(eGen.Edge(), linePc(uEnd, 0.0, uEnd, vHi, fg, lg), vt);
+            place(eTop.Edge(), linePc(uEnd, vHi, 2.0 * kPi, vHi, ft, lt), vt);
+            // The shifted generator's pcurve meets the arc inside the arc's
+            // parameter, gap millimetres from the shared vertex. Its edge
+            // tolerance covers that curve-on-surface gap; the vertex does not.
+            place(eShift.Edge(), linePc(uCross, vHi, uCross, 0.0, fs, ls), gap);
+            bb.MakeFace(face, trim, vt);
+            BRepBuilderAPI_MakeWire mkW;
+            mkW.Add(eArc.Edge());
+            mkW.Add(eGen.Edge());
+            mkW.Add(eTop.Edge());
+            mkW.Add(eShift.Edge());
+            if (!mkW.IsDone()) return false;
+            bb.Add(face, mkW.Wire());
+            corner = A;
+            shifted = eShift.Edge();
+            measured = at(0.0, 0.0).Distance(at(uCross, 0.0));
+            return true;
+        };
+        const double gapIn = 0.5 * kTau;
+        TopoDS_Face faceIn;
+        TopoDS_Vertex cornerIn;
+        TopoDS_Edge shiftIn;
+        double measuredIn = 0;
+        expect(build(gapIn, faceIn, cornerIn, shiftIn, measuredIn) && measuredIn <= kTau &&
+                   measuredIn > Precision::Confusion(),
+               "corner tol: a within-tau gap is built");
+        if (!faceIn.IsNull()) {
+            const double vt0 = BRep_Tool::Tolerance(cornerIn);
+            const double et0 = BRep_Tool::Tolerance(shiftIn);
+            BRepCheck_Analyzer before(faceIn, Standard_True);
+            expect(before.IsValid() == Standard_False, "corner tol: within-tau face is invalid");
+            const bool healed = raiseMeasuredCornerTol(faceIn, kTau);
+            BRepCheck_Analyzer after(faceIn, Standard_True);
+            const double vt1 = BRep_Tool::Tolerance(cornerIn);
+            expect(!healed && after.IsValid() == Standard_False,
+                   "corner tol: within tau, still invalid, today's path kept");
+            expect(std::fabs(vt1 - vt0) <= Precision::Confusion(),
+                   "corner tol: an unvalidated raise restores the vertex tolerance");
+            expect(std::fabs(BRep_Tool::Tolerance(shiftIn) - et0) <= Precision::Confusion(),
+                   "corner tol: the edge tolerance is not rewritten");
+        }
+        const double gapOut = 2.0 * kTau;
+        TopoDS_Face faceOut;
+        TopoDS_Vertex cornerOut;
+        TopoDS_Edge shiftOut;
+        double measuredOut = 0;
+        expect(build(gapOut, faceOut, cornerOut, shiftOut, measuredOut) && measuredOut > kTau,
+               "corner tol: a beyond-tau gap is built");
+        if (!faceOut.IsNull()) {
+            const double vt0 = BRep_Tool::Tolerance(cornerOut);
+            const bool healed = raiseMeasuredCornerTol(faceOut, kTau);
+            BRepCheck_Analyzer after(faceOut, Standard_True);
+            expect(!healed && after.IsValid() == Standard_False &&
+                       std::fabs(BRep_Tool::Tolerance(cornerOut) - vt0) <= Precision::Confusion(),
+                   "corner tol: beyond tau today's vertex tolerance stands");
+        }
+    }
+
+    // D-fc-7.16. The rotated frame is a measured function of the trim, and it
+    // applies only to a partial cylinder that touches the seam or already
+    // carries a seam edge.
+    {
+        const double uHi = 1.2;
+        const double twoPi = 2.0 * kPi;
+        expect(partialTrimTouchesPeriodicSeam(0.0, uHi), "seam frame: u = 0 touches the seam");
+        expect(partialTrimTouchesPeriodicSeam(0.2, twoPi), "seam frame: u = 2pi touches the seam");
+        expect(!partialTrimTouchesPeriodicSeam(0.4, 1.1), "seam frame: an interior trim does not");
+        expect(std::fabs(partialCylSeamFrameAngle(0.0, uHi) - (0.5 * uHi - kPi)) <=
+                   Precision::PConfusion(),
+               "seam frame: the rotation centres the trim at pi");
+        expect(partialCylSeamFrameApplies(0.0, uHi, 0), "seam frame: a seam-touching partial applies");
+        expect(partialCylSeamFrameApplies(0.4, 1.1, 3),
+               "seam frame: a partial with a seam edge applies");
+        expect(!partialCylSeamFrameApplies(0.4, 1.1, 0),
+               "seam frame: an interior partial with no seam edge does not");
+        expect(!partialCylSeamFrameApplies(0.0, twoPi, 3),
+               "seam frame: a full turn is not this heal");
+    }
+
+    // D-fc-7.16. A partial cylinder whose trim starts at u = 0 and whose
+    // closing edges are parameterised on the periodic image at 2π is invalid.
+    // The same edges, charted on the frame rotated by (uLo + uHi)/2 − π, are
+    // one valid face. A trim that starts at u = 0 and is already valid is not
+    // rewritten.
+    {
+        const double R = 3.0;
+        const double uLo = 0.0;
+        const double uHi = 1.2;
+        const double vLo = 0.0;
+        const double vHi = 3.0;
+        const double twoPi = 2.0 * kPi;
+        const gp_Ax3 ax(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_CylindricalSurface) basis =
+            new Geom_CylindricalSurface(gp_Cylinder(ax, R));
+        auto at = [&](double u, double v) { return gp_Pnt(R * std::cos(u), R * std::sin(u), v); };
+        auto place = [&](BRep_Builder& bb, const TopoDS_Edge& e,
+                         const Handle(Geom_Surface)& s, double ua, double va, double ub, double vb,
+                         double tol) {
+            Standard_Real f = 0, l = 0;
+            BRep_Tool::Curve(e, f, l);
+            const double df = l - f;
+            const gp_Vec2d d((ub - ua) / df, (vb - va) / df);
+            Handle(Geom2d_Curve) pc;
+            if (std::abs(d.Magnitude() - 1.0) <= Precision::PConfusion())
+                pc = new Geom2d_Line(gp_Pnt2d(ua - f * d.X(), va - f * d.Y()), gp_Dir2d(d));
+            else {
+                TColgp_Array1OfPnt2d poles(1, 2);
+                poles.SetValue(1, gp_Pnt2d(ua, va));
+                poles.SetValue(2, gp_Pnt2d(ub, vb));
+                TColStd_Array1OfReal knots(1, 2);
+                knots.SetValue(1, f);
+                knots.SetValue(2, l);
+                TColStd_Array1OfInteger mults(1, 2);
+                mults.SetValue(1, 2);
+                mults.SetValue(2, 2);
+                pc = new Geom2d_BSplineCurve(poles, knots, mults, 1);
+            }
+            const TopLoc_Location loc;
+            bb.UpdateEdge(e, pc, s, loc, tol);
+            bb.Range(e, s, loc, f, l);
+        };
+        BRep_Builder bb;
+        const double vt = Precision::Confusion();
+        TopoDS_Vertex v00, v10, v11, v01;
+        bb.MakeVertex(v00, at(uLo, vLo), vt);
+        bb.MakeVertex(v10, at(uHi, vLo), vt);
+        bb.MakeVertex(v11, at(uHi, vHi), vt);
+        bb.MakeVertex(v01, at(uLo, vHi), vt);
+        const gp_Ax2 cLo(gp_Pnt(0, 0, vLo), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const gp_Ax2 cHi(gp_Pnt(0, 0, vHi), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+        const Handle(Geom_TrimmedCurve) arcLo =
+            new Geom_TrimmedCurve(new Geom_Circle(cLo, R), uLo, uHi);
+        // Sense false walks the short arc from uHi back to uLo.
+        const Handle(Geom_TrimmedCurve) arcHi =
+            new Geom_TrimmedCurve(new Geom_Circle(cHi, R), uLo, uHi, Standard_False);
+        BRepBuilderAPI_MakeEdge eArc(arcLo, v00, v10);
+        BRepBuilderAPI_MakeEdge eGenHi(new Geom_Line(at(uHi, vLo), gp_Dir(0, 0, 1)), v10, v11);
+        BRepBuilderAPI_MakeEdge eArcHi(arcHi, v11, v01);
+        BRepBuilderAPI_MakeEdge eGenLo(new Geom_Line(at(uLo, vHi), gp_Dir(0, 0, -1)), v01, v00);
+        expect(eArc.IsDone() && eGenHi.IsDone() && eArcHi.IsDone() && eGenLo.IsDone(),
+               "seam frame: boundary edges built");
+        if (eArc.IsDone() && eGenHi.IsDone() && eArcHi.IsDone() && eGenLo.IsDone()) {
+            const Handle(Geom_RectangularTrimmedSurface) trim =
+                new Geom_RectangularTrimmedSurface(basis, uLo, uHi, vLo, vHi);
+            // The closing pair sits on the periodic image at 2π, not on u = 0.
+            place(bb, eArc.Edge(), trim, uLo, vLo, uHi, vLo, vt);
+            place(bb, eGenHi.Edge(), trim, uHi, vLo, uHi, vHi, vt);
+            place(bb, eArcHi.Edge(), trim, uHi, vHi, twoPi, vHi, vt);
+            place(bb, eGenLo.Edge(), trim, twoPi, vHi, twoPi, vLo, vt);
+            BRepBuilderAPI_MakeWire mkW;
+            mkW.Add(eArc.Edge());
+            mkW.Add(eGenHi.Edge());
+            mkW.Add(eArcHi.Edge());
+            mkW.Add(eGenLo.Edge());
+            expect(mkW.IsDone(), "seam frame: wire closed");
+            if (mkW.IsDone()) {
+                TopoDS_Face face;
+                bb.MakeFace(face, trim, vt);
+                bb.Add(face, mkW.Wire());
+                BRepCheck_Analyzer before(face, Standard_True);
+                expect(before.IsValid() == Standard_False,
+                       "seam frame: trim at u = 0 with the periodic image is invalid");
+                const bool healed = healPartialCylSeamFrame(face, kTau);
+                BRepCheck_Analyzer after(face, Standard_True);
+                expect(healed && after.IsValid() == Standard_True,
+                       "seam frame: the rotated frame is a valid face");
+                Handle(Geom_RectangularTrimmedSurface) got =
+                    Handle(Geom_RectangularTrimmedSurface)::DownCast(BRep_Tool::Surface(face));
+                expect(!got.IsNull(), "seam frame: the shipped surface is the rotated trim");
+                if (!got.IsNull()) {
+                    Standard_Real gu0 = 0, gu1 = 0, gv0 = 0, gv1 = 0;
+                    got->Bounds(gu0, gu1, gv0, gv1);
+                    expect(std::fabs(0.5 * (gu0 + gu1) - kPi) <= Precision::PConfusion(),
+                           "seam frame: shipped trim is centred at pi");
+                    expect(gu0 > Precision::PConfusion() &&
+                               gu1 < twoPi - Precision::PConfusion(),
+                           "seam frame: shipped trim is clear of the seam");
+                    Handle(Geom_CylindricalSurface) gc =
+                        Handle(Geom_CylindricalSurface)::DownCast(got->BasisSurface());
+                    expect(!gc.IsNull() && std::fabs(gc->Radius() - R) <= Precision::Confusion() &&
+                               gc->Position().Location().Distance(ax.Location()) <=
+                                   Precision::Confusion() &&
+                               gc->Position().Direction().IsEqual(ax.Direction(),
+                                                                  Precision::Angular()),
+                           "seam frame: axis, location and radius are unchanged");
+                    bool onePc = !gc.IsNull();
+                    for (TopExp_Explorer ex(face, TopAbs_EDGE); ex.More() && onePc; ex.Next()) {
+                        Standard_Real a = 0, b = 0;
+                        Handle(Geom2d_Curve) pc =
+                            BRep_Tool::CurveOnSurface(TopoDS::Edge(ex.Current()), face, a, b);
+                        if (pc.IsNull()) {
+                            onePc = false;
+                            continue;
+                        }
+                        const double uA = pc->Value(a).X();
+                        const double uB = pc->Value(b).X();
+                        if (uA < gu0 - Precision::PConfusion() || uA > gu1 + Precision::PConfusion() ||
+                            uB < gu0 - Precision::PConfusion() || uB > gu1 + Precision::PConfusion())
+                            onePc = false;
+                    }
+                    expect(onePc, "seam frame: one pcurve per edge, inside the rotated trim");
+                    TopoDS_Shell sh;
+                    bb.MakeShell(sh);
+                    bb.Add(sh, face);
+                    BRepCheck_Analyzer anSh(sh, Standard_True);
+                    expect(anSh.IsValid() == Standard_True,
+                           "seam frame: the shell that contains the face is valid");
+                }
+            }
+            // The same boundary with pcurves on the trim itself is valid, and
+            // the heal must not replace that surface or those pcurves.
+            TopoDS_Vertex w00, w10, w11, w01;
+            bb.MakeVertex(w00, at(uLo, vLo), vt);
+            bb.MakeVertex(w10, at(uHi, vLo), vt);
+            bb.MakeVertex(w11, at(uHi, vHi), vt);
+            bb.MakeVertex(w01, at(uLo, vHi), vt);
+            BRepBuilderAPI_MakeEdge fArc(arcLo, w00, w10);
+            BRepBuilderAPI_MakeEdge fHi(new Geom_Line(at(uHi, vLo), gp_Dir(0, 0, 1)), w10, w11);
+            BRepBuilderAPI_MakeEdge fTop(arcHi, w11, w01);
+            BRepBuilderAPI_MakeEdge fLo(new Geom_Line(at(uLo, vHi), gp_Dir(0, 0, -1)), w01, w00);
+            expect(fArc.IsDone() && fHi.IsDone() && fTop.IsDone() && fLo.IsDone(),
+                   "seam frame: valid-at-first edges built");
+            if (fArc.IsDone() && fHi.IsDone() && fTop.IsDone() && fLo.IsDone()) {
+                const Handle(Geom_RectangularTrimmedSurface) okTrim =
+                    new Geom_RectangularTrimmedSurface(basis, uLo, uHi, vLo, vHi);
+                place(bb, fArc.Edge(), okTrim, uLo, vLo, uHi, vLo, vt);
+                place(bb, fHi.Edge(), okTrim, uHi, vLo, uHi, vHi, vt);
+                place(bb, fTop.Edge(), okTrim, uHi, vHi, uLo, vHi, vt);
+                place(bb, fLo.Edge(), okTrim, uLo, vHi, uLo, vLo, vt);
+                BRepBuilderAPI_MakeWire okW;
+                okW.Add(fArc.Edge());
+                okW.Add(fHi.Edge());
+                okW.Add(fTop.Edge());
+                okW.Add(fLo.Edge());
+                expect(okW.IsDone(), "seam frame: valid-at-first wire closed");
+                if (okW.IsDone()) {
+                    TopoDS_Face okFace;
+                    bb.MakeFace(okFace, okTrim, vt);
+                    bb.Add(okFace, okW.Wire());
+                    BRepCheck_Analyzer okBefore(okFace, Standard_True);
+                    expect(okBefore.IsValid() == Standard_True,
+                           "seam frame: a trim at u = 0 with its own pcurves is valid");
+                    const Geom_Surface* surf0 = BRep_Tool::Surface(okFace).get();
+                    const Geom2d_Curve* pcs[4] = {};
+                    TopoDS_Edge eds[4] = {fArc.Edge(), fHi.Edge(), fTop.Edge(), fLo.Edge()};
+                    for (int i = 0; i < 4; ++i) {
+                        Standard_Real a = 0, b = 0;
+                        pcs[i] = BRep_Tool::CurveOnSurface(eds[i], okFace, a, b).get();
+                    }
+                    const bool healed = healPartialCylSeamFrame(okFace, kTau);
+                    const Geom_Surface* surf1 = BRep_Tool::Surface(okFace).get();
+                    bool same = surf0 == surf1;
+                    for (int i = 0; i < 4 && same; ++i) {
+                        Standard_Real a = 0, b = 0;
+                        if (BRep_Tool::CurveOnSurface(eds[i], okFace, a, b).get() != pcs[i])
+                            same = false;
+                    }
+                    BRepCheck_Analyzer okAfter(okFace, Standard_True);
+                    expect(!healed && same && okAfter.IsValid() == Standard_True,
+                           "seam frame: a face valid at first build is untouched");
+                }
+            }
         }
     }
 

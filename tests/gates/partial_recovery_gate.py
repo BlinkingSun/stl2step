@@ -793,17 +793,27 @@ def evaluate_pickup(
         floor=FLOOR_CYLINDERS,
     )
 
+    # DECISION A1 (spheres remain faceted) is superseded for the certified
+    # relational corner spheres (D-fc-7.17), exactly as D-fc-4.9 / D-fc-4.11 did
+    # for tori: the shipped sphere count is an EXACT ratchet (a drop is a
+    # regression, a rise is an unrecorded claim) and can never exceed the ground
+    # truth's sphere faces.
     cen_sphere = census_surface_count(dict(census), "sphere")
+    sph_expected = int(rch.get("censusSphereExpected", 0))
+    sph_gt = int(rch.get("censusSphereGtCount", 0))
+    sph_ok = cen_sphere == sph_expected and cen_sphere <= sph_gt
     add(
         "census.sphere",
-        cen_sphere == 0,
+        sph_ok,
         (
-            f"census.sphere={cen_sphere} != 0 (DECISION A1: spheres remain faceted)"
-            if cen_sphere != 0
-            else f"census.sphere={cen_sphere} (must remain faceted)"
+            f"census.sphere={cen_sphere} == expected {sph_expected} (<= GT {sph_gt})"
+            if sph_ok
+            else f"census.sphere={cen_sphere} != expected {sph_expected} or > GT {sph_gt} "
+            "(prg-ratchet censusSphereExpected / censusSphereGtCount)"
         ),
         got=cen_sphere,
-        floor=0,
+        expected=sph_expected,
+        gt=sph_gt,
     )
 
     # DECISION A1 (tori remain faceted) is superseded for the certified
@@ -1054,7 +1064,7 @@ def synthetic_pass_census() -> Dict[str, Any]:
         "surfaces": {
             "plane": FLOOR_PLANES,
             "cylinder": FLOOR_CYLINDERS,
-            "sphere": 0,
+            "sphere": _expected_sphere(),
             "torus": _expected_torus(),
         },
         "cylinder_radii": radii,
@@ -1085,10 +1095,15 @@ def _expected_torus() -> int:
     return int(load_prg_ratchet().get("censusTorusExpected", 0))
 
 
+def _expected_sphere() -> int:
+    """The ratcheted shipped-sphere count (prg-ratchet censusSphereExpected)."""
+    return int(load_prg_ratchet().get("censusSphereExpected", 0))
+
+
 def synthetic_head_fail_census() -> Dict[str, Any]:
     return {
         "ok": True,
-        "surfaces": {"plane": 0, "cylinder": 0, "sphere": 0, "torus": _expected_torus()},
+        "surfaces": {"plane": 0, "cylinder": 0, "sphere": _expected_sphere(), "torus": _expected_torus()},
         "cylinder_radii": [],
     }
 
@@ -1596,7 +1611,7 @@ def _self_test() -> int:
     check(
         any(c.name == "census.sphere" and c.ok for c in pass_checks)
         and any(c.name == "census.torus" and c.ok for c in pass_checks),
-        "synthetic-pass asserts census.sphere==0 and census.torus==expected",
+        "synthetic-pass asserts census.sphere==expected and census.torus==expected",
     )
 
     head_checks = evaluate_pickup(
@@ -1614,7 +1629,7 @@ def _self_test() -> int:
     check("combined" in named, "HEAD-red names combined")
     check("census.plane" in named, "HEAD-red names census.plane")
     check("census.cylinder" in named, "HEAD-red names census.cylinder")
-    check("census.sphere" not in named, "HEAD-red does not fail census.sphere (0 at HEAD)")
+    check("census.sphere" not in named, "HEAD-red does not fail census.sphere (expected count)")
     check("census.torus" not in named, "HEAD-red does not fail census.torus (expected count)")
     msgs = " ".join(c.message for c in head_checks if not c.ok)
     check("smoothBuiltPlanes=0 < floor 18" in msgs, "HEAD-red message cites plane floor 18")
@@ -1766,17 +1781,35 @@ def _self_test() -> int:
 
     sphere_cen = synthetic_pass_census()
     sphere_cen["surfaces"] = dict(sphere_cen["surfaces"])
-    sphere_cen["surfaces"]["sphere"] = 1
+    sphere_cen["surfaces"]["sphere"] = _expected_sphere() + 1
     sph = evaluate_pickup(
         synthetic_pass_result(), sphere_cen, gt_radii, 0, strict=True
     )
-    check("census.sphere" in failing_names(sph), "analytic sphere fails census.sphere")
+    check("census.sphere" in failing_names(sph), "an unrecorded extra sphere fails census.sphere")
     sph_exp, sph_unexp = split_hard_fails(sph)
     check(
         any(c.name == "census.sphere" for c in sph_unexp)
         and not any(c.name == "census.sphere" for c in sph_exp),
         "census.sphere leak is UNEXPECTED (not PASS_REGEX inverted)",
     )
+
+    if _expected_sphere() > 0:
+        lost_cen = synthetic_pass_census()
+        lost_cen["surfaces"] = dict(lost_cen["surfaces"])
+        lost_cen["surfaces"]["sphere"] = _expected_sphere() - 1
+        lost = evaluate_pickup(
+            synthetic_pass_result(), lost_cen, gt_radii, 0, strict=True
+        )
+        check("census.sphere" in failing_names(lost), "a lost certified sphere fails census.sphere")
+    over_gt_s = dict(load_prg_ratchet())
+    over_gt_s["censusSphereExpected"] = int(over_gt_s.get("censusSphereGtCount", 0)) + 1
+    sphere_cen = synthetic_pass_census()
+    sphere_cen["surfaces"] = dict(sphere_cen["surfaces"])
+    sphere_cen["surfaces"]["sphere"] = over_gt_s["censusSphereExpected"]
+    sph = evaluate_pickup(
+        synthetic_pass_result(), sphere_cen, gt_radii, 0, strict=True, ratchet=over_gt_s
+    )
+    check("census.sphere" in failing_names(sph), "a sphere count above the GT fails census.sphere")
 
     for delta, label in ((1, "an unrecorded extra torus"), (-1, "a lost certified torus")):
         torus_cen = synthetic_pass_census()

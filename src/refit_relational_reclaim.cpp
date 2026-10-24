@@ -12,10 +12,13 @@
 //      and takes a same-surface partial reached only through the healed gap. A
 //      healed band that is one edge-component bounded by two cycles, each winding
 //      once about the axis, is a closed wall by construction (D-fc-5.7 O-1).
-//   2. Same-surface closure (D-fc-4.4). Certified partial CylGrow regions that
-//      are one surface at tau merge greedily to a fixed point; the Unclaimed
-//      I/Cover triangles inside the group's extent fill the gap (D-fc-3.2.7).
-//      The group commits only if the result is ONE edge-component and a disk.
+//   2. Same-surface closure (D-fc-4.4, D-fc-7.4 Fix 1). Certified partial
+//      CylGrow regions that are one surface at tau merge greedily to a fixed
+//      point; the Unclaimed I/Cover triangles inside the group's extent fill
+//      the gap (D-fc-3.2.7). A single certified partial (maxVertexDev <= tau)
+//      runs that same fill. The group commits only if the result is ONE
+//      edge-component and a disk. A single region whose fill adds no triangle
+//      is left unchanged.
 //   3. Ring-wall closure (D-fc-6.10). An A1 chart that already holds one or
 //      more CylGrow or FilletStrip pieces, and is not already one region,
 //      becomes one closed cylinder when its two boundary cycles are
@@ -1182,7 +1185,13 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
     int committed = 0;
     std::vector<int> erase;
     for (Group& g : groups) {
-        if (g.members.size() < 2) continue;  // one surface => one face triggers the fill
+        // An empty slot is a group already absorbed by the greedy merge.
+        if (g.members.empty()) continue;
+        // D-fc-7.4 Fix 1. A single certified partial CylGrow (the candidate
+        // filter is maxVertexDev <= tau, not closed) runs the same fill as a
+        // merged group. Cover is unchanged: >= 1 vertex within tau, every
+        // vertex within the certified set's own chord sagitta s.
+        const bool solo = g.members.size() == 1;
         const Cyl S = g.s;
         const Region& R0 = work.accepted[(std::size_t)g.members.front()];
         gp_XYZ xd = R0.ax.XDirection().XYZ();
@@ -1253,8 +1262,11 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
         bool fitOk = cylinderFitLS(mv, cert, gp_Dir(S.A), fa, fc, fr, fres, maxIt);
         auto cc = edgeComponents(rm, C);
         int loops = cc.size() == 1 ? boundaryLoops(rm, C) : -1;
-        // Ring closure: a partial result that is not one disk may be a closed wall.
-        // The whole-turn fill is taken only when its result is one edge-component,
+        // Ring closure: a partial result may be a closed wall -- one that is not one
+        // disk, or (D-fc-7.3 F-F) one disk whose missing arc is a window and the
+        // cover round it (the pickup bore behind its cross hole: the partial fill
+        // stops at the group's own angular extent). The whole-turn fill is taken
+        // only when its result is one edge-component,
         // re-certified at tau on members + I, closed by the D2 rule or by its own
         // rails (D-fc-4.6 F4: no vertex-azimuth gap wider than one of its boundary
         // edges), and its loops are the two rims plus windows that one seam
@@ -1262,7 +1274,7 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
         // partial result stands and is deferred below.
         bool ring = false;
         int windows = 0;
-        if (fitOk && fres <= tau && !(cc.size() == 1 && loops == 1)) {
+        if (fitOk && fres <= tau) {
             const std::vector<int> I0 = I, Cv0 = Cv, C0 = C, cert0 = cert;
             fill(true);
             gp_Dir ra;
@@ -1317,6 +1329,9 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
                 cert = cert0;
             }
         }
+        // A solo whose fill added nothing is already one face. Refitting it
+        // would rewrite the region and move telemetry on every partial cylinder.
+        if (solo && I.empty() && Cv.empty()) continue;
         BandDiag dg;
         dg.mode = "closure";
         dg.seed = minTriOf(g.tris);
@@ -1368,10 +1383,35 @@ int closeSameSurface(const RMesh& rm, const SegmentParams& p, const DerivedTols&
         nr.tris = C;
         applyCylFields(nr, N, f);
         std::vector<char> inC((std::size_t)nTri, 0);
-        for (int t : C) {
-            inC[(std::size_t)t] = 1;
-            unclaimed[(std::size_t)t] = 0;
+        for (int t : C)
+            if (t >= 0 && t < nTri) inC[(std::size_t)t] = 1;
+        // A solo fill may consume a chart, and it may leave a one-triangle
+        // remainder (the dent the cover law does not take). It does not cut a
+        // multi-triangle chart in two: that remainder is still a face, and the
+        // certified cylinder stays as it shipped.
+        int chartCuts = 0;
+        for (const Provisional& pr : work.provisionals) {
+            if (pr.claim != ProvClaim::Unclaimed) continue;
+            std::vector<int> keep;
+            bool hit = false;
+            for (int t : pr.tris) {
+                if (t < 0 || (std::size_t)t >= inC.size()) continue;
+                if (inC[(std::size_t)t]) hit = true;
+                else keep.push_back(t);
+            }
+            if (!hit || keep.empty()) continue;
+            for (const std::vector<int>& comp : edgeComponents(rm, keep))
+                if (comp.size() > 1) ++chartCuts;
         }
+        if (solo && chartCuts > 0) {
+            dg.straddle = chartCuts;
+            dg.why = "straddle";
+            printBand(dg);
+            ++deferred;
+            continue;
+        }
+        for (int t : C)
+            if (t >= 0 && t < nTri) unclaimed[(std::size_t)t] = 0;
         dg.straddle = trimClaimed(rm, work, inC);
         dg.maxDev = nr.maxVertexDev;
         dg.maxDevTau = nr.maxVertexDev / tau;
@@ -2720,6 +2760,27 @@ std::vector<std::vector<int>> triSetLoops(const MeshView& mv, const std::vector<
     std::size_t sum = 0;
     for (const auto& l : loops) sum += l.size();
     if (sum != nB) loops.clear();
+    return loops;
+}
+
+std::vector<std::vector<int>> triSetOrientedLoops(const MeshView& mv, const std::vector<int>& tris) {
+    std::vector<std::vector<int>> loops = triSetLoops(mv, tris);
+    const int nTri = (int)mv.nTri;
+    for (std::vector<int>& l : loops) {
+        if (l.size() < 2) continue;
+        const int g0 = mv.compVtx ? mv.compVtx[l[0]] : l[0];
+        const int g1 = mv.compVtx ? mv.compVtx[l[1]] : l[1];
+        bool fwd = false, rev = false;
+        for (int t : tris) {
+            if (t < 0 || t >= nTri) continue;
+            const int* v = mv.tris[mv.compTris ? mv.compTris[t] : t];
+            for (int c = 0; c < 3; ++c) {
+                if (v[c] == g0 && v[(c + 1) % 3] == g1) fwd = true;
+                if (v[c] == g1 && v[(c + 1) % 3] == g0) rev = true;
+            }
+        }
+        if (rev && !fwd) std::reverse(l.begin() + 1, l.end());
+    }
     return loops;
 }
 
