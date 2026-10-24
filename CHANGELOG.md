@@ -8,8 +8,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [1.8.0] - 2026-10-24
 
-TrueForm finishes the corners. Where three certified rounds meet, the corner now ships as one
-exact sphere instead of a patch of facets, closed hub rings carry their windows as one cylinder,
+TrueForm finishes the corners. Sphere corners (since 1.6.0 for three equal cylindrical rounds)
+now also form where one of the three rounds is a certified torus, closed hub rings carry their windows as one cylinder,
 and a partial cylinder whose trim starts on the cylinder's own seam no longer fails its validity
 check (task `stl2step-fc`, phase fc-8, the handle-pickup round).
 
@@ -22,8 +22,8 @@ and training file converts byte-identically to 1.7.0.
 
 ### Added
 
-- Corner spheres: when three certified rounds (cylinders, or a certified torus) meet at a corner,
-  the sphere's centre is taken from those anchors and its radius is fitted by least squares. It
+- Corner spheres also form where one of the three meeting rounds is a certified torus (1.6.0
+  required three equal cylindrical rounds). The sphere's centre is taken from those anchors and its radius is fitted by least squares. It
   ships only if every vertex and every sphere|round contact certifies within the mesh tolerance;
   otherwise the corner stays faceted. An uncertified cylinder whose every triangle lies inside
   that one certified sphere is dissolved into it.
