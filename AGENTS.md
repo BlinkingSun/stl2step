@@ -23,8 +23,10 @@ STEP file, and optionally re-reads it to self-verify. It is built on
 OpenCASCADE (OCCT). Output is always in **millimetres**. Without `--smooth`
 (the 1.x default) curved surfaces remain **faceted** at the mesh resolution,
 byte-identical to 1.0.0. With **TrueForm** (`--engine trueform` / `--smooth`), v1 recovers planes, right circular
-cylinders (holes/bosses, N ≥ 6), and plane–plane fillet strips (1–3 rows);
-cones, spheres, and tori stay faceted.
+cylinders (holes/bosses, N ≥ 6), plane–plane fillet strips (1–3 rows), hole
+chamfers and countersinks (cones), and — when certified neighbours anchor them —
+relational tori and corner spheres (1.8.0+); other cones, spheres, and tori stay
+faceted.
 
 Use it when your software consumes STEP/B-Rep but a user hands you an STL.
 
@@ -290,8 +292,8 @@ Because each invocation is independent, batch with `xargs -P` /
    radii. Components that cannot close analytically fall back to Verbatim per
    component (never corrupt the file). On a real CAD export, TrueForm may build a
    fraction of recognised cylinders (e.g. 127/583 on Body11); see
-   `tests/diag/body11/KNOWN-GAP.md`. Cones, spheres, and tori are reported and
-   left faceted; there is no freeform/NURBS reconstruction. Refit is skipped on
+   `tests/diag/body11/KNOWN-GAP.md`. Cones, spheres, and tori that no certified
+   neighbour anchors are reported and left faceted; there is no freeform/NURBS reconstruction. Refit is skipped on
    any component that needs the sewing repair path. A regular N≥6 prism (e.g. a hex socket) **is** recovered as a
    cylinder, and a symmetric 45° chamfer **is** recovered as a fillet — both
    intended, not bugs. An asymmetric chamfer (`sL/sR ≥ 1.3`) is rejected. Flat
@@ -343,7 +345,7 @@ Because each invocation is independent, batch with `xargs -P` /
   carries the reason in parentheses: `... one component
   (classB-no-region-qualifies) -- kept faceted`. Dirty-skip
   (`N component(s) skipped (dirty mesh, repaired path)`) and NYI rejects
-  (cones, spheres, tori left faceted) are `note()`, **not** warnings — a dirty
+  (unanchored cones, spheres, tori left faceted) are `note()`, **not** warnings — a dirty
   input converted with `--smooth` keeps its exit code versus the same input
   without it.
 - `"validityCheck":"skipped"` in RESULT (any exit) → the shape had more than

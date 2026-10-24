@@ -6,6 +6,54 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-24
+
+TrueForm finishes the corners. Where three certified rounds meet, the corner now ships as one
+exact sphere instead of a patch of facets, closed hub rings carry their windows as one cylinder,
+and a partial cylinder whose trim starts on the cylinder's own seam no longer fails its validity
+check (task `stl2step-fc`, phase fc-8, the handle-pickup round).
+
+On the public corpus part handle-pickup the output drops from 639 to 341 faces: five R3 corner
+spheres replace about 190 facet faces and nine cylinders that did not fit the mesh, the R9 hub
+ring is one closed cylinder with its four rounds exactly tangent, its bore closes, and a small R3
+partial cylinder at the hook ships as one face. Body28 gains one corner sphere, and S02 and S27
+keep their spheres with a least-squares radius (volume change about 1e-5 mm³). Every other corpus
+and training file converts byte-identically to 1.7.0.
+
+### Added
+
+- Corner spheres: when three certified rounds (cylinders, or a certified torus) meet at a corner,
+  the sphere's centre is taken from those anchors and its radius is fitted by least squares. It
+  ships only if every vertex and every sphere|round contact certifies within the mesh tolerance;
+  otherwise the corner stays faceted. An uncertified cylinder whose every triangle lies inside
+  that one certified sphere is dissolved into it.
+- A closed coaxial wall may carry windows. A closed wall with no fold, anchored by a certified
+  tangent parallel cylinder, ships as one closed cylinder, and the rounds anchoring it are
+  refitted exactly tangent, meeting at a common generator.
+- A region whose every vertex lies on a certified member of a coaxial family takes that member's
+  surface (one surface per family); an edge-adjacent re-host joins its member by closure.
+- The same-surface whole-turn fill also runs for a single certified partial cylinder, not only
+  for merged groups.
+- A certified region whose face build fails reports its BRepCheck status under
+  `STL2STEP_DIAG_REL` instead of being dropped silently.
+
+### Fixed
+
+- A partial cylinder whose trim started on the periodic seam (u = 0) built a face that failed
+  BRepCheck (wire orientation) and shipped as facets. Such a face is now rebuilt on the same
+  cylinder with its parameter frame rotated so the trim is centred at π. Only a face that fails
+  its first build is touched; geometry is unchanged.
+
+### Changed
+
+- The partial-recovery gate's sphere count is an exact ratchet for the certified corner spheres
+  (5 shipped on handle-pickup, 9 in the ground truth), replacing the old "spheres stay faceted"
+  assertion, as was done earlier for the certified tori. Its volume ceiling is the measured three-platform
+  maximum (15.3475 mm³). The engine's shell-volume integral is open-shell: where faces trimmed to
+  exact arcs met chord-bounded facets, the old shell was closed only within tolerance, and the
+  sphere faces close those slivers. The material change of the spheres is −1.43 mm³; the rest
+  of the reported −6.07 mm³ is that boundary term, not material.
+
 ## [1.7.0] - 2026-10-23
 
 TrueForm heals what it used to discard. A component whose analytic rebuild failed in one place
