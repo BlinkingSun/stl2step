@@ -6,6 +6,58 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-11-07
+
+TrueForm stops giving up on whole parts and finishes the drilled and rounded details of plate parts
+(task `stl2step-gid`). A component whose shell misses its volume check no longer reverts to facets as a
+whole when no single region is to blame: every region that fails its own vertex certificate dissolves to
+facets and every certified region stays analytic. The faceted fallback can no longer lose a face in the
+unify step, so a written STEP always re-reads as the solid RESULT reports. Drill-point cones, blind and
+through holes with an imperfect cap ring, slot arcs between parallel caps, and small quarter-round tori
+tangent to two certified faces now ship as single analytic faces. Conversions that dissolve many regions
+at once are several times faster. On the corpus, every input except two private training files converts
+byte-identically to 1.8.0.
+
+### Added
+
+- Class-B heal: when a closed, valid shell misses its volume budget and no region qualifies for the
+  existing swept-volume dissolve, every shipped region whose own `maxVertexDev` exceeds τ is dissolved to
+  facets in one pass from the pristine plan and the shell is re-tested; certified regions (planes,
+  cylinders, built tori) stay. The named revert `classB-no-region-qualifies` remains only if that shell
+  still fails.
+- Drill-point cones: a 118° (59° half-angle) apex fan at the bottom of a certified blind-hole wall ships
+  as one closed cone face sharing the hole's rim circle. The claim runs after the ring-wall closure, so
+  holes certified there donate too. A fan without a certified hole wall stays faceted.
+- A hole wall that the cylinder stage refused but whose ring closes as one free annulus (two boundary
+  cycles, every corner on a τ-certified circle) is closed as one cylinder.
+- Anchored quarter-round torus: a round whose (ρ, z) profile is tangent to certified anchors has fewer
+  free parameters (one per anchor less), so four profile stations over-determine it. It ships as one
+  torus face over exactly its τ-certified triangles; rim triangles that are off the round stay facets
+  behind a mesh-polyline boundary.
+- Gauss great-circle pole as a late extrusion-axis hypothesis: when a band's certified anchor pair is
+  parallel or absent, the pole of its normals' great circle proposes the axis (accepted only when every
+  triangle is within its own normal-noise bound); the band must then pass every refutation the anchored
+  path applies (tess-law polygon test, station count, same-surface). It runs after the coaxial lift, so it
+  never pre-empts a relational family.
+
+### Fixed
+
+- The faceted unify (`ShapeUpgrade_UnifySameDomain`) could drop a sliver facet without merging it, leaving
+  a three-edge hole; ShapeFix then wrote the solid as an open shell while RESULT reported one solid. Dropped
+  faces' edges are now kept and the unify never increases free edges. RESULT `solids` and `openShells` are
+  counted from the shape actually written.
+- A closed seamed hole whose cap wire did not pass the seam vertex failed BRepCheck (UnorientableShape) and
+  shipped as facets with a `seamed360: BRepCheck invalid on seamed face` warning; cap pcurves are now
+  rebranched onto the seam chart.
+- OCCT 8 build: no typedef-only list-iterator header.
+
+### Changed
+
+- Dissolving many regions to facets in one step restores the shared mesh vertices and edges once per batch
+  instead of once per region (output identical; one heavily dissolved part went from 41 s to 10 s).
+- Gate G0.3 accepts a `--force-sew` exit that improves from 2 to 0 when the written body is closed and
+  warning-free (the old baseline exit encoded the unify drop).
+
 ## [1.8.0] - 2026-10-24
 
 TrueForm finishes the corners. Sphere corners (since 1.6.0 for three equal cylindrical rounds)
