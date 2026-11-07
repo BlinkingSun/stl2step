@@ -86,9 +86,9 @@ Output is always written in **millimetres**. STL is unitless, so tell the engine
 
 **SolidOut** is a desktop app over this engine for people who want the conversion without a terminal: open an STL, look at the mesh, convert with Verbatim or TrueForm, read the result (planes, cylinders, fillets, volume delta, watertight check) and export the STEP. The engine and OpenCASCADE are bundled inside the app, so nothing else needs to be installed and nothing runs in the background: the app launches the bundled engine for each conversion.
 
-Download: [SolidOut 0.2.7 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.8.0 + SolidOut 0.2.7 for macOS and Windows). SolidOut 0.2.7 ships with engine 1.8.0 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
+Download: [SolidOut 0.2.8 for macOS (Apple silicon)](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-macOS-AppleSilicon.dmg) from the [latest release](https://github.com/BlinkingSun/stl2step/releases/latest) (stl2step 1.9.0 + SolidOut 0.2.8 for macOS and Windows). SolidOut 0.2.8 ships with engine 1.9.0 built in. Signed with Developer ID and notarized by Apple. Conversions need macOS 26 or newer.
 
-Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same current release with engine 1.8.0 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
+Windows (x64): [SolidOut-Windows-x64-setup.exe](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64-setup.exe) (installer, recommended) or [SolidOut-Windows-x64.msi](https://github.com/BlinkingSun/stl2step/releases/latest/download/SolidOut-Windows-x64.msi); checksums in [SHA256SUMS.txt](https://github.com/BlinkingSun/stl2step/releases/latest/download/SHA256SUMS.txt). Same current release with engine 1.9.0 built in, same UI; needs Windows 10/11 x64 with WebView2 (built into Windows 11). The Windows build is not yet Authenticode-signed, so SmartScreen warns on first launch: choose "More info" then "Run anyway". Both apps are closed source and ship as release assets here; the engine they drive is this repository.
 
 **Updating the engine.** The Engine card in the right panel shows the engine in use and an **Update engine** button. On launch and on the button the app checks this repository's latest release; when a newer engine exists the line under the button turns amber and one press downloads, verifies (SHA-256 from the manifest; Developer ID Team ID on macOS) and installs it into the app's data folder. Nothing in the app bundle changes, and the next conversion uses the new engine without a restart. A release without `engine-manifest.json` is not an engine candidate.
 
@@ -114,6 +114,8 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 | `engine-manifest.json` | Schema 1 index of engine bundles | the updater |
 | `SHA256SUMS-engine.txt` | SHA-256 checksums of the engine files | the updater |
 
+**What changed in 1.9.0.** TrueForm stops giving up on whole parts. A shell that misses its volume check with no single region to blame no longer reverts to facets as a whole: every region that fails its own vertex certificate dissolves to facets and every certified region (planes, cylinders, tori) stays analytic. The faceted fallback can no longer lose a face in the unify step, so a written STEP always re-reads as the solid RESULT reports. Drill-point cones at the bottom of blind holes, hole walls with an imperfect cap ring, seamed holes whose cap misses the seam, slot arcs between parallel faces and small quarter-round tori tangent to two certified faces now ship as single analytic faces, and conversions that dissolve many regions at once are several times faster. Every corpus file converts byte-identically to 1.8.0, and so does every training file except two, which now ship fewer facets. See [CHANGELOG.md](CHANGELOG.md).
+
 **What changed in 1.8.0.** TrueForm finishes the corners. Sphere corners now also form where one of the three meeting rounds is a certified torus (centre from the anchoring rounds, radius fitted, every vertex and contact within tolerance), and a cylinder that did not fit the mesh but lies wholly inside such a sphere is absorbed into it. Closed hub rings with windows ship as one cylinder with exactly tangent rounds, and a partial cylinder whose trim starts on the cylinder's own seam is rebuilt valid instead of shipping as facets. On the public corpus part handle-pickup the output drops from 639 to 341 faces with five R3 corner spheres; Body28 gains one sphere; every other corpus and training file converts byte-identically to 1.7.0. See [CHANGELOG.md](CHANGELOG.md).
 
 **What changed in 1.7.0.** TrueForm heals instead of reverting: a region that fails topology no longer discards the whole part (only that region becomes facets), a closed shell is no longer rejected for its volume sign, and on a real volume miss only the regions that fail their own fit are dropped. Holes split by the mesh close into one cylinder from their mouth circles, closed coaxial walls and partial walls anchored by tangent fillets ship as cylinders, and coaxial chamfer rims ship as exact circles. A training part that used to ship 100 % faceted now converts in seconds to planes and cylinders; S29_hex_law, cyl_meets_chamfer and three build fixtures stop reverting; every other file converts byte-identically to 1.6.0. See [CHANGELOG.md](CHANGELOG.md).
@@ -129,23 +131,23 @@ Releases are titled `stl2step X + SolidOut Y for macOS and Windows`. App files k
 ```json
 {
   "schema": 1,
-  "engineVersion": "1.8.0",
+  "engineVersion": "1.9.0",
   "assets": {
     "macos-arm64": {
-      "name": "stl2step-engine-v1.8.0-macos-arm64.tar.gz",
-      "sha256": "b03fb7b347985ce67e367ea0249149739b48404fa3111de03bfa46b966b22f09",
-      "size": 13939938,
+      "name": "stl2step-engine-v1.9.0-macos-arm64.tar.gz",
+      "sha256": "56a60136644f28b5f83917f82034a208b73ef81a3cc100acf0ef8a6c5d09f3d8",
+      "size": 14007046,
       "minOS": "26.0",
       "teamId": "L3LP86Z6L4"
     },
     "windows-x64": {
-      "name": "stl2step-engine-v1.8.0-windows-x64.zip",
-      "sha256": "fe9035ec9b7a1d47eea77fae85566ae0f6385147849f61efbff6583c0bfda71d",
-      "size": 16915659,
+      "name": "stl2step-engine-v1.9.0-windows-x64.zip",
+      "sha256": "ed6d5f6dedc96cd945f3b376a3eafa4084b71ef4b1c43786b3c6a97e75835489",
+      "size": 16969659,
       "minWindows": "10"
     },
     "web-wasm": {
-      "name": "stl2step-engine-v1.8.0-web-wasm.tar.gz",
+      "name": "stl2step-engine-v1.9.0-web-wasm.tar.gz",
       "emscripten": "6.0.5",
       "occt": "7.9.3",
       "threads": "1"
