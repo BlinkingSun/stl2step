@@ -1350,6 +1350,91 @@ static void caseChamferToCap() {
     expect(std::fabs(ang - 45.0) <= 1e-4, "chamfer to cap: 45 deg");
 }
 
+// D-gid-2.5. A drill point: a 16-station mouth ring on a hole cylinder and one
+// apex vertex on the hole axis (118 deg included, 59 deg half-angle). apexOff
+// moves the apex off the axis (radially, in mm).
+static Part drillPoint(double apexOff, double height) {
+    Part p;
+    const int N = 16;
+    const double R = 0.8;
+    auto top = ring(p.mesh, R, 0.0, N);
+    auto mouth = ring(p.mesh, R, -5.0, N);
+    const int apex = p.mesh.add(apexOff, 0.0, -5.0 - height);
+    std::vector<int> wall;
+    band(p.mesh, top, mouth, N, wall);
+    for (int i = 0; i < N; ++i) {
+        p.feature.push_back((int)(p.mesh.triFlat.size() / 3));
+        p.mesh.addTri(mouth[(std::size_t)((i + 1) % N)], mouth[(std::size_t)i], apex);
+    }
+    p.mesh.finish();
+    addCyl(p, wall, R, -2.5);
+    Provisional pr;
+    pr.tris = p.feature;
+    p.work.provisionals.push_back(pr);
+    return p;
+}
+
+static void caseDrillPoint() {
+    const double R = 0.8;
+    const double h = R / std::tan(59.0 * kPi / 180.0);
+    {
+        Part p = drillPoint(0.0, h);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        const std::string diag = g.stop();
+        const Region* c = findNew(p.work, SurfType::Cone, Origin::ChamferCone);
+        expect(c != nullptr, "drill point: closed cone claimed");
+        if (!c) {
+            std::fprintf(stderr, "DIAG\n%s\n", diag.c_str());
+            return;
+        }
+        const double tau = tauOf(mv);
+        expect(c->closed360 && c->tris.size() == p.feature.size(), "drill point: closed, whole fan");
+        expect(c->radius == 0.0 && c->vMin == 0.0, "drill point: R_lo = 0 on the apex");
+        expect(std::fabs(c->vMax - R) <= tau, "drill point: R_hi = mouth radius");
+        expect(std::fabs(c->maxVertexSnap - h) <= tau, "drill point: signed apex-to-mouth height");
+        expect(c->ax.Location().Distance(gp_Pnt(0, 0, -5.0 - h)) <= tau &&
+                   std::fabs(c->ax.Direction().Z()) > 1.0 - 1e-12,
+               "drill point: Location on the apex, donor axis");
+        const double ang = std::atan(c->vMax / c->maxVertexSnap) * 180.0 / kPi;
+        expect(std::fabs(ang - 59.0) <= 1e-4, "drill point: 59 deg half-angle");
+        expect(c->maxVertexDev <= tau, "drill point: every vertex within tau");
+        expect(p.work.provisionals[0].claim == ProvClaim::ConsumedCylinder,
+               "drill point: provisional consumed");
+        checkRim(*c, p.mesh, p.feature, tau, "drill point: rims within tau");
+    }
+    {
+        Part p = drillPoint(0.0, h);
+        const double tau = 2.0 * p.mesh.q;
+        p.mesh.pts.back().SetX(1.5 * tau);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        g.stop();
+        expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 0,
+               "drill point: apex off the donor axis by more than tau is refused");
+    }
+    {
+        Part p = drillPoint(0.0, 0.0);
+        MeshView mv = p.mesh.view();
+        SegmentParams sp;
+        DerivedTols tol;
+        params(sp, tol, 1);
+        Grab g;
+        claimRelRevolve(mv, sp, tol, p.work, RelRevolveMode::Line);
+        g.stop();
+        expect(countType(p.work, SurfType::Cone, Origin::ChamferCone) == 0,
+               "drill point: a flat fan is no cone");
+    }
+}
+
 // F2: a same-radius coaxial band merges into its member by the D-fc-4.4 closure.
 struct MergePart {
     Synth mesh;
@@ -1468,6 +1553,7 @@ int main() {
     caseSameSurfaceMerge();
     caseRoundMiddleRow();
     caseChamferToCap();
+    caseDrillPoint();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;

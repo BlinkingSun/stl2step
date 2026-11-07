@@ -1180,10 +1180,151 @@ bool fitOneSided(const std::vector<Vert>& verts, const gp_XYZ& axis, const gp_XY
     return r > 0.0 && std::isfinite(r) && std::isfinite(t);
 }
 
-}  // namespace
+// D-gid-3.3. Angular radius of one triangle on the Gauss sphere.
+// N = e1 × e2 (unnormalised). |δN| ≤ 2q·(|e1|+|e2|)+4q².
+double normalAngBound(const gp_XYZ& e1, const gp_XYZ& e2, double q) {
+    const gp_XYZ N = e1.Crossed(e2);
+    const double nlen = N.Modulus();
+    const double dN = 2.0 * q * (e1.Modulus() + e2.Modulus()) + 4.0 * q * q;
+    if (!(nlen > 0.0) || !(dN < nlen)) return 0.5 * kPi;
+    return std::asin(std::min(1.0, dN / nlen));
+}
 
-bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                     SegmentWork& work) {
+bool solve33(double A[3][3], const double b[3], double x[3]) {
+    double m[3][4];
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) m[i][j] = A[i][j];
+        m[i][3] = b[i];
+    }
+    for (int col = 0; col < 3; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < 3; ++r)
+            if (std::abs(m[r][col]) > std::abs(m[piv][col])) piv = r;
+        if (!(std::abs(m[piv][col]) > 1e-18)) return false;
+        if (piv != col) {
+            for (int j = col; j < 4; ++j) std::swap(m[piv][j], m[col][j]);
+        }
+        const double div = m[col][col];
+        for (int j = col; j < 4; ++j) m[col][j] /= div;
+        for (int r = 0; r < 3; ++r) {
+            if (r == col) continue;
+            const double f = m[r][col];
+            for (int j = col; j < 4; ++j) m[r][j] -= f * m[col][j];
+        }
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (!std::isfinite(m[i][3])) return false;
+        x[i] = m[i][3];
+    }
+    return true;
+}
+
+// Fixed-axis circle. The pole is the hypothesis, so the axis is not a free
+// parameter. Init is the circumcircle of three farthest section points;
+// Gauss-Newton then minimises the radial residual the certificate measures.
+bool fitCircleFixedAxis(const std::vector<gp_XYZ>& pts, gp_XYZ axis, int maxIter,
+                        gp_XYZ& center, double& radius) {
+    const double am = axis.Modulus();
+    if (!(am > 1e-15) || pts.size() < 3) return false;
+    axis.Divide(am);
+    gp_XYZ u, v;
+    if (!frameOf(axis, u, v)) return false;
+    const int n = (int)pts.size();
+    std::vector<double> x((std::size_t)n), y((std::size_t)n);
+    double zMean = 0.0;
+    for (int i = 0; i < n; ++i) {
+        x[(std::size_t)i] = pts[(std::size_t)i].Dot(u);
+        y[(std::size_t)i] = pts[(std::size_t)i].Dot(v);
+        zMean += pts[(std::size_t)i].Dot(axis);
+    }
+    zMean /= (double)n;
+    auto dist2 = [&](int i, int j) {
+        const double dx = x[(std::size_t)i] - x[(std::size_t)j];
+        const double dy = y[(std::size_t)i] - y[(std::size_t)j];
+        return dx * dx + dy * dy;
+    };
+    int i0 = 0;
+    double best = -1.0;
+    for (int i = 1; i < n; ++i) {
+        const double d = dist2(0, i);
+        if (d > best) {
+            best = d;
+            i0 = i;
+        }
+    }
+    int i1 = i0;
+    best = -1.0;
+    for (int i = 0; i < n; ++i) {
+        const double d = dist2(i0, i);
+        if (d > best) {
+            best = d;
+            i1 = i;
+        }
+    }
+    int i2 = i0;
+    double bestA = -1.0;
+    const double x0 = x[(std::size_t)i0], y0 = y[(std::size_t)i0];
+    const double x1 = x[(std::size_t)i1], y1 = y[(std::size_t)i1];
+    for (int i = 0; i < n; ++i) {
+        const double area = std::abs((x1 - x0) * (y[(std::size_t)i] - y0) -
+                                     (x[(std::size_t)i] - x0) * (y1 - y0));
+        if (area > bestA) {
+            bestA = area;
+            i2 = i;
+        }
+    }
+    const double x2 = x[(std::size_t)i2], y2 = y[(std::size_t)i2];
+    const double d = 2.0 * (x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1));
+    if (!(std::abs(d) > 1e-18) || !(bestA > 0.0)) return false;
+    const double a0 = x0 * x0 + y0 * y0;
+    const double a1 = x1 * x1 + y1 * y1;
+    const double a2 = x2 * x2 + y2 * y2;
+    double cx = (a0 * (y1 - y2) + a1 * (y2 - y0) + a2 * (y0 - y1)) / d;
+    double cy = (a0 * (x2 - x1) + a1 * (x0 - x2) + a2 * (x1 - x0)) / d;
+    double R = std::hypot(x0 - cx, y0 - cy);
+    if (!(R > 0.0) || !std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(R)) return false;
+    const int itCap = std::max(8, maxIter);
+    for (int it = 0; it < itCap; ++it) {
+        double A[3][3] = {};
+        double rhs[3] = {};
+        for (int i = 0; i < n; ++i) {
+            const double dx = x[(std::size_t)i] - cx;
+            const double dy = y[(std::size_t)i] - cy;
+            const double rho = std::hypot(dx, dy);
+            if (!(rho > 1e-15)) continue;
+            const double j0 = -dx / rho;
+            const double j1 = -dy / rho;
+            const double j2 = -1.0;
+            const double e = rho - R;
+            const double js[3] = {j0, j1, j2};
+            for (int a = 0; a < 3; ++a) {
+                rhs[a] -= js[a] * e;
+                for (int c = 0; c < 3; ++c) A[a][c] += js[a] * js[c];
+            }
+        }
+        double delta[3];
+        if (!solve33(A, rhs, delta)) break;
+        if (!(std::abs(delta[0]) < 1e6 * (1.0 + std::abs(cx))) ||
+            !(std::abs(delta[1]) < 1e6 * (1.0 + std::abs(cy))))
+            return false;
+        cx += delta[0];
+        cy += delta[1];
+        R += delta[2];
+        if (!(R > 0.0) || !std::isfinite(cx) || !std::isfinite(cy) || !std::isfinite(R))
+            return false;
+        const double step = std::max(std::abs(delta[0]), std::max(std::abs(delta[1]), std::abs(delta[2])));
+        if (step <= 1e-12 * (1.0 + R)) break;
+    }
+    center = u * cx + v * cy + axis * zMean;
+    radius = R;
+    return std::isfinite(radius) && radius > 0.0 && std::isfinite(center.X()) &&
+           std::isfinite(center.Y()) && std::isfinite(center.Z());
+}
+
+// D-gid-5.13. One body, two passes. The main pass is H0 without the pole;
+// the pole pass runs only the pole block, late in H0, on what is unclaimed.
+bool relExtrudePass(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                    SegmentWork& work, bool polePass) {
     try {
         const auto tStart = std::chrono::steady_clock::now();
         const double tau = tauOf(mv);
@@ -1882,6 +2023,9 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             int nEvalSides = 0;
             int nPrunedSides = 0;
             bool commit = false;
+            // D-gid-3.3. Set on the parallel arm (cross <= rhs) when both
+            // anchors are certified. The pole pass reads it.
+            bool parallelCertified = false;
             int si = 0;
             int guard = 0;
             std::vector<int> C;
@@ -1947,7 +2091,11 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             if (cross <= rhs) {
                 // A parallel pair has no n_A × n_B axis. The hem (D-fc-5.11 F9)
                 // takes its axis from a third certified plane, in the one-sided
-                // station walk below; this walk leaves the pair.
+                // station walk below; this walk leaves the pair. D-gid-3.3: a
+                // certified parallel pair is also a Gauss-pole candidate. The
+                // pole pass runs late in H0 and does not use the 1e-12 arm
+                // below.
+                out.parallelCertified = A.certified && B.certified;
                 BandDiag dg;
                 dg.tau = tau;
                 dg.mode = "hem";
@@ -2536,6 +2684,18 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             nEvalSides += o.nEvalSides;
             nPrunedSides += o.nPrunedSides;
         };
+        // D-gid-3.3. Certified pairs the parallel arm deferred. Prov ids, lo < hi.
+        // The main pass records them; the pole pass reads them (prov ids are
+        // stable: later stages only append provisionals).
+        std::vector<std::pair<int, int>>& polePairs = work.relPolePairs;
+        if (!polePass) polePairs.clear();
+        auto notePolePair = [&](int pa, int pb) {
+            if (pa == pb || pa < 0 || pb < 0) return;
+            if (pa > pb) std::swap(pa, pb);
+            for (const auto& e : polePairs)
+                if (e.first == pa && e.second == pb) return;
+            polePairs.emplace_back(pa, pb);
+        };
         // Scheduling grain only: pairs per block per worker.
         const std::size_t blockCap = (std::size_t)nWork * 1024;
         std::vector<std::pair<std::size_t, std::size_t>> blockPairs;
@@ -2547,7 +2707,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 b = a + 1;
             }
         };
-        while (curB < nA) {
+        while (!polePass && curB < nA) {
             if (candEpoch != anchorEpoch) rebuildCand();
             refreshAnchorTab(curA);
             blockPairs.clear();
@@ -2581,6 +2741,8 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 const std::size_t a = blockPairs[k].first, b = blockPairs[k].second;
                 if (!touchAnchor(a) || !touchAnchor(b)) continue;
                 flushOut(outs[k]);
+                if (outs[k].parallelCertified)
+                    notePolePair(anchorTab[a].prov, anchorTab[b].prov);
                 if (outs[k].commit) break;
             }
             if (k == nb) {
@@ -2634,7 +2796,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         // evaluated on worker threads and replayed in walk order (DIAG text,
         // tallies, the first commit), as the pair walk does. Output does not
         // depend on the worker count; threads 1 runs it inline.
-        {
+        if (!polePass) {
             const auto tOsb = std::chrono::steady_clock::now();
             int osbEdges = 0, osbStations = 0, osbHyp = 0, osbAcc = 0, osbHem = 0;
             // The pair walk refreshes its table from curA on; load every row.
@@ -3466,6 +3628,386 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             }
         }
 
+        // D-gid-3.3. Gauss pole as the extrude axis. D-gid-5.13: its own pass,
+        // after the Line lift, its reclaim and the ruled quads, so a band a
+        // relational family certifies is already taken. Unclaimed components only.
+        // A component that meets a recorded parallel certified pair is an
+        // extrude when the pole is parallel to both cap normals under the
+        // same per-plane term as the parallel test. A perpendicular pole is
+        // the hem axis and is not claimed. A component that meets no
+        // certified anchor is the no-pair case. One component,
+        // one fit: a failing triangle refuses the whole component.
+        if (polePass) {
+            struct PoleAnch {
+                int prov = -1;
+                gp_XYZ n;
+                gp_XYZ p0;
+                double tolA = 0;
+                double extent = 0;
+            };
+            const int nProvNow = (int)work.provisionals.size();
+            std::vector<PoleAnch> certs;
+            std::vector<int> certOf(nProvNow, -1);
+            std::vector<int> bodyProv((std::size_t)nTri, -1);
+            for (int pi = 0; pi < nProvNow; ++pi) {
+                LiveAnchor A;
+                if (!computeAnchor(pi, A) || !A.certified) continue;
+                PoleAnch c;
+                c.prov = pi;
+                c.n = A.n;
+                c.p0 = A.p0;
+                c.tolA = A.tolA;
+                c.extent = A.extent > 0.0 ? A.extent : tau;
+                certOf[(std::size_t)pi] = (int)certs.size();
+                certs.push_back(c);
+                for (int t : A.body)
+                    if (t >= 0 && t < nTri && bodyProv[(std::size_t)t] < 0)
+                        bodyProv[(std::size_t)t] = pi;
+            }
+            // Shatter between a recorded parallel pair is the faceted wall,
+            // not the cap. Release only the A2 grain (n <= 2) that is not
+            // itself a pair member, lies in the slab between that pair, and
+            // meets both caps or meets a triangle that does. A fillet anchor
+            // of a non-parallel pair stays a body.
+            std::vector<char> released((std::size_t)nTri, 0);
+            {
+                struct ShProv {
+                    int pv = -1;
+                    std::vector<int> tris;
+                    std::vector<int> touch;
+                };
+                std::vector<ShProv> shCaps;
+                std::vector<int> shOf((std::size_t)nProvNow, -1);
+                for (int t = 0; t < nTri; ++t) {
+                    const int pv = bodyProv[(std::size_t)t];
+                    if (pv < 0 || certOf[(std::size_t)pv] < 0) continue;
+                    if ((int)work.provisionals[(std::size_t)pv].tris.size() > 2) continue;
+                    int ix = shOf[(std::size_t)pv];
+                    if (ix < 0) {
+                        ix = (int)shCaps.size();
+                        shOf[(std::size_t)pv] = ix;
+                        ShProv sp;
+                        sp.pv = pv;
+                        shCaps.push_back(std::move(sp));
+                    }
+                    shCaps[(std::size_t)ix].tris.push_back(t);
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (ot < 0) continue;
+                        const int op = bodyProv[(std::size_t)ot];
+                        if (op < 0 || (int)work.provisionals[(std::size_t)op].tris.size() <= 2)
+                            continue;
+                        shCaps[(std::size_t)ix].touch.push_back(op);
+                    }
+                }
+                for (ShProv& sp : shCaps) {
+                    std::sort(sp.touch.begin(), sp.touch.end());
+                    sp.touch.erase(std::unique(sp.touch.begin(), sp.touch.end()), sp.touch.end());
+                }
+                auto touchHas = [](const ShProv& sp, int pv) {
+                    return std::binary_search(sp.touch.begin(), sp.touch.end(), pv);
+                };
+                for (const auto& e : polePairs) {
+                    if (e.first < 0 || e.second < 0 || e.first >= nProvNow || e.second >= nProvNow)
+                        continue;
+                    // Real caps are larger than the A2 shatter grain. A pair of
+                    // two quads is the wall facing itself (antiparallel), not a
+                    // cap pair, and must not keep the wall out of the band.
+                    if ((int)work.provisionals[(std::size_t)e.first].tris.size() <= 2 ||
+                        (int)work.provisionals[(std::size_t)e.second].tris.size() <= 2)
+                        continue;
+                    const int ia = certOf[(std::size_t)e.first];
+                    const int ib = certOf[(std::size_t)e.second];
+                    if (ia < 0 || ib < 0) continue;
+                    const PoleAnch& cA = certs[(std::size_t)ia];
+                    const PoleAnch& cB = certs[(std::size_t)ib];
+                    auto shatterAt = [&](int t) -> bool {
+                        if (t < 0 || t >= nTri) return false;
+                        const int pv = bodyProv[(std::size_t)t];
+                        if (pv < 0) return false;
+                        if ((int)work.provisionals[(std::size_t)pv].tris.size() > 2) return false;
+                        const int ix = certOf[(std::size_t)pv];
+                        if (ix < 0) return false;
+                        const PoleAnch& c = certs[(std::size_t)ix];
+                        // A chip parallel to the caps is part of the cap.
+                        const double crossN = cA.n.Crossed(c.n).Modulus();
+                        const double rhsN = 2.0 * (c.tolA + tau) / c.extent;
+                        if (crossN <= rhsN) return false;
+                        return true;
+                    };
+                    const double sA = cA.p0.Dot(cA.n);
+                    const double sB = cB.p0.Dot(cA.n);
+                    const double sLo = std::min(sA, sB) - tau;
+                    const double sHi = std::max(sA, sB) + tau;
+                    auto inSlab = [&](int t) -> bool {
+                        for (int k = 0; k < 3; ++k) {
+                            const double s = cornerPt(mv, t, k).Dot(cA.n);
+                            if (s < sLo || s > sHi) return false;
+                        }
+                        return true;
+                    };
+                    std::vector<int> stack;
+                    // One triangle of a quad meets one cap. The provisional
+                    // meets both when its triangles, together, do.
+                    for (const ShProv& sp : shCaps) {
+                        if (!touchHas(sp, e.first) || !touchHas(sp, e.second)) continue;
+                        if (!shatterAt(sp.tris.front())) continue;
+                        bool slab = true;
+                        for (int u : sp.tris)
+                            if (!inSlab(u)) slab = false;
+                        if (!slab) continue;
+                        for (int u : sp.tris)
+                            if (!released[(std::size_t)u]) stack.push_back(u);
+                    }
+                    while (!stack.empty()) {
+                        const int t = stack.back();
+                        stack.pop_back();
+                        if (released[(std::size_t)t]) continue;
+                        released[(std::size_t)t] = 1;
+                        for (int s = 0; s < 3; ++s) {
+                            const int ot = otherTri(mv.triEdges[t][s], t);
+                            if (ot < 0 || released[(std::size_t)ot] || !shatterAt(ot) || !inSlab(ot))
+                                continue;
+                            stack.push_back(ot);
+                        }
+                    }
+                }
+                for (int t = 0; t < nTri; ++t)
+                    if (released[(std::size_t)t]) bodyProv[(std::size_t)t] = -1;
+            }
+            std::map<int, std::vector<int>> partners;
+            for (const auto& e : polePairs) {
+                partners[e.first].push_back(e.second);
+                partners[e.second].push_back(e.first);
+            }
+            std::vector<char> seen((std::size_t)nTri, 0);
+            std::vector<std::vector<int>> comps;
+            for (int t0 = 0; t0 < nTri; ++t0) {
+                if (seen[(std::size_t)t0] || !candidate(t0) || bodyProv[(std::size_t)t0] >= 0)
+                    continue;
+                // Released cap-wall quads stay one component. A crumb that is
+                // not part of that wall does not join it, and the wall does
+                // not join the crumb.
+                const bool wall0 = released[(std::size_t)t0] != 0;
+                std::vector<int> comp;
+                std::vector<int> stack = {t0};
+                seen[(std::size_t)t0] = 1;
+                while (!stack.empty()) {
+                    const int t = stack.back();
+                    stack.pop_back();
+                    comp.push_back(t);
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (ot < 0 || seen[(std::size_t)ot] || !candidate(ot) ||
+                            bodyProv[(std::size_t)ot] >= 0)
+                            continue;
+                        if (wall0 != (released[(std::size_t)ot] != 0)) continue;
+                        seen[(std::size_t)ot] = 1;
+                        stack.push_back(ot);
+                    }
+                }
+                comps.push_back(std::move(comp));
+            }
+            std::sort(comps.begin(), comps.end(), [](const std::vector<int>& a,
+                                                     const std::vector<int>& b) {
+                return *std::min_element(a.begin(), a.end()) <
+                       *std::min_element(b.begin(), b.end());
+            });
+            const double qPole = mv.quantFloor;
+            auto provIn = [](const std::vector<int>& touch, int pv) {
+                return std::binary_search(touch.begin(), touch.end(), pv);
+            };
+            for (const std::vector<int>& comp : comps) {
+                std::vector<int> touch;
+                for (int t : comp) {
+                    for (int s = 0; s < 3; ++s) {
+                        const int ot = otherTri(mv.triEdges[t][s], t);
+                        if (ot < 0 || ot >= nTri) continue;
+                        const int pv = bodyProv[(std::size_t)ot];
+                        if (pv >= 0) touch.push_back(pv);
+                    }
+                }
+                std::sort(touch.begin(), touch.end());
+                touch.erase(std::unique(touch.begin(), touch.end()), touch.end());
+                std::vector<std::pair<int, int>> hits;
+                for (int pv : touch) {
+                    const auto it = partners.find(pv);
+                    if (it == partners.end()) continue;
+                    for (int partner : it->second) {
+                        if (!provIn(touch, partner) || partner <= pv) continue;
+                        hits.emplace_back(pv, partner);
+                    }
+                }
+                std::sort(hits.begin(), hits.end());
+                hits.erase(std::unique(hits.begin(), hits.end()), hits.end());
+                const bool matched = !hits.empty();
+                const bool noTouch = touch.empty();
+                if (!matched && !noTouch) continue;
+
+                bool det = false;
+                gp_XYZ axis(0, 0, 1);
+                if (gaussPole(mv, comp, axis, det) && det) canonicalHemi(axis);
+                else det = false;
+
+                bool angOk = det;
+                if (det) {
+                    for (int t : comp) {
+                        const gp_XYZ e1 = cornerPt(mv, t, 1) - cornerPt(mv, t, 0);
+                        const gp_XYZ e2 = cornerPt(mv, t, 2) - cornerPt(mv, t, 0);
+                        const double bound = normalAngBound(e1, e2, qPole);
+                        gp_XYZ nrm;
+                        triAreaNormal(mv, t, nrm);
+                        const double ang = std::asin(std::min(1.0, std::abs(nrm.Dot(axis))));
+                        if (ang > bound) {
+                            angOk = false;
+                            break;
+                        }
+                    }
+                }
+                if (!matched && (!det || !angOk)) continue;
+
+                auto anchOf = [&](int pv) -> const PoleAnch* {
+                    if (pv < 0 || pv >= nProvNow) return nullptr;
+                    const int ix = certOf[(std::size_t)pv];
+                    if (ix < 0) return nullptr;
+                    return &certs[(std::size_t)ix];
+                };
+                // The cap pair is the recorded parallel pair whose normals are
+                // parallel to the pole. The same term as the parallel test.
+                // Another parallel pair in the touch set (a hem, or two side
+                // walls) does not veto a pair that does line up.
+                auto pairParallel = [&](int pa, int pb) -> bool {
+                    if (!det) return false;
+                    for (int pv : {pa, pb}) {
+                        const PoleAnch* c = anchOf(pv);
+                        if (!c) return false;
+                        const double crossN = axis.Crossed(c->n).Modulus();
+                        const double rhsN = 2.0 * (c->tolA + tau) / c->extent;
+                        if (crossN > rhsN) return false;
+                    }
+                    return true;
+                };
+                int mA = -1, mB = -1;
+                bool aligned = !matched;
+                if (matched) {
+                    for (const auto& h : hits) {
+                        if (!pairParallel(h.first, h.second)) continue;
+                        mA = h.first;
+                        mB = h.second;
+                        aligned = true;
+                        break;
+                    }
+                    if (!aligned) {
+                        mA = hits.front().first;
+                        mB = hits.front().second;
+                    }
+                }
+                const PoleAnch* cA = matched ? anchOf(mA) : nullptr;
+                const PoleAnch* cB = matched ? anchOf(mB) : nullptr;
+                std::vector<Vert> verts;
+                uniqueVerts(mv, g2l, comp, verts);
+                int st = 0, lv = 0;
+                double lr = 0;
+                if (det) profileCounts(verts, axis, tau, st, lv, lr);
+                gp_XYZ center(0, 0, 0);
+                double radius = 0;
+                bool fitOk = false;
+                double dev = 0;
+                const bool wantFit = det && angOk && (aligned || diagOn());
+                if (wantFit) {
+                    std::vector<gp_XYZ> pts;
+                    pts.reserve(verts.size());
+                    for (const Vert& vt : verts) pts.push_back(vt.p);
+                    fitOk = fitCircleFixedAxis(pts, axis, std::max(1, p.maxRefineIters), center,
+                                               radius);
+                    if (fitOk) {
+                        double rms = 0;
+                        dev = devStats(verts, center, axis, radius, rms);
+                    }
+                }
+                // D-gid-5.4 / D-fc-2. A closed loop of wall facets is stage A's
+                // (claimNgonWallsA: closed360, N in [kNMin, kNMax], then the
+                // tess-law). It ran first; a loop it left is a polygon. The
+                // closure is the one commitBand would stamp.
+                SpanInfo spPole;
+                if (fitOk) {
+                    const gp_XYZ xdir = lowestXDir(verts, center, axis);
+                    spPole = measureSpan(mv, g2l, comp, verts, center, axis, xdir, tol.thetaBin);
+                }
+                const char* why = nullptr;
+                if (!det || st < minStations(kParamsCircle) || lv < 2) why = "underdetermined";
+                else if (!angOk) why = "normal-off";
+                else if (!aligned) why = "pole-perp";
+                else if (lr <= tau) why = "line";
+                else if (!fitOk || dev > tau) why = "vertex-off";
+                else if (spPole.closed360) why = "polygon-loop";
+                // D-gid-5.4. The pole is only the axis source. D-fc-5.5 F-2, as
+                // the one-sided and hem walks count it: without any one source
+                // (its provisional, or the uncertified region it robs) the band
+                // keeps minStations. A released wall quad is one source, so a
+                // band of three quads is underdetermined. Counted last: one
+                // station count per source, so only on a band that passed the
+                // rest (a refusal is a refusal in any order).
+                int stLoso = -1;
+                if (!why) {
+                    std::vector<std::array<gp_XYZ, 3>> tp;
+                    std::vector<int> ts;
+                    tp.reserve(comp.size());
+                    ts.reserve(comp.size());
+                    for (int t : comp) {
+                        tp.push_back({cornerPt(mv, t, 0), cornerPt(mv, t, 1), cornerPt(mv, t, 2)});
+                        const int ow = uncertOwner[(std::size_t)t];
+                        ts.push_back(ow >= 0 ? nProv + ow : triProv[t]);
+                    }
+                    stLoso = leaveOneSourceOutStations(tp, ts, axis, tau);
+                    if (stLoso < minStations(kParamsCircle)) why = "underdetermined";
+                }
+                BandDiag dg;
+                dg.tau = tau;
+                dg.mode = "pole";
+                dg.fit = matched ? "anchored" : "free";
+                dg.params = kParamsCircle;
+                dg.seed = minTriOf(comp);
+                dg.axis = axis;
+                dg.radius = radius;
+                dg.stations = st;
+                dg.levels = lv;
+                dg.lineRes = lr;
+                dg.nV = (int)verts.size();
+                dg.nTri = (int)comp.size();
+                dg.nI = dg.nTri;
+                dg.certDev = dev;
+                dg.maxDev = dev;
+                dg.span = spPole.span;
+                if (cA) dg.anchorTolA = cA->tolA;
+                if (cB) dg.anchorTolB = cB->tolA;
+                if (diagOn() && det)
+                    diagPrintf("DIAG_REL_POLE seed=%d stations=%d losoStations=%d closed360=%d "
+                               "nBands=%d\n",
+                               dg.seed, st, stLoso, spPole.closed360 ? 1 : 0, spPole.nBands);
+                if (why) {
+                    dg.why = why;
+                    emitDiag(dg);
+                    tallyWhy(yc, why);
+                    continue;
+                }
+                std::vector<char> inC((std::size_t)nTri, 0);
+                for (int t : comp)
+                    if (t >= 0 && t < nTri) inC[(std::size_t)t] = 1;
+                if (sameSurface(axis, center, radius, inC)) {
+                    dg.why = "same-surface";
+                    emitDiag(dg);
+                    tallyWhy(yc, "same-surface");
+                    continue;
+                }
+                bool live = true;
+                for (int t : comp)
+                    if (!candidate(t)) live = false;
+                if (!live) continue;
+                commitBand(comp, axis, center, radius, false, mA, mB, dg.seed, dg);
+            }
+        }
+
         // Pegs. Axis is the plane anchor normal. Certified anchors keep that axis;
         // an uncertified anchor is a free cylinder fit.
         struct SeenCyl {
@@ -3672,7 +4214,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
         // same surface. Nothing is claimed. The stored axis is the certificate
         // when it already meets τ; a free refit is only a fallback. A second
         // fit of the unclaimed side must put every accepted vertex back within τ.
-        {
+        if (!polePass) {
             const int nAcc = (int)work.accepted.size();
             for (int i = 0; i < nAcc; ++i) {
                 const Region& acc = work.accepted[i];
@@ -3738,7 +4280,7 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
             }
         }
 
-        if (diagOn()) {
+        if (diagOn() && !polePass) {
             const double seconds = std::chrono::duration<double>(
                                        std::chrono::steady_clock::now() - tStart)
                                        .count();
@@ -3781,6 +4323,18 @@ bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTo
     } catch (...) {
         return false;
     }
+}
+
+}  // namespace
+
+bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                     SegmentWork& work) {
+    return relExtrudePass(mv, p, tol, work, false);
+}
+
+bool claimRelExtrudePole(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                         SegmentWork& work) {
+    return relExtrudePass(mv, p, tol, work, true);
 }
 
 int leaveOneSourceOutStations(const std::vector<std::array<gp_XYZ, 3>>& triPts,

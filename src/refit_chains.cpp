@@ -934,7 +934,13 @@ static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const
         // count is the census already in hand — no new threshold.
         const bool torusMouth = reg.closed360 && reg.type == SurfType::Torus &&
                                 reg.origin == Origin::TorusBlend && loops.size() == 1;
-        if (reg.closed360 && !torusMouth && loops.size() < 2)
+        // D-gid-2.5: a ChamferCone on its apex (radius 0) has one loop, the
+        // mouth. Same exemption as the torus-mouth arm — the history is the
+        // radius, not a new threshold. The CapHigh role is assigned below.
+        const bool apexMouth = reg.closed360 && reg.type == SurfType::Cone &&
+                               reg.origin == Origin::ChamferCone && !(reg.radius > 0.0) &&
+                               loops.size() == 1;
+        if (reg.closed360 && !torusMouth && !apexMouth && loops.size() < 2)
             reg.closed360 = false;
 
         struct Scored {
@@ -1033,8 +1039,12 @@ static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const
             sc.push_back(std::move(s));
         }
 
-        if (reg.closed360 && reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend &&
-            sc.size() == 1) {
+        if (apexMouth && sc.size() == 1) {
+            // D-gid-2.5: the mesh loop is the mouth (CapHigh). There is no
+            // CapLow; the apex is a degenerated edge, not a mesh loop.
+            sc[0].lp.role = LoopRole::CapHigh;
+        } else if (reg.closed360 && reg.type == SurfType::Torus &&
+                   reg.origin == Origin::TorusBlend && sc.size() == 1) {
             // Mouth-round band: tangency circles at vMin/vMax are internal;
             // the mesh carries one outer loop.  Caps are built analytically.
             sc[0].lp.role = LoopRole::Outer;
@@ -1414,6 +1424,13 @@ static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const
                 else if (lp.role == LoopRole::CapHigh) ++nHigh;
                 else if (lp.role == LoopRole::Outer) ++nOuter;
             }
+            // D-gid-2.5: the apex cone's only mesh loop is the mouth
+            // (CapHigh). The apex is a degenerated edge, not a CapLow loop,
+            // so the two-cap census would dissolve the region the role
+            // assignment just kept.
+            const bool apexMouth = reg.type == SurfType::Cone &&
+                                   reg.origin == Origin::ChamferCone &&
+                                   !(reg.radius > 0.0);
             if (reg.type == SurfType::Torus && reg.origin == Origin::TorusBlend) {
                 if (nOuter > 1) {
                     diagTopoFail(reg, "cap-census");
@@ -1425,6 +1442,11 @@ static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const
                         return dissolveRegion(reg);
                     }
                 } else if (nOuter != 1) {
+                    diagTopoFail(reg, "cap-census");
+                    return dissolveRegion(reg);
+                }
+            } else if (apexMouth) {
+                if (nLow != 0 || nHigh != 1 || nOuter != 0) {
                     diagTopoFail(reg, "cap-census");
                     return dissolveRegion(reg);
                 }

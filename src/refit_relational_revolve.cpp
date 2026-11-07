@@ -818,6 +818,60 @@ bool emitCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const B
     return true;
 }
 
+// D-gid-2.5 / D-fc-6.8 RQ-5. A closed cone on its apex (a drill point), encoded
+// as emitCone encodes a closed ChamferCone with R_lo = 0: Location on the apex,
+// on the donor axis; radius = vMin = 0; vMax = R_hi, the mouth; maxVertexSnap
+// = the signed apex-to-mouth height along +Direction (chamferHeightOf).
+bool emitApexCone(const WorkMesh& wm, SegmentWork& work, const Donor& donor, const Band& band,
+                  double zApex, double Rhi, double zMouth, double maxD, double rms,
+                  const ClosedM& cl, int& straddle) {
+    const MeshView& mv = *wm.mv;
+    const double hSigned = zMouth - zApex;
+    if (!(std::fabs(hSigned) > wm.tau) || !(Rhi > wm.tau)) return false;
+    const gp_XYZ loc = donor.fr.origin + donor.fr.axis * zApex;
+    const Frame placed = makeFrame(loc, donor.fr.axis, donor.fr.e1);
+    double sigma = 0;
+    for (int t : band.tris) {
+        gp_XYZ n;
+        const double a = triAreaNormal(mv, t, n);
+        gp_XYZ rad = triCentroid(mv, t) - loc;
+        rad -= placed.axis * rad.Dot(placed.axis);
+        const double rm = rad.Modulus();
+        if (rm > gp::Resolution()) sigma += a * n.Dot(rad / rm);
+    }
+    const int nSides = std::max(cl.nSides, 3);
+    const double dVol = coneBandChordVolume(mv, band.tris, placed, 0.0, Rhi / hSigned);
+    Region r;
+    r.id = 0;
+    r.type = SurfType::Cone;
+    r.origin = Origin::ChamferCone;
+    r.ax = gp_Ax3(gp_Pnt(loc.X(), loc.Y(), loc.Z()), gp_Dir(placed.axis.X(), placed.axis.Y(), placed.axis.Z()),
+                  gp_Dir(placed.e1.X(), placed.e1.Y(), placed.e1.Z()));
+    r.radius = 0.0;
+    r.uMin = 0;
+    r.uMax = kTwoPi;
+    r.vMin = 0.0;
+    r.vMax = Rhi;
+    r.closed360 = true;
+    r.outwardNormal = sigma > 0.0;
+    r.tris = band.tris;
+    r.maxVertexDev = maxD;
+    r.rmsVertexDev = rms;
+    r.chordSagitta = chordSagitta(0.0, nSides);
+    r.nSides = nSides;
+    r.dVolPredicted = (sigma > 0.0 ? 1.0 : -1.0) * dVol;
+    r.maxVertexSnap = hSigned;
+    r.reject = Reject::None;
+    r.builtAs = BuiltAs::NotBuilt;
+    r.filletNbrA = donor.idx;
+    r.filletNbrB = -1;
+    straddle = countStraddle(work, band.tris, (int)mv.nTri);
+    std::vector<int> touched;
+    trimProvisionals(mv, work, band.tris, (int)mv.nTri, ProvClaim::ConsumedCylinder, touched);
+    work.accepted.push_back(std::move(r));
+    return true;
+}
+
 // D-fc-5.5. A partial cone (a ChamferCone that does not close) about the
 // family axis (origin, axis): Location on the R_lo rim, XDirection the radial
 // direction of the band's first azimuth (closedOf's uMin), so the admitted arc
@@ -1507,7 +1561,7 @@ bool bandIsAnnulus(const WorkMesh& wm, const std::vector<int>& tris) {
 // its donor's coaxial family (one parameter, the radius, about the family
 // axis); only a chain that is not one goes on to the cone (fewest parameters).
 void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<AxisScan>& scans,
-                 LineFamilies& lf, int& claimed, int& refused) {
+                 LineFamilies& lf, int& claimed, int& refused, bool apexOnly = false) {
     const MeshView& mv = *wm.mv;
     const int nTri = (int)mv.nTri;
     const double tau = wm.tau;
@@ -1689,6 +1743,205 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
         }
         return on;
     };
+
+    auto runApexFans = [&]() {
+        // D-gid-2.5 (the D-fc-5.11 F4 apex admission, extended from partial to closed
+        // cones): a drill point. A mixed band whose every triangle stands on two
+        // vertices of ONE ring (the mouth) and on ONE shared off-ring vertex at
+        // rho <= tau from the donor axis (the apex) is a fan about that axis. It is
+        // a closed cone when the donor is a certified cylinder whose radius is the
+        // mouth (shared rim, D-gid-3.6 — a ring donor or a different coaxial radius
+        // is not a hole wall), the mouth holds >= minStations(kParamsCircle)
+        // stations each within tau of the mouth circle, every mouth vertex closes
+        // the fan, the fan closes (closedOf), and every vertex is within tau of the
+        // profile line from the apex station (0, z_apex) to the mouth station
+        // (R, z_mouth). The axis is the donor's, never refit on the band
+        // (D-fc-1.5). A flat fan stays refused. A fan this donor does not own
+        // returns false so the caller keeps the existing vertex-off score.
+        auto claimApexFan = [&](Band& band) -> bool {
+            if (donor.idx < 0 || donor.idx >= (int)work.accepted.size()) return false;
+            if (work.accepted[(std::size_t)donor.idx].type != SurfType::Cylinder) return false;
+            int apexV = -1, mouth = -1;
+            std::map<int, int> rimUse;
+            for (int t : band.tris) {
+                int off = -1, nOff = 0;
+                for (int k = 0; k < 3; ++k) {
+                    const int gt = mv.compTris ? mv.compTris[t] : t;
+                    const int v = mv.tris[gt][k];
+                    const int r = (v >= 0 && v <= maxV) ? ringOf[(std::size_t)v] : -1;
+                    if (r < 0) {
+                        off = v;
+                        ++nOff;
+                        continue;
+                    }
+                    if (mouth < 0) mouth = r;
+                    if (r != mouth) return false;
+                    ++rimUse[v];
+                }
+                if (nOff != 1 || off < 0 || off > maxV || !seenV[(std::size_t)off]) return false;
+                if (apexV < 0) apexV = off;
+                if (off != apexV) return false;
+            }
+            if (apexV < 0 || mouth < 0) return false;
+            if (!(rhoOf[(std::size_t)apexV] <= tau)) return false;
+            std::vector<Vtx> rim;
+            std::vector<double> psis, rhos;
+            double sR = 0, sZ = 0;
+            for (const auto& kv : rimUse) {
+                if (kv.second != 2) return false;
+                Vtx v;
+                v.p = mv.pts[kv.first];
+                v.pr = profOfPoint(v.p, fr, 0);
+                rim.push_back(v);
+                psis.push_back(v.pr.psi);
+                rhos.push_back(v.pr.rho);
+                sR += v.pr.rho;
+                sZ += v.pr.z;
+            }
+            if (countColumns(psis, rhos, tau) < minStations(kParamsCircle)) return false;
+            const double Rm = sR / (double)rim.size();
+            const double zm = sZ / (double)rim.size();
+            // D-gid-3.6: the mouth is this hole cylinder's rim. A coaxial donor of
+            // another radius does not own the fan, and this lane mints no hole wall.
+            if (!(std::fabs(Rm - donor.radius) <= tau)) return false;
+            double ringDev = 0;
+            for (const Vtx& v : rim)
+                ringDev = std::max(ringDev, std::hypot(v.pr.rho - Rm, v.pr.z - zm));
+            if (!(ringDev <= tau)) return false;
+            const double za = zOf[(std::size_t)apexV];
+            if (!(std::fabs(zm - za) > tau) || !(Rm > tau)) return false;
+            const ClosedM cl = closedOf(mv, fr, band.tris, rim, wm.thetaBin);
+            if (!cl.closed) return false;
+            std::vector<ProfPt> st(2);
+            st[0].rho = 0.0;
+            st[0].z = za;
+            st[1].rho = Rm;
+            st[1].z = zm;
+            const SurfaceFit fit = fitSurface(st, tau);
+            if (!fit.hatOk || !fit.regressRho) return false;
+            double maxD = 0, sum2 = 0;
+            for (const ProfPt& pp : band.pts) {
+                const double dv = linePerp(fit, pp);
+                if (!(dv <= tau)) return false;
+                maxD = std::max(maxD, dv);
+                sum2 += dv * dv;
+            }
+            DiagRec d = baseDiag("line", donor, band, tau);
+            d.stations = countProfPts(band.pts, tau);
+            d.params = kParamsLine;
+            d.maxDev = maxD;
+            d.maxDevTau = maxD / tau;
+            d.lineResTau = ringDev / tau;
+            d.span = cl.span;
+            d.spanTol = (cl.nBands > 0) ? 1.5 * kTwoPi / cl.nBands : 0;
+            d.halfAng = std::atan(std::fabs(fit.b)) * 180.0 / kPi;
+            d.dihedral = d.halfAng;
+            d.r0 = 0.0;
+            d.r1 = Rm;
+            if (sameSurfaceFr(wm, work, fr, band, fit, false)) {
+                ++refused;
+                d.why = "same-surface";
+                printBand(d);
+                return true;
+            }
+            // The cone's XDirection sits on the mouth vertex nearest the donor's.
+            // The apex has no azimuth. The donor frame is restored afterwards:
+            // updateDonor would otherwise rewrite the hole cylinder's ruling, and
+            // a ruling move makes its already-closed cap miss the seam.
+            const gp_XYZ savedE1 = donor.fr.e1;
+            const gp_XYZ savedE2 = donor.fr.e2;
+            {
+                double best = 1e300;
+                gp_XYZ bestR(0, 0, 0);
+                bool have = false;
+                for (const Vtx& v : rim) {
+                    gp_XYZ rad = v.p - fr.origin;
+                    rad -= fr.axis * rad.Dot(fr.axis);
+                    const double m = rad.Modulus();
+                    if (!(m > gp::Resolution())) continue;
+                    rad /= m;
+                    const double miss = 1.0 - rad.Dot(donor.fr.e1);
+                    if (!have || miss < best) {
+                        best = miss;
+                        bestR = rad;
+                        have = true;
+                    }
+                }
+                if (have) {
+                    donor.fr.e1 = bestR;
+                    gp_XYZ e2 = donor.fr.axis.Crossed(donor.fr.e1);
+                    const double em = e2.Modulus();
+                    if (em > gp::Resolution()) donor.fr.e2 = e2 / em;
+                }
+            }
+            int straddle = 0;
+            const double rms = band.pts.empty() ? 0.0 : std::sqrt(sum2 / (double)band.pts.size());
+            if (!emitApexCone(wm, work, donor, band, za, Rm, zm, maxD, rms, cl, straddle)) {
+                ++refused;
+                d.why = "degenerate";
+                printBand(d);
+                return true;
+            }
+            donor.fr.e1 = savedE1;
+            donor.fr.e2 = savedE2;
+            updateDonor(work, donor);
+            for (int t : band.tris)
+                if (t >= 0 && t < nTri) wm.freeTri[(std::size_t)t] = 0;
+            ++claimed;
+            d.straddle = straddle;
+            d.why = "accept";
+            printBand(d);
+            return true;
+        };
+
+        // Triangles with some, but not all, vertices on rings are not a line band.
+        // Score them (the elliptical cap) and do not claim them. A drill-point fan
+        // is claimed here, before that score.
+        std::vector<char> mixed((std::size_t)nTri, 0), seenT((std::size_t)nTri, 0);
+        for (int t = 0; t < nTri; ++t) {
+            if (!wm.freeTri[(std::size_t)t]) continue;
+            const int on = vertOnRing(t);
+            if (on > 0 && on < 3) mixed[(std::size_t)t] = 1;
+        }
+        for (int t = 0; t < nTri; ++t) {
+            if (!mixed[(std::size_t)t] || seenT[(std::size_t)t]) continue;
+            std::vector<int> comp, stack{t};
+            seenT[(std::size_t)t] = 1;
+            while (!stack.empty()) {
+                const int c = stack.back();
+                stack.pop_back();
+                comp.push_back(c);
+                for (int n : wm.adj.nbr[(std::size_t)c]) {
+                    if (n < 0 || n >= nTri || !mixed[(std::size_t)n] || seenT[(std::size_t)n]) continue;
+                    seenT[(std::size_t)n] = 1;
+                    stack.push_back(n);
+                }
+            }
+            Band band;
+            band.in.assign((std::size_t)nTri, 0);
+            band.tris = std::move(comp);
+            band.seed = minTriOf(band.tris);
+            for (int c : band.tris)
+                if (c >= 0 && c < nTri) band.in[(std::size_t)c] = 1;
+            collectBand(mv, fr, wm.g2l, band);
+            if (claimApexFan(band)) continue;
+            ++refused;
+            DiagRec d = baseDiag("line", donor, band, tau);
+            d.params = kParamsLine;
+            d.why = "vertex-off";
+            printBand(d);
+        }
+    };
+    // D-gid-5.17: closeRingWalls certifies the donor cylinders after the
+    // first Line pass. Re-run only this apex claim for fans still free.
+    // The certificate above is unchanged. Accepted triangles are not free.
+    if (apexOnly) {
+        runApexFans();
+        scan.scanned = true;
+        scans.push_back(scan);
+        return;
+    }
+
 
     std::vector<std::vector<int>> fullAdj((std::size_t)std::max(nRings, 0));
     struct Cand {
@@ -2869,41 +3122,8 @@ void gatherLines(WorkMesh& wm, SegmentWork& work, Donor& donor, std::vector<Axis
         printBand(d);
     }
 
-    // Triangles with some, but not all, vertices on rings are not a line band.
-    // Score them (the elliptical cap) and do not claim them.
-    std::vector<char> mixed((std::size_t)nTri, 0), seenT((std::size_t)nTri, 0);
-    for (int t = 0; t < nTri; ++t) {
-        if (!wm.freeTri[(std::size_t)t]) continue;
-        const int on = vertOnRing(t);
-        if (on > 0 && on < 3) mixed[(std::size_t)t] = 1;
-    }
-    for (int t = 0; t < nTri; ++t) {
-        if (!mixed[(std::size_t)t] || seenT[(std::size_t)t]) continue;
-        std::vector<int> comp, stack{t};
-        seenT[(std::size_t)t] = 1;
-        while (!stack.empty()) {
-            const int c = stack.back();
-            stack.pop_back();
-            comp.push_back(c);
-            for (int n : wm.adj.nbr[(std::size_t)c]) {
-                if (n < 0 || n >= nTri || !mixed[(std::size_t)n] || seenT[(std::size_t)n]) continue;
-                seenT[(std::size_t)n] = 1;
-                stack.push_back(n);
-            }
-        }
-        Band band;
-        band.in.assign((std::size_t)nTri, 0);
-        band.tris = std::move(comp);
-        band.seed = minTriOf(band.tris);
-        for (int c : band.tris)
-            if (c >= 0 && c < nTri) band.in[(std::size_t)c] = 1;
-        collectBand(mv, fr, wm.g2l, band);
-        ++refused;
-        DiagRec d = baseDiag("line", donor, band, tau);
-        d.params = kParamsLine;
-        d.why = "vertex-off";
-        printBand(d);
-    }
+    runApexFans();
+
 
     scan.scanned = true;
     scans.push_back(scan);
@@ -4006,7 +4226,7 @@ void anchoredTangentRounds(WorkMesh& wm, SegmentWork& work, const LineFamilies& 
 
 
 bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                     SegmentWork& work, RelRevolveMode mode) {
+                     SegmentWork& work, RelRevolveMode mode, bool apexOnly) {
     try {
         const double tau = tauOf(mv);
         const char* modeName = (mode == RelRevolveMode::Torus) ? "torus" : "line";
@@ -4072,8 +4292,47 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
                 d.params = kParamsLine;
                 printBand(d);
             };
+            // D-gid-5.17. closeRingWalls certifies a closed cylinder whose chord
+            // vertices sit off a least-squares refit by the chord sagitta, so
+            // the refit refuses the donor and the apex claim never reads it.
+            // The apex-only pass donates that stored cylinder. The cone
+            // certificate is unchanged, and the first Line pass is unchanged.
+            auto admitStoredCylinder = [&]() -> bool {
+                if (!(apexOnly && r.type == SurfType::Cylinder && r.closed360 && r.radius > tau))
+                    return false;
+                const Frame sf = makeFrame(r.ax.Location().XYZ(), r.ax.Direction().XYZ(),
+                                           r.ax.XDirection().XYZ());
+                std::vector<int> sgids;
+                for (int t : tris) {
+                    for (int k = 0; k < 3; ++k) {
+                        const int gt = mv.compTris ? mv.compTris[t] : t;
+                        sgids.push_back(mv.tris[gt][k]);
+                    }
+                }
+                std::sort(sgids.begin(), sgids.end());
+                sgids.erase(std::unique(sgids.begin(), sgids.end()), sgids.end());
+                double zMin = 1e300, zMax = -1e300;
+                for (int g : sgids) {
+                    const double z = (mv.pts[g] - sf.origin).Dot(sf.axis);
+                    zMin = std::min(zMin, z);
+                    zMax = std::max(zMax, z);
+                }
+                Donor d;
+                d.idx = i;
+                d.fr = sf;
+                d.radius = r.radius;
+                // updateDonor writes these back onto the cylinder. Keep the
+                // sag the ring certificate stored; a zero would replace it.
+                d.maxDev = r.maxVertexDev;
+                d.rms = r.rmsVertexDev;
+                d.length = (zMax > zMin) ? (zMax - zMin) : tau;
+                d.minTri = minTriOf(r.tris);
+                d.gids = std::move(sgids);
+                donors.push_back(std::move(d));
+                return true;
+            };
             if (!fitOk || !(radius > tau)) {
-                failDonor();
+                if (!admitStoredCylinder()) failDonor();
                 continue;
             }
             Frame fr = makeFrame(center.XYZ(), axisOut.XYZ(), r.ax.XDirection().XYZ());
@@ -4123,7 +4382,7 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
             const int levels = countLevels(zs, tau);
             const bool partialOk = cols >= 4 && levels >= 2;
             if (!(maxD <= tau) || !(r.closed360 || partialOk)) {
-                failDonor();
+                if (!admitStoredCylinder()) failDonor();
                 continue;
             }
             Donor d;
@@ -4144,6 +4403,24 @@ bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTo
 
         int claimed = 0, refused = 0;
         std::vector<AxisScan> axisScans;
+
+        // D-gid-5.17. The apex claim's donor is a cylinder closeRingWalls
+        // certifies, and that closure runs after the first Line pass. Re-run
+        // only the apex claim. Fans already accepted are not free, so they
+        // are not retaken. Line bands, coaxial lifts and section fillets stay
+        // on the first pass.
+        if (apexOnly) {
+            if (mode != RelRevolveMode::Torus) {
+                LineFamilies lf;
+                lf.famOfAcc.assign(work.accepted.size(), -1);
+                lf.tol = &tol;
+                lf.sp = &p;
+                for (Donor& donor : donors)
+                    gatherLines(wm, work, donor, axisScans, lf, claimed, refused, true);
+            }
+            printSum(modeName, (int)donors.size(), claimed, refused + refusedDonors);
+            return true;
+        }
 
         if (mode != RelRevolveMode::Torus) {
             // D-fc-5.1 / D-fc-4.8 (b): the coaxial families of the Line donors,

@@ -117,6 +117,14 @@ inline double tanDistTol(double tolA, double tau) { return tolA + tau; }
 // D-fc-1.6(7). |a·n_A| <= (anchorTol(A) + τ) / L.
 inline double tanAngTol(double tolA, double tau, double L) { return (tolA + tau) / L; }
 
+// D-fc-1.6.7. Branch-cut on a circle: curve parameter u (radians) sits on k·2π
+// within arc-length τ when |u − k·2π| ≤ τ/r (parametric confusion on the natural
+// circle chart, not a hand epsilon).
+inline double circlePeriodParamTol(double tau, double radius) {
+    const double r = std::max(radius, 0.0);
+    return (tau > 0.0 && r > 0.0) ? (tau / r) : 0.0;
+}
+
 // A closed wall between two rims is an annulus: two boundary loops (topology).
 constexpr int kAnnulusLoops = 2;
 

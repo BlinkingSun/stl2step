@@ -1810,11 +1810,13 @@ bool certifyRingCycle(const MeshView& mv, const std::vector<int>& cyc, double ta
 }
 
 // D-fc-6.10 C-1 + C-3. Hooked from reclaimLine after closeSameSurface.
-// Scope (no new number): the chart holds at least one accepted cylinder of
-// origin CylGrow or FilletStrip, every such region lies wholly inside the
-// chart, every other triangle is an Unclaimed provisional, and the chart is
-// not already one region. A free chart (RQ-H3) and a chart held whole by one
-// uncertified region (RQ-H6) are not entered.
+// Scope (no new number): either the chart holds at least one accepted
+// cylinder of origin CylGrow or FilletStrip, every such region lies wholly
+// inside the chart, and every other triangle is an Unclaimed provisional;
+// or the chart has no owner, every triangle is an Unclaimed provisional, and
+// every triangle sits in a cylinder region B1 already refused (a free annulus
+// that was rolled back — the same ring certificate, a new region). A chart
+// held whole by one uncertified region (RQ-H6) is not entered.
 int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& tol, double tau,
                    SegmentWork& work) {
     const MeshView& mv = *rm.mv;
@@ -1835,6 +1837,15 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
     for (auto& kv : charts) order.push_back(std::move(kv.second));
     std::sort(order.begin(), order.end(),
               [](const std::vector<int>& a, const std::vector<int>& b) { return a.front() < b.front(); });
+    // Triangles a cylinder claim already refused (B1's rejected list). A free
+    // annulus is entered only when that refusal covers the whole chart: the
+    // wall was attempted and rolled back, not a surface no stage tried.
+    std::vector<char> b1Refused((std::size_t)nTri, 0);
+    for (const Region& rr : work.rejected) {
+        if (rr.type != SurfType::Cylinder) continue;
+        for (int t : rr.tris)
+            if (t >= 0 && t < nTri) b1Refused[(std::size_t)t] = 1;
+    }
     int committed = 0;
     std::vector<int> erase;
     for (const std::vector<int>& ch : order) {
@@ -1851,8 +1862,22 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
                 ++nFree;
             }
         }
-        if (owners.empty()) continue;
-        if (owners.size() == 1 && nFree == 0) continue;
+        // A free chart is entered only when every triangle is an Unclaimed
+        // provisional. The ring, fit and cover gates below are the owned-chart
+        // certificate; nothing is dropped by rank.
+        const bool freeChart = owners.empty();
+        if (freeChart) {
+            if (foreign || nFree != (int)ch.size()) continue;
+            bool refused = true;
+            for (int t : ch)
+                if (!b1Refused[(std::size_t)t]) {
+                    refused = false;
+                    break;
+                }
+            if (!refused) continue;
+        } else if (owners.size() == 1 && nFree == 0) {
+            continue;
+        }
         std::set<int> chSet(ch.begin(), ch.end());
         for (int o : owners) {
             const Region& r = work.accepted[(std::size_t)o];
@@ -1990,10 +2015,21 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
         }
         closeRingFields(f);
         f.closed360 = true;
-        const int r0 = *owners.begin();
-        Region nr = work.accepted[(std::size_t)r0];
-        nr.origin = Origin::CylGrow;
-        nr.filletNbrA = nr.filletNbrB = -1;
+        int r0 = -1;
+        Region nr;
+        if (freeChart) {
+            nr.id = 0;
+            nr.type = SurfType::Cylinder;
+            nr.origin = Origin::CylGrow;
+            nr.reject = Reject::None;
+            nr.builtAs = BuiltAs::NotBuilt;
+            nr.filletNbrA = nr.filletNbrB = -1;
+        } else {
+            r0 = *owners.begin();
+            nr = work.accepted[(std::size_t)r0];
+            nr.origin = Origin::CylGrow;
+            nr.filletNbrA = nr.filletNbrB = -1;
+        }
         nr.tris = ch;
         applyCylFields(nr, S, f);
         {
@@ -2040,9 +2076,14 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
                              (int)work.accepted[(std::size_t)o].origin,
                              work.accepted[(std::size_t)o].tris.size(),
                              tau > 0.0 ? work.accepted[(std::size_t)o].maxVertexDev / tau : 0.0);
-        work.accepted[(std::size_t)r0] = std::move(nr);
-        for (int o : owners)
-            if (o != r0) erase.push_back(o);
+        if (freeChart) {
+            r0 = (int)work.accepted.size();
+            work.accepted.push_back(std::move(nr));
+        } else {
+            work.accepted[(std::size_t)r0] = std::move(nr);
+            for (int o : owners)
+                if (o != r0) erase.push_back(o);
+        }
         for (int t : ch) owner[(std::size_t)t] = r0;
         ++committed;
         report("accept", &rg[0], &rg[1]);

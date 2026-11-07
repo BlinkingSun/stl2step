@@ -209,7 +209,12 @@ static Run runClaim(Synth& s, stl2step::refit::SegmentWork work, double q, int t
     const auto mv = s.view(q);
     Run r;
     r.tau = (q > 0.0) ? 2.0 * q : 0.0;
-    r.diag = captureStderr([&] { claimRelExtrude(mv, p, tol, work); });
+    // H0's two extrude passes; the pole pass (D-gid-5.13) runs after the
+    // relational stages, which these synthetic cases do not exercise.
+    r.diag = captureStderr([&] {
+        claimRelExtrude(mv, p, tol, work);
+        claimRelExtrudePole(mv, p, tol, work);
+    });
     r.work = std::move(work);
     return r;
 }
@@ -1630,6 +1635,199 @@ static void case30() {
     expect(okS, "case30 co-directed tangent far plane is not a hem");
 }
 
+struct PoleMesh {
+    Synth synth;
+    stl2step::refit::SegmentWork work;
+};
+
+// Partial cylinder about Z, R=5, height 3, arc from 0. Each quad is its own
+// 2-triangle strip so it is not an A3 anchor. Optional caps are certified
+// parallel planes. Optional spike shares the first generator and sits on the
+// axis, so the component is one triangle off the cylinder.
+static PoleMesh makePoleArc(int nStrips, bool withAnchors, bool spike, bool certWall = false) {
+    PoleMesh m;
+    const double R = 5.0;
+    const double H = 3.0;
+    const double ang1 = 60.0 * kPi / 180.0;
+    const int nAng = nStrips + 1;
+    std::vector<int> lo((std::size_t)nAng), hi((std::size_t)nAng);
+    for (int i = 0; i < nAng; ++i) {
+        const double th = ang1 * (double)i / (double)nStrips;
+        lo[(std::size_t)i] = m.synth.addV(gp_XYZ(R * std::cos(th), R * std::sin(th), 0.0));
+        hi[(std::size_t)i] = m.synth.addV(gp_XYZ(R * std::cos(th), R * std::sin(th), H));
+    }
+    for (int i = 0; i < nStrips; ++i) {
+        std::vector<int> tris;
+        m.synth.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)i + 1],
+                        hi[(std::size_t)i + 1], tris);
+        if (certWall) {
+            const double th0 = ang1 * (double)i / (double)nStrips;
+            const double th1 = ang1 * (double)(i + 1) / (double)nStrips;
+            const double mid = 0.5 * (th0 + th1);
+            addAnchor(m.work, tris, gp_XYZ(std::cos(mid), std::sin(mid), 0.0),
+                      gp_XYZ(R * std::cos(th0), R * std::sin(th0), 0.0), 0.0);
+        } else {
+            addStrip(m.work, tris);
+        }
+    }
+    if (withAnchors) {
+        const int o = m.synth.addV(gp_XYZ(0, 0, 0));
+        const int oH = m.synth.addV(gp_XYZ(0, 0, H));
+        if (certWall) {
+            // Caps are past the A2 shatter grain, as a real plate is.
+            std::vector<int> bot, top;
+            const int nFan = std::min(3, nStrips);
+            for (int i = 0; i < nFan; ++i) {
+                bot.push_back(m.synth.tri(lo[(std::size_t)i], lo[(std::size_t)i + 1], o));
+                top.push_back(m.synth.tri(hi[(std::size_t)i], hi[(std::size_t)i + 1], oH));
+            }
+            addAnchor(m.work, bot, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+            addAnchor(m.work, top, gp_XYZ(0, 0, 1), gp_XYZ(0, 0, H), 0.0);
+        } else {
+            const int bot = m.synth.tri(lo[0], lo[1], o);
+            const int top = m.synth.tri(hi[0], hi[1], oH);
+            addAnchor(m.work, {bot}, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+            addAnchor(m.work, {top}, gp_XYZ(0, 0, 1), gp_XYZ(0, 0, H), 0.0);
+        }
+    }
+    if (spike) {
+        const int extra = m.synth.addV(gp_XYZ(0, 0, 0.5 * H));
+        addStrip(m.work, {m.synth.tri(lo[0], hi[0], extra)});
+    }
+    return m;
+}
+
+static void case33() {
+    using namespace stl2step::refit;
+    const double q = 1e-4;
+    const double R = 5.0;
+    auto anchored = makePoleArc(6, true, false);
+    Run r = runClaim(anchored.synth, std::move(anchored.work), q, 1);
+    bool ok = r.work.accepted.size() == 1;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        const double az = std::abs(a.ax.Direction().Z());
+        ok = a.origin == Origin::CylGrow && nearRadius(a, R, r.tau) && !a.closed360 &&
+             a.tris.size() == 12 && az > 0.999;
+        std::fprintf(stderr, "case33 r=%.9g dev=%.3g tris=%d az=%.6f origin=%d\n", a.radius,
+                     a.maxVertexDev, (int)a.tris.size(), az, (int)a.origin);
+    }
+    if (!ok) dumpFail("case33", r);
+    expect(ok, "case33 parallel caps, partial cylinder via gauss pole");
+
+    auto thr = makePoleArc(6, true, false);
+    Run r3 = runClaim(thr.synth, std::move(thr.work), q, 3);
+    bool same = r3.work.accepted.size() == 1 && r.work.accepted.size() == 1;
+    if (same) {
+        const Region& a = r.work.accepted[0];
+        const Region& b = r3.work.accepted[0];
+        same = a.tris == b.tris && std::abs(a.radius - b.radius) <= 1e-9 &&
+               a.ax.Direction().XYZ().Dot(b.ax.Direction().XYZ()) > 0.999;
+    }
+    if (!same) dumpFail("case33-threads", r3);
+    expect(same, "case33 threads 1 and 3 commit the same cylinder");
+
+    auto freeArc = makePoleArc(6, false, false);
+    Run rf = runClaim(freeArc.synth, std::move(freeArc.work), q, 1);
+    bool okF = rf.work.accepted.size() == 1;
+    if (okF) {
+        const Region& a = rf.work.accepted[0];
+        okF = a.origin == Origin::CylGrow && nearRadius(a, R, rf.tau) && a.tris.size() == 12;
+    }
+    if (!okF) dumpFail("case33-free", rf);
+    expect(okF, "case33 no certified anchor, same partial cylinder");
+
+    auto few = makePoleArc(2, true, false);
+    Run ru = runClaim(few.synth, std::move(few.work), q, 1);
+    const bool okU = ru.work.accepted.empty() && hasWhy(ru.diag, "underdetermined");
+    if (!okU) dumpFail("case33-stations", ru);
+    expect(okU, "case33 three stations stay unclaimed");
+
+    auto bad = makePoleArc(6, true, true);
+    Run rb = runClaim(bad.synth, std::move(bad.work), q, 1);
+    const bool okB = rb.work.accepted.empty() &&
+                     (hasWhy(rb.diag, "vertex-off") || hasWhy(rb.diag, "normal-off"));
+    if (!okB) dumpFail("case33-spike", rb);
+    expect(okB, "case33 one off-cylinder triangle refuses the component");
+}
+
+static void case34() {
+    using namespace stl2step::refit;
+    const double q = 1e-4;
+    const double R = 5.0;
+    // Each wall quad is itself an A3 anchor (n = 2, area above the floor).
+    // The caps are the parallel pair. The quads stay in the band.
+    auto wall = makePoleArc(6, true, false, true);
+    Run r = runClaim(wall.synth, std::move(wall.work), q, 1);
+    bool ok = r.work.accepted.size() == 1;
+    if (ok) {
+        const Region& a = r.work.accepted[0];
+        ok = a.origin == Origin::CylGrow && nearRadius(a, R, r.tau) && !a.closed360 &&
+             a.tris.size() == 12 && std::abs(a.ax.Direction().Z()) > 0.999;
+        std::fprintf(stderr, "case34 r=%.9g dev=%.3g tris=%d\n", a.radius, a.maxVertexDev,
+                     (int)a.tris.size());
+    }
+    if (!ok) dumpFail("case34", r);
+    expect(ok, "case34 shatter-grain wall quads are the pole band, not caps");
+}
+
+// D-gid-5.4. A closed square prism between certified caps: its vertices lie
+// on the circumcircle (dev 0), so only the loop rule refuses it.
+static PoleMesh makePoleLoop(int nSides) {
+    PoleMesh m;
+    const double R = 4.0;
+    const double H = 3.0;
+    std::vector<int> lo((std::size_t)nSides), hi((std::size_t)nSides);
+    for (int i = 0; i < nSides; ++i) {
+        const double th = 2.0 * kPi * (double)i / (double)nSides;
+        lo[(std::size_t)i] = m.synth.addV(gp_XYZ(R * std::cos(th), R * std::sin(th), 0.0));
+        hi[(std::size_t)i] = m.synth.addV(gp_XYZ(R * std::cos(th), R * std::sin(th), H));
+    }
+    for (int i = 0; i < nSides; ++i) {
+        const int j = (i + 1) % nSides;
+        std::vector<int> tris;
+        m.synth.addQuad(lo[(std::size_t)i], hi[(std::size_t)i], lo[(std::size_t)j],
+                        hi[(std::size_t)j], tris);
+        addStrip(m.work, tris);
+    }
+    const int o = m.synth.addV(gp_XYZ(0, 0, 0));
+    const int oH = m.synth.addV(gp_XYZ(0, 0, H));
+    std::vector<int> bot, top;
+    for (int i = 0; i < nSides; ++i) {
+        const int j = (i + 1) % nSides;
+        bot.push_back(m.synth.tri(lo[(std::size_t)i], lo[(std::size_t)j], o));
+        top.push_back(m.synth.tri(hi[(std::size_t)i], hi[(std::size_t)j], oH));
+    }
+    addAnchor(m.work, bot, gp_XYZ(0, 0, -1), gp_XYZ(0, 0, 0), 0.0);
+    addAnchor(m.work, top, gp_XYZ(0, 0, 1), gp_XYZ(0, 0, H), 0.0);
+    return m;
+}
+
+static void case35() {
+    using namespace stl2step::refit;
+    const double q = 1e-4;
+    // Four stations, but three without an end quad (D-fc-5.5 F-2).
+    auto three = makePoleArc(3, true, false, true);
+    Run r3 = runClaim(three.synth, std::move(three.work), q, 1);
+    const bool ok3 = r3.work.accepted.empty() && hasWhy(r3.diag, "underdetermined") &&
+                     r3.diag.find("losoStations=3") != std::string::npos;
+    if (!ok3) dumpFail("case35-three", r3);
+    expect(ok3, "case35 three-quad arc is underdetermined leave-one-source-out");
+
+    // Four quads keep four stations without either end quad.
+    auto four = makePoleArc(4, true, false, true);
+    Run r4 = runClaim(four.synth, std::move(four.work), q, 1);
+    const bool ok4 = r4.work.accepted.size() == 1 && r4.work.accepted[0].tris.size() == 8;
+    if (!ok4) dumpFail("case35-four", r4);
+    expect(ok4, "case35 four-quad arc still commits");
+
+    auto loop = makePoleLoop(4);
+    Run rl = runClaim(loop.synth, std::move(loop.work), q, 1);
+    const bool okL = rl.work.accepted.empty() && hasWhy(rl.diag, "polygon-loop");
+    if (!okL) dumpFail("case35-loop", rl);
+    expect(okL, "case35 closed square prism is a polygon, not its circumcylinder");
+}
+
 int main() {
     setenv("STL2STEP_DIAG_REL", "1", 1);
     pins();
@@ -1666,6 +1864,9 @@ int main() {
     case30();
     case31();
     case32();
+    case33();
+    case34();
+    case35();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;

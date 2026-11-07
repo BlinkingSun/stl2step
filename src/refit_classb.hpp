@@ -39,6 +39,23 @@ inline bool classBHealPassHasCandidates(const int* qualifyingRids, int nQualifyi
     return nQualifying > 0;
 }
 
+// D-gid-2.2 / D-gid-3.8. The swept test qualified nobody (nQual = 0), so the
+// caller runs one classBOwnCertFails dissolve from the pristine plan. A
+// positive count stays on the swept-test loop. A negative count is not an
+// empty set.
+inline bool classBNoQualCertFailPass(int nQualifying) {
+    return nQualifying == 0;
+}
+
+// Member of that one pass: shipped analytic and own vertex residual over τ.
+// nQualifying is the finished swept-test count. The pass cannot be selected
+// while that count is still positive, and it does not rank or subset the ids.
+inline bool classBCertFailPassMember(bool shippedAnalytic, double maxVertexDev, double tau,
+                                     int nQualifying) {
+    return classBNoQualCertFailPass(nQualifying) && shippedAnalytic &&
+           classBOwnCertFails(maxVertexDev, tau);
+}
+
 }  // namespace refit
 }  // namespace stl2step
 

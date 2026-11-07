@@ -137,6 +137,9 @@ struct SegmentWork {
     std::vector<Region> rejected;       // B1 G1-G4 rollbacks only (G5 silent)
     std::vector<TorusPendingReclaim> torusPending;
     bool torusAdmitted = false;         // stage T committed at least one candidate
+    // D-gid-3.3: certified parallel pairs the H0 parallel arm deferred (prov
+    // ids, lo < hi). claimRelExtrude records them; claimRelExtrudePole reads.
+    std::vector<std::pair<int, int>> relPolePairs;
 };
 
 // --- Stage entry points (one per D1 §1.2 stage; bool = stage ok, never throws) -
@@ -313,14 +316,21 @@ struct MeshRing;  // refit_relational_arc.hpp (ring donors)
 
 enum class RelRevolveMode : uint8_t { Line, Torus };
 bool claimRelExtrude (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+// D-gid-5.13: the Gauss-pole extrude axis as a late pass, after the Line lift
+// and its reclaim, on what is still unclaimed. A fallback axis source.
+bool claimRelExtrudePole(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
 bool refuteNgonByLaw (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
 // D-fc-5.17 F-2 / D-fc-2 P-TL: a mesh ring loop is a polygon (not a rim) when
 // its azimuth step is no finer than a tess-law witness at radius <= R + tau.
 bool meshRingRefutedByTessLaw(const MeshView&, const SegmentParams&, double tau,
                               const SegmentWork&, const MeshRing&,
                               const std::vector<const MeshRing*>& peerRings);
-bool claimRelRevolve (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
+// apexOnly re-runs the drill-point claim after ring-wall closure (D-gid-5.17).
+bool claimRelRevolve (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode,
+                      bool apexOnly = false);
 bool reclaimRelational(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
+// D-gid-2.6. Anchored quarter-round tori (src/refit_anchored_round.cpp): after H1.
+bool claimAnchoredRounds(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
 
 // D-fc-5.11 F8. Sphere corners (src/refit_relational_sphere.cpp): after every
 // stage that certifies a round (H1), before A3.

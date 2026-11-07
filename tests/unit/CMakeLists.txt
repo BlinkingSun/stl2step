@@ -949,6 +949,53 @@ set_tests_properties(relational_rehost_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# D-gid-2.1: unify free-edge guard, dropped-face rebuild, written-body retally.
+add_executable(unify_guard_unit unify_guard_unit.cpp)
+target_compile_features(unify_guard_unit PRIVATE cxx_std_17)
+set_target_properties(unify_guard_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(unify_guard_unit PRIVATE stl2step::core)
+target_include_directories(unify_guard_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(unify_guard_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(unify_guard_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(unify_guard_unit)
+endif()
+add_test(NAME unify_guard_unit COMMAND unify_guard_unit)
+set_tests_properties(unify_guard_unit PROPERTIES
+    LABELS "unit"
+    TIMEOUT 60)
+
+# gid/gx-torus28 (D-gid-2.6): anchored quarter-round certificate on synthetic
+# profiles -- 4 stations certify with tangent anchors, refuse as a free round.
+add_executable(relational_anchored_round_unit relational_anchored_round_unit.cpp)
+target_compile_features(relational_anchored_round_unit PRIVATE cxx_std_17)
+set_target_properties(relational_anchored_round_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_anchored_round_unit PRIVATE stl2step::core)
+target_include_directories(relational_anchored_round_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_anchored_round_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_anchored_round_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_anchored_round_unit)
+endif()
+add_test(NAME relational_anchored_round_unit COMMAND relational_anchored_round_unit)
+set_tests_properties(relational_anchored_round_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

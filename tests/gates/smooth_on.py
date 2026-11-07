@@ -406,6 +406,26 @@ def check_g0_3(ctx: GateContext) -> GateOutcome:
             )
         except RuntimeError as exc:
             return GateOutcome(gate_id, fid, "FAIL", str(exc))
+        # D-gid-5.9: the 187ead0 baseline exit 2 can encode the unify drop defect
+        # (a dropped facet left an open shell + a volume warning). A candidate that
+        # exits 0 with no warnings and writes a closed body (solids >= 1, openShells
+        # 0, both re-tallied from the written shape) is an authorised improvement.
+        cres = base.result or {}
+        improved = (
+            bl.exit_code == 2
+            and base.exit_code == 0
+            and not cres.get("warnings")
+            and int(cres.get("solids") or 0) >= 1
+            and int(cres.get("openShells") or 0) == 0
+        )
+        if improved:
+            return GateOutcome(
+                gate_id,
+                fid,
+                "PASS",
+                f"force-sew exit 0 vs baseline 2: closed body, no warnings (authorised improvement, D-gid-5.9)",
+                details={"candidateExit": base.exit_code, "baselineExit": bl.exit_code},
+            )
         if base.exit_code != bl.exit_code:
             return GateOutcome(
                 gate_id,

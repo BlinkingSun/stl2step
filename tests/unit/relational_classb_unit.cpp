@@ -39,9 +39,27 @@ static void testStopRule() {
     expect(!classBHealPassHasCandidates(ids, 0), "empty pass stops heal");
 }
 
+static void testCertFailPass() {
+    const double tau = 2e-5;
+    expect(classBNoQualCertFailPass(0), "nQual 0 selects the cert-fail pass");
+    expect(!classBNoQualCertFailPass(1), "positive nQual stays on the swept loop");
+    expect(!classBNoQualCertFailPass(-1), "a negative count is not an empty set");
+    expect(classBCertFailPassMember(true, tau * 2.0, tau, 0),
+           "shipped over-tau region is a member when nQual is 0");
+    expect(!classBCertFailPassMember(true, tau * 2.0, tau, 3),
+           "swept candidates suppress the cert-fail pass");
+    expect(!classBCertFailPassMember(false, tau * 2.0, tau, 0),
+           "an unshipped region is not a member");
+    expect(!classBCertFailPassMember(true, tau * 0.5, tau, 0),
+           "a certified region stays");
+    expect(!classBCertFailPassMember(true, tau, tau, 0),
+           "a residual equal to tau stays");
+}
+
 int main() {
     testDissolveConjuncts();
     testStopRule();
+    testCertFailPass();
     if (gFail) {
         std::fprintf(stderr, "relational_classb_unit: %d FAIL\n", gFail);
         return 1;

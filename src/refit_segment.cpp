@@ -28,10 +28,12 @@ bool claimToriT(const MeshView& mv, const SegmentParams& p, const DerivedTols& t
                 SegmentWork& work);
 bool claimRelExtrude(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                      SegmentWork& work);
+bool claimRelExtrudePole(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                         SegmentWork& work);
 bool refuteNgonByLaw(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                      SegmentWork& work);
 bool claimRelRevolve(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                     SegmentWork& work, RelRevolveMode mode);
+                     SegmentWork& work, RelRevolveMode mode, bool apexOnly);
 bool reclaimRelational(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
                        SegmentWork& work, RelRevolveMode mode);
 bool claimRuledQuads(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
@@ -100,8 +102,14 @@ bool runStages(const MeshView& mv, const SegmentParams& p, const DerivedTols& to
     if (!refuteNgonByLaw(mv, p, tol, work)) return false;
     if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Line)) return false;
     if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Line)) return false;
+    // D-gid-5.17: the apex claim reads donor cylinders closeRingWalls just
+    // certified. Re-run it for fans still free. Same certificate.
+    if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Line, true)) return false;
     // D-fc-5.9: the ruled quad between certified rails, at the tail of H0.
     if (!claimRuledQuads(mv, p, tol, work)) return false;
+    // D-gid-5.13: the Gauss pole is a fallback axis source. It runs last in
+    // H0, on what the relational families left, so it never pre-empts one.
+    if (!claimRelExtrudePole(mv, p, tol, work)) return false;
 
     auto preTorus = std::make_shared<const SegmentWork>(work);
     if (!runTorusStages(mv, p, tol, *preTorus, nullptr, out)) return false;
@@ -122,6 +130,8 @@ bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTol
     // H1 (D-fc-1.3): after stage T, before A3. The pre-T snapshot already closed.
     if (!claimRelRevolve(mv, p, tol, work, RelRevolveMode::Torus)) return false;
     if (!reclaimRelational(mv, p, tol, work, RelRevolveMode::Torus)) return false;
+    // D-gid-2.6: a round tangent to certified anchors, below certifyTorus's free count.
+    if (!claimAnchoredRounds(mv, p, tol, work)) return false;
     // D-fc-5.11 F8: a corner of three certified rounds is a sphere.
     if (!claimSphereCorners(mv, p, tol, work)) return false;
 

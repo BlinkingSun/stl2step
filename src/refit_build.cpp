@@ -16317,6 +16317,21 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                              tookH ? 1 : 0, ciL0, ciH0, diagTShapePtr(eL), diagTShapePtr(eH));
             bindIsoPCurves(eL, r.vMin, u0, eSeam, true);
             bindIsoPCurves(eH, r.vMax, u0, eSeam, false);
+            // D-gid-2.8: bindIsoPCurves writes each cap on the branch its own 3d range
+            // names and the seam pair at the low cap's f, f + 2pi. A cap circle born on
+            // [2pi, 4pi] (its vertex reads 2pi - eps on the circle: ElCLib's wrap) lies
+            // two periods off that chart -- measured on a small flange hole: the
+            // wire does not close in UV (NotClosed) and the face is UnorientableShape.
+            // Shift it by whole periods onto the chart the seam names, exactly as
+            // rebranchEdges does on the inner-wire and torus paths (gSeamSet, which
+            // finishFace rebranches itself); a cap already on the chart is not touched.
+            if (!gSeamSet && !keepSharedCaps) {
+                Standard_Real fL = 0, lL = 0;
+                Handle(Geom_Curve) cL3 = BRep_Tool::Curve(eL, fL, lL);
+                const double uChart = cL3.IsNull() ? u0 : fL;
+                rebranchEdges(eL, uChart, TopoDS_Edge());
+                rebranchEdges(eH, uChart, TopoDS_Edge());
+            }
             if (keepSharedCaps) {
                 Standard_Real f = 0, l = 0;
                 Handle(Geom_Curve) c3 = BRep_Tool::Curve(eL, f, l);
@@ -20345,6 +20360,45 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     if (e.IsNull()) e = makeFullCircle(curve.circ, verts[(size_t)ia]);
                     if (e.IsNull())
                         e = makeEdgeFromCurve(curve, verts[(size_t)ia], verts[(size_t)ib], full);
+                    // D-gid-2.5. This circle is the drill-point mouth, shared with
+                    // the hole cylinder. The cylinder iso pcurve is a line whose
+                    // origin is the 3d first parameter, so a start on the branch
+                    // cut (parameter 2π, the same point as 0) puts the cap a full
+                    // turn off the seam and the wall is NotClosed. Land that one
+                    // edge on [0, 2π]. Every other full circle keeps its range.
+                    const bool apexMouth =
+                        (A->type == SurfType::Cone && A->origin == Origin::ChamferCone &&
+                         !(A->radius > 0.0)) ||
+                        (B->type == SurfType::Cone && B->origin == Origin::ChamferCone &&
+                         !(B->radius > 0.0));
+                    if (apexMouth && !e.IsNull()) {
+                        Standard_Real f0 = 0, l0 = 0;
+                        if (!BRep_Tool::Curve(e, f0, l0).IsNull()) {
+                            const double period = 2.0 * kPi;
+                            const double nTurn = std::round(f0 / period);
+                            const double tauR = tauOf(mv);
+                            const double angTol =
+                                circlePeriodParamTol(tauR, curve.circ.Radius());
+                            if (std::fabs(nTurn) >= 1.0 &&
+                                std::fabs(f0 - nTurn * period) <= angTol) {
+                                BRep_Builder Br;
+                                Br.Range(e, 0.0, period);
+                                TopoDS_Vertex vs, ve;
+                                TopExp::Vertices(e, vs, ve);
+                                if (!vs.IsNull()) {
+                                    const gp_Pnt at0 = ElCLib::Value(0.0, curve.circ);
+                                    bumpVertexTol(vs, std::max(at0.Distance(BRep_Tool::Pnt(vs)),
+                                                               Precision::Confusion()));
+                                }
+                                if (diag130Enabled() || diagP2Enabled())
+                                    std::fprintf(stderr,
+                                                 "DIAG_CONEFACE rid=%d why=apex-range "
+                                                 "f0=%.6f ci=%d\n",
+                                                 A->type == SurfType::Cone ? A->id : B->id, f0,
+                                                 (int)ci);
+                            }
+                        }
+                    }
                 } else {
                     const bool partialCylArc =
                         cylHint && !cylHint->closed360 && curve.kind == AnalyticCurve::Circ;
@@ -21021,6 +21075,293 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                 return coneFail("inner-loop-wire", 0, 0);
                             inners.push_back(iw);
                         }
+                    }
+                    // D-gid-2.5 / D-gid-3.6. An apex cone (R_lo = 0) has no CapLow.
+                    // The face is the shared mouth circle (coneIsoCircle at the
+                    // signed height), a seam generator apex→rim, and a
+                    // degenerated edge at the apex. The wire matches the face
+                    // BRepLib_MakeFace builds for that (u, v) rectangle, which
+                    // is the orientation BRepCheck accepts. A face that fails
+                    // returns false: this band alone explodes to facets.
+                    if (!(r.radius > Precision::Confusion())) {
+                        if (capL || !capH || capH->chainIdx.empty())
+                            return coneFail("apex-mouth",
+                                            capL ? (double)capL->chainIdx.size() : -1,
+                                            capH ? (double)capH->chainIdx.size() : -1);
+                        Handle(Geom_ConicalSurface) csurf = Handle(Geom_ConicalSurface)::DownCast(
+                            regionSurf(r, SurfVar::ConeBase));
+                        if (csurf.IsNull())
+                            return coneFail("apex-surface", r.radius, chamferRhiOf(r));
+                        const double Rhi = chamferRhiOf(r);
+                        const double h = chamferHeightOf(r);
+                        const gp_Cone gcone = csurf->Cone();
+                        const double vApex = coneVAtRadius(gcone, 0.0);
+                        const double vMouth = coneVAtRadius(gcone, Rhi);
+                        if (!std::isfinite(vApex) || !std::isfinite(vMouth) ||
+                            !(std::fabs(vMouth - vApex) > Precision::Confusion()))
+                            return coneFail("apex-v", vApex, vMouth);
+                        const gp_Circ circ = coneIsoCircle(r, h);
+                        if (!(circ.Radius() > Precision::Confusion()))
+                            return coneFail("apex-circle", circ.Radius(), h);
+                        int vH = vertexClosestToUOnLoop(mv, r, *capH, rs, 0.0);
+                        if (const int a = axisSeamVertexOf(capH, geom); a >= 0) vH = a;
+                        int apexLv = -1;
+                        double apexGap = 1e300;
+                        if (mv.compTris && mv.tris && mv.compVtx) {
+                            // Triangle corners are global point ids. compVtx is
+                            // local -> global, so a global id is not a local index.
+                            std::unordered_map<int, int> g2l;
+                            g2l.reserve(mv.nVtx);
+                            for (size_t i = 0; i < mv.nVtx; ++i)
+                                g2l.emplace(mv.compVtx[i], (int)i);
+                            for (int t : r.tris) {
+                                if (t < 0 || (size_t)t >= mv.nTri) continue;
+                                const int gt = mv.compTris[t];
+                                if (gt < 0) continue;
+                                const int* T = mv.tris[gt];
+                                for (int k = 0; k < 3; ++k) {
+                                    const auto it = g2l.find(T[k]);
+                                    if (it == g2l.end()) continue;
+                                    const int lv = it->second;
+                                    if (lv < 0 || (size_t)lv >= verts.size()) continue;
+                                    const double d = pntOf(mv, lv).Distance(r.ax.Location());
+                                    if (d < apexGap) {
+                                        apexGap = d;
+                                        apexLv = lv;
+                                    }
+                                }
+                            }
+                        }
+                        if (vH < 0 || apexLv < 0 || vH == apexLv || (size_t)vH >= verts.size() ||
+                            (size_t)apexLv >= verts.size())
+                            return coneFail("apex-vertex", (double)apexLv, (double)vH);
+                        const double snapCap = meshTolCap(mv, &r);
+                        AnalyticCurve acH;
+                        acH.kind = AnalyticCurve::Circ;
+                        acH.circ = circ;
+                        snapVertexToCurve(verts[(size_t)vH], acH, std::max(snapCap, apexGap));
+                        bumpVertexTol(verts[(size_t)apexLv], std::max(apexGap, Precision::Confusion()));
+                        const int ciH = capH->chainIdx.front();
+                        if (capH->chainIdx.size() != 1 || ciH < 0)
+                            return coneFail("apex-composite", (double)capH->chainIdx.size(), 0);
+                        TopoDS_Edge eMouth;
+                        if ((size_t)ciH < geom.size() && geom[(size_t)ciH].collapsed) {
+                            if (geom[(size_t)ciH].edges.size() != 1)
+                                return coneFail("apex-collapsed-edges",
+                                                (double)geom[(size_t)ciH].edges.size(), 0);
+                            eMouth = TopoDS::Edge(geom[(size_t)ciH].edges[0].Oriented(TopAbs_FORWARD));
+                            if (!edgeSpansFullCircle(eMouth))
+                                return coneFail("apex-not-circle", 0, 0);
+                        } else {
+                            if (!partnerBuildable(ciH, r, rs, &eprimeFill, &exploded)) {
+                                diagCapMint(r.id, ciH, capPartnerRid(ciH, r, rs), 0, 0);
+                                return coneFail("apex-partner", (double)ciH, 0);
+                            }
+                            diagCapMint(r.id, ciH, capPartnerRid(ciH, r, rs), 1, 1);
+                            eMouth = makeFullCircle(circ, verts[(size_t)vH]);
+                            // A full circle whose start parameter lands on the
+                            // branch cut (2π, the same point as 0) makes the
+                            // hole cylinder's iso pcurve miss its seam. Snap
+                            // that minted edge onto [0, 2π]. A reused edge is
+                            // left alone: its partner already closed on it.
+                            if (!eMouth.IsNull()) {
+                                Standard_Real f0 = 0, l0 = 0;
+                                if (!BRep_Tool::Curve(eMouth, f0, l0).IsNull()) {
+                                    const double period = 2.0 * kPi;
+                                    const double nTurn = std::round(f0 / period);
+                                    const double tauR = tauOf(mv);
+                                    const double angTol =
+                                        circlePeriodParamTol(tauR, circ.Radius());
+                                    if (std::fabs(nTurn) >= 1.0 &&
+                                        std::fabs(f0 - nTurn * period) <= angTol) {
+                                        BRep_Builder Br;
+                                        Br.Range(eMouth, 0.0, period);
+                                        bumpVertexTol(
+                                            verts[(size_t)vH],
+                                            std::max(ElCLib::Value(0.0, circ).Distance(
+                                                         BRep_Tool::Pnt(verts[(size_t)vH])),
+                                                     Precision::Confusion()));
+                                    }
+                                }
+                            }
+                        }
+                        if (eMouth.IsNull()) return coneFail("apex-mouth-edge", 0, 0);
+                        Standard_Real cf = 0, clp = 0;
+                        Handle(Geom_Curve) cMouth = BRep_Tool::Curve(eMouth, cf, clp);
+                        if (cMouth.IsNull()) return coneFail("apex-mouth-curve", cf, clp);
+                        // Seam from the apex to the mouth edge's own start point, so a
+                        // reused hole-circle (its parameter is not the cone's u)
+                        // still meets the ruling. Pcurves are the circle-on-cone
+                        // and line-on-cone certificates the frustum arm uses, shifted
+                        // onto one 2π chart. The 3d seam always runs apex → mouth;
+                        // vSgn carries a negative cone.
+                        TopoDS_Vertex vMouthV;
+                        {
+                            TopoDS_Vertex vs, ve;
+                            TopExp::Vertices(eMouth, vs, ve);
+                            vMouthV = vs;
+                        }
+                        if (vMouthV.IsNull() || vMouthV.IsSame(verts[(size_t)apexLv]))
+                            return coneFail("apex-mouth-vertex", 0, 0);
+                        snapVertexToCurve(vMouthV, acH, std::max(snapCap, apexGap));
+                        const gp_Pnt pApex = r.ax.Location();
+                        const gp_Pnt pMouth = BRep_Tool::Pnt(vMouthV);
+                        const gp_Vec genVec(pApex, pMouth);
+                        if (genVec.Magnitude() <= Precision::Confusion())
+                            return coneFail("apex-generator", genVec.Magnitude(), 0);
+                        gp_Dir genDir;
+                        try {
+                            genDir = gp_Dir(genVec);
+                        } catch (const Standard_Failure&) {
+                            return coneFail("apex-gendir", 0, 0);
+                        }
+                        const gp_Lin gen(pApex, genDir);
+                        auto distToGen = [&](const gp_Pnt& p) {
+                            const gp_Vec w(gen.Location(), p);
+                            const gp_Vec ax(gen.Direction());
+                            return (w - ax * w.Dot(ax)).Magnitude();
+                        };
+                        bumpVertexTol(verts[(size_t)apexLv],
+                                      std::max(apexGap, distToGen(BRep_Tool::Pnt(verts[(size_t)apexLv]))));
+                        bumpVertexTol(vMouthV, std::max(apexGap, distToGen(pMouth)));
+                        TopoDS_Edge eSeam;
+                        try {
+                            BRepBuilderAPI_MakeEdge ms(gen, verts[(size_t)apexLv], vMouthV);
+                            if (!ms.IsDone())
+                                return coneFail("apex-seam",
+                                                distToGen(BRep_Tool::Pnt(verts[(size_t)apexLv])),
+                                                distToGen(pMouth));
+                            eSeam = ms.Edge();
+                        } catch (const Standard_Failure&) {
+                            return coneFail("apex-seam-threw", 0, 0);
+                        }
+                        Standard_Real fs = 0, ls = 0;
+                        if (BRep_Tool::Curve(eSeam, fs, ls).IsNull() ||
+                            !(std::fabs(ls - fs) > Precision::PConfusion()))
+                            return coneFail("apex-seam-range", fs, ls);
+                        const double edgeTol =
+                            std::max(sewTol, std::max(apexGap, Precision::Confusion()));
+                        BRep_Builder B;
+                        Handle(Geom2d_Curve) pcMouth;
+                        Handle(Geom_Circle) gcMouth =
+                            Handle(Geom_Circle)::DownCast(basisCurveOf(cMouth));
+                        if (!gcMouth.IsNull())
+                            pcMouth = conePCurveForCircle(gcone, gcMouth->Circ());
+                        if (pcMouth.IsNull())
+                            pcMouth = new Geom2d_Line(gp_Pnt2d(0.0, vMouth), gp_Dir2d(1.0, 0.0));
+                        {
+                            const double period = 2.0 * kPi;
+                            const double uA = pcMouth->Value(cf).X();
+                            const double uB = pcMouth->Value(clp).X();
+                            const double kShift = -std::floor(std::min(uA, uB) / period);
+                            if (kShift != 0.0) {
+                                Handle(Geom2d_Curve) sh = Handle(Geom2d_Curve)::DownCast(
+                                    pcMouth->Translated(gp_Vec2d(kShift * period, 0.0)));
+                                if (!sh.IsNull()) pcMouth = sh;
+                            }
+                        }
+                        const double uAtCf = pcMouth->Value(cf).X();
+                        const double uAtCl = pcMouth->Value(clp).X();
+                        const bool mouthFwdIncreases = uAtCl >= uAtCf;
+                        const double u0 = mouthFwdIncreases ? uAtCf : uAtCl;
+                        const double u1 = mouthFwdIncreases ? uAtCl : uAtCf;
+                        if (!(u1 - u0 > Precision::Angular()))
+                            return coneFail("apex-u", u0, u1);
+                        double mouthTol = edgeTol;
+                        if (!gcMouth.IsNull()) {
+                            const char* cls = nullptr;
+                            const double sup = coneCircleBindSup(
+                                cMouth, cf, clp, csurf, pcMouth, TopLoc_Location(), &cls);
+                            if (sup > mouthTol) mouthTol = sup;
+                        }
+                        B.UpdateEdge(eMouth, pcMouth, csurf, TopLoc_Location(), mouthTol);
+                        B.Range(eMouth, csurf, TopLoc_Location(), cf, clp);
+                        const double vSgn = (vMouth >= vApex) ? 1.0 : -1.0;
+                        double vDir = vSgn;
+                        double vOrigin = vApex - vSgn * fs;
+                        if (Handle(Geom2d_Curve) pcLine = conePCurveForLine(
+                                gcone, gen, 0.5 * (fs + ls), Precision::Angular())) {
+                            Handle(Geom2d_Line) ln = Handle(Geom2d_Line)::DownCast(pcLine);
+                            if (!ln.IsNull()) {
+                                vDir = ln->Direction().Y();
+                                const double vFs = ln->Value(fs).Y();
+                                vOrigin = vFs - vDir * fs;
+                            }
+                        }
+                        Handle(Geom2d_Line) pcS0 =
+                            new Geom2d_Line(gp_Pnt2d(u0, vOrigin), gp_Dir2d(0.0, vDir));
+                        Handle(Geom2d_Line) pcS1 =
+                            new Geom2d_Line(gp_Pnt2d(u1, vOrigin), gp_Dir2d(0.0, vDir));
+                        B.UpdateEdge(eSeam, pcS0, pcS1, csurf, TopLoc_Location(), edgeTol);
+                        B.Range(eSeam, fs, ls);
+                        TopoDS_Edge eApex;
+                        B.MakeEdge(eApex);
+                        B.Degenerated(eApex, Standard_True);
+                        const double uSpan = u1 - u0;
+                        Handle(Geom2d_Line) pcA =
+                            new Geom2d_Line(gp_Pnt2d(u0, vApex), gp_Dir2d(1.0, 0.0));
+                        B.UpdateEdge(eApex, pcA, csurf, TopLoc_Location(), edgeTol);
+                        B.Range(eApex, csurf, TopLoc_Location(), 0.0, uSpan);
+                        B.Add(eApex, verts[(size_t)apexLv].Oriented(TopAbs_FORWARD));
+                        B.Add(eApex, verts[(size_t)apexLv].Oriented(TopAbs_REVERSED));
+                        B.Range(eApex, 0.0, uSpan);
+                        TopoDS_Wire w;
+                        B.MakeWire(w);
+                        // Frustum order: seam forward (u0, apex→mouth), mouth along
+                        // increasing u, seam reversed (u1), degenerated apex reversed.
+                        B.Add(w, eSeam);
+                        B.Add(w, mouthFwdIncreases ? eMouth
+                                                   : TopoDS::Edge(eMouth.Reversed()));
+                        B.Add(w, TopoDS::Edge(eSeam.Reversed()));
+                        B.Add(w, TopoDS::Edge(eApex.Reversed()));
+                        w.Closed(Standard_True);
+                        if (diagP2Enabled() || diag130Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_CONEFACE rid=%d why=apex-uv cf=%.6f cl=%.6f "
+                                         "u0=%.6f u1=%.6f vDir=%.0f fs=%.6f ls=%.6f\n",
+                                         r.id, cf, clp, u0, u1, vDir, fs, ls);
+                        TopoDS_Face f;
+                        bool okFace = false;
+                        TopoDS_Face fTry;
+                        if (makeFaceCopy(csurf, w, inners, r.outwardNormal, fTry) &&
+                            faceIsValid(fTry)) {
+                            f = fTry;
+                            okFace = true;
+                        } else if (makeFaceKeep(csurf, w, inners, r.outwardNormal, fTry) &&
+                                   faceIsValid(fTry)) {
+                            f = fTry;
+                            okFace = true;
+                        } else if (!fTry.IsNull()) {
+                            f = fTry;
+                        }
+                        if (!okFace) {
+                            if ((diagP2Enabled() || diag130Enabled()) && !f.IsNull()) {
+                                try {
+                                    BRepCheck_Analyzer an(f, Standard_True);
+                                    char ctx[160];
+                                    formatStatusInContext(an.Result(f), f, ctx, sizeof(ctx));
+                                    std::fprintf(stderr,
+                                                 "DIAG_CONEFACE rid=%d nTri=%zu why=apex-invalid "
+                                                 "check=%s Rhi=%.6f h=%.6f vA=%.6f vM=%.6f\n",
+                                                 r.id, r.tris.size(), ctx, Rhi, h, vApex, vMouth);
+                                } catch (const Standard_Failure&) {
+                                }
+                            }
+                            return coneFail("apex-invalid", vApex, vMouth);
+                        }
+                        if ((size_t)ciH < geom.size() && (size_t)ciH < collapsed.size()) {
+                            geom[(size_t)ciH].collapsed = true;
+                            geom[(size_t)ciH].edges = {eMouth};
+                            collapsed[(size_t)ciH] = 1;
+                        }
+                        if (diagP2Enabled() || diag130Enabled())
+                            std::fprintf(stderr,
+                                         "DIAG_CONEFACE rid=%d R=%.4f nTri=%zu why=APEX "
+                                         "valid=1 Rlo=0 Rhi=%.6f h=%.6f\n",
+                                         r.id, r.radius, r.tris.size(), Rhi, h);
+                        r.builtAs = BuiltAs::Seamed360;
+                        acc.push_back(f);
+                        return true;
                     }
                     if (!capL || !capH || capL->chainIdx.empty() || capH->chainIdx.empty())
                         return coneFail("missing-cap-loop", capL ? (double)capL->chainIdx.size() : -1,
@@ -22311,9 +22652,236 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         };
                         const bool capLoops = capL && capH && !capL->chainIdx.empty() &&
                                               !capH->chainIdx.empty();
-                        if (capLoops && (capLoopUnshareable(capL->chainIdx, reusedL, partnerOk) ||
-                                         capLoopUnshareable(capH->chainIdx, reusedH, partnerOk)))
-                            return torusFail("cap-partner-unbuilt", __LINE__, nullptr);
+                        const bool unL =
+                            capLoops && capLoopUnshareable(capL->chainIdx, reusedL, partnerOk);
+                        const bool unH =
+                            capLoops && capLoopUnshareable(capH->chainIdx, reusedH, partnerOk);
+                        // D-gid-5.15: an anchored round whose tau-preimage left facets
+                        // on one side. That cap is the mesh polyline the facets and the
+                        // plane already share (buildLoopWire / appendPolyline, the rim
+                        // D-140-2 ships for a closed wall whose partner cannot carry its
+                        // circle); the other cap stays the anchor's exact circle. The
+                        // seam stands on that circle's vertex and meets the polyline at
+                        // its mesh vertex on the same meridian.
+                        if (r.meshPolylineCap && capLoops && unL != unH) {
+                            const Loop* polyLp = unL ? capL : capH;
+                            const bool polyLow = unL;
+                            TopoDS_Edge eX = polyLow ? eH : eL;
+                            const bool reusedX = polyLow ? reusedH : reusedL;
+                            const int ciX0 = polyLow ? ciH0 : ciL0;
+                            TopoDS_Vertex VX = verts[(size_t)(polyLow ? vH : vL)];
+                            if (reusedX) {
+                                TopoDS_Vertex a, b;
+                                TopExp::Vertices(eX, a, b, Standard_True);
+                                if (!a.IsNull()) VX = a;
+                            } else {
+                                snapVertexToCurve(VX, polyLow ? acH : acL, snapCap);
+                            }
+                            const double uX = azimuthOf(r, BRep_Tool::Pnt(VX));
+                            TopoDS_Wire wP;
+                            if (!buildLoopWire(wP, *polyLp, rs, mv, geom, collapsed, meshE, edgeOk,
+                                               nullptr))
+                                return torusFail("polyline-cap-wire", __LINE__, nullptr);
+                            std::vector<TopoDS_Edge> pathP;
+                            for (BRepTools_WireExplorer ex(wP); ex.More(); ex.Next())
+                                pathP.push_back(TopoDS::Edge(ex.Current()));
+                            if (pathP.size() < 3)
+                                return torusFail("polyline-cap-wire", __LINE__, nullptr);
+                            // The polyline's vertex on the seam meridian.
+                            TopoDS_Vertex VP;
+                            double bestDu = 1e300;
+                            for (const TopoDS_Edge& e : pathP) {
+                                TopoDS_Vertex a, b;
+                                TopExp::Vertices(e, a, b, Standard_True);
+                                const double du = angularDistance(azimuthOf(r, BRep_Tool::Pnt(a)), uX);
+                                if (du < bestDu) {
+                                    bestDu = du;
+                                    VP = a;
+                                }
+                            }
+                            if (VP.IsNull() || !rotateEdgesToVertex(pathP, VP))
+                                return torusFail("polyline-cap-seam", __LINE__, nullptr);
+                            const double u0p = uX;
+                            // (u, v) of a point: u unwrapped against uPrev, v on the
+                            // band's profile chart [vMin - pi, vMin + pi).
+                            auto uvOf = [&](const gp_Pnt& P, double uPrev) -> gp_Pnt2d {
+                                double u = azimuthOf(r, P);
+                                while (u - uPrev > kPi) u -= 2.0 * kPi;
+                                while (u - uPrev <= -kPi) u += 2.0 * kPi;
+                                const gp_Vec d(r.ax.Location(), P);
+                                const double z = d.Dot(gp_Vec(r.ax.Direction()));
+                                const double rho = (d - gp_Vec(r.ax.Direction()) * z).Magnitude();
+                                double v = std::atan2(z, rho - r.radius);
+                                const double vMid = 0.5 * (r.vMin + r.vMax);
+                                while (v - vMid > kPi) v -= 2.0 * kPi;
+                                while (v - vMid <= -kPi) v += 2.0 * kPi;
+                                return gp_Pnt2d(u, v);
+                            };
+                            // The low cap runs +u in the wire, the high cap -u (the
+                            // closed construction above). Orient the polyline to match.
+                            auto sweepOf = [&](const std::vector<TopoDS_Edge>& path) {
+                                double uPrev = u0p, sw = 0.0;
+                                for (const TopoDS_Edge& e : path) {
+                                    TopoDS_Vertex a, b;
+                                    TopExp::Vertices(e, a, b, Standard_True);
+                                    const double u = uvOf(BRep_Tool::Pnt(b), uPrev).X();
+                                    sw += u - uPrev;
+                                    uPrev = u;
+                                }
+                                return sw;
+                            };
+                            double sw = sweepOf(pathP);
+                            if ((polyLow && sw < 0.0) || (!polyLow && sw > 0.0)) {
+                                std::reverse(pathP.begin(), pathP.end());
+                                for (TopoDS_Edge& e : pathP) e.Reverse();
+                                if (!rotateEdgesToVertex(pathP, VP))
+                                    return torusFail("polyline-cap-seam", __LINE__, nullptr);
+                                sw = sweepOf(pathP);
+                            }
+                            if (std::fabs(std::fabs(sw) - 2.0 * kPi) > kPi)
+                                return torusFail("polyline-cap-winding", __LINE__, nullptr);
+                            const double vXe = [&]() {
+                                Standard_Real f = 0, l = 0;
+                                Handle(Geom_Curve) c = BRep_Tool::Curve(eX, f, l);
+                                if (c.IsNull()) return polyLow ? r.vMax : r.vMin;
+                                return uvOf(c->Value(0.5 * (f + l)), u0p).Y();
+                            }();
+                            // The mesh columns of the two rims need not share an
+                            // azimuth: the seam is the straight (u, v) segment from the
+                            // circle's vertex to the polyline's, written twice one
+                            // period apart. It adds no vertex to a shared edge.
+                            const gp_Pnt2d uvP = uvOf(BRep_Tool::Pnt(VP), u0p);
+                            const double uP = uvP.X(), vPe = uvP.Y();
+                            const gp_Pnt2d uvLo = polyLow ? uvP : gp_Pnt2d(u0p, vXe);
+                            const gp_Pnt2d uvHi = polyLow ? gp_Pnt2d(u0p, vXe) : uvP;
+                            const TopoDS_Vertex VLo = polyLow ? VP : VX, VHi = polyLow ? VX : VP;
+                            const double seamLen = uvLo.Distance(uvHi);
+                            if (!(seamLen > gp::Resolution()))
+                                return torusFail("polyline-cap-seam", __LINE__, nullptr);
+                            Handle(Geom2d_Line) pcSeamRev =
+                                new Geom2d_Line(uvLo, gp_Dir2d(gp_Vec2d(uvLo, uvHi)));
+                            Handle(Geom2d_Line) pcSeamFwd = Handle(Geom2d_Line)::DownCast(
+                                pcSeamRev->Translated(gp_Vec2d(2.0 * kPi, 0.0)));
+                            TopoDS_Edge eSeamP;
+                            try {
+                                BRepBuilderAPI_MakeEdge ms(pcSeamRev, tsurf, VLo, VHi, 0.0, seamLen);
+                                if (!ms.IsDone())
+                                    return torusFail("seam-MakeEdge-failed", __LINE__, nullptr);
+                                eSeamP = ms.Edge();
+                                if (!BRepLib::BuildCurve3d(eSeamP, Precision::Confusion()))
+                                    return torusFail("seam-curve3d", __LINE__, nullptr);
+                            } catch (const Standard_Failure&) {
+                                return torusFail("seam-threw", __LINE__, nullptr);
+                            }
+                            eSeamP.Closed(Standard_False);
+                            const double offP = std::fabs(uP - u0p);
+                            const bool withUX = [&]() {
+                                try {
+                                    Standard_Real f = 0, l = 0;
+                                    Handle(Geom_Curve) c = BRep_Tool::Curve(eX, f, l);
+                                    return rimRunsWithSurfaceU(c, f, tsurf, u0p, vXe);
+                                } catch (const Standard_Failure&) {
+                                }
+                                return true;
+                            }();
+                            auto bindPolyPCurves = [&]() {
+                                BRep_Builder Bp;
+                                const TopLoc_Location loc;
+                                Standard_Real fX = 0, lX = 0;
+                                (void)BRep_Tool::Curve(eX, fX, lX);
+                                Handle(Geom2d_Line) pcX =
+                                    withUX ? new Geom2d_Line(gp_Pnt2d(u0p - fX, vXe), gp_Dir2d(1.0, 0.0))
+                                           : new Geom2d_Line(gp_Pnt2d(u0p + 2.0 * kPi + fX, vXe),
+                                                             gp_Dir2d(-1.0, 0.0));
+                                Bp.UpdateEdge(eX, pcX, tsurf, loc, sewTol);
+                                Bp.UpdateEdge(eSeamP, pcSeamFwd, pcSeamRev, tsurf, loc,
+                                              BRep_Tool::Tolerance(eSeamP));
+                                Bp.Range(eSeamP, 0.0, seamLen);
+                                eSeamP.Closed(Standard_False);
+                                // Each polyline edge: the 2-D segment between its two
+                                // vertices' (u, v), u unwrapped along the loop from the
+                                // seam (u0 for the low cap, u0 + 2 pi for the high cap).
+                                double uPrev = polyLow ? uP : uP + 2.0 * kPi;
+                                for (std::size_t i = 0; i < pathP.size(); ++i) {
+                                    const TopoDS_Edge& e = pathP[i];
+                                    TopoDS_Vertex a, b;
+                                    TopExp::Vertices(e, a, b, Standard_True);
+                                    const gp_Pnt2d pa = i == 0 ? gp_Pnt2d(uPrev, vPe)
+                                                               : uvOf(BRep_Tool::Pnt(a), uPrev);
+                                    gp_Pnt2d pb = uvOf(BRep_Tool::Pnt(b), pa.X());
+                                    if (i + 1 == pathP.size())
+                                        pb = gp_Pnt2d(polyLow ? uP + 2.0 * kPi : uP, vPe);
+                                    uPrev = pb.X();
+                                    const TopoDS_Edge ef = TopoDS::Edge(e.Oriented(TopAbs_FORWARD));
+                                    Standard_Real f = 0, l = 0;
+                                    Handle(Geom_Curve) c = BRep_Tool::Curve(ef, f, l);
+                                    if (c.IsNull() || !(l > f)) continue;
+                                    const bool rev = e.Orientation() == TopAbs_REVERSED;
+                                    TColgp_Array1OfPnt2d poles(1, 2);
+                                    poles(1) = rev ? pb : pa;
+                                    poles(2) = rev ? pa : pb;
+                                    TColStd_Array1OfReal knots(1, 2);
+                                    knots(1) = f;
+                                    knots(2) = l;
+                                    TColStd_Array1OfInteger mults(1, 2);
+                                    mults(1) = 2;
+                                    mults(2) = 2;
+                                    Handle(Geom2d_BSplineCurve) pc =
+                                        new Geom2d_BSplineCurve(poles, knots, mults, 1);
+                                    Bp.UpdateEdge(ef, pc, tsurf, loc, BRep_Tool::Tolerance(ef));
+                                }
+                            };
+                            bindPolyPCurves();
+                            BRep_Builder Bw;
+                            TopoDS_Wire wR;
+                            Bw.MakeWire(wR);
+                            Bw.Add(wR, TopoDS::Edge(eSeamP.Reversed()));
+                            if (polyLow) {
+                                for (const TopoDS_Edge& e : pathP) Bw.Add(wR, e);
+                            } else {
+                                Bw.Add(wR, withUX ? eX : TopoDS::Edge(eX.Reversed()));
+                            }
+                            Bw.Add(wR, eSeamP);
+                            if (polyLow) {
+                                Bw.Add(wR, withUX ? TopoDS::Edge(eX.Reversed()) : eX);
+                            } else {
+                                for (const TopoDS_Edge& e : pathP) Bw.Add(wR, e);
+                            }
+                            wR.Closed(Standard_True);
+                            TopoDS_Face fP;
+                            if (!makeFaceKeep(tsurf, wR, inners, r.outwardNormal, fP))
+                                return torusFail("polyline-cap-face", __LINE__, nullptr);
+                            bindPolyPCurves();
+                            try {
+                                BRepLib::SameParameter(eX, sewTol);
+                                BRepLib::SameParameter(eSeamP, sewTol);
+                                // The mesh edges arrive SameParameter on their other
+                                // faces; the torus pcurve is new, so measure it.
+                                BRep_Builder Bs;
+                                for (const TopoDS_Edge& e : pathP) {
+                                    Bs.SameParameter(e, Standard_False);
+                                    BRepLib::SameParameter(e, sewTol);
+                                }
+                            } catch (const Standard_Failure&) {
+                            }
+                            if (diagP2Enabled() || diag130Enabled() || diagRelEnabled()) {
+                                double maxTolP = 0.0;
+                                for (const TopoDS_Edge& e : pathP)
+                                    maxTolP = std::max(maxTolP, BRep_Tool::Tolerance(e));
+                                std::fprintf(stderr,
+                                             "DIAG_TORUSPOLYCAP rid=%d low=%d nEdge=%zu u0=%.6f "
+                                             "offP=%.6g sweep=%.6f reusedX=%d withUX=%d "
+                                             "maxEdgeTol=%.6g valid=%d\n",
+                                             r.id, polyLow ? 1 : 0, pathP.size(), u0p, offP, sw,
+                                             reusedX ? 1 : 0, withUX ? 1 : 0, maxTolP,
+                                             faceIsValid(fP) ? 1 : 0);
+                            }
+                            if (!finishTorus(fP, BuiltAs::Seamed360))
+                                return torusFail("polyline-cap-invalid", __LINE__, &fP);
+                            if (!reusedX) publishRim(ciX0, eX);
+                            return true;
+                        }
+                        if (unL || unH) return torusFail("cap-partner-unbuilt", __LINE__, nullptr);
                         if (eL.IsNull() || eH.IsNull()) return torusFail("cap-edge", __LINE__, nullptr);
 
                         TopoDS_Vertex VL = verts[(size_t)vL];
@@ -22343,7 +22911,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         // unbuilt) at the low cap's u.
                         // D-fc-4.6 F8: a rim a neighbour already built this pass is that
                         // face's own edge; minting a second circle leaves two free edges.
-                        // The build order is closed-360 cylinders, then region id.
+                        // Build order: closed-360 cylinders, then publishRimFirst, then
+                        // region id. A lower-id plane of an anchored round is not
+                        // built yet.
                         auto builtBefore = [&](int ci) -> bool {
                             const Region* P = regionById(rs, capPartnerRid(ci, r, rs));
                             if (!P || regionExploded(exploded, P->id)) return false;
@@ -22900,6 +23470,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         // built and committed (a later round's shell did not close): the
         // component takes the pre-T snapshot it arrived with, never verbatim.
         bool torusExplodedU3 = false;
+        // D-gid-2.3. restoreShared() re-mints every vertex from vsnap, rebuilds
+        // every mesh edge and re-binds every plane-chain pcurve. What it leaves
+        // depends on vsnap and the region set only, never on the slots it
+        // replaces, so a run of explodes needs one restore after the last of
+        // them. Per explode it was O(#exploded x mesh): hundreds of restores in the
+        // D-fc-5.18 loop and thousands in a large class-B heal.
+        int explodeBatch = 0;
+        bool explodeBatchRestore = false;
         auto explodeRegion = [&](int id) {
             if (id < 0 || (size_t)id >= exploded.size() || exploded[(size_t)id]) return;
             exploded[(size_t)id] = 1;
@@ -22913,6 +23491,15 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 rr->reject = Reject::FaceBuildFailed;
             }
             uncollapseRegionChains(id, rs, collapsed, geom);
+            if (explodeBatch > 0)
+                explodeBatchRestore = true;
+            else
+                restoreShared();
+        };
+        auto beginExplodeBatch = [&]() { explodeBatch++; };
+        auto endExplodeBatch = [&]() {
+            if (--explodeBatch > 0 || !explodeBatchRestore) return;
+            explodeBatchRestore = false;
             restoreShared();
         };
         // D-fc-5.18. A ruled quad must not let the rest of its component ship
@@ -22925,6 +23512,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             const double tauR = tauOf(mv);
             double devMax = 0.0;
             bool sawAnalytic = false;
+            beginExplodeBatch();
             for (Region& rg : rs.regions) {
                 if (!a3PlaneFacetsBesideRuled(true,
                                               rg.origin == Origin::PlaneGrow &&
@@ -22943,6 +23531,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 rg.dVolPredicted = 0.0;
                 explodeRegion(rg.id);
             }
+            endExplodeBatch();
             for (const Region& rg : rs.regions) {
                 if (regionExploded(exploded, rg.id)) continue;
                 if (!std::isfinite(rg.maxVertexDev)) continue;
@@ -22958,6 +23547,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
             double devMax = 0.0;
             bool sawAnalytic = false;
+            beginExplodeBatch();
             for (int id : ids) {
                 Region* rg = regionByIdMut(rs, id);
                 if (!rg || regionExploded(exploded, id)) continue;
@@ -22966,6 +23556,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 rg->dVolPredicted = 0.0;
                 explodeRegion(id);
             }
+            endExplodeBatch();
             for (const Region& rg : rs.regions) {
                 if (regionExploded(exploded, rg.id)) continue;
                 if (!std::isfinite(rg.maxVertexDev)) continue;
@@ -22988,11 +23579,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         };
         auto explodeAll = [&]() -> bool {
             bool any = false;
+            beginExplodeBatch();
             for (const Region& r : rs.regions) {
                 if (regionExploded(exploded, r.id)) continue;
                 explodeRegion(r.id);
                 any = true;
             }
+            endExplodeBatch();
             return any;
         };
 
@@ -23033,11 +23626,21 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             std::vector<int> failedIds;
             std::vector<size_t> buildOrder(rs.regions.size());
             for (size_t i = 0; i < buildOrder.size(); i++) buildOrder[i] = i;
+            // Closed cylinders first, then an anchored round that must publish
+            // its tangent circle before its partner plane (publishRimFirst),
+            // then everyone else by id. A plane built first keeps its polyline
+            // (the chain is not a sew-tolerance circle), the torus mints a
+            // second 2π edge, and the free edges make the next round drop the
+            // partner. Other closed tori stay in id order.
             std::stable_sort(buildOrder.begin(), buildOrder.end(), [&](size_t a, size_t b) {
                 const Region& ra = rs.regions[a], &rb = rs.regions[b];
-                const bool a360 = ra.closed360 && ra.type == SurfType::Cylinder;
-                const bool b360 = rb.closed360 && rb.type == SurfType::Cylinder;
-                if (a360 != b360) return a360;
+                auto tier = [](const Region& r) {
+                    if (r.closed360 && r.type == SurfType::Cylinder) return 0;
+                    if (r.publishRimFirst) return 1;
+                    return 2;
+                };
+                const int ta = tier(ra), tb = tier(rb);
+                if (ta != tb) return ta < tb;
                 return ra.id < rb.id;
             });
             // U-3 per torus (D-fc-4.11 (a)): a round that failed a torus ships nothing,

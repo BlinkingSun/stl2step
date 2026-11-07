@@ -226,6 +226,13 @@ struct Region {
     bool   tangentExact = false;
     gp_XYZ tangentWallOrigin{0, 0, 0}, tangentWallAxis{0, 0, 0};
     double tangentWallRadius = 0;
+    // Anchored quarter-round only. Its tangent circle is published before the
+    // partner plane builds, so the plane appends that edge instead of a
+    // polyline. Other closed tori keep id order.
+    bool   publishRimFirst = false;
+    // Anchored quarter-round only (D-gid-5.15). A cap of the closed torus runs
+    // against the facets its tau-preimage left; that cap is the mesh polyline.
+    bool   meshPolylineCap = false;
 };
 
 struct BoundaryChain {

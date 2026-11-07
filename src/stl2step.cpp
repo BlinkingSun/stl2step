@@ -49,6 +49,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <BRepTools_History.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -77,7 +78,11 @@
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_State.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Edge.hxx>
@@ -614,6 +619,107 @@ HealStats healOpenBoundaries(std::vector<std::array<int, 3>>& tris,
         }
     }
     return st;
+}
+
+// D-gid-2.1. An edge is free when exactly one distinct face owns it (the
+// spike's count: a face listed twice is still one face).
+int countFreeEdges(const TopoDS_Shape& shape) {
+    TopTools_IndexedDataMapOfShapeListOfShape ef;
+    TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, ef);
+    int n = 0;
+    for (int i = 1; i <= ef.Extent(); ++i) {
+        TopTools_IndexedMapOfShape faces;
+        for (TopTools_ListOfShape::Iterator it(ef(i)); it.More(); it.Next())
+            faces.Add(it.Value());
+        if (faces.Extent() == 1) ++n;
+    }
+    return n;
+}
+
+// History predicate, no angle cutoff: removed and no Modified image.
+std::vector<TopoDS_Face> facesRemovedWithoutImage(
+    const Handle(BRepTools_History)& hist,
+    const std::vector<TopoDS_Face>& faces) {
+    std::vector<TopoDS_Face> dropped;
+    if (hist.IsNull()) return dropped;
+    for (const auto& f : faces) {
+        if (!hist->IsRemoved(f)) continue;
+        if (!hist->Modified(f).IsEmpty()) continue;
+        dropped.push_back(f);
+    }
+    return dropped;
+}
+
+// Post-unify guard. More free edges than the input -> keep the input.
+TopoDS_Shape keepIfFreeEdgesNotIncreased(const TopoDS_Shape& input,
+                                        const TopoDS_Shape& unified) {
+    if (countFreeEdges(unified) > countFreeEdges(input)) return input;
+    return unified;
+}
+
+// Solids, and shells that are not inside a solid. That is the written file.
+void tallyWrittenBodies(const TopoDS_Shape& written, int& solids, int& openShells) {
+    solids = 0;
+    openShells = 0;
+    for (TopExp_Explorer ex(written, TopAbs_SOLID); ex.More(); ex.Next())
+        ++solids;
+    for (TopExp_Explorer ex(written, TopAbs_SHELL, TopAbs_SOLID); ex.More(); ex.Next())
+        ++openShells;
+}
+
+// Same constructor, tolerances and KeepShape(face) list as the old unifyOne.
+// A dropped face is rebuilt with KeepShape on each of its edges (KeepShape on
+// the face itself does not keep it). The free-edge guard then runs. No-op
+// when the history drops nothing and the free-edge count does not rise.
+TopoDS_Shape unifySameDomainGuarded(const TopoDS_Shape& shape, double angleDeg,
+                                    const std::vector<TopoDS_Face>* keep) {
+    constexpr double kPi = 3.14159265358979323846;
+    std::vector<TopoDS_Face> inputFaces;
+    for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next())
+        inputFaces.push_back(TopoDS::Face(ex.Current()));
+
+    struct Built {
+        TopoDS_Shape shape;
+        Handle(BRepTools_History) hist;
+    };
+    auto run = [&](const std::vector<TopoDS_Shape>* keepEdges) -> Built {
+        ShapeUpgrade_UnifySameDomain usd(shape, Standard_True, Standard_True, Standard_False);
+        if (angleDeg > 0) {
+            usd.SetAngularTolerance(angleDeg * kPi / 180.0);
+            usd.SetLinearTolerance(Precision::Confusion());
+        }
+        if (keep)
+            for (const auto& f : *keep) usd.KeepShape(f);
+        if (keepEdges)
+            for (const auto& e : *keepEdges) usd.KeepShape(e);
+        usd.Build();
+        return {usd.Shape(), usd.History()};
+    };
+
+    Built first = run(nullptr);
+    std::vector<TopoDS_Face> dropped = facesRemovedWithoutImage(first.hist, inputFaces);
+    TopoDS_Shape unified = first.shape;
+    if (!dropped.empty()) {
+        std::vector<TopoDS_Shape> keepEdges;
+        for (const auto& f : dropped)
+            for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next())
+                keepEdges.push_back(ex.Current());
+        try {
+            unified = run(&keepEdges).shape;
+        } catch (...) {
+            unified = first.shape;
+        }
+    }
+    TopoDS_Shape chosen = keepIfFreeEdgesNotIncreased(shape, unified);
+    const char* env = std::getenv("STL2STEP_DIAG_UNIFY");
+    if (env && env[0] == '1' &&
+        (!dropped.empty() || !chosen.IsSame(unified))) {
+        std::fprintf(stderr,
+                     "DIAG_UNIFY dropped=%d freeIn=%d freeCandidate=%d keptInput=%d\n",
+                     (int)dropped.size(), countFreeEdges(shape),
+                     countFreeEdges(unified), chosen.IsSame(unified) ? 0 : 1);
+    }
+    return chosen;
 }
 
 }  // namespace detail
@@ -1398,6 +1504,136 @@ Result Converter::run() {
                         shellChecked = true;
                     }
                 }
+                // D-gid-2.2. The swept test qualified nobody on this shell (the
+                // post-T shell when a torus probe is in force). Dissolve every
+                // shipped analytic region that fails its own τ certificate, in
+                // one pass from the pristine plan, before the pre-T restore.
+                // Built tori that are not in torusFailedTris are still in that
+                // plan and stay unless they themselves fail τ. The named revert
+                // stands only when this shell still fails.
+                if (!ok && skWhy == 3) {
+                    const double tauE = refit::tauOf(mv);
+                    int nQual = 0;
+                    if (tauE > 0.0) {
+                        for (const auto& w : rs.classBMetrics)
+                            if (refit::classBDissolveQualifies(
+                                    w.shippedAnalytic, w.maxVertexDev, tauE, w.swept,
+                                    w.dVolPredicted, w.area))
+                                ++nQual;
+                    }
+                    std::vector<int> certFail;
+                    if (refit::classBNoQualCertFailPass(nQual)) {
+                        for (const auto& w : rs.classBMetrics) {
+                            if (!refit::classBCertFailPassMember(
+                                    w.shippedAnalytic, w.maxVertexDev, tauE, nQual))
+                                continue;
+                            certFail.push_back(w.rid);
+                        }
+                    }
+                    if (!certFail.empty()) {
+                        std::sort(certFail.begin(), certFail.end());
+                        certFail.erase(std::unique(certFail.begin(), certFail.end()),
+                                       certFail.end());
+                        rs = healBase;
+                        rs.classBExplode = certFail;
+                        parallelFor(subThreads, nV, [&](size_t i) {
+                            BRep_Builder bb;
+                            bb.MakeVertex(verts[i], gp_Pnt(pts[cs.vtx[i]]),
+                                          Precision::Confusion());
+                        });
+                        torusProbeWarn.clear();
+                        ok = tryBuild(rs, true);
+                        shellChecked = false;
+                        if (ok) {
+                            ok = shellOk();
+                            shellChecked = true;
+                        }
+                        if (ok) {
+                            // D-gid-3.8: smoothMaxDevMM names a region that shipped.
+                            double shippedDev = 0.0;
+                            bool anyShip = false;
+                            for (const auto& w : rs.classBMetrics) {
+                                if (!w.shippedAnalytic || !std::isfinite(w.maxVertexDev))
+                                    continue;
+                                shippedDev = std::max(shippedDev, w.maxVertexDev);
+                                anyShip = true;
+                            }
+                            if (anyShip) rs.stats.maxVertexDev = shippedDev;
+                            if (const char* dv = std::getenv("STL2STEP_DIAG_CLASSB");
+                                dv && dv[0] && dv[0] != '0') {
+                                double dVolSigned = 0.0, dVolAbs = 0.0, areaKept = 0.0;
+                                std::vector<int> kept;
+                                kept.reserve(rs.classBMetrics.size());
+                                for (const auto& w : rs.classBMetrics) {
+                                    if (!w.shippedAnalytic) continue;
+                                    dVolSigned += w.dVolPredicted;
+                                    dVolAbs += std::fabs(w.dVolPredicted);
+                                    areaKept += w.area;
+                                    kept.push_back(w.rid);
+                                }
+                                std::sort(kept.begin(), kept.end());
+                                int nPl = 0, nCy = 0, nFi = 0, nTo = 0, nCn = 0, nSp = 0;
+                                double rMin = 0.0;
+                                bool anyR = false;
+                                auto considerR = [&](double r) {
+                                    if (!(r > 0.0) || !std::isfinite(r)) return;
+                                    if (!anyR || r < rMin) {
+                                        rMin = r;
+                                        anyR = true;
+                                    }
+                                };
+                                for (const auto& reg : rs.regions) {
+                                    if (!std::binary_search(kept.begin(), kept.end(), reg.id))
+                                        continue;
+                                    if (reg.origin == refit::Origin::FilletStrip) nFi++;
+                                    else if (reg.type == refit::SurfType::Plane) nPl++;
+                                    else if (reg.type == refit::SurfType::Cylinder) nCy++;
+                                    else if (reg.type == refit::SurfType::Torus) nTo++;
+                                    else if (reg.type == refit::SurfType::Cone) nCn++;
+                                    else if (reg.type == refit::SurfType::Sphere) nSp++;
+                                    considerR(reg.radius);
+                                    considerR(reg.radius2);
+                                }
+                                double shellVol = 0.0;
+                                try {
+                                    TopoDS_Shell probe;
+                                    BRep_Builder pb;
+                                    pb.MakeShell(probe);
+                                    for (auto& f : rf) pb.Add(probe, f);
+                                    shellVol = shapeVolume(probe);
+                                } catch (const Standard_Failure&) {
+                                    shellVol = 0.0;
+                                }
+                                const double meshAbs = std::fabs(cs.vol);
+                                const double delta = std::fabs(shellVol) - meshAbs;
+                                const double g5 = anyR ? 0.1 * rMin : 0.0;
+                                std::fprintf(stderr,
+                                             "DIAG_CLASSB_HEAL nQual=%d nDissolve=%zu nKept=%zu "
+                                             "nPlane=%d nCyl=%d nFillet=%d nTorus=%d nCone=%d "
+                                             "nSphere=%d maxDevShipped=%.6g rMin=%.6g g5=%.6g "
+                                             "maxEdgeTol=%.6g shell=%.6f meshAbs=%.6f "
+                                             "meshSigned=%.6f delta=%.6f dVolSigned=%.6f "
+                                             "dVolAbs=%.6f areaKept=%.6f areaTau=%.6g "
+                                             "resid=%.6g\n",
+                                             nQual, certFail.size(), kept.size(), nPl, nCy, nFi,
+                                             nTo, nCn, nSp, shippedDev, rMin, g5,
+                                             rs.stats.maxEdgeTol, shellVol, meshAbs, cs.vol, delta,
+                                             dVolSigned, dVolAbs, areaKept, areaKept * tauE,
+                                             std::fabs(delta - dVolSigned));
+                            }
+                            if (!torusProbe) {
+                                for (const auto& m : torusProbeWarn) warn(m);
+                                torusProbeWarn.clear();
+                            }
+                        } else {
+                            rs = healBase;
+                            ok = false;
+                            shellChecked = false;
+                            skWhy = 3;
+                            torusProbeWarn.clear();
+                        }
+                    }
+                }
                 if (!ok && torusProbe) {
                     shellChecked = false;
                     torusProbeWarn.clear();
@@ -1700,17 +1936,12 @@ Result Converter::run() {
         facesBefore = countShapes(shape, TopAbs_FACE);
         facesAfter = facesBefore;
         if (unify) {
+            // D-gid-2.1: rebuild when the history drops a face, then refuse a
+            // unify that opens free edges. Helpers live in detail:: so the
+            // unit test calls the same functions.
             auto unifyOne = [&](TopoDS_Shape& s, const std::vector<TopoDS_Face>* keep,
                                 double angleDeg) {
-                ShapeUpgrade_UnifySameDomain usd(s, Standard_True, Standard_True, Standard_False);
-                if (angleDeg > 0) {
-                    usd.SetAngularTolerance(angleDeg * kPi / 180.0);
-                    usd.SetLinearTolerance(Precision::Confusion());
-                }
-                if (keep)
-                    for (const auto& f : *keep) usd.KeepShape(f);
-                usd.Build();
-                s = usd.Shape();
+                s = detail::unifySameDomainGuarded(s, angleDeg, keep);
             };
             auto unifyAll = [&](double angleDeg, const char* label) {
                 const int before = countShapes(shape, TopAbs_FACE);
@@ -1922,6 +2153,16 @@ Result Converter::run() {
         note("  write     %s, %s (%.1f KB)  [%.2fs]\n", schema.c_str(), outPath.c_str(),
              outSize / 1024.0, writeS);
         timer.lap();                                    // reset stage timer for verify
+
+        // D-gid-2.1 / D-gid-3.8: solids and openShells are the shape that was
+        // written (after unify and ShapeFix), before the re-read compare.
+        // watertight stays the input-mesh flag. --no-solid still reports 0/0.
+        if (makeSolids) {
+            int wrSolids = 0, wrOpen = 0;
+            detail::tallyWrittenBodies(shape, wrSolids, wrOpen);
+            solidsOut = wrSolids;
+            openShellsOut = wrOpen;
+        }
 
         // ---- 8. verify by re-reading -------------------------------------------
         if (verify) {
