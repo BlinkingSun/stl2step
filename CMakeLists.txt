@@ -76,6 +76,7 @@ add_library(stl2step_core
     src/refit_torus.cpp
     src/refit_profile_cert.cpp
     src/refit_anchored_round.cpp
+    src/refit_drafted_cone.cpp
     src/refit_relational_extrude.cpp
     src/refit_relational_revolve.cpp
     src/refit_relational_reclaim.cpp

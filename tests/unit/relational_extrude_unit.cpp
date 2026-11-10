@@ -1230,6 +1230,57 @@ static void case32() {
     expect(ok, "case32 certified prior FilletStrip is not robbed");
 }
 
+static void case36() {
+    using namespace stl2step::refit;
+    // D-fc-1.6.11 with D-fc-4.3. An uncertified CylGrow region (its stored
+    // surface misses its own vertices by 100 τ) holds band strips 10 and 11
+    // and nothing else, so every one of its vertices lies on the band's
+    // certified circle. The band robs it (it dissolves at the commit); it is
+    // not a same-surface neighbour that refuses the band. The fixture is
+    // makeRob's without the stray triangle.
+    FilletMesh m = makeFillet(3.0, 0.0, 8.0, 0.0, 0.5 * kPi, 24, 0.0);
+    const double tau = 2.0 * 1e-4;
+    std::vector<int> stolen;
+    for (int k = 10; k <= 11; ++k) {
+        m.work.provisionals[(std::size_t)k].claim = ProvClaim::ConsumedCylinder;
+        for (int t : m.work.provisionals[(std::size_t)k].tris) stolen.push_back(t);
+    }
+    Region rob;
+    rob.id = 0;
+    rob.type = SurfType::Cylinder;
+    rob.origin = Origin::CylGrow;
+    rob.radius = 7.0;
+    rob.tris = stolen;
+    rob.maxVertexDev = 100.0 * tau;
+    m.work.accepted.push_back(rob);
+    const std::vector<int> band = m.bandTris;
+    Run r = runClaim(m.synth, std::move(m.work), 1e-4, 1);
+    int nFil = 0, nCyl = 0;
+    const Region* fil = nullptr;
+    for (const Region& a : r.work.accepted) {
+        if (a.origin == Origin::FilletStrip) {
+            ++nFil;
+            fil = &a;
+        }
+        if (a.origin == Origin::CylGrow) ++nCyl;
+    }
+    const std::string robLine = [&] {
+        std::istringstream is(r.diag);
+        std::string line;
+        while (std::getline(is, line))
+            if (line.rfind("DIAG_REL_ROB", 0) == 0) return line;
+        return std::string();
+    }();
+    const bool ok = nFil == 1 && nCyl == 0 && fil != nullptr && fil->tris.size() == band.size() &&
+                    fil->maxVertexDev <= tau && nearRadius(*fil, 3.0, tau) &&
+                    fieldNum(robLine, "stolen") == 4.0 && fieldNum(robLine, "released") == 0.0 &&
+                    !hasWhy(r.diag, "same-surface");
+    std::fprintf(stderr, "case36 nFil=%d nCyl=%d filTris=%d %s\n", nFil, nCyl,
+                 fil ? (int)fil->tris.size() : -1, robLine.c_str());
+    if (!ok) dumpFail("case36", r);
+    expect(ok, "case36 uncertified region wholly on the band's circle is robbed, not same-surface");
+}
+
 static void case23() {
     using namespace stl2step::refit;
     // D-fc-3.2.2. Walls x = 0 and z = 0 whose bodies lie far from each other's
@@ -1867,6 +1918,7 @@ int main() {
     case33();
     case34();
     case35();
+    case36();
     if (gFail) {
         std::fprintf(stderr, "%d check(s) failed\n", gFail);
         return 1;

@@ -140,7 +140,12 @@ suite:
   feature (including DXF emission) is inert when unset. `STL2STEP_VOLID`
   (unset or `0`) is a default-off stderr instrument for the volume-attribution
   identity: `1` prints `DIAG_VOLID_CLASS` + `DIAG_VOLID_SUM`, `2` adds per-bucket
-  `DIAG_VOLID row`; it does not change STEP bytes. The conversion path
+  `DIAG_VOLID row`; it does not change STEP bytes. `STL2STEP_DIAG_CAPOWN`
+  (unset or `0`) is a default-off stderr census of the shipped cylinders:
+  `1` prints one `DIAG_CAPOWN` line per cylinder that owns a triangle with an
+  axial facet normal or borders unowned triangles lying within τ of it, plus
+  one `DIAG_CAPOWN_COMP` per component; `2` adds one `DIAG_CAPOWN_TRI` line per
+  such triangle. It does not change STEP bytes. The conversion path
   contains no nondeterministic components.
 
 ## 6. Summary

@@ -10,6 +10,13 @@
 // spine) or a certified torus blend (circle spine). The torus contact is the
 // torus u-iso through the centre (ElSLib::TorusUIso in the torus frame). A
 // mesh polyline between the two curved faces is not a contact.
+// D-gid-8.4: two certified cylinder rounds of one radius whose axes meet fix
+// the centre and the radius without a third round. When no third round passes
+// through that centre, the pair is a corner of its own; it ships only under the
+// D-gid-4.4 meet rule (vertices and contacts within tau, certified neighbours
+// tangent, plane stations > 2). A pair with any third round through its centre
+// (certified or not, a torus that fails its own residual included) is not a
+// pair corner: the triple decides, and no anchor subset is tried.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational_sphere.hpp"
@@ -95,11 +102,10 @@ bool lineSpinesPoint(const std::vector<RoundSpine>& spines, gp_XYZ& c) {
     return true;
 }
 
-SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double tau) {
+SphereCornerFit sphereOfRoundSet(const std::vector<RoundSpine>& rounds, double tau) {
     SphereCornerFit f;
-    if (!(tau > 0.0)) return f;
-    std::vector<RoundSpine> v(rounds.begin(), rounds.end());
-    if (!lineSpinesPoint(v, f.c)) return f;
+    if (!(tau > 0.0) || rounds.size() < 2 || rounds.size() > 3) return f;
+    if (!lineSpinesPoint(rounds, f.c)) return f;
     double lo = rounds[0].r, hi = rounds[0].r, sum = 0.0;
     bool spineOff = false;
     for (const RoundSpine& s : rounds) {
@@ -113,7 +119,7 @@ SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double t
         const double lim = s.circle ? tanDistTol(tau, tau) : tau;
         if (!std::isfinite(d) || d > lim) spineOff = true;
     }
-    f.r = sum / 3.0;
+    f.r = sum / static_cast<double>(rounds.size());
     f.radiusSpread = hi - lo;
     if (f.radiusSpread > tau || spineOff || !(f.r > tau)) {
         f.why = "not-blend";
@@ -122,6 +128,10 @@ SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double t
     f.ok = true;
     f.why = "accept";
     return f;
+}
+
+SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double tau) {
+    return sphereOfRoundSet(std::vector<RoundSpine>(rounds.begin(), rounds.end()), tau);
 }
 
 double sphereRadiusLeastSquares(const gp_XYZ& centre, const std::vector<gp_XYZ>& pts) {
@@ -145,6 +155,19 @@ bool sphereRoundContact(const gp_XYZ& c, double r, const RoundSpine& s, double t
     }
     double v = 0.0;
     return sphereCylinderContact(c, r, s.o, s.a, s.r, tol, v);
+}
+
+bool sphereOutranksCylinder(const gp_XYZ& c, double r, const RoundSpine& cyl,
+                            const std::vector<std::array<gp_XYZ, 3>>& tris, double tau) {
+    if (!(tau > 0.0) || !std::isfinite(tau) || cyl.circle || tris.empty()) return false;
+    if (!(cyl.a.Modulus() > 0.0) || !std::isfinite(r) || !std::isfinite(cyl.r)) return false;
+    for (const std::array<gp_XYZ, 3>& t : tris)
+        for (const gp_XYZ& x : t) {
+            const double onCyl = std::fabs(spineDistance(cyl, x) - cyl.r);
+            const double onSph = std::fabs((x - c).Modulus() - r);
+            if (!(onCyl <= tau) || !(onSph <= tau)) return false;
+        }
+    return true;
 }
 
 // solved: a finite residual was measured. Fewer than four points is residual 0
@@ -724,10 +747,33 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             }
             rounds.push_back(rd);
         }
-        if (rounds.size() < 3) return true;
+        if (rounds.size() < 2) return true;
 
         // --- corners: two line spines that meet, and every round through it --
+        // D-gid-8.4: two certified cylinder rounds of one radius whose axes
+        // meet fix the sphere (centre on both axes, radius theirs). When no
+        // third round passes through that centre the pair alone is the corner;
+        // it ships only under the D-gid-4.4 meet rule (the same vertex test,
+        // contacts and plane-station rule as every corner), never as a classic
+        // three-round disk. Pairs run after every three-round corner.
         std::vector<std::array<int, 3>> corners;
+        std::vector<std::array<int, 2>> pairCorners;
+        // A torus blend that fails its own residual is not a round, but it
+        // still passes through a corner it meets: it keeps the pair from being
+        // a corner of its own, as an uncertified cylinder round does.
+        std::vector<RoundSpine> offTori;
+        for (const Region& R : work.accepted) {
+            if (R.tris.empty() || R.type != SurfType::Torus || R.origin != Origin::TorusBlend ||
+                anchorCertified(tau, R.maxVertexDev))
+                continue;
+            RoundSpine sp;
+            sp.circle = true;
+            sp.o = R.ax.Location().XYZ();
+            sp.a = R.ax.Direction().XYZ();
+            sp.R = R.radius;
+            sp.r = R.radius2;
+            if (sp.r > tau) offTori.push_back(sp);
+        }
         for (std::size_t i = 0; i < rounds.size(); ++i) {
             if (rounds[i].s.circle) continue;
             for (std::size_t j = i + 1; j < rounds.size(); ++j) {
@@ -737,6 +783,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 if (!lineSpinesPoint({rounds[i].s, rounds[j].s}, c)) continue;
                 if (spineDistance(rounds[i].s, c) > tau || spineDistance(rounds[j].s, c) > tau)
                     continue;
+                bool third = false;
                 for (std::size_t k = 0; k < rounds.size(); ++k) {
                     if (k == i || k == j) continue;
                     if (std::fabs(rounds[k].s.r - rounds[i].s.r) > tau) continue;
@@ -750,18 +797,47 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                                    (int)i, (int)j, (int)k, c.X(), c.Y(), c.Z(), spineK / tau,
                                    limK / tau);
                     if (spineK > limK) continue;
+                    third = true;
                     std::array<int, 3> key = {(int)i, (int)j, (int)k};
                     std::sort(key.begin(), key.end());
                     corners.push_back(key);
                 }
+                for (std::size_t k = 0; k < offTori.size() && !third; ++k)
+                    if (std::fabs(offTori[k].r - rounds[i].s.r) <= tau &&
+                        spineDistance(offTori[k], c) <= tanDistTol(tau, tau))
+                        third = true;
+                if (!third) pairCorners.push_back({(int)i, (int)j});
             }
         }
         std::sort(corners.begin(), corners.end());
         corners.erase(std::unique(corners.begin(), corners.end()), corners.end());
+        // The H1 rob below ran only after three-round corners; a pair alone
+        // does not start it.
+        const bool tripleCorners = !corners.empty();
+        struct CornerKey {
+            int n = 3;
+            int idx[3] = {-1, -1, -1};
+        };
+        std::vector<CornerKey> todo;
+        todo.reserve(corners.size() + pairCorners.size());
+        for (const std::array<int, 3>& k3 : corners) {
+            CornerKey ck;
+            ck.n = 3;
+            for (int q = 0; q < 3; ++q) ck.idx[q] = k3[(std::size_t)q];
+            todo.push_back(ck);
+        }
+        for (const std::array<int, 2>& k2 : pairCorners) {
+            CornerKey ck;
+            ck.n = 2;
+            ck.idx[0] = k2[0];
+            ck.idx[1] = k2[1];
+            todo.push_back(ck);
+        }
 
         int nAccept = 0, nRefused = 0;
-        if (corners.empty()) {
-            if (dg) {
+        if (todo.empty()) {
+            // Fewer than three rounds printed nothing before pair corners.
+            if (dg && rounds.size() >= 3) {
                 diagResidueSpheres(mv, work, tau);
                 diagPrintf("DIAG_REL_SUM stage=sphere rounds=%zu corners=0 accept=0 refused=0\n",
                            rounds.size());
@@ -809,14 +885,19 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
         std::vector<int> dissolved;
         std::vector<char> claimed((std::size_t)nTri, 0);
 
-        for (const std::array<int, 3>& key : corners) {
-            const Round* rd[3] = {&rounds[(std::size_t)key[0]], &rounds[(std::size_t)key[1]],
-                                  &rounds[(std::size_t)key[2]]};
-            const SphereCornerFit fit = sphereOfRounds({rd[0]->s, rd[1]->s, rd[2]->s}, tau);
+        for (const CornerKey& key : todo) {
+            const int nR = key.n;
+            const Round* rd[3] = {nullptr, nullptr, nullptr};
+            std::vector<RoundSpine> spines;
+            for (int q = 0; q < nR; ++q) {
+                rd[q] = &rounds[(std::size_t)key.idx[q]];
+                spines.push_back(rd[q]->s);
+            }
+            const SphereCornerFit fit = sphereOfRoundSet(spines, tau);
             const gp_XYZ c = fit.c;
             double r = fit.r;
-            int accIdx[3];
-            for (int q = 0; q < 3; ++q) accIdx[q] = rd[q]->acc;
+            int accIdx[3] = {-1, -1, -1};
+            for (int q = 0; q < nR; ++q) accIdx[q] = rd[q]->acc;
             const char* why = fit.why;
             std::vector<int> band;
             int nV = 0, comps = 0, chi = 0, foreign = 0, nRob = 0;
@@ -825,6 +906,17 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             auto emit = [&](const char* w) {
                 if (!dg) return;
                 int seed = band.empty() ? -1 : band.front();
+                // A pair corner has no third round: it prints -1 / 0.
+                auto rOrigin = [&](int q) {
+                    return accIdx[q] >= 0 ? (int)work.accepted[(std::size_t)accIdx[q]].origin : -1;
+                };
+                auto rDevTau = [&](int q) {
+                    return accIdx[q] >= 0
+                               ? work.accepted[(std::size_t)accIdx[q]].maxVertexDev / tau
+                               : 0.0;
+                };
+                auto rCertI = [&](int q) { return rd[q] ? rd[q]->cert.nI : 0; };
+                auto rCover = [&](int q) { return rd[q] ? rd[q]->cert.nCover : 0; };
                 diagPrintf("DIAG_REL_BAND stage=sphere mode=corner seed=%d nTri=%zu nV=%d "
                            "stations=%d levels=0 params=%d fit=anchored radius=%.9g "
                            "centre=%.6f,%.6f,%.6f maxDev=%.6g maxDevTau=%.6g lineRes=%.6g "
@@ -833,16 +925,10 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                            "roundCertI=%d,%d,%d roundCover=%d,%d,%d comps=%d chi=%d foreign=%d rob=%d why=%s\n",
                            seed, band.size(), nV, nV, kParamsSphere, r, c.X(), c.Y(), c.Z(),
                            maxDev, maxDev / tau, planeRes / tau, fit.spineDev / tau,
-                           fit.radiusSpread / tau, accIdx[0], accIdx[1], accIdx[2],
-                           (int)work.accepted[(std::size_t)accIdx[0]].origin,
-                           (int)work.accepted[(std::size_t)accIdx[1]].origin,
-                           (int)work.accepted[(std::size_t)accIdx[2]].origin,
-                           work.accepted[(std::size_t)accIdx[0]].maxVertexDev / tau,
-                           work.accepted[(std::size_t)accIdx[1]].maxVertexDev / tau,
-                           work.accepted[(std::size_t)accIdx[2]].maxVertexDev / tau, touch[0],
-                           touch[1], touch[2], rd[0]->cert.nI, rd[1]->cert.nI, rd[2]->cert.nI,
-                           rd[0]->cert.nCover, rd[1]->cert.nCover, rd[2]->cert.nCover, comps, chi,
-                           foreign, nRob, w);
+                           fit.radiusSpread / tau, accIdx[0], accIdx[1], accIdx[2], rOrigin(0),
+                           rOrigin(1), rOrigin(2), rDevTau(0), rDevTau(1), rDevTau(2), touch[0],
+                           touch[1], touch[2], rCertI(0), rCertI(1), rCertI(2), rCover(0),
+                           rCover(1), rCover(2), comps, chi, foreign, nRob, w);
             };
             auto refuse = [&](const char* w) {
                 ++nRefused;
@@ -853,7 +939,10 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 continue;
             }
             // D-fc-1.4: every round is a certified surface.
-            if (!rd[0]->certified || !rd[1]->certified || !rd[2]->certified) {
+            bool anchored = true;
+            for (int q = 0; q < nR; ++q)
+                if (!rd[q]->certified) anchored = false;
+            if (!anchored) {
                 refuse("no-anchor");
                 continue;
             }
@@ -862,7 +951,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             gp_XYZ tan[3];
             double side[3] = {0, 0, 0};
             bool ends = true;
-            for (int q = 0; q < 3 && ends; ++q) {
+            for (int q = 0; q < nR && ends; ++q) {
                 if (!spineTangentAt(rd[q]->s, c, tan[q])) {
                     ends = false;
                     break;
@@ -880,6 +969,61 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 refuse("not-blend");
                 continue;
             }
+            // D-gid-8.3 (R-k31-2), certificate order "fewest parameters first".
+            // A CylGrow cylinder whose every vertex is within tau of its own
+            // cylinder (five parameters) AND of this corner's sphere (four, the
+            // centre fixed by three certified tangent rounds) is the sphere's:
+            // two certified surfaces claim the same triangles and the one with
+            // fewer parameters owns them. D-fc-4.3's "a region whose own
+            // residual <= tau is never touched" protects a region against a
+            // surface that does NOT also certify its triangles; it does not
+            // protect it against one that does. The corner's own rounds are
+            // anchors and are never taken. The candidacy holds for this corner
+            // only; F-D below then takes such a region whole (every triangle in
+            // the band and on the fitted sphere) or not at all.
+            struct OwnedReset {
+                std::vector<char>& flags;
+                std::vector<int> ids;
+                ~OwnedReset() {
+                    for (int a : ids) flags[(std::size_t)a] = 0;
+                }
+            } owned{robbable, {}};
+            for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
+                if (robbable[(std::size_t)ai]) continue;
+                bool own = false;
+                for (int q = 0; q < nR; ++q) own = own || ai == rd[q]->acc;
+                if (own) continue;
+                const Region& R = work.accepted[(std::size_t)ai];
+                if (R.origin != Origin::CylGrow || R.type != SurfType::Cylinder || R.tris.empty())
+                    continue;
+                const int t0 = R.tris.front();
+                if (t0 < 0 || t0 >= nTri ||
+                    std::fabs((ptOf(mv, t0, 0) - c).Modulus() - r) > tau)
+                    continue;
+                RoundSpine cs;
+                cs.circle = false;
+                cs.o = R.ax.Location().XYZ();
+                cs.a = R.ax.Direction().XYZ();
+                cs.r = R.radius;
+                std::vector<std::array<gp_XYZ, 3>> pts;
+                pts.reserve(R.tris.size());
+                bool inRange = true;
+                for (int t : R.tris) {
+                    if (t < 0 || t >= nTri) {
+                        inRange = false;
+                        break;
+                    }
+                    pts.push_back({ptOf(mv, t, 0), ptOf(mv, t, 1), ptOf(mv, t, 2)});
+                }
+                if (!inRange || !sphereOutranksCylinder(c, r, cs, pts, tau)) continue;
+                robbable[(std::size_t)ai] = 1;
+                owned.ids.push_back(ai);
+                if (dg)
+                    diagPrintf("DIAG_REL_SPHERE_OWNS centre=%.4f,%.4f,%.4f acc=%d nTri=%zu "
+                               "radius=%.9g devTau=%.6g\n",
+                               c.X(), c.Y(), c.Z(), ai, R.tris.size(), R.radius,
+                               R.maxVertexDev / tau);
+            }
             // I: every free triangle in the sector with 3 vertices within tau.
             for (int t = 0; t < nTri; ++t) {
                 if (claimed[(std::size_t)t] || !candidate(t)) continue;
@@ -887,28 +1031,76 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 for (int k = 0; k < 3 && in; ++k) {
                     const gp_XYZ x = ptOf(mv, t, k);
                     if (std::fabs((x - c).Modulus() - r) > tau) in = false;
-                    for (int q = 0; q < 3 && in; ++q)
+                    for (int q = 0; q < nR && in; ++q)
                         if (!onPatchSide(x, c, tan[q], side[q], tau)) in = false;
                 }
                 if (in) band.push_back(t);
             }
             if (band.empty()) {
                 if (dg) {
+                    // offSide[q]: near candidates outside round q's contact plane
+                    // (the round whose side excludes them). A held near triangle
+                    // names its owner once (DIAG_REL_SPHERE_HELD): whether that
+                    // region lies wholly on this sphere and meets it as a round.
                     int nNear = 0, nNotCand = 0, nNotSector = 0;
+                    int offSide[3] = {0, 0, 0};
+                    std::vector<int> held;
                     for (int t = 0; t < nTri; ++t) {
                         bool near = true;
                         for (int k = 0; k < 3 && near; ++k)
                             if (std::fabs((ptOf(mv, t, k) - c).Modulus() - r) > tau) near = false;
                         if (!near) continue;
                         ++nNear;
-                        if (!candidate(t)) ++nNotCand;
-                        else ++nNotSector;
+                        if (!candidate(t)) {
+                            ++nNotCand;
+                            const int ai = triAcc[(std::size_t)t];
+                            if (ai >= 0) held.push_back(ai);
+                            continue;
+                        }
+                        ++nNotSector;
+                        for (int q = 0; q < nR; ++q) {
+                            bool in = true;
+                            for (int k = 0; k < 3 && in; ++k)
+                                if (!onPatchSide(ptOf(mv, t, k), c, tan[q], side[q], tau)) in = false;
+                            if (!in) ++offSide[q];
+                        }
                     }
-                    if (nNear > 0)
+                    if (nNear > 0) {
                         diagPrintf("DIAG_REL_SPHERE_EMPTY centre=%.4f,%.4f,%.4f R=%.9g "
-                                   "nNear=%d nNotCand=%d nNotSector=%d rounds=%d,%d,%d\n",
+                                   "nNear=%d nNotCand=%d nNotSector=%d rounds=%d,%d,%d "
+                                   "offSide=%d,%d,%d\n",
                                    c.X(), c.Y(), c.Z(), r, nNear, nNotCand, nNotSector, accIdx[0],
-                                   accIdx[1], accIdx[2]);
+                                   accIdx[1], accIdx[2], offSide[0], offSide[1], offSide[2]);
+                        std::sort(held.begin(), held.end());
+                        for (std::size_t i = 0; i < held.size();) {
+                            std::size_t j = i;
+                            while (j < held.size() && held[j] == held[i]) ++j;
+                            const Region& hr = work.accepted[(std::size_t)held[i]];
+                            bool onSph = !hr.tris.empty();
+                            for (int t2 : hr.tris)
+                                for (int k = 0; k < 3 && onSph; ++k)
+                                    if (std::fabs((ptOf(mv, t2, k) - c).Modulus() - r) > tau)
+                                        onSph = false;
+                            int contact = -1;
+                            if (hr.type == SurfType::Cylinder || hr.type == SurfType::Torus) {
+                                RoundSpine sp;
+                                sp.circle = hr.type == SurfType::Torus;
+                                sp.o = hr.ax.Location().XYZ();
+                                sp.a = hr.ax.Direction().XYZ();
+                                sp.R = hr.radius;
+                                sp.r = sp.circle ? hr.radius2 : hr.radius;
+                                contact = sphereRoundContact(c, r, sp, tau) ? 1 : 0;
+                            }
+                            diagPrintf("DIAG_REL_SPHERE_HELD centre=%.4f,%.4f,%.4f acc=%d origin=%d "
+                                       "type=%d nTri=%zu near=%d radius=%.9g devTau=%.6g "
+                                       "certified=%d onSphere=%d contact=%d\n",
+                                       c.X(), c.Y(), c.Z(), held[i], (int)hr.origin, (int)hr.type,
+                                       hr.tris.size(), (int)(j - i), hr.radius, hr.maxVertexDev / tau,
+                                       anchorCertified(tau, hr.maxVertexDev) ? 1 : 0, onSph ? 1 : 0,
+                                       contact);
+                            i = j;
+                        }
+                    }
                 }
                 refuse("underdetermined");
                 continue;
@@ -953,7 +1145,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                     continue;
                 }
                 bool contact = true;
-                for (int q = 0; q < 3 && contact; ++q)
+                for (int q = 0; q < nR && contact; ++q)
                     if (!sphereRoundContact(c, r, rd[q]->s, tau)) contact = false;
                 if (!contact) {
                     refuse("vertex-off");
@@ -961,10 +1153,11 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 }
             }
             // D-fc-7.3 F-D. The preimage (centre, fitted radius) is fixed before
-            // the drop. An over-tau CylGrow joins this corner only when every
-            // one of its triangles lies on that sphere. A region that is only
-            // partly inside stays whole: its triangles leave the band. No
-            // subset is tried.
+            // the drop. A robbable CylGrow (over tau, or owned by this corner
+            // under D-gid-8.3) joins this corner only when every one of its
+            // triangles lies on that sphere. A region that is only partly
+            // inside stays whole: its triangles leave the band. No subset is
+            // tried.
             {
                 std::vector<int> owners;
                 for (int t : band) {
@@ -977,7 +1170,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 bool anyDrop = false;
                 for (int ai : owners) {
                     const Region& rr = work.accepted[(std::size_t)ai];
-                    if (!uncertifiedCylGrow(rr, tau)) continue;
+                    if (!robbable[(std::size_t)ai]) continue;
                     bool whole = !rr.tris.empty();
                     for (int t : rr.tris) {
                         if (t < 0 || t >= nTri || !inBand[(std::size_t)t]) {
@@ -1070,7 +1263,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                         ++nBoundary;
                         const int ai = o >= 0 ? triAcc[(std::size_t)o] : -1;
                         int which = -1;
-                        for (int q = 0; q < 3; ++q)
+                        for (int q = 0; q < nR; ++q)
                             if (ai >= 0 && ai == rd[q]->acc) which = q;
                         if (which >= 0) {
                             ++touch[which];
@@ -1117,7 +1310,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                             if (o >= 0 && inBand[(std::size_t)o]) continue;
                             const int ai = o >= 0 ? triAcc[(std::size_t)o] : -1;
                             bool isRound = false;
-                            for (int q = 0; q < 3; ++q)
+                            for (int q = 0; q < nR; ++q)
                                 if (ai >= 0 && ai == rd[q]->acc) isRound = true;
                             if (isRound) continue;
                             int slot = -1;
@@ -1165,8 +1358,9 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             // certified surface or is a certified surface tangent to this
             // sphere. Uncertified residue is not an anchor. Plane stations > 2
             // refuse two coaxial rims (the existing plane-station rule).
-            const bool classic = comps == 1 && chi == 1 && foreign == 0 && touch[0] > 0 &&
-                                 touch[1] > 0 && touch[2] > 0;
+            // D-gid-8.4: a pair corner is never classic; it takes the meet rule.
+            const bool classic = nR == 3 && comps == 1 && chi == 1 && foreign == 0 &&
+                                 touch[0] > 0 && touch[1] > 0 && touch[2] > 0;
             bool meetOk = false;
             if (!classic && comps == 1 && chi == 1 && contactOff == 0) {
                 const int nTouch = (touch[0] > 0 ? 1 : 0) + (touch[1] > 0 ? 1 : 0) +
@@ -1178,7 +1372,7 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                         if (o >= 0 && inBand[(std::size_t)o]) continue;
                         const int ai = o >= 0 ? triAcc[(std::size_t)o] : -1;
                         bool isRound = false;
-                        for (int q = 0; q < 3; ++q)
+                        for (int q = 0; q < nR; ++q)
                             if (ai >= 0 && ai == rd[q]->acc) isRound = true;
                         if (isRound || ai < 0) continue;
                         const Region& nb = work.accepted[(std::size_t)ai];
@@ -1256,11 +1450,14 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             // so every pcurve is an exact line. Otherwise the patch's middle
             // sits on the equator. Either way the patch is centred on u = pi,
             // away from the seam.
+            // A pair corner: the same test against its one other round.
             int polar = -1;
-            for (int q = 0; q < 3 && polar < 0; ++q)
-                if (std::fabs(tan[q].Dot(tan[(q + 1) % 3])) <= tau / r &&
-                    std::fabs(tan[q].Dot(tan[(q + 2) % 3])) <= tau / r)
-                    polar = q;
+            for (int q = 0; q < nR && polar < 0; ++q) {
+                bool perp = true;
+                for (int o = 1; o < nR; ++o)
+                    if (std::fabs(tan[q].Dot(tan[(q + o) % nR])) > tau / r) perp = false;
+                if (perp) polar = q;
+            }
             gp_XYZ zd, xd;
             if (polar >= 0) {
                 zd = tan[polar] * (-side[polar]);
@@ -1468,7 +1665,8 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
         // that shares a mesh edge with it, dissolves into that torus. A
         // subset does not. Spheres have already taken the corners they
         // certified, so a region claimed above is empty and is not seen here.
-        {
+        // It runs where it ran before D-gid-8.4: after three-round corners.
+        if (tripleCorners) {
             auto onTorus = [&](int t, const Region& tor) {
                 if (t < 0 || t >= nTri) return false;
                 for (int k = 0; k < 3; ++k)
@@ -1534,8 +1732,9 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
         if (dg) {
             diagResidueSpheres(mv, work, tau);
             diagPrintf("DIAG_REL_SUM stage=sphere rounds=%zu corners=%zu accept=%d refused=%d "
-                       "dissolved=%zu\n",
-                       rounds.size(), corners.size(), nAccept, nRefused, dissolved.size());
+                       "dissolved=%zu pairs=%zu\n",
+                       rounds.size(), corners.size(), nAccept, nRefused, dissolved.size(),
+                       pairCorners.size());
         }
 
         // D-fc-4.3. A dissolved region leaves the accepted list. Indices into

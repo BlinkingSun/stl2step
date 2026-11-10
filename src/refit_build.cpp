@@ -23,6 +23,7 @@
 #include "refit_axis_seam.hpp"
 #include "refit_cap_arc.hpp"
 #include "refit_partial_cyl.hpp"
+#include "refit_pcurve_branch.hpp"
 #include "refit_edge_bound.hpp"
 #include "refit_slit_heal.hpp"
 #include "refit_wire_clip.hpp"
@@ -36,6 +37,7 @@
 #include <climits>
 #include <cfloat>
 #include <cmath>
+#include <cstdarg>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
@@ -2352,6 +2354,36 @@ bool diagRelEnabled() {
     return cached != 0;
 }
 
+// D-gid-8.23 census switch: every region face the closed-shell cascade sees
+// as BRepCheck-invalid, with its certificate, its validity before the shell's
+// SameParameter, and what the D-fc-7.10 corner measure does to it. Prints
+// only; never changes a shape.
+bool diagStripxEnabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_DIAG_STRIPX");
+        cached = (v && v[0] && v[0] != '0') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+// D-gid-8.28 census switch. After the shell's forced SameParameter every edge
+// it lowered keeps max(its tolerance then, min(the tolerance it carried in, its
+// exact curve-on-surface deviation)) -- always, with or without the switch.
+//   1: also print one DIAG_SAMETOL line per lowered edge and per built face
+//      whose validity changes (prints only; output identical);
+//   2: the same prints, with the carried-in tolerance kept as it is (no
+//      measure) -- the measurement variant of D-gid-8.28, changes output.
+int diagSametolMode() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_DIAG_SAMETOL");
+        cached = (v && v[0] && v[0] != '0') ? ((v[0] == '2') ? 2 : 1) : 0;
+    }
+    return cached;
+}
+bool diagSametolEnabled() { return diagSametolMode() != 0; }
+
 const char* intAnaTypeName(IntAna_ResultType ty) {
     switch (ty) {
         case IntAna_Point: return "Point";
@@ -3966,6 +3998,8 @@ bool regionExploded(const std::vector<char>& exploded, int id) {
 // within tau with a closed torus takes ONE frame XDirection (the lowest-id
 // closed torus's), so u = 0 names one half-plane for the whole family, and
 // every closed rim of the family starts at that half-plane's exact circle point.
+// D-gid-8.13 adds the rim family: a closed-360 cylinder and the closed chamfer
+// cones that share its closed rims, when a cone's two rims stagger.
 struct TorusSeamFamily {
     gp_Ax1 axis;               // the seed torus's axis line
     gp_Dir refX;               // the seam half-plane (first-built member's XDirection)
@@ -4012,18 +4046,12 @@ std::vector<TorusSeamFamily> shareTorusSeamFrames(const MeshView& mv, RegionSet&
         if (torusFamilyCandidate(r)) ids.push_back(r.id);
     std::sort(ids.begin(), ids.end());
     std::vector<char> taken(ids.size(), 0);
-    for (size_t i = 0; i < ids.size(); ++i) {
-        const Region* seed = regionById(rs, ids[i]);
-        if (taken[i] || !seed || !isTorusBlendR(*seed)) continue;
-        TorusSeamFamily fam;
-        fam.axis = gp_Ax1(seed->ax.Location(), seed->ax.Direction());
-        for (size_t j = 0; j < ids.size(); ++j) {
-            const Region* m = regionById(rs, ids[j]);
-            if (taken[j] || !m) continue;
-            if (j != i && !coaxialAtRims(mv, rs, *m, fam.axis, tau)) continue;
-            taken[j] = 1;
-            fam.members.push_back(m->id);
-        }
+    // A gathered family takes its half-plane, measures its rims and, when active,
+    // turns its members onto it. A torus family is active when a rim stands off the
+    // half-plane (D-fc-4.8); a rim family (D-gid-8.13) when one of its cones has
+    // two rims that stagger (coneRimsStagger), the only case in which a seam corner
+    // of the pair carries the gap in its vertex tolerance.
+    auto settle = [&](const Region* seed, TorusSeamFamily& fam, bool rimFamily) {
         const Region* first = nullptr;
         for (int id : fam.members) {
             const Region* m = regionById(rs, id);
@@ -4063,14 +4091,39 @@ std::vector<TorusSeamFamily> shareTorusSeamFrames(const MeshView& mv, RegionSet&
                     ++reusedHigh;
             }
         }
-        const bool active = worst > tau || reusedHigh > 0;
-        if (diagRelEnabled())
-            std::fprintf(stderr,
-                         "DIAG_AXISSEAM_FAMILY seed=%d ref=%d members=%zu worstRimOff=%.6g "
-                         "reusedHigh=%d active=%d\n",
-                         seed->id, first->id, fam.members.size(), worst, reusedHigh,
-                         active ? 1 : 0);
-        if (!active) continue;
+        int staggered = 0;
+        if (rimFamily) {
+            for (int id : fam.members) {
+                const Region* C = regionById(rs, id);
+                if (!C || !isChamferConeR(*C)) continue;
+                std::vector<double> phis;
+                for (const BoundaryChain& ch : rs.chains) {
+                    if (!ch.closedLoop || (ch.regA != id && ch.regB != id)) continue;
+                    std::vector<gp_Pnt> pts;
+                    for (int lv : ch.meshVerts) pts.push_back(pntOf(mv, lv));
+                    double phi = 0.0;
+                    if (rimSeamAzimuth(fam.axis, fam.refX, pts, phi)) phis.push_back(phi);
+                }
+                if (phis.size() == 2 && coneRimsStagger(phis[0], phis[1], C->radius, tau))
+                    ++staggered;
+            }
+        }
+        const bool active = rimFamily ? staggered > 0 : (worst > tau || reusedHigh > 0);
+        if (diagRelEnabled()) {
+            if (rimFamily)
+                std::fprintf(stderr,
+                             "DIAG_AXISSEAM_FAMILY kind=rim seed=%d ref=%d members=%zu "
+                             "worstRimOff=%.6g staggered=%d active=%d\n",
+                             seed->id, first->id, fam.members.size(), worst, staggered,
+                             active ? 1 : 0);
+            else
+                std::fprintf(stderr,
+                             "DIAG_AXISSEAM_FAMILY seed=%d ref=%d members=%zu worstRimOff=%.6g "
+                             "reusedHigh=%d active=%d\n",
+                             seed->id, first->id, fam.members.size(), worst, reusedHigh,
+                             active ? 1 : 0);
+        }
+        if (!active) return;
         for (int id : fam.members) {
             Region* m = regionByIdMut(rs, id);
             gp_Ax3 turned;
@@ -4085,6 +4138,63 @@ std::vector<TorusSeamFamily> shareTorusSeamFrames(const MeshView& mv, RegionSet&
             if (turn) m->ax = turned;
         }
         fams.push_back(std::move(fam));
+    };
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const Region* seed = regionById(rs, ids[i]);
+        if (taken[i] || !seed || !isTorusBlendR(*seed)) continue;
+        TorusSeamFamily fam;
+        fam.axis = gp_Ax1(seed->ax.Location(), seed->ax.Direction());
+        for (size_t j = 0; j < ids.size(); ++j) {
+            const Region* m = regionById(rs, ids[j]);
+            if (taken[j] || !m) continue;
+            if (j != i && !coaxialAtRims(mv, rs, *m, fam.axis, tau)) continue;
+            taken[j] = 1;
+            fam.members.push_back(m->id);
+        }
+        settle(seed, fam, false);
+    }
+    // D-gid-8.13: a cone/cylinder pair between certified coaxial rims. A closed-360
+    // cylinder no torus family took, sharing a closed rim with a closed chamfer cone
+    // coaxial with it within tau, seeds a family. Its members are the seam bearers
+    // joined to it through shared closed rims, each coaxial within tau: a seam has to
+    // meet the vertex of every closed rim its face shares, so those faces, and only
+    // those, need one half-plane. The junction rim is then the one circle both faces
+    // share, from its exact half-plane point, and no seam corner carries a stagger.
+    std::vector<char> joined(ids.size(), 0);
+    auto candIndex = [&](int rid) -> int {
+        const auto it = std::lower_bound(ids.begin(), ids.end(), rid);
+        return (it != ids.end() && *it == rid) ? (int)(it - ids.begin()) : -1;
+    };
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const Region* seed = regionById(rs, ids[i]);
+        if (taken[i] || !seed || seed->type != SurfType::Cylinder) continue;
+        TorusSeamFamily fam;
+        fam.axis = gp_Ax1(seed->ax.Location(), seed->ax.Direction());
+        std::vector<int> grown = {(int)i};
+        joined[i] = 1;
+        bool withCone = false;
+        for (size_t q = 0; q < grown.size(); ++q) {
+            const int rq = ids[(size_t)grown[q]];
+            for (const BoundaryChain& ch : rs.chains) {
+                if (!ch.closedLoop) continue;
+                const int other = ch.regA == rq ? ch.regB : ch.regB == rq ? ch.regA : -1;
+                const int j = other >= 0 ? candIndex(other) : -1;
+                if (j < 0 || taken[(size_t)j] || joined[(size_t)j]) continue;
+                const Region* m = regionById(rs, other);
+                if (!m || !coaxialAtRims(mv, rs, *m, fam.axis, tau)) continue;
+                joined[(size_t)j] = 1;
+                grown.push_back(j);
+                if (isChamferConeR(*m)) withCone = true;
+            }
+        }
+        for (int j : grown) joined[(size_t)j] = 0;
+        if (!withCone) continue;
+        for (int j : grown) {
+            taken[(size_t)j] = 1;
+            fam.members.push_back(ids[(size_t)j]);
+        }
+        std::sort(fam.members.begin(), fam.members.end());
+        settle(seed, fam, true);
     }
     return fams;
 }
@@ -7944,8 +8054,10 @@ void diagPlateMakeFaceFail(int rid, const TopoDS_Face& f, const TopoDS_Wire& ow,
 }
 
 void emitFaceSurfDiag(int ridHint, const TopoDS_Face& F);
+// uChart (D-gid-8.7): the face chart [u0, u1] in srf's own frame, or nullptr.
 Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
-                                      const Handle(Geom_Surface)& srf, const char* kind);
+                                      const Handle(Geom_Surface)& srf, const char* kind,
+                                      const double* uChart = nullptr);
 thread_local std::unordered_set<const void*> gSeamTShapes;
 thread_local int lastCanonClearPass = -1;
 thread_local int gCompNTri = 0;
@@ -8890,8 +9002,23 @@ TopoDS_Edge findCollapsedCircleEdge(const gp_Circ& target, const std::vector<Cha
 double pcurveDev(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
                  const Handle(Geom_Surface)& srf, const Handle(Geom2d_Curve)& c2d);
 
+// D-gid-8.7: the fallback projection on its face chart's periodic branch
+// (refit_pcurve_branch.hpp); prints DIAG_PCBRANCH under STL2STEP_P2_DIAG.
+Handle(Geom2d_Curve) projectOnChartBranchDiag(const Handle(Geom_Curve)& c3, Standard_Real f,
+                                              Standard_Real l, const Handle(Geom_Surface)& srf,
+                                              const double* uChart, const char* site) {
+    ChartBranchInfo info;
+    Handle(Geom2d_Curve) pc = projectOnChartBranch(c3, f, l, srf, uChart, &info);
+    if (diagP2Enabled() && !pc.IsNull() && std::strcmp(info.from, "none") != 0)
+        std::fprintf(stderr,
+                     "DIAG_PCBRANCH site=%s chart=%s u0=%.9g u1=%.9g uMid=%.9g shift=%.9g\n",
+                     site, info.from, info.c0, info.c1, info.uMid, info.shift);
+    return pc;
+}
+
 Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Real f, Standard_Real l,
-                                      const Handle(Geom_Surface)& srf, const char* kind) {
+                                      const Handle(Geom_Surface)& srf, const char* kind,
+                                      const double* uChart) {
     if (c3.IsNull() || srf.IsNull()) return {};
     Handle(Geom_Plane) pl = Handle(Geom_Plane)::DownCast(srf);
     if (!pl.IsNull()) {
@@ -9047,7 +9174,7 @@ Handle(Geom2d_Curve) makePCurveOnSurf(const Handle(Geom_Curve)& c3, Standard_Rea
             }
             if (!c2dLin.IsNull() && pcurveDev(c3, f, l, srf, c2dLin) <= Precision::Confusion())
                 return c2dLin;
-            return GeomProjLib::Curve2d(c3, f, l, srf);
+            return projectOnChartBranchDiag(c3, f, l, srf, uChart, "lin-fallback");
         }
         // D-130-2 tier 2: the skew cyl|cyl loop as ONE degree-1 B-spline
         // through its mesh vertices. Its pcurve is the degree-1 2d B-spline
@@ -9745,6 +9872,17 @@ struct SeamBindCounts {
     int nDoubleWrite = 0;
 };
 
+// D-gid-8.7: the region's own chart [uMin, uMax] in the frame of one of its
+// cylinder surfaces (cylChartInFrame). Every variant regionSurf builds is a turn
+// of the region's frame about its axis: CylBase gets [uMin, uMax] itself,
+// CylRotAx the same chart from 0. No chart for a full turn.
+bool regionChartOnSurf(const Region& r, const Handle(Geom_Surface)& srf, double chart[2]) {
+    if (r.type != SurfType::Cylinder || r.closed360) return false;
+    Handle(Geom_CylindricalSurface) cyl = basisCylOf(srf);
+    if (cyl.IsNull()) return false;
+    return cylChartInFrame(r.ax, r.uMin, r.uMax, cyl->Position(), chart);
+}
+
 void bindAllVariants(const TopoDS_Edge& e, const Region& R, const char* kind, const MeshView& mv,
                      int ci, SeamBindCounts& acc) {
     Standard_Real f = 0, l = 0;
@@ -9770,10 +9908,12 @@ void bindAllVariants(const TopoDS_Edge& e, const Region& R, const char* kind, co
         Handle(Geom_Plane) plBind = Handle(Geom_Plane)::DownCast(srf);
         const bool pinVerts = !plBind.IsNull() && kind &&
                               (std::strcmp(kind, "lin") == 0 || std::strcmp(kind, "poly") == 0);
+        double chart[2] = {0.0, 0.0};
+        const bool haveChart = regionChartOnSurf(R, srf, chart);
         if (pinVerts)
             c2d = makePlanePCurvePinnedToVertices(e, plBind, c3, f, l);
         else
-            c2d = makePCurveOnSurf(c3, f, l, srf, kind);
+            c2d = makePCurveOnSurf(c3, f, l, srf, kind, haveChart ? chart : nullptr);
         if (c2d.IsNull()) continue;
         double devT = 0, devN = 0, dev = 0;
         const char* proj = "closedform";
@@ -13468,7 +13608,7 @@ bool healInvalidPartialTrimChart(TopoDS_Face& face, double cap, double tau) {
 // to the measured gap (never lower, never past tau) makes the test pass
 // without a new threshold. 1.1 is the checker's own factor; this function
 // does not apply it. tau is the only gate.
-bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau) {
+bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau, bool allowReverse) {
     if (face.IsNull() || !(tau > 0.0)) return false;
     if (faceIsValid(face)) return false;
     TopLoc_Location faceLoc;
@@ -13629,7 +13769,7 @@ bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau) {
     TopoDS_Face rev = face;
     rev.Reverse();
     const bool okF = any && faceIsValid(fwd);
-    const bool okR = any && !okF && faceIsValid(rev);
+    const bool okR = allowReverse && any && !okF && faceIsValid(rev);
     char faceSt[64] = "[]";
     char wireSt[64] = "[]";
     char wireCtx[64] = "[]";
@@ -13721,6 +13861,18 @@ bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau) {
     }
     restore();
     return false;
+}
+
+// D-gid-8.23. See the declaration.
+bool healShellPartialCylCorner(TopoDS_Face& face, double tau) {
+    if (face.IsNull() || !(tau > 0.0)) return false;
+    if (faceIsValid(face)) return false;
+    TopLoc_Location loc;
+    Handle(Geom_Surface) srf = BRep_Tool::Surface(face, loc);
+    Handle(Geom_RectangularTrimmedSurface) trim = Handle(Geom_RectangularTrimmedSurface)::DownCast(srf);
+    Handle(Geom_Surface) basis = trim.IsNull() ? srf : trim->BasisSurface();
+    if (Handle(Geom_CylindricalSurface)::DownCast(basis).IsNull()) return false;
+    return raiseMeasuredCornerTol(face, tau, /*allowReverse=*/false);
 }
 
 // D-fc-7.16. See the declaration. The chart is partialTrimChartPCurve on the
@@ -18664,6 +18816,207 @@ void diagCascadeExplode(int rid, CascadeRung rung, const RegionSet& rs) {
     std::fprintf(stderr, "]\n");
 }
 
+const char* originName(Origin o);
+
+// D-gid-8.23 census (STL2STEP_DIAG_STRIPX). One line per region face that is
+// BRepCheck-invalid at the closed-shell check: origin, certificate
+// (maxVertexDev / tau, ring), whether it was valid before the shell's forced
+// SameParameter (preSP: 1 valid, 0 invalid, -1 not measured), and whether
+// the D-fc-7.10 corner measure validates it in place (corner). The corner
+// probe runs on the face and every vertex tolerance of the face is written
+// back afterwards, so the shapes leave exactly as they came.
+void diagStripxCulprits(const std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                        const std::vector<uint8_t>& builtFacet, const RegionSet& rs,
+                        const std::vector<char>& exploded, const std::vector<signed char>& preSp,
+                        double tau, int pass) {
+    if (!diagStripxEnabled()) return;
+    for (size_t i = 0; i < built.size(); i++) {
+        const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+        if (rid < 0 || regionExploded(exploded, rid)) continue;
+        if (i < builtFacet.size() && builtFacet[i]) continue;
+        if (faceIsValid(built[i])) continue;
+        const Region* r = regionById(rs, rid);
+        if (!r) continue;
+        std::vector<std::pair<Handle(BRep_TVertex), double>> saved;
+        for (TopExp_Explorer vx(built[i], TopAbs_VERTEX); vx.More(); vx.Next())
+            if (Handle(BRep_TVertex) tv = Handle(BRep_TVertex)::DownCast(vx.Current().TShape()))
+                saved.emplace_back(tv, tv->Tolerance());
+        TopoDS_Face probe = built[i];
+        bool corner = false;
+        try {
+            corner = raiseMeasuredCornerTol(probe, tau, false);
+        } catch (const Standard_Failure&) {
+            corner = false;
+        }
+        for (auto& sv : saved) sv.first->Tolerance(sv.second);
+        const bool cert = r->ringCertified || (tau > 0.0 && r->maxVertexDev <= tau);
+        const int pre = (i < preSp.size()) ? (int)preSp[i] : -1;
+        std::fprintf(stderr,
+                     "DIAG_STRIPX culprit pass=%d rid=%d origin=%s type=%s partial=%d nTri=%zu "
+                     "R=%.6f devTau=%.4f ring=%d cert=%d preSP=%d corner=%d\n",
+                     pass, rid, originName(r->origin),
+                     r->type == SurfType::Cylinder ? "cyl"
+                     : r->type == SurfType::Plane  ? "pln"
+                                                   : "oth",
+                     (r->type == SurfType::Cylinder && !r->closed360) ? 1 : 0, r->tris.size(),
+                     r->radius, tau > 0.0 ? r->maxVertexDev / tau : -1.0, r->ringCertified ? 1 : 0,
+                     cert ? 1 : 0, pre, corner ? 1 : 0);
+    }
+}
+
+const char* edgeCurveKindName(const Handle(Geom_Curve)& c3);
+
+// D-gid-8.28 census (prints only). One line per edge SameParameter lowered:
+// the two faces it bounds, its curve, the tolerance it carried into
+// SameParameter (before), the one SameParameter left (after), the one it
+// leaves with (kept), its measured deviation (the rule's measure; -1 not
+// measured), the last builder writer stamp, its mesh cap (min over the faces
+// it bounds, the D-130-2 red line), the larger vertex tolerance at its ends,
+// the exact maximum over its stored pcurves, and its exact curve-on-surface
+// deviation before SameParameter (devPre). Then one line per built face whose
+// BRepCheck validity differs between before SameParameter, after it, and after
+// the rule.
+void diagSametolReport(const TopoDS_Shape& sh, const std::vector<TopoDS_Face>& built,
+                       const std::vector<int>& builtRid, const std::vector<uint8_t>& builtFacet,
+                       const RegionSet& rs, const MeshView& mv,
+                       const std::vector<EdgeTolRow>& lowered, const std::vector<signed char>& vPre,
+                       const std::vector<signed char>& vSp,
+                       const std::unordered_map<const void*, double>& preDev, double tau,
+                       int pass) {
+    if (!diagSametolEnabled()) return;
+    TopTools_IndexedDataMapOfShapeListOfShape anc;
+    TopTools_IndexedMapOfShape faceMap;
+    try {
+        TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, anc);
+        TopExp::MapShapes(sh, TopAbs_FACE, faceMap);
+    } catch (const Standard_Failure&) {
+    }
+    std::vector<int> faceBuilt((size_t)faceMap.Extent() + 1, -1);
+    for (size_t i = 0; i < built.size(); i++) {
+        const int idx = faceMap.FindIndex(built[i]);
+        if (idx > 0) faceBuilt[(size_t)idx] = (int)i;
+    }
+    double maxKept = 0.0, maxRatio = 0.0;
+    int nOverCap = 0, nRaised = 0, nUnmeasured = 0;
+    for (const EdgeTolRow& r : lowered) {
+        int rid[2] = {-1, -1}, fac[2] = {0, 0}, nA = 0;
+        double cap = -1.0;
+        const int ei = anc.FindIndex(r.e);
+        if (ei > 0) {
+            for (TopTools_ListOfShape::Iterator it(anc(ei)); it.More() && nA < 2; it.Next()) {
+                const int fi = faceMap.FindIndex(it.Value());
+                const int bi = (fi > 0) ? faceBuilt[(size_t)fi] : -1;
+                if (bi < 0) continue;
+                rid[nA] = ((size_t)bi < builtRid.size()) ? builtRid[(size_t)bi] : -1;
+                fac[nA] = ((size_t)bi < builtFacet.size() && builtFacet[(size_t)bi]) ? 1 : 0;
+                const Region* rr = regionById(rs, rid[nA]);
+                const double c = meshTolCap(mv, fac[nA] ? nullptr : rr);
+                cap = (cap < 0.0) ? c : std::min(cap, c);
+                nA++;
+            }
+        }
+        double vt = 0.0;
+        for (TopExp_Explorer vx(r.e, TopAbs_VERTEX); vx.More(); vx.Next())
+            vt = std::max(vt, BRep_Tool::Tolerance(TopoDS::Vertex(vx.Current())));
+        Standard_Real f = 0, l = 0;
+        Handle(Geom_Curve) c3 = BRep_Tool::Curve(r.e, f, l);
+        const double exact = maxExactAllPcurves(r.e, -1.0);
+        const auto pit = preDev.find(diagTShapePtr(r.e));
+        const double devPre = (pit == preDev.end()) ? -1.0 : pit->second;
+        const bool up = r.kept > r.after;
+        const bool over = up && cap >= 0.0 && r.kept > cap + Precision::PConfusion();
+        if (up) nRaised++;
+        if (!(r.measured >= 0.0)) nUnmeasured++;
+        if (over) nOverCap++;
+        if (up) maxKept = std::max(maxKept, r.kept);
+        if (up && r.after > 0.0) maxRatio = std::max(maxRatio, r.kept / r.after);
+        std::fprintf(stderr,
+                     "DIAG_SAMETOL edge pass=%d ridA=%d facetA=%d ridB=%d facetB=%d curve=%s "
+                     "before=%.6e after=%.6e kept=%.6e measured=%.6e raised=%d keptTau=%.4f "
+                     "writer=%s cap=%.6e overCap=%d vtolMax=%.6e vtolTau=%.4f exactPc=%.6e "
+                     "devPre=%.6e sewTol=%.3e\n",
+                     pass, rid[0], fac[0], rid[1], fac[1],
+                     c3.IsNull() ? "none" : edgeCurveKindName(c3), r.before, r.after, r.kept,
+                     r.measured, up ? 1 : 0, tau > 0.0 ? r.kept / tau : -1.0,
+                     lastTolWriterOf(r.e), cap, over ? 1 : 0, vt, tau > 0.0 ? vt / tau : -1.0,
+                     exact, devPre, mv.sewTol);
+    }
+    int nRescued = 0, nBroken = 0, nSpInvalid = 0;
+    std::unordered_set<const void*> upTs;
+    for (const EdgeTolRow& er : lowered)
+        if (er.kept > er.after) upTs.insert(diagTShapePtr(er.e));
+    for (size_t i = 0; i < built.size(); i++) {
+        const int pre = (i < vPre.size()) ? (int)vPre[i] : -1;
+        const int sp = (i < vSp.size()) ? (int)vSp[i] : -1;
+        if (pre < 0 || sp < 0) continue;
+        const int now = faceIsValid(built[i]) ? 1 : 0;
+        if (pre == sp && sp == now) continue;
+        if (pre == 1 && sp == 0) nSpInvalid++;
+        if (sp == 0 && now == 1) nRescued++;
+        if (sp == 1 && now == 0) nBroken++;
+        const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+        const bool facet = i < builtFacet.size() && builtFacet[i];
+        const Region* r = facet ? nullptr : regionById(rs, rid);
+        int nUp = 0;
+        {
+            std::unordered_set<const void*> seen;
+            for (TopExp_Explorer ex(built[i], TopAbs_EDGE); ex.More(); ex.Next()) {
+                const void* ts = diagTShapePtr(TopoDS::Edge(ex.Current()));
+                if (seen.insert(ts).second && upTs.count(ts)) nUp++;
+            }
+        }
+        const bool cert = r && (r->ringCertified || (tau > 0.0 && r->maxVertexDev <= tau));
+        std::fprintf(stderr,
+                     "DIAG_SAMETOL face pass=%d rid=%d facet=%d origin=%s type=%s nTri=%zu "
+                     "R=%.6f devTau=%.4f ring=%d cert=%d preSP=%d postSP=%d rule=%d nRaised=%d\n",
+                     pass, rid, facet ? 1 : 0, r ? originName(r->origin) : "-",
+                     !r                                ? "-"
+                     : r->type == SurfType::Cylinder ? "cyl"
+                     : r->type == SurfType::Plane    ? "pln"
+                                                     : "oth",
+                     r ? r->tris.size() : (size_t)0, r ? r->radius : 0.0,
+                     (r && tau > 0.0) ? r->maxVertexDev / tau : -1.0,
+                     (r && r->ringCertified) ? 1 : 0, cert ? 1 : 0, pre, sp, now, nUp);
+    }
+    std::fprintf(stderr,
+                 "DIAG_SAMETOL sum pass=%d mode=%d lowered=%zu raised=%d unmeasured=%d "
+                 "maxKept=%.6e maxKeptTau=%.4f maxRatio=%.4f overCap=%d spInvalidated=%d "
+                 "rescued=%d broken=%d\n",
+                 pass, diagSametolMode(), lowered.size(), nRaised, nUnmeasured, maxKept,
+                 tau > 0.0 ? maxKept / tau : -1.0, maxRatio, nOverCap, nSpInvalid, nRescued,
+                 nBroken);
+}
+
+// D-gid-8.23. Before the closed-shell cascade explodes a face, every
+// BRepCheck-invalid partial-cylinder region face takes the D-fc-7.10 corner
+// measure in place (healShellPartialCylCorner). Returns how many faces it
+// validated; the caller re-checks the shell.
+int healShellPartialCylCorners(std::vector<TopoDS_Face>& built, const std::vector<int>& builtRid,
+                               const std::vector<uint8_t>& builtFacet, const RegionSet& rs,
+                               const std::vector<char>& exploded, double tau, int pass) {
+    if (!(tau > 0.0)) return 0;
+    int healed = 0;
+    for (size_t i = 0; i < built.size(); i++) {
+        const int rid = (i < builtRid.size()) ? builtRid[i] : -1;
+        if (rid < 0 || regionExploded(exploded, rid)) continue;
+        if (i < builtFacet.size() && builtFacet[i]) continue;
+        const Region* r = regionById(rs, rid);
+        if (!r || r->type != SurfType::Cylinder || r->closed360) continue;
+        if (faceIsValid(built[i])) continue;
+        bool ok = false;
+        try {
+            ok = healShellPartialCylCorner(built[i], tau);
+        } catch (const Standard_Failure&) {
+            ok = false;
+        }
+        if (ok) healed++;
+        if (diagStripxEnabled())
+            std::fprintf(stderr, "DIAG_STRIPX heal pass=%d rid=%d healed=%d\n", pass, rid,
+                         ok ? 1 : 0);
+    }
+    return healed;
+}
+
 int hopCylCount(const RegionSet& rs, int rid) {
     int hop = 0;
     for (const BoundaryChain& ch : rs.chains) {
@@ -19628,7 +19981,325 @@ void measureClassBShipMetrics(const MeshView& mv, const RegionSet& rs,
         out.push_back(row);
     }
 }
+
+// ---------------------------------------------------------------------------
+// D-gid-8.2 (gz-capown) -- cap-ownership census of shipped cylinders. DIAG
+// ONLY, default off (STL2STEP_DIAG_CAPOWN=1; 2 = + one line per triangle).
+// Reads the final state of a successful buildFaces; changes nothing.
+// For every shipped cylinder face F (axis a, radius R from F's own surface):
+//   own  -- a triangle F's region owns whose facet normal is axial beyond the
+//           spike-gid-slippage (d) axial bound |n.a| > e_t, e_t = min(a_t/L +
+//           s_t*tau/a_t + q/L, s_t) (spike-gy-slipnormal: e*_t = e_t there).
+//   adj  -- a triangle F's region does NOT own, edge-connected to it through
+//           triangles of the same kind, whose every vertex is within tau of
+//           F's cylinder: who owns it, what it ships as, and its axial test.
+// For each such triangle the regions across its three edges, the vertex
+// deviation to every across plane, and where its centroid's projection on
+// the cylinder classifies against F (IN / ON / OUT).
+// ---------------------------------------------------------------------------
+int capOwnLevel() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* v = std::getenv("STL2STEP_DIAG_CAPOWN");
+        cached = (v && v[0] && v[0] != '0') ? std::max(1, std::atoi(v)) : 0;
+    }
+    return cached;
+}
+std::string& capOwnLines() {
+    static thread_local std::string s;
+    return s;
+}
+void capOwnAppend(std::string& s, const char* fmt, ...) {
+    char buf[1536];
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) s.append(buf, std::min<size_t>((size_t)n, sizeof(buf) - 1));
+}
+
+void capOwnCensus(const MeshView& mv, const RegionSet& rs, const std::vector<TopoDS_Face>& built,
+                  const std::vector<int>& builtRid, const std::vector<char>& exploded,
+                  const std::vector<char>& eprimeFill) {
+    std::string& out = capOwnLines();
+    out.clear();
+    const double q = mv.quantFloor, tau = tauOf(mv);
+    if (!(tau > 0.0)) {
+        capOwnAppend(out, "DIAG_CAPOWN_COMP path=build tau=0\n");
+        return;
+    }
+    const int level = capOwnLevel();
+    std::unordered_map<int, std::vector<size_t>> facesOf;
+    for (size_t fi = 0; fi < built.size(); fi++) {
+        const int rid = fi < builtRid.size() ? builtRid[fi] : -1;
+        if (rid >= 0 && !built[fi].IsNull()) facesOf[rid].push_back(fi);
+    }
+    std::unordered_map<int, const Region*> byId;
+    for (const Region& r : rs.regions) byId[r.id] = &r;
+    auto P = [&](int t, int j) -> gp_XYZ { return mv.pts[mv.tris[mv.compTris[t]][j]]; };
+    // edge -> its (up to two) triangles
+    std::vector<std::array<int, 2>> edgeTris(mv.nEdge, std::array<int, 2>{-1, -1});
+    for (size_t t = 0; t < mv.nTri; t++)
+        for (int k = 0; k < 3; k++) {
+            const int e = mv.triEdges[t][k];
+            if (e < 0 || (size_t)e >= mv.nEdge) continue;
+            if (edgeTris[e][0] < 0) edgeTris[e][0] = (int)t;
+            else if (edgeTris[e][1] < 0) edgeTris[e][1] = (int)t;
+        }
+    auto across = [&](int t, int k) -> int {
+        const int e = mv.triEdges[t][k];
+        if (e < 0 || (size_t)e >= mv.nEdge) return -1;
+        return edgeTris[e][0] == t ? edgeTris[e][1] : edgeTris[e][0];
+    };
+    auto ownerOf = [&](int t) -> int {
+        return (t >= 0 && (size_t)t < rs.triRegion.size()) ? rs.triRegion[t] : -1;
+    };
+    // what a triangle ships as: a = analytic region face, f = facet
+    auto shipsAs = [&](int t) -> const char* {
+        const int rid = ownerOf(t);
+        if (rid < 0) return "island";
+        auto it = byId.find(rid);
+        if (it == byId.end()) return "noregion";
+        const Region& r = *it->second;
+        if (regionExploded(exploded, rid)) return "exploded";
+        if (regionExploded(eprimeFill, rid)) return "eprime";
+        if (r.builtAs == BuiltAs::ExplodedToFacets) return "explodedToFacets";
+        if (!facesOf.count(rid)) return "noface";
+        return "analytic";
+    };
+    auto typeName = [](SurfType s) -> const char* {
+        switch (s) {
+            case SurfType::Plane: return "plane";
+            case SurfType::Cylinder: return "cylinder";
+            case SurfType::Cone: return "cone";
+            case SurfType::Sphere: return "sphere";
+            case SurfType::Torus: return "torus";
+            case SurfType::BSpline: return "bspline";
+        }
+        return "?";
+    };
+    int nCyl = 0, nCert = 0, ownTris = 0, adjTris = 0;
+    double ownArea = 0, adjArea = 0;
+    for (const Region& r : rs.regions) {
+        if (r.type != SurfType::Cylinder) continue;
+        if (regionExploded(exploded, r.id) || regionExploded(eprimeFill, r.id) ||
+            r.builtAs == BuiltAs::ExplodedToFacets)
+            continue;
+        auto fit = facesOf.find(r.id);
+        if (fit == facesOf.end()) continue;
+        BRepAdaptor_Surface sa(built[fit->second.front()], Standard_False);
+        if (sa.GetType() != GeomAbs_Cylinder) continue;
+        nCyl++;
+        const gp_Cylinder cy = sa.Cylinder();
+        const gp_XYZ ax = cy.Position().Direction().XYZ();
+        const bool cert = anchorCertified(tau, r.maxVertexDev) || r.ringCertified;
+        if (cert) nCert++;
+        auto vdev = [&](const gp_XYZ& x) {
+            bool ok = true;
+            const gp_XYZ y = classBClosestPoint(sa, x, ok);
+            return ok ? (y - x).Modulus() : 1e300;
+        };
+        auto triDev = [&](int t) {
+            return std::max({vdev(P(t, 0)), vdev(P(t, 1)), vdev(P(t, 2))});
+        };
+        // region frame for e_t
+        double W = 0, L = 0;
+        gp_XYZ ctr(0, 0, 0);
+        for (int t : r.tris) {
+            const gp_XYZ a = P(t, 0), b = P(t, 1), c = P(t, 2);
+            const double A = 0.5 * (b - a).Crossed(c - a).Modulus();
+            W += A;
+            ctr += ((a + b + c) / 3.0) * A;
+        }
+        if (W > 0) {
+            ctr /= W;
+            for (int t : r.tris) {
+                const gp_XYZ a = P(t, 0), b = P(t, 1), c = P(t, 2);
+                const double A = 0.5 * (b - a).Crossed(c - a).Modulus();
+                L += A * (((a + b + c) / 3.0) - ctr).SquareModulus();
+            }
+            L = std::sqrt(L / W);
+        }
+        struct Ax {
+            double A = 0, alt = 0, cosAx = 0, e = 0;
+            gp_XYZ c;
+        };
+        auto axial = [&](int t) {
+            Ax s;
+            const gp_XYZ a = P(t, 0), b = P(t, 1), c = P(t, 2);
+            const gp_XYZ cr = (b - a).Crossed(c - a);
+            const double m = cr.Modulus();
+            const double lmax = std::max({(b - c).Modulus(), (c - a).Modulus(), (a - b).Modulus()});
+            s.A = 0.5 * m;
+            s.alt = lmax > 0 ? m / lmax : 0;
+            s.c = (a + b + c) / 3.0;
+            s.cosAx = m > 0 ? std::fabs(cr.Dot(ax)) / m : 0;
+            const double spd = L > 0 ? std::sqrt(1.0 + ((s.c - ctr) / L).SquareModulus()) : 1.0;
+            s.e = (L > 0 && s.alt > 0) ? std::min(s.alt / L + spd * tau / s.alt + q / L, spd) : spd;
+            return s;
+        };
+        auto classify = [&](const gp_XYZ& x) -> const char* {
+            double u = 0, v = 0;
+            ElSLib::Parameters(cy, gp_Pnt(x), u, v);
+            const char* best = "OUT";
+            for (size_t fi : fit->second) {
+                try {
+                    BRepTopAdaptor_FClass2d fc(built[fi], Precision::PConfusion());
+                    for (double du : {0.0, -2 * std::acos(-1.0), 2 * std::acos(-1.0)}) {
+                        const TopAbs_State st = fc.Perform(gp_Pnt2d(u + du, v));
+                        if (st == TopAbs_IN) return "IN";
+                        if (st == TopAbs_ON) best = "ON";
+                    }
+                } catch (const Standard_Failure&) {
+                }
+            }
+            return best;
+        };
+        auto acrossDesc = [&](int t, std::string& s) {
+            for (int k = 0; k < 3; k++) {
+                const int u = across(t, k);
+                const int rid = ownerOf(u);
+                char b[160];
+                if (u < 0) {
+                    std::snprintf(b, sizeof b, "%s-", k ? "," : "");
+                } else if (rid < 0) {
+                    std::snprintf(b, sizeof b, "%sisl", k ? "," : "");
+                } else {
+                    auto it = byId.find(rid);
+                    double pd = -1;
+                    if (it != byId.end() && it->second->type == SurfType::Plane) {
+                        const gp_XYZ n = it->second->ax.Direction().XYZ();
+                        const gp_XYZ o = it->second->ax.Location().XYZ();
+                        pd = 0;
+                        for (int j = 0; j < 3; j++)
+                            pd = std::max(pd, std::fabs((P(t, j) - o).Dot(n)));
+                        pd /= tau;
+                    }
+                    std::snprintf(b, sizeof b, "%s%d:%s:%s:pd%.3g", k ? "," : "", rid,
+                                  it != byId.end() ? typeName(it->second->type) : "?",
+                                  shipsAs(u), pd);
+                }
+                s += b;
+            }
+        };
+        std::unordered_set<int> mine(r.tris.begin(), r.tris.end());
+        int rOwn = 0;
+        double rOwnA = 0;
+        for (int t : r.tris) {
+            const Ax s = axial(t);
+            if (!(s.cosAx > s.e)) continue;
+            rOwn++;
+            rOwnA += s.A;
+            if (level >= 2) {
+                std::string acr;
+                acrossDesc(t, acr);
+                capOwnAppend(out,
+                             "DIAG_CAPOWN_TRI kind=own rid=%d origin=%s cert=%d t=%d gt=%d "
+                             "area=%.6g alt=%.6g cosAx=%.6f e=%.6g devTau=%.4g cls=%s "
+                             "across=%s c=%.6f,%.6f,%.6f\n",
+                             r.id, originName(r.origin), cert ? 1 : 0, t, mv.compTris[t], s.A,
+                             s.alt, s.cosAx, s.e, triDev(t) / tau, classify(s.c), acr.c_str(),
+                             s.c.X(), s.c.Y(), s.c.Z());
+            }
+        }
+        // adj: flood from the region boundary through non-owned triangles whose
+        // every vertex is within tau of this cylinder.
+        std::vector<int> stack;
+        std::unordered_set<int> seen;
+        for (int t : r.tris)
+            for (int k = 0; k < 3; k++) {
+                const int u = across(t, k);
+                if (u < 0 || mine.count(u) || seen.count(u)) continue;
+                seen.insert(u);
+                if (triDev(u) <= tau) stack.push_back(u);
+            }
+        std::vector<int> adj;
+        while (!stack.empty()) {
+            const int u = stack.back();
+            stack.pop_back();
+            adj.push_back(u);
+            for (int k = 0; k < 3; k++) {
+                const int w = across(u, k);
+                if (w < 0 || mine.count(w) || seen.count(w)) continue;
+                seen.insert(w);
+                if (triDev(w) <= tau) stack.push_back(w);
+            }
+        }
+        std::sort(adj.begin(), adj.end());
+        int rAdj = 0, rAdjAxial = 0, rAdjFacet = 0, rAdjFacetRadial = 0;
+        double rAdjA = 0, rAdjFacetRadialA = 0;
+        for (int u : adj) {
+            const Ax s = axial(u);
+            const bool ax0 = s.cosAx > s.e;
+            const char* sh = shipsAs(u);
+            const bool facet = std::strcmp(sh, "analytic") != 0;
+            rAdj++;
+            rAdjA += s.A;
+            if (ax0) rAdjAxial++;
+            if (facet) rAdjFacet++;
+            if (facet && !ax0) {
+                rAdjFacetRadial++;
+                rAdjFacetRadialA += s.A;
+            }
+            if (level >= 2) {
+                const int orid = ownerOf(u);
+                auto it = byId.find(orid);
+                std::string acr;
+                acrossDesc(u, acr);
+                capOwnAppend(out,
+                             "DIAG_CAPOWN_TRI kind=adj rid=%d origin=%s cert=%d t=%d gt=%d "
+                             "area=%.6g alt=%.6g cosAx=%.6f e=%.6g axial=%d devTau=%.4g "
+                             "owner=%d ownerType=%s ownerOrigin=%s ownerDevTau=%.4g ships=%s "
+                             "cls=%s across=%s c=%.6f,%.6f,%.6f\n",
+                             r.id, originName(r.origin), cert ? 1 : 0, u, mv.compTris[u], s.A,
+                             s.alt, s.cosAx, s.e, ax0 ? 1 : 0, triDev(u) / tau, orid,
+                             it != byId.end() ? typeName(it->second->type) : "-",
+                             it != byId.end() ? originName(it->second->origin) : "-",
+                             it != byId.end() ? it->second->maxVertexDev / tau : -1.0, sh,
+                             classify(s.c), acr.c_str(), s.c.X(), s.c.Y(), s.c.Z());
+            }
+        }
+        ownTris += rOwn;
+        ownArea += rOwnA;
+        adjTris += rAdjFacetRadial;
+        adjArea += rAdjFacetRadialA;
+        if (rOwn > 0 || rAdj > 0)
+            capOwnAppend(out,
+                         "DIAG_CAPOWN rid=%d origin=%s builtAs=%s nTri=%zu R=%.6g cert=%d "
+                         "ring=%d engDevTau=%.4g L=%.6g own=%d ownArea=%.6g adj=%d adjArea=%.6g "
+                         "adjAxial=%d adjFacet=%d adjFacetRadial=%d adjFacetRadialArea=%.6g\n",
+                         r.id, originName(r.origin), builtAsName(r.builtAs), r.tris.size(),
+                         cy.Radius(), cert ? 1 : 0, r.ringCertified ? 1 : 0,
+                         r.maxVertexDev / tau, L, rOwn, rOwnA, rAdj, rAdjA, rAdjAxial, rAdjFacet,
+                         rAdjFacetRadial, rAdjFacetRadialA);
+    }
+    capOwnAppend(out,
+                 "DIAG_CAPOWN_COMP path=build q=%.6g tau=%.6g cylinders=%d certified=%d "
+                 "ownTris=%d ownArea=%.6g adjFacetRadialTris=%d adjFacetRadialArea=%.6g\n",
+                 q, tau, nCyl, nCert, ownTris, ownArea, adjTris, adjArea);
+}
 }  // namespace
+
+bool capOwnDiagEnabled() { return capOwnLevel() > 0; }
+
+void capOwnTake(int comp, std::string& lines) {
+    const std::string& src = capOwnLines();
+    const std::string tag = " comp=" + std::to_string(comp);
+    lines.clear();
+    size_t b = 0;
+    while (b < src.size()) {
+        size_t e = src.find('\n', b);
+        if (e == std::string::npos) e = src.size();
+        const size_t sp = src.find(' ', b);
+        const size_t cut = (sp != std::string::npos && sp < e) ? sp : e;
+        lines.append(src, b, cut - b);
+        lines += tag;
+        lines.append(src, cut, e - cut);
+        lines += '\n';
+        b = e + 1;
+    }
+    capOwnLines().clear();
+}
 
 void forgetCylMeetSurf(int id) {
     for (int v = static_cast<int>(SurfVar::Plane); v <= static_cast<int>(SurfVar::TorusBase); ++v) {
@@ -19721,6 +20392,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
     out.clear();
     rs.torusFailedTris.clear();
     rs.classBMetrics.clear();
+    if (capOwnDiagEnabled()) capOwnLines().clear();  // D-gid-8.2 diag only
     rs.shipFaceRid.clear();
     rs.shipFaceFacet.clear();
     try {
@@ -19765,7 +20437,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         }
 
         const bool wasClosed = meshComponentClosed(mv);
-        // D-fc-4.8: each closed torus's coaxial family stands on one seam half-plane.
+        // D-fc-4.8: each closed torus's coaxial family stands on one seam half-plane;
+        // D-gid-8.13: so does a staggered cone/cylinder pair that shares a rim.
         const std::vector<TorusSeamFamily> seamFams = shareTorusSeamFrames(mv, rs);
         std::vector<char> seamPlaced;
 
@@ -20200,7 +20873,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // coaxial cylinder at its outer or inner equator, is their tangent
                 // contact -- the torus's own v-iso there, which the partner holds
                 // within anchorTol(partner) + tau (D-fc-1.4, D-fc-1.6.7) -- not the
-                // mesh chords: one arc both faces share.
+                // mesh chords: one arc both faces share. D-gid-8.19: a certified
+                // closed torus whose cap is the D-gid-5.15 mesh polyline takes it
+                // too, when every chain vertex is within tau of the iso
+                // (openChainTakesTorusContact). Its chains with the facets stay
+                // the mesh polyline.
                 if (curve.kind == AnalyticCurve::None && anaPair && !ch.closedLoop &&
                     !coneRimPartner && ch.meshVerts.size() >= 3) {
                     const Region* tor = (A && isTorusBlendR(*A)) ? A
@@ -20208,16 +20885,23 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                                                  : nullptr;
                     const Region* oth = (tor == A) ? B : A;
                     const double tauC = 2.0 * std::max(mv.quantFloor, 0.0);
-                    if (tor && oth && !tor->closed360 && tauC > 0.0) {
+                    if (tor && oth && tauC > 0.0) {
                         const gp_Torus gt(tor->ax, tor->radius, tor->radius2);
                         const double tolC = std::max(tauC, oth->maxVertexDev) + tauC;
                         gp_Circ cc;
-                        const bool on =
+                        const bool held =
                             (oth->type == SurfType::Plane &&
                              torusPlaneContactCircle(gt, gp_Pln(oth->ax), tolC, cc)) ||
                             (oth->type == SurfType::Cylinder &&
                              torusCylinderContactCircle(gt, gp_Cylinder(oth->ax, oth->radius),
                                                         tolC, cc));
+                        double chainDev = -1.0;
+                        if (held) {
+                            chainDev = 0.0;
+                            for (int lv : ch.meshVerts)
+                                chainDev = std::max(chainDev, pointCircleDist(cc, pntOf(mv, lv)));
+                        }
+                        const bool on = held && openChainTakesTorusContact(*tor, tauC, chainDev);
                         if (on) {
                             curve.kind = AnalyticCurve::Circ;
                             curve.circ = cc;
@@ -20225,9 +20909,12 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         if (diagRelEnabled())
                             std::fprintf(stderr,
                                          "DIAG_TORUS_CONTACT ci=%d tor=%d oth=%d othType=%d "
-                                         "nV=%zu tol=%.6g on=%d\n",
+                                         "nV=%zu tol=%.6g closed=%d polylineCap=%d held=%d "
+                                         "chainDev=%.6g on=%d\n",
                                          (int)ci, tor->id, oth->id, (int)oth->type,
-                                         ch.meshVerts.size(), tolC, on ? 1 : 0);
+                                         ch.meshVerts.size(), tolC, tor->closed360 ? 1 : 0,
+                                         tor->meshPolylineCap ? 1 : 0, held ? 1 : 0, chainDev,
+                                         on ? 1 : 0);
                     }
                 }
                 // Detector B: a plane-loop CIRCLE answers where IntAna has no
@@ -24884,6 +25571,37 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 }
             }
         };
+        std::vector<signed char> stripxPreSp;
+        if (diagStripxEnabled()) {
+            stripxPreSp.assign(built.size(), -1);
+            for (size_t i = 0; i < built.size(); i++)
+                if (i < builtRid.size() && builtRid[i] >= 0 && !(i < builtFacet.size() && builtFacet[i]))
+                    stripxPreSp[i] = faceIsValid(built[i]) ? 1 : 0;
+        }
+        // D-gid-8.28: the tolerance every edge carries into SameParameter (the
+        // rule after it), and under STL2STEP_DIAG_SAMETOL the validity of every
+        // built face before and after it (census only).
+        const bool sametolOn = diagSametolEnabled();
+        const std::vector<EdgeTolRow> sametolSnap = snapshotEdgeTolerances(sh);
+        std::vector<signed char> sametolPre, sametolSp;
+        std::unordered_map<const void*, double> sametolDevPre;
+        if (sametolOn) {
+            sametolPre.assign(built.size(), -1);
+            for (size_t i = 0; i < built.size(); i++)
+                sametolPre[i] = faceIsValid(built[i]) ? 1 : 0;
+            try {
+                TopTools_IndexedDataMapOfShapeListOfShape ancP;
+                TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, ancP);
+                for (int k = 1; k <= ancP.Extent(); k++) {
+                    const TopoDS_Edge& e = TopoDS::Edge(ancP.FindKey(k));
+                    double d = -1.0;
+                    for (TopTools_ListOfShape::Iterator it(ancP(k)); it.More(); it.Next())
+                        d = std::max(d, exactEdgeDeviationOnFace(e, TopoDS::Face(it.Value())));
+                    sametolDevPre[diagTShapePtr(e)] = d;
+                }
+            } catch (const Standard_Failure&) {
+            }
+        }
         try {
             sameParameterKeepingTier2(sh, std::min(sewTol, spCap));
             bool needRelax = false;
@@ -24910,6 +25628,40 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             }
         } catch (const Standard_Failure&) {
             return false;
+        }
+        // D-gid-8.28: SameParameter re-measures each edge on its own samples and
+        // can leave it below its exact deviation, and a face that was valid can
+        // then fail its wire check (D-fc-6.9: a tolerance below its measured
+        // value is forbidden). Every edge it lowered keeps
+        //   max(its tolerance now, min(the tolerance it carried in,
+        //       its exact curve-on-surface deviation on the faces it bounds)):
+        // never more than the builder wrote, never more than the edge measures.
+        // Tolerances only rise; no curve, pcurve or vertex is touched.
+        {
+            if (sametolOn) {
+                sametolSp.assign(built.size(), -1);
+                for (size_t i = 0; i < built.size(); i++)
+                    sametolSp[i] = faceIsValid(built[i]) ? 1 : 0;
+            }
+            TopTools_IndexedDataMapOfShapeListOfShape ancT;
+            bool ancDone = false;
+            const bool carried = diagSametolMode() == 2;
+            const std::vector<EdgeTolRow> lowered =
+                keepSnapshotEdgeTolerances(sametolSnap, [&](const TopoDS_Edge& e) -> double {
+                    if (carried) return std::numeric_limits<double>::infinity();
+                    if (!ancDone) {
+                        ancDone = true;
+                        try {
+                            TopExp::MapShapesAndAncestors(sh, TopAbs_EDGE, TopAbs_FACE, ancT);
+                        } catch (const Standard_Failure&) {
+                        }
+                    }
+                    const int k = ancT.FindIndex(e);
+                    return (k > 0) ? exactEdgeDeviationOnFaces(e, ancT(k)) : -1.0;
+                });
+            if (sametolOn)
+                diagSametolReport(sh, built, builtRid, builtFacet, rs, mv, lowered, sametolPre,
+                                  sametolSp, sametolDevPre, tauOf(mv), recoverPass);
         }
 
         // Cone-iso rims: SameParameter has just set the tolerance to the
@@ -25173,13 +25925,23 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             for (int id : plan.explode) {
                 if (id < 0 || regionExploded(exploded, id)) continue;
                 diagCascadeExplode(id, plan.rung, rs);
+                if (diagStripxEnabled())
+                    std::fprintf(stderr, "DIAG_STRIPX explode pass=%d rid=%d rung=%s\n",
+                                 recoverPass, id, cascadeRungName(plan.rung));
                 explodeRegion(id);
                 any = true;
             }
             return any;
         };
 
-        const bool shValid = shellIsValid(sh);
+        bool shValid = shellIsValid(sh);
+        // D-gid-8.23: heal-not-revert before the cascade. A partial-cylinder face
+        // that the shell's forced SameParameter left BRepCheck-invalid takes the
+        // D-fc-7.10 corner measure in place; the shell is then checked again.
+        if (BRep_Tool::IsClosed(sh) && !shValid &&
+            healShellPartialCylCorners(built, builtRid, builtFacet, rs, exploded, tauOf(mv),
+                                       recoverPass) > 0)
+            shValid = shellIsValid(sh);
         // The valid first-pass shell has to be printable too, or "valid=1" is a
         // claim about the absence of a log line rather than a measurement.
         if (collapseDiagEnabled() && BRep_Tool::IsClosed(sh) && shValid)
@@ -25187,6 +25949,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         // Site B is closed-but-invalid only. Open shells are site C (untouched).
         if (BRep_Tool::IsClosed(sh) && !shValid) {
             dumpShellCheck(sh, built, builtRid, rs, sewTol);
+            diagStripxCulprits(built, builtRid, builtFacet, rs, exploded, stripxPreSp, tauOf(mv),
+                               recoverPass);
             std::vector<CascadeHit> culprits;
             collectFaceCulprits(built, builtRid, exploded, culprits);
             collectShellCulprits(sh, built, builtRid, rs, exploded, culprits);
@@ -25322,6 +26086,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         dumpR2Probe(mv, rs, built, builtRid, eprimeFill, exploded, sewTol);
         dumpVolAttrib("ship", mv, rs, built, builtRid, eprimeFill, exploded);
         measureClassBShipMetrics(mv, rs, built, builtRid, exploded, rs.classBMetrics);
+        if (capOwnDiagEnabled())  // D-gid-8.2 diag only
+            capOwnCensus(mv, rs, built, builtRid, exploded, eprimeFill);
         std::fprintf(stderr, "DIAG_RECONNECT_SUM fires=%d nTri=%d notDetermined=%d\n",
                      gReconnectFires, (int)mv.nTri, gOriNotDetermined);
         rs.shipFaceRid = builtRid;

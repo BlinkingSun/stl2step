@@ -26,6 +26,7 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <gp_Dir2d.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec2d.hxx>
@@ -51,6 +52,17 @@
 #include <gp_Ax3.hxx>
 #include <gp_Elips.hxx>
 #include <gp_Pln.hxx>
+
+#include <BRepCheck_Wire.hxx>
+#include <Geom2dAPI_Interpolate.hxx>
+#include <GeomAPI_ProjectPointOnCurve.hxx>
+#include <Geom_CylindricalSurface.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_RectangularTrimmedSurface.hxx>
+#include <IntAna_QuadQuadGeo.hxx>
+#include <TColStd_HArray1OfReal.hxx>
+#include <TColgp_HArray1OfPnt2d.hxx>
+#include <gp_Cylinder.hxx>
 
 using namespace stl2step::refit;
 
@@ -333,9 +345,321 @@ static void caseInsideOut() {
     expect(!singleWireInsideOut(TopoDS_Face()), "inside out: a null face is not");
 }
 
+
+// D-gid-8.23. A partial cylinder between two generators and two slightly oblique
+// elliptic caps. One corner vertex stands a fraction of a micron off the
+// cylinder, so the generator and the cap end at two different projections of
+// it and their pcurves cross a little farther from the vertex than 1.1 times
+// its tolerance. The face is valid as built: BRepCheck's second-phase test
+// accepts the crossing while the cap edge carries its build tolerance. A forced
+// SameParameter (the shell's call) re-measures the cap by sampling and lowers
+// that tolerance, and the face becomes a self-intersecting wire -- the
+// invalid-in-context face. healShellPartialCylCorner takes the D-fc-7.10
+// corner measure: the vertex tolerance becomes the measured crossing distance
+// when it is <= tau, nothing else is written; above tau it is refused and the
+// face is left exactly as it was.
+namespace {
+struct StripFace {
+    TopoDS_Face face;
+    TopoDS_Wire wire;
+    TopoDS_Edge capTop, genHi;
+    TopoDS_Vertex corner;
+    bool ok = false;
+};
+
+StripFace makeObliqueCapStrip() {
+    StripFace out;
+    const double R = 2.0, uHi = 1.4, h = 3.0;
+    const double dt = 8e-7, dr = 5e-7, dz = 9e-7;     // corner offset from the exact triple point
+    const double capTol = 3e-7, genTol = 8e-7;         // build tolerances (above the sampled deviation)
+    const gp_Cylinder cyl(gp_Ax3(gp::Origin(), gp::DZ(), gp::DX()), R);
+    const gp_Pln top(gp_Pnt(0, 0, h), gp_Dir(0.0, 0.002, 1.0));
+    const gp_Pln bot(gp_Pnt(0, 0, -h), gp_Dir(0.002, 0.0, 1.0));
+    IntAna_QuadQuadGeo qt(top, cyl, 1e-12, 1e-12), qb(bot, cyl, 1e-12, 1e-12);
+    if (!qt.IsDone() || !qb.IsDone() || qt.TypeInter() != IntAna_Ellipse ||
+        qb.TypeInter() != IntAna_Ellipse)
+        return out;
+    const Handle(Geom_Ellipse) eT = new Geom_Ellipse(qt.Ellipse(1));
+    const Handle(Geom_Ellipse) eB = new Geom_Ellipse(qb.Ellipse(1));
+    auto onCap = [&](const gp_Pln& pl, double u) {
+        const gp_Dir n = pl.Axis().Direction();
+        const gp_Pnt o = pl.Location();
+        const double x = R * std::cos(u), y = R * std::sin(u);
+        const double z = (n.X() * o.X() + n.Y() * o.Y() + n.Z() * o.Z() - n.X() * x - n.Y() * y) / n.Z();
+        return gp_Pnt(x, y, z);
+    };
+    const gp_Pnt T0 = onCap(top, 0.0), T1 = onCap(top, uHi), B0 = onCap(bot, 0.0), B1 = onCap(bot, uHi);
+    const gp_Vec tang(-std::sin(uHi), std::cos(uHi), 0), rad(std::cos(uHi), std::sin(uHi), 0);
+    const gp_Pnt V = T1.Translated(tang * dt + rad * dr + gp_Vec(0, 0, dz));
+    const Handle(Geom_Line) g0 = new Geom_Line(gp_Pnt(R, 0, 0), gp::DZ());
+    const Handle(Geom_Line) g1 = new Geom_Line(gp_Pnt(R * std::cos(uHi), R * std::sin(uHi), 0), gp::DZ());
+    const Handle(Geom_RectangularTrimmedSurface) S = new Geom_RectangularTrimmedSurface(
+        new Geom_CylindricalSurface(cyl), 0.0, uHi, -h - 0.1, h + 0.1);
+    BRep_Builder B;
+    TopoDS_Vertex vB0, vB1, vT0, vT1;
+    B.MakeVertex(vB0, B0, Precision::Confusion());
+    B.MakeVertex(vB1, B1, Precision::Confusion());
+    B.MakeVertex(vT0, T0, Precision::Confusion());
+    B.MakeVertex(vT1, V, Precision::Confusion());
+    auto uOf = [](const gp_Pnt& p) { return std::atan2(p.Y(), p.X()); };
+    auto mk = [&](const Handle(Geom_Curve)& c, const TopoDS_Vertex& a, const TopoDS_Vertex& b, double tol,
+                  bool line, TopoDS_Edge& e) -> bool {
+        GeomAPI_ProjectPointOnCurve pa(BRep_Tool::Pnt(a), c), pb(BRep_Tool::Pnt(b), c);
+        if (pa.NbPoints() == 0 || pb.NbPoints() == 0) return false;
+        double f = pa.LowerDistanceParameter(), l = pb.LowerDistanceParameter();
+        if (!line && l < f) l += 2.0 * kPi;
+        B.MakeEdge(e, c, tol);
+        TopoDS_Vertex va = a, vb = b;
+        va.Orientation(TopAbs_FORWARD);
+        vb.Orientation(TopAbs_REVERSED);
+        B.Add(e, va);
+        B.Add(e, vb);
+        B.Range(e, f, l);
+        Handle(Geom2d_Curve) pc;
+        if (line) {
+            pc = new Geom2d_Line(gp_Pnt2d(uOf(c->Value(0.0)), 0.0), gp_Dir2d(0, 1));
+        } else {
+            const int n = 17;
+            Handle(TColgp_HArray1OfPnt2d) pts = new TColgp_HArray1OfPnt2d(1, n);
+            Handle(TColStd_HArray1OfReal) prm = new TColStd_HArray1OfReal(1, n);
+            for (int i = 0; i < n; i++) {
+                const double t = f + (l - f) * i / (n - 1);
+                const gp_Pnt p = c->Value(t);
+                double u = uOf(p);
+                while (u - 0.5 * uHi > kPi) u -= 2.0 * kPi;
+                while (u - 0.5 * uHi < -kPi) u += 2.0 * kPi;
+                pts->SetValue(i + 1, gp_Pnt2d(u, p.Z()));
+                prm->SetValue(i + 1, t);
+            }
+            Geom2dAPI_Interpolate in(pts, prm, Standard_False, 1e-12);
+            in.Perform();
+            if (!in.IsDone()) return false;
+            pc = in.Curve();
+        }
+        B.UpdateEdge(e, pc, S, TopLoc_Location(), tol);
+        B.Range(e, S, TopLoc_Location(), f, l);
+        // Each vertex tolerance covers its distance to the curve end (+ confusion).
+        const double da = c->Value(f).Distance(BRep_Tool::Pnt(a));
+        const double db = c->Value(l).Distance(BRep_Tool::Pnt(b));
+        B.UpdateVertex(a, std::max(BRep_Tool::Tolerance(a), da + Precision::Confusion()));
+        B.UpdateVertex(b, std::max(BRep_Tool::Tolerance(b), db + Precision::Confusion()));
+        return true;
+    };
+    TopoDS_Edge eBot, eG1, eTop, eG0;
+    if (!mk(eB, vB0, vB1, capTol, false, eBot) || !mk(g1, vB1, vT1, genTol, true, eG1) ||
+        !mk(eT, vT0, vT1, capTol, false, eTop) || !mk(g0, vB0, vT0, genTol, true, eG0))
+        return out;
+    B.MakeWire(out.wire);
+    B.Add(out.wire, eBot);
+    B.Add(out.wire, eG1);
+    B.Add(out.wire, TopoDS::Edge(eTop.Reversed()));
+    B.Add(out.wire, TopoDS::Edge(eG0.Reversed()));
+    out.wire.Closed(Standard_True);
+    B.MakeFace(out.face, S, Precision::Confusion());
+    B.Add(out.face, out.wire);
+    out.capTop = eTop;
+    out.genHi = eG1;
+    out.corner = vT1;
+    out.ok = true;
+    return out;
+}
+
+int wireSelfX(const StripFace& sf) {
+    BRepCheck_Wire bw(sf.wire);
+    TopoDS_Edge x1, x2;
+    return (int)bw.SelfIntersect(sf.face, x1, x2, Standard_False);
+}
+}  // namespace
+
+// D-gid-8.28. The same synthetic strip: the shell's forced SameParameter lowers
+// the cap edge's build tolerance and the wire self-intersects. After it, an edge
+// keeps max(its tolerance now, min(the tolerance it carried in, its measure)):
+// with an unbounded measure the carried-in tolerance itself, with the exact
+// curve-on-surface measure never more than that measure. Tolerances only rise,
+// never past the carried-in value; pcurves and vertex tolerances are untouched.
+static void caseKeepToleranceThroughSameParameter() {
+    auto vertexTols = [](const TopoDS_Face& f) {
+        std::vector<double> v;
+        TopTools_IndexedMapOfShape vm;
+        TopExp::MapShapes(f, TopAbs_VERTEX, vm);
+        for (int i = 1; i <= vm.Extent(); i++) v.push_back(BRep_Tool::Tolerance(TopoDS::Vertex(vm(i))));
+        return v;
+    };
+    auto onlyFace = [](const TopoDS_Face& f) {
+        TopTools_ListOfShape l;
+        l.Append(f);
+        return l;
+    };
+    const double inf = std::numeric_limits<double>::infinity();
+    // Carried-in tolerance: the face is valid again, the cap is back to its build tolerance.
+    {
+        StripFace sf = makeObliqueCapStrip();
+        expect(sf.ok, "keep tol: synthetic strip built");
+        if (!sf.ok) return;
+        const double capBuilt = BRep_Tool::Tolerance(sf.capTop);
+        const double genBuilt = BRep_Tool::Tolerance(sf.genHi);
+        const std::vector<EdgeTolRow> snap = snapshotEdgeTolerances(sf.face);
+        expect(snap.size() == 4, "keep tol: one row per edge");
+        BRepLib::SameParameter(sf.face, 1e-4, Standard_True);
+        const double capSp = BRep_Tool::Tolerance(sf.capTop);
+        const std::vector<double> vtSp = vertexTols(sf.face);
+        std::vector<double> edgeSp;
+        for (const EdgeTolRow& r : snap) edgeSp.push_back(BRep_Tool::Tolerance(r.e));
+        Standard_Real a0 = 0, b0 = 0;
+        const Geom2d_Curve* pcSp = BRep_Tool::CurveOnSurface(sf.capTop, sf.face, a0, b0).get();
+        expect(capSp < capBuilt && BRepCheck_Analyzer(sf.face, Standard_True).IsValid() == Standard_False,
+               "keep tol: forced SameParameter lowers the cap and invalidates the face");
+        const std::vector<EdgeTolRow> rows =
+            keepSnapshotEdgeTolerances(snap, [&](const TopoDS_Edge&) { return inf; });
+        bool capRow = false, rowsOk = !rows.empty();
+        for (const EdgeTolRow& r : rows) {
+            rowsOk = rowsOk && r.before > r.after && r.kept == r.before;
+            if (r.e.IsSame(sf.capTop)) capRow = r.before == capBuilt && r.after == capSp;
+        }
+        expect(rowsOk && capRow, "keep tol: every lowered edge is listed and keeps its carried-in tolerance");
+        expect(BRep_Tool::Tolerance(sf.capTop) == capBuilt,
+               "keep tol: the cap is back to its build tolerance exactly");
+        bool maxOk = true;
+        for (size_t i = 0; i < snap.size(); i++)
+            maxOk = maxOk && BRep_Tool::Tolerance(snap[i].e) == std::max(edgeSp[i], snap[i].before);
+        expect(maxOk && BRep_Tool::Tolerance(sf.genHi) >= genBuilt,
+               "keep tol: every edge ends at max(its SameParameter tolerance, its carried-in one)");
+        expect(BRepCheck_Analyzer(sf.face, Standard_True).IsValid() == Standard_True,
+               "keep tol: the face is valid again");
+        Standard_Real a1 = 0, b1 = 0;
+        expect(BRep_Tool::CurveOnSurface(sf.capTop, sf.face, a1, b1).get() == pcSp && vertexTols(sf.face) == vtSp,
+               "keep tol: no pcurve and no vertex tolerance is written");
+        std::fprintf(stderr, "keep tol (carried): cap %.4e -> SP %.4e -> kept %.4e\n", capBuilt, capSp,
+                     BRep_Tool::Tolerance(sf.capTop));
+        const std::vector<EdgeTolRow> again =
+            keepSnapshotEdgeTolerances(snap, [&](const TopoDS_Edge&) { return inf; });
+        expect(again.empty(), "keep tol: a second pass finds nothing lowered");
+    }
+    // Measured: the kept tolerance never exceeds the edge's own exact deviation.
+    {
+        StripFace sf = makeObliqueCapStrip();
+        if (!sf.ok) return;
+        const double capBuilt = BRep_Tool::Tolerance(sf.capTop);
+        const std::vector<EdgeTolRow> snap = snapshotEdgeTolerances(sf.face);
+        BRepLib::SameParameter(sf.face, 1e-4, Standard_True);
+        const double capSp = BRep_Tool::Tolerance(sf.capTop);
+        const TopTools_ListOfShape faces = onlyFace(sf.face);
+        const double capDev = exactEdgeDeviationOnFaces(sf.capTop, faces);
+        const std::vector<EdgeTolRow> rows = keepSnapshotEdgeTolerances(
+            snap, [&](const TopoDS_Edge& e) { return exactEdgeDeviationOnFaces(e, faces); });
+        bool ok = !rows.empty();
+        for (const EdgeTolRow& r : rows)
+            ok = ok && r.kept >= r.after && r.kept <= r.before &&
+                 (r.kept == r.after || r.kept == std::min(r.before, r.measured));
+        expect(ok, "keep tol (measured): kept = max(after, min(before, measured)) on every row");
+        const double capKept = BRep_Tool::Tolerance(sf.capTop);
+        expect(capDev > 0.0 && capKept == std::max(capSp, std::min(capBuilt, capDev)),
+               "keep tol (measured): the cap keeps its exact deviation, bounded by its build tolerance");
+        std::fprintf(stderr, "keep tol (measured): cap %.4e -> SP %.4e, exact %.4e -> kept %.4e, face %s\n",
+                     capBuilt, capSp, capDev, capKept,
+                     BRepCheck_Analyzer(sf.face, Standard_True).IsValid() ? "valid" : "invalid");
+    }
+    // A placeholder above the measure (a fat bind tolerance): the measured mode keeps
+    // only the measure, the carried-in mode the placeholder.
+    {
+        StripFace sf = makeObliqueCapStrip();
+        if (!sf.ok) return;
+        const double fat = 1e-3;
+        BRep_Builder().UpdateEdge(sf.genHi, fat);
+        const std::vector<EdgeTolRow> snap = snapshotEdgeTolerances(sf.face);
+        BRepLib::SameParameter(sf.face, 1e-4, Standard_True);
+        const double genSp = BRep_Tool::Tolerance(sf.genHi);
+        const TopTools_ListOfShape faces = onlyFace(sf.face);
+        const double genDev = exactEdgeDeviationOnFaces(sf.genHi, faces);
+        expect(genSp < fat && genDev < fat, "keep tol: SameParameter drops a placeholder to its sample");
+        keepSnapshotEdgeTolerances(snap,
+                                   [&](const TopoDS_Edge& e) { return exactEdgeDeviationOnFaces(e, faces); });
+        expect(BRep_Tool::Tolerance(sf.genHi) == std::max(genSp, genDev),
+               "keep tol (measured): a placeholder is not kept, only the measure");
+        keepSnapshotEdgeTolerances(snap, [&](const TopoDS_Edge&) { return inf; });
+        expect(BRep_Tool::Tolerance(sf.genHi) == fat, "keep tol (carried): the placeholder comes back");
+    }
+    // Not measurable: the edge is left as SameParameter wrote it.
+    {
+        StripFace sf = makeObliqueCapStrip();
+        if (!sf.ok) return;
+        const std::vector<EdgeTolRow> snap = snapshotEdgeTolerances(sf.face);
+        BRepLib::SameParameter(sf.face, 1e-4, Standard_True);
+        const double capSp = BRep_Tool::Tolerance(sf.capTop);
+        const std::vector<EdgeTolRow> rows =
+            keepSnapshotEdgeTolerances(snap, [&](const TopoDS_Edge&) { return -1.0; });
+        bool ok = !rows.empty();
+        for (const EdgeTolRow& r : rows) ok = ok && r.kept == r.after && r.measured < 0.0;
+        expect(ok && BRep_Tool::Tolerance(sf.capTop) == capSp,
+               "keep tol: an edge with no measure keeps SameParameter's tolerance");
+    }
+    expect(snapshotEdgeTolerances(TopoDS_Shape()).empty(), "keep tol: a null shape has no rows");
+}
+
+static void caseShellCornerAfterSameParameter() {
+    // tau here is the unit's synthetic 1e-4; the crossing is ~1.3e-6 from the vertex.
+    {
+        StripFace sf = makeObliqueCapStrip();
+        expect(sf.ok, "shell corner: synthetic strip built");
+        if (!sf.ok) return;
+        expect(BRepCheck_Analyzer(sf.face, Standard_True).IsValid() == Standard_True,
+               "shell corner: the strip is valid as built");
+        TopoDS_Face copy = sf.face;
+        expect(!healShellPartialCylCorner(copy, kTau), "shell corner: a valid face is not touched");
+        const double vtBuilt = BRep_Tool::Tolerance(sf.corner);
+        const double capBuilt = BRep_Tool::Tolerance(sf.capTop);
+        BRepLib::SameParameter(sf.face, 1e-4, Standard_True);
+        expect(BRep_Tool::Tolerance(sf.capTop) < capBuilt,
+               "shell corner: forced SameParameter lowers the cap edge's build tolerance");
+        expect(BRepCheck_Analyzer(sf.face, Standard_True).IsValid() == Standard_False &&
+                   wireSelfX(sf) == (int)BRepCheck_SelfIntersectingWire,
+               "shell corner: after forced SameParameter the wire self-intersects (invalid in context)");
+        // Refused above tau: nothing moves.
+        const double vtBefore = BRep_Tool::Tolerance(sf.corner);
+        const double capBefore = BRep_Tool::Tolerance(sf.capTop);
+        const double genBefore = BRep_Tool::Tolerance(sf.genHi);
+        Standard_Real a0 = 0, b0 = 0;
+        const Geom2d_Curve* pcBefore = BRep_Tool::CurveOnSurface(sf.capTop, sf.face, a0, b0).get();
+        const TopAbs_Orientation oriBefore = sf.face.Orientation();
+        TopoDS_Face tight = sf.face;
+        expect(!healShellPartialCylCorner(tight, 0.5 * vtBuilt),
+               "shell corner: a crossing farther than tau is refused");
+        expect(BRep_Tool::Tolerance(sf.corner) == vtBefore &&
+                   BRepCheck_Analyzer(sf.face, Standard_True).IsValid() == Standard_False,
+               "shell corner: the refusal restores the vertex tolerance exactly");
+        // Within tau: the vertex takes the measured crossing distance, nothing else.
+        TopoDS_Face healed = sf.face;
+        const bool ok = healShellPartialCylCorner(healed, kTau);
+        const double vtAfter = BRep_Tool::Tolerance(sf.corner);
+        expect(ok && BRepCheck_Analyzer(healed, Standard_True).IsValid() == Standard_True,
+               "shell corner: the corner measure validates the face in place");
+        expect(vtAfter > vtBefore && vtAfter <= kTau,
+               "shell corner: the vertex tolerance rises to the measured distance, <= tau");
+        expect(healed.Orientation() == oriBefore && healed.IsSame(sf.face),
+               "shell corner: the face keeps its orientation and its TShape");
+        Standard_Real a1 = 0, b1 = 0;
+        expect(BRep_Tool::CurveOnSurface(sf.capTop, healed, a1, b1).get() == pcBefore &&
+                   BRep_Tool::Tolerance(sf.capTop) == capBefore &&
+                   BRep_Tool::Tolerance(sf.genHi) == genBefore,
+               "shell corner: no pcurve or edge tolerance is written");
+        std::fprintf(stderr, "shell corner: vtol built %.4e, after SP %.4e, healed %.4e; cap tol %.3e -> %.3e\n",
+                     vtBuilt, vtBefore, vtAfter, capBuilt, capBefore);
+    }
+    // Only a cylinder: the same corner measure is not taken for a planar face.
+    {
+        BRep_Builder B;
+        const Handle(Geom_Plane) pl = new Geom_Plane(gp_Pln(gp::Origin(), gp::DZ()));
+        TopoDS_Face f;
+        B.MakeFace(f, pl, Precision::Confusion());
+        expect(!healShellPartialCylCorner(f, kTau), "shell corner: a non-cylinder face is refused");
+    }
+}
+
 int main() {
     caseInsideOut();
     caseEdgeBound();
+    caseShellCornerAfterSameParameter();
+    caseKeepToleranceThroughSameParameter();
     const gp_Ax1 fam(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
 
     // axisOnFamilyAxis: line distance and direction error times lever, each at tau.

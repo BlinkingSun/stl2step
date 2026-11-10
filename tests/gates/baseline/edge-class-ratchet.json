@@ -75,7 +75,7 @@
   "tier2Ceiling": {
     "Body11": 2782,
     "Body244": 0,
-    "Body28": 1228,
+    "Body28": 1234,
     "S01": 0,
     "S02": 0,
     "S03": 60,
@@ -135,7 +135,7 @@
     "linkage_bores_chamfer": "D-train-seams D-S1: certified-span collapse of the two R30 rims on this mesh, tier2 210 → 138 (36 chords per rim become one CIRCLE; each tail chord stays tier 2). C2 refused both foot-lines (max residual above tau). overTol stays (writer=other, C3 OPEN). D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch (xguard-r1+bedge-r1): polylineTier2 138→110. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 110→125, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 110 tightening was measured before E2. fc-3 (D-fc-4.4, ORCHESTRATOR RULING CLOSURES 2026-10-16 01:15, re-affirmed 01:50 on audit-fc3-instruments F1): 125→139 measured on fc3-int a7d2776 (macOS), ABOVE the public ceiling 138 by decision. The four R3 slot ends now ship as ONE certified cylinder each; the net +14 is 15 straight R3 | R10-puncture-plane chord edges (the puncture planes are 2–3-triangle PlaneGrow facets of the R10 cross bore) that were facet|facet (counted analytic) and now deviate 0.0028–0.0033 mm against meshTolCap 0.0018 mm — every one overCap (linkage overCap 43→58), minus one cyl|cyl polyline. The R3∩R10 contact itself is unchanged (76 tier-2 segments). Tighten when the R10 cross bore ships as one face (wave-2 closure) so those edges become R3|R10 contacts. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): RAISE 139 -> 159: D-fc-5.12 (fx-plater10 R10 instruments) — the slot/cross-bore contacts that now ship as certified analytic faces leave 20 tail chords as tier-2 polylines; measured 159 on all three platforms.",
     "Body11": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 5218→5204. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 5204 -> 2782 (fx-b11walls + fx-ringdonor-r1: bores, mouth/lug tori, grip cones; D-fc-5.21).",
     "Body244": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1417→1224. CLOSURES 2026-10-15 06:05: analytic 148→3, facet lines replaced by 2 true cones. overCap remains 241. fc-4 (D-fc-4.6, 8654f72): Body244 is 13 analytic faces — overCap cleared (RATCHET-CLEAR, expectedRed entry removed); polylineTier2 measured 0 on macOS, ceiling lowered only after Linux/Windows are measured (D-130-24). | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1224 -> 0.",
-    "Body28": "D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 1385→1394, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 1385 tightening was measured before E2. Still below the public ceiling 1442. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1394 -> 1228 (macOS 1228, Linux/Windows 1219; max).",
+    "Body28": "gid-8.22 (D-gid-8.10/8.22, D-130-24; int3 6edb248, macOS measured; 3-OS max at integrate): RAISE 1228 -> 1234 = the new two-round sphere corner's 6 facet-bounded edges (gz-gripsph); no analytic edge lost. | D-fc-1.14 re-baseline 2026-10-15 on fc/instr-patch: RATCHET-TIGHTEN polylineTier2 1442→1385. CLOSURES 2026-10-15 23:00 (ORCHESTRATOR RULING, D-fc-1.14): 1385→1394, the value measured on inc2-cand2 c7400ba (fresh clone) after E2 shipped; the 1385 tightening was measured before E2. Still below the public ceiling 1442. | fc-6 integrate 2026-10-18 (0d34003; macOS/Linux/Windows measured, D-130-24 max): TIGHTEN 1394 -> 1228 (macOS 1228, Linux/Windows 1219; max).",
     "S21_rim_offplane_vertex": "D-S8 fixture added by this lane. edge_class_gate on be13e23: red lines clear, polylineTier2=0, and the gate's own line was 'no tier2Ceiling (a fixture the ratchet never saw is not measured); seed it'. Seeded at the measured 0. No expectedRed entry.",
     "S23_plane_fillet_lowfold": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=14, overCap at seed.",
     "S24_hem_uturn": "D-fc-1.14 first measure on fc/instr-patch: polylineTier2=0, red lines clear. Seeded at 0. No expectedRed entry.",
@@ -166,7 +166,7 @@
       "overCap"
     ],
     "S16-R2-ChainUnstable": [
-      "overCap"
+      "overTol"
     ],
     "S19_mouth_round": [
       "overCap"
@@ -203,13 +203,13 @@
       "overCap"
     ]
   },
-  "expectedRedCountNote": "gid-7.1 (D-gid-7.1, D-130-24; lane gy-cidrift 2026-11-07, test-only): Body28 overCap linux 464 -> 466 = the max of Linux NUC 464 and hosted CI ubuntu-latest = ubuntu-26.04 20261101.186.1 (amd64v3, GNU 15.2.0, glibc 2.43; was ubuntu-24.04 / GNU 13.3.0 through 1.8.0), PR #30 run 42399639781 job 128484418180 at 1.9.0 cac798e 466 (equal to the macOS 466; hosted Body28 polylineTier2 1228 also equals macOS). A/B: the unchanged 1.8.0 tree 6cfcfa9 on the same image, run 40117303482 attempt 2: same failures, same values (tightBudget 15.347656, Body28 overCap 466, S19_mouth_round polylineTier2 498, ellipse 9.89e-17 / 1.06e-16), 3 failed of 114, while its ubuntu-24.04 attempt 1 passed 114/114. PRIOR: D-fc-5.4 (audit-fc3-instruments F1; lane fx-tooling, 2026-10-17): a per-platform COUNT ceiling on a line expectedRed admits, so new red lines cannot enter a listed class silently. Seeded at the overCap counts measured by `edge_class_gate.py --measure --binary build-wip/stl2step` on macOS / Homebrew OCCT 7.9.3 at 37710e6 (fc-4 integration). A platform with no value of its own uses the macos value; the orchestrator adds linux/windows values from their next preflight measures. Body244 has no entry: its expectedRed overCap admission was deleted in fc-4 (RATCHET-CLEAR, 41aba62), so a Body244 overCap is a hard FAIL. An increase FAILS; a decrease prints RATCHET-TIGHTEN.",
+  "expectedRedCountNote": "gid-8.22 (D-gid-8.17, D-130-24; int3 6edb248): S16-R2-ChainUnstable overCap 2 -> overTol 2 = the same two plate-corner cyl|cyl joins, their tolerance down 1.09 -> 0.53 mm once the robbed 2-triangle chip ships as two certified R1 cylinders (gz-132round 5add5dc); linux/windows values provisional until the 3-OS round. | gid-7.1 (D-gid-7.1, D-130-24; lane gy-cidrift 2026-11-07, test-only): Body28 overCap linux 464 -> 466 = the max of Linux NUC 464 and hosted CI ubuntu-latest = ubuntu-26.04 20261101.186.1 (amd64v3, GNU 15.2.0, glibc 2.43; was ubuntu-24.04 / GNU 13.3.0 through 1.8.0), PR #30 run 42399639781 job 128484418180 at 1.9.0 cac798e 466 (equal to the macOS 466; hosted Body28 polylineTier2 1228 also equals macOS). A/B: the unchanged 1.8.0 tree 6cfcfa9 on the same image, run 40117303482 attempt 2: same failures, same values (tightBudget 15.347656, Body28 overCap 466, S19_mouth_round polylineTier2 498, ellipse 9.89e-17 / 1.06e-16), 3 failed of 114, while its ubuntu-24.04 attempt 1 passed 114/114. PRIOR: D-fc-5.4 (audit-fc3-instruments F1; lane fx-tooling, 2026-10-17): a per-platform COUNT ceiling on a line expectedRed admits, so new red lines cannot enter a listed class silently. Seeded at the overCap counts measured by `edge_class_gate.py --measure --binary build-wip/stl2step` on macOS / Homebrew OCCT 7.9.3 at 37710e6 (fc-4 integration). A platform with no value of its own uses the macos value; the orchestrator adds linux/windows values from their next preflight measures. Body244 has no entry: its expectedRed overCap admission was deleted in fc-4 (RATCHET-CLEAR, 41aba62), so a Body244 overCap is a hard FAIL. An increase FAILS; a decrease prints RATCHET-TIGHTEN.",
   "expectedRedCount": {
     "Body11": {"overCap": {"macos": 1949, "linux": 1949, "windows": 1949}},
     "Body28": {"overCap": {"macos": 466, "linux": 466, "windows": 464}},
     "S03": {"overCap": {"macos": 52}},
     "S09": {"overCap": {"macos": 4}},
-    "S16-R2-ChainUnstable": {"overCap": {"macos": 2, "linux": 2, "windows": 2}},
+    "S16-R2-ChainUnstable": {"overTol": {"macos": 2, "linux": 2, "windows": 2}},
     "S19_mouth_round": {"overCap": {"macos": 32}},
     "S23_plane_fillet_lowfold": {"overCap": {"macos": 12}},
     "S25_peg_fillet": {"overCap": {"macos": 1, "linux": 1, "windows": 1}},

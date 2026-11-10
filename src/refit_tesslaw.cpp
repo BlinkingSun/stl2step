@@ -1078,4 +1078,85 @@ bool meshRingRefutedByTessLaw(const MeshView& mv, const SegmentParams& p, double
     return false;
 }
 
+// D-gid-8.4. Admissible samples (D-fc-2.1 items 1-4) of the certified non-N-gon
+// references: the same measureRef / markAdmissible as meshRingRefutedByTessLaw.
+std::vector<TessLawSample> tessLawSamples(const MeshView& mv, const SegmentParams& p, double tau,
+                                          const SegmentWork& work) {
+    std::vector<TessLawSample> out;
+    if (!(tau > 0.0) || !meshReadable(mv)) return out;
+    std::vector<Meas> meas;
+    meas.reserve(work.accepted.size());
+    int nextRailId = 0;
+    for (int i = 0; i < static_cast<int>(work.accepted.size()); ++i) {
+        Meas m;
+        if (measureRef(mv, p, tau, i, work.accepted[static_cast<size_t>(i)], nextRailId, m) &&
+            m.certified && !m.isNgon)
+            meas.push_back(std::move(m));
+    }
+    markAdmissible(meas, tau);
+    for (const Meas& ref : meas)
+        for (const Rail& a : ref.rails) {
+            if (!a.admissible || a.k < 2 || !std::isfinite(a.U)) continue;
+            TessLawSample s;
+            s.minTri = ref.minTri;
+            s.r = a.r;
+            s.k = a.k;
+            s.maxStep = a.maxStep;
+            s.U = a.U;
+            out.push_back(s);
+        }
+    return out;
+}
+
+// D-gid-8.4. The band's polygon claim is its coarsest rail step: a sampled
+// circle has no step coarser than the file's law at its radius.
+bool tessLawBandStep(const MeshView& mv, const std::vector<int>& band, const gp_Dir& axis,
+                     const gp_Pnt& centre, double radius, double tau, double& step, int& k) {
+    step = 0.0;
+    k = 0;
+    if (!(tau > 0.0) || !(radius > 0.0) || !meshReadable(mv) || band.empty()) return false;
+    std::vector<Rail> rails;
+    int nextRailId = 0;
+    collectRails(mv, band, axis, centre, radius, tau, false, -1, minTriOf(band), nextRailId,
+                 rails);
+    bool any = false;
+    for (const Rail& a : rails) {
+        if (a.k < 2) continue;
+        if (!any || a.maxStep > step || (a.maxStep == step && a.k < k)) {
+            step = a.maxStep;
+            k = a.k;
+        }
+        any = true;
+    }
+    return any;
+}
+
+// D-gid-8.4. The winning sample follows consider(): a hit beats a miss; among
+// hits the smallest U, then the smallest region id, then the smallest k; a
+// miss reports the tightest U.
+TessLawDecision tessLawDecide(const std::vector<TessLawSample>& samples, double R, double step,
+                              double tau) {
+    TessLawDecision d;
+    if (!(tau > 0.0) || !(R > 0.0) || !(step > 0.0) || !std::isfinite(step)) return d;
+    bool any = false, hits = false;
+    for (const TessLawSample& s : samples) {
+        if (!(s.r <= R + tau) || !std::isfinite(s.U)) continue;
+        const bool hit = step >= s.U;
+        const bool tighter = s.U < d.bound
+                             || (s.U == d.bound && (s.minTri < d.refRid
+                                                    || (s.minTri == d.refRid && s.k < d.refK)));
+        if (!any || (hit && (!hits || tighter)) || (!hit && !hits && tighter)) {
+            any = true;
+            hits = hits || hit;
+            d.refRid = s.minTri;
+            d.refR = s.r;
+            d.refK = s.k;
+            d.refStep = s.maxStep;
+            d.bound = s.U;
+        }
+    }
+    if (any) d.verdict = hits ? TessLawVerdict::Refute : TessLawVerdict::Keep;
+    return d;
+}
+
 }}  // namespace stl2step::refit

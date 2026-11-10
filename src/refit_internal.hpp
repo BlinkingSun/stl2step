@@ -219,8 +219,9 @@ double dVolCylinderSector(double areaReg, double radius, int nSides, bool outwar
 
 double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const gp_Ax3& ax);
 
-// D-gid-7.6 / D-gid-7.15 / D-gid-7.17: exact chord volume of a FilletStrip
-// cylinder, a CylGrow cylinder with maxVertexDev <= tauOf(mv), or a torus, over
+// D-gid-7.6 / D-gid-7.15 / D-gid-7.17 / D-gid-8.6 / D-gid-8.8: exact chord volume of a FilletStrip
+// cylinder, a CylGrow cylinder with maxVertexDev <= tauOf(mv) or ringCertified, a torus, or a
+// closed apex ChamferCone with maxVertexDev <= tauOf(mv), over
 // its own triangles (refit_relational_revolve.cpp,
 // which owns refit_band_volume.hpp; the P1 include allowlist keeps it out of
 // refit_math.cpp). false otherwise. out is signed by outwardNormal (I9) with
@@ -335,20 +336,67 @@ bool refuteNgonByLaw (const MeshView&, const SegmentParams&, const DerivedTols&,
 bool meshRingRefutedByTessLaw(const MeshView&, const SegmentParams&, double tau,
                               const SegmentWork&, const MeshRing&,
                               const std::vector<const MeshRing*>& peerRings);
+// D-gid-8.4. The tessellation law (D-fc-2.1) on a closed ring band that folds
+// at or above thetaCylLo (claimRingCylinders): its concyclic vertices cannot
+// tell an N-gon prism from a sampled circle. Samples are the admissible rails
+// of the certified non-N-gon references in work.accepted (the witness set W).
+struct TessLawSample {
+    int minTri = -1;
+    double r = 0.0;
+    int k = 0;
+    double maxStep = 0.0;
+    double U = 0.0;
+};
+enum class TessLawVerdict : uint8_t { NoRef, Keep, Refute };
+struct TessLawDecision {
+    TessLawVerdict verdict = TessLawVerdict::NoRef;
+    int refRid = -1;
+    double refR = 0.0;
+    int refK = 0;
+    double refStep = 0.0;
+    double bound = 0.0;
+};
+std::vector<TessLawSample> tessLawSamples(const MeshView&, const SegmentParams&, double tau,
+                                          const SegmentWork&);
+// The band's coarsest boundary-rail step (D-fc-2.1 rails, k >= 2) about its
+// cylinder; false when it has no such rail.
+bool tessLawBandStep(const MeshView&, const std::vector<int>& band, const gp_Dir& axis,
+                     const gp_Pnt& centre, double radius, double tau, double& step, int& k);
+// Refute iff some sample with r <= R + tau has step >= U; Keep when samples
+// with r <= R + tau exist and none hits; NoRef otherwise (D-fc-1.9).
+TessLawDecision tessLawDecide(const std::vector<TessLawSample>& samples, double R, double step,
+                              double tau);
 // apexOnly re-runs the drill-point claim after ring-wall closure (D-gid-5.17).
 bool claimRelRevolve (const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode,
                       bool apexOnly = false);
 bool reclaimRelational(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&, RelRevolveMode);
-// D-gid-2.6. Anchored quarter-round tori (src/refit_anchored_round.cpp): after H1.
-bool claimAnchoredRounds(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+// D-gid-8.18. A drafted wall whose axis is a certified plane's normal
+// (src/refit_drafted_cone.cpp): after the sphere corners, before A3.
+bool claimDraftedCones(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+// D-gid-2.6. Anchored quarter-round tori (src/refit_anchored_round.cpp): after H1,
+// on cylinder donors. D-gid-8.18: coneDonors runs it again after the drafted
+// walls, on cone donors only (a partial torus admitted).
+bool claimAnchoredRounds(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&,
+                         bool coneDonors = false);
 
 // D-fc-5.11 F8. Sphere corners (src/refit_relational_sphere.cpp): after every
 // stage that certifies a round (H1), before A3.
 bool claimSphereCorners(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
 
+// D-gid-8.4. The wall between two certified coaxial rims, closed as the cylinder
+// or cone it certifies as (src/refit_relational_reclaim.cpp): after the sphere
+// corners, before A3, on what every family left.
+bool claimRingFrustums(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+
 // D-gid-7.12. Same-surface growth of the certified tori (src/refit_relational_reclaim.cpp):
 // after A3, on the triangles every other stage left.
 bool claimTorusSameSurface(const MeshView&, const SegmentParams&, SegmentWork&);
+
+// D-gid-8.2. Only a lateral facet can be part of a wall (src/refit_grow.cpp):
+// after A3 and the torus same-surface growth, before D. A cylinder's
+// non-lateral triangles move, per edge-connected set, to the one adjacent
+// certified plane whose vertex certificate covers the set; else they stay.
+bool releaseCapTriangles(const MeshView&, const DerivedTols&, SegmentWork&);
 
 bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
 

@@ -73,6 +73,135 @@ inline double revolvedChordTerm(const gp_XYZ& p0, const gp_XYZ& p1, const gp_XYZ
     return std::isfinite(v) ? v : 0.0;
 }
 
+// D-gid-8.8. The same volume for a cone band that holds its own apex (a closed
+// drill point: a fan about a vertex on the axis). revolvedChordTerm cannot take
+// it: its footprint is the straight (theta, u) triangle of the three vertices,
+// and the apex vertex has no azimuth.
+//
+// THE BOUNDARY FORM. With H(u) = integral from the apex to u of rho_S^2 / 2,
+// Green's theorem turns the patch over a footprint into  - (loop of H du-theta),
+//   patch(T) = - sum over T's edges p -> q (winding order) of dtheta(p, q) * Hbar(p, q),
+// dtheta = the edge's own wrapped azimuth step, Hbar = H's mean along the edge.
+// u is linear along a straight footprint edge and H is a cubic in u, so
+// Simpson's rule gives Hbar exactly. The wedge is the signed flux of
+// F = rho e_rho / 2 through T, c_perp . S_perp / 2 (F is linear on T).
+//
+// Over a band, an edge shared by two triangles enters with opposite sense and
+// the same dtheta, so it cancels whatever its endpoints' azimuths are. Every
+// edge at the apex is such an edge, so only the band's rim survives:
+//   sum_T term(T) = - (rim loop of H dtheta) - (flux of F through the facets).
+// H(apex) = 0, so the footprint runs from the apex to the rim. That is the
+// volume between the cone and the facets: F is tangent to the rays through the
+// rim and vanishes on the axis. A rim in a plane perpendicular to the axis is
+// u = const, a straight footprint edge, so the sum is exact; any other rim is
+// exact to third order in its azimuth step, as for revolvedChordTerm.
+//
+// rho_S(u) = slope * u, u = (p - apex) . axis. The term of ONE triangle is not
+// its own volume; only the sum over a closed fan about the axis is meaningful.
+// The sum is positive where the cone lies on the side the facets' winding
+// normals point to. e1, e2 and axis must be orthonormal.
+inline double apexConeChordTerm(const gp_XYZ& p0, const gp_XYZ& p1, const gp_XYZ& p2,
+                                const gp_XYZ& apex, const gp_XYZ& axis, const gp_XYZ& e1,
+                                const gp_XYZ& e2, double slope) {
+    constexpr double kPiL = 3.14159265358979323846;
+    const gp_XYZ d[3] = {p0 - apex, p1 - apex, p2 - apex};
+    const double k = slope * slope / 6.0;
+    auto H = [&](double u) { return k * u * u * u; };
+    double th[3], u[3];
+    for (int i = 0; i < 3; ++i) {
+        th[i] = std::atan2(d[i].Dot(e2), d[i].Dot(e1));
+        u[i] = d[i].Dot(axis);
+    }
+    double patch = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3;
+        double dt = th[j] - th[i];
+        while (dt > kPiL) dt -= 2.0 * kPiL;
+        while (dt <= -kPiL) dt += 2.0 * kPiL;
+        const double hBar = (H(u[i]) + 4.0 * H(0.5 * (u[i] + u[j])) + H(u[j])) / 6.0;
+        patch -= dt * hBar;
+    }
+    const gp_XYZ c = (d[0] + d[1] + d[2]) / 3.0;
+    const gp_XYZ S = (d[1] - d[0]).Crossed(d[2] - d[0]) * 0.5;
+    const gp_XYZ cPerp = c - axis * c.Dot(axis);
+    const gp_XYZ sPerp = S - axis * S.Dot(axis);
+    const double v = patch - 0.5 * cPerp.Dot(sPerp);
+    return std::isfinite(v) ? v : 0.0;
+}
+
+// D-gid-8.18. The rim term of revolvedChordTerm for one band rim edge pi -> pj
+// (in the sense of the triangle that owns it). revolvedChordTerm takes each
+// edge's image on the surface as straight in (theta, u); the field's rays carry
+// a chord point to the surface at its own azimuth and height, so the true image
+// of the rim chord is theta(s) = atan2 of the chord's projection, u(s) linear.
+// The two differ when the edge is oblique (it changes both azimuth and height):
+// a generator-crossing end of a partial band, or a rim on a plane that is not
+// perpendicular to the axis. Interior edges cancel in a band. With
+// G(u) = integral rho_S(u)^2 / 2 du, Green on the (theta, u) footprint gives
+//   rim = -integral_0^1 G(u(s)) (theta'(s) - dtheta) ds,
+//   theta'(s) = (x_i dy - y_i dx) / (x(s)^2 + y(s)^2),
+// for the footprint oriented counter-clockwise; revolvedChordTerm takes every
+// footprint with a positive area, so the caller multiplies by the sign of the
+// owning triangle's (theta, u) area (revolvedParamSign). The integrand is
+// smooth on a chord that does not pass the axis; a fixed 16-point
+// Gauss-Legendre rule evaluates it, no step or tolerance is chosen. Zero for a
+// meridian (dtheta = 0 and theta' = 0) or a parallel (du = 0) edge.
+inline double coneRimTerm(const gp_XYZ& pi, const gp_XYZ& pj, const gp_XYZ& origin,
+                          const gp_XYZ& axis, const gp_XYZ& e1, const gp_XYZ& e2, double rho0,
+                          double slope) {
+    constexpr double kPiL = 3.14159265358979323846;
+    const gp_XYZ di = pi - origin, dj = pj - origin;
+    const double xi = di.Dot(e1), yi = di.Dot(e2), ui = di.Dot(axis);
+    const double xj = dj.Dot(e1), yj = dj.Dot(e2), uj = dj.Dot(axis);
+    double dth = std::atan2(yj, xj) - std::atan2(yi, xi);
+    while (dth > kPiL) dth -= 2.0 * kPiL;
+    while (dth <= -kPiL) dth += 2.0 * kPiL;
+    const double dx = xj - xi, dy = yj - yi, du = uj - ui;
+    const double cross = xi * dy - yi * dx;
+    auto G = [&](double u) {
+        return 0.5 * rho0 * rho0 * u + 0.5 * rho0 * slope * u * u + slope * slope * u * u * u / 6.0;
+    };
+    static const double kX[8] = {0.095012509837637441, 0.28160355077925892, 0.45801677765722737,
+                                 0.61787624440264377,  0.75540440835500311, 0.86563120238783164,
+                                 0.9445750230732326,   0.98940093499164994};
+    static const double kW[8] = {0.18945061045506859, 0.18260341504492361, 0.16915651939500262,
+                                 0.14959598881657665, 0.12462897125553395, 0.095158511682492994,
+                                 0.062253523938647609, 0.027152459411754055};
+    double acc = 0.0;
+    for (int k = 0; k < 8; ++k)
+        for (int sgn = -1; sgn <= 1; sgn += 2) {
+            const double s = 0.5 * (1.0 + sgn * kX[k]);
+            const double w = 0.5 * kW[k];
+            const double x = xi + s * dx, y = yi + s * dy, u = ui + s * du;
+            const double q = x * x + y * y;
+            if (!(q > 0.0)) return 0.0;
+            acc += w * G(u) * (cross / q - dth);
+        }
+    const double out = -acc;
+    return std::isfinite(out) ? out : 0.0;
+}
+
+// The sign of the (theta, u) area revolvedChordTerm takes in absolute value
+// (+1 counter-clockwise about axis = e1 x e2), 0 for a degenerate footprint.
+inline int revolvedParamSign(const gp_XYZ& p0, const gp_XYZ& p1, const gp_XYZ& p2,
+                             const gp_XYZ& origin, const gp_XYZ& axis, const gp_XYZ& e1,
+                             const gp_XYZ& e2) {
+    constexpr double kPiL = 3.14159265358979323846;
+    const gp_XYZ d0 = p0 - origin, d1 = p1 - origin, d2 = p2 - origin;
+    const gp_XYZ c = (d0 + d1 + d2) / 3.0;
+    const double thc = std::atan2(c.Dot(e2), c.Dot(e1));
+    auto dth = [&](const gp_XYZ& d) {
+        double a = std::atan2(d.Dot(e2), d.Dot(e1)) - thc;
+        while (a > kPiL) a -= 2.0 * kPiL;
+        while (a <= -kPiL) a += 2.0 * kPiL;
+        return a;
+    };
+    const double t0 = dth(d0), t1 = dth(d1), t2 = dth(d2);
+    const double u0 = d0.Dot(axis), u1 = d1.Dot(axis), u2 = d2.Dot(axis);
+    const double a = (t1 - t0) * (u2 - u0) - (t2 - t0) * (u1 - u0);
+    return a > 0.0 ? 1 : (a < 0.0 ? -1 : 0);
+}
+
 // The volume between one planar mesh triangle and a torus (D-gid-7.6), by the
 // same field F = rho e_rho / 2 as revolvedChordTerm (divergence 1, tangent to
 // every ray perpendicular to the axis).

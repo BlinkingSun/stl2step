@@ -177,6 +177,39 @@ static void casePredicates() {
     f = sphereOfRounds({lx, lz, tor}, kTau);
     expect(f.ok, "two lines and a torus spine through the corner: accept");
 
+    // D-gid-8.4 sphereOfRoundSet: two meeting lines of one radius fix the
+    // sphere; the three-round set is sphereOfRounds exactly.
+    {
+        SphereCornerFit g = sphereOfRoundSet({lx, ly}, kTau);
+        expect(g.ok && std::strcmp(g.why, "accept") == 0 && std::fabs(g.r - 2.0) < 1e-12 &&
+                   (g.c - gp_XYZ(1, 1, 1)).Modulus() < 1e-12,
+               "pair: two meeting lines of one radius accept at their point");
+        RoundSpine ly2 = ly;
+        ly2.r = 2.0 + 1.5 * kTau;
+        g = sphereOfRoundSet({lx, ly2}, kTau);
+        expect(!g.ok && std::strcmp(g.why, "not-blend") == 0, "pair: radii apart by > tau refuse");
+        ly2 = ly;
+        ly2.o = gp_XYZ(1, 7, 1 + 3.0 * kTau);
+        g = sphereOfRoundSet({lx, ly2}, kTau);
+        expect(!g.ok && std::strcmp(g.why, "not-blend") == 0,
+               "pair: skew axes 3 tau apart (1.5 tau each) refuse");
+        g = sphereOfRoundSet({lx, tor}, kTau);
+        expect(!g.ok && std::strcmp(g.why, "underdetermined") == 0,
+               "pair: one line and a torus spine is underdetermined");
+        g = sphereOfRoundSet({lx}, kTau);
+        expect(!g.ok && std::strcmp(g.why, "underdetermined") == 0, "one round is underdetermined");
+        g = sphereOfRoundSet({lx, ly, lz, lx}, kTau);
+        expect(!g.ok && std::strcmp(g.why, "underdetermined") == 0,
+               "four rounds are underdetermined");
+        g = sphereOfRoundSet({lx, ly}, 0.0);
+        expect(!g.ok, "pair: tau <= 0 admits nothing");
+        const SphereCornerFit a = sphereOfRounds({lx, ly, lz}, kTau);
+        const SphereCornerFit b = sphereOfRoundSet({lx, ly, lz}, kTau);
+        expect(a.ok == b.ok && a.r == b.r && (a.c - b.c).Modulus() == 0.0 &&
+                   a.spineDev == b.spineDev && a.radiusSpread == b.radiusSpread,
+               "three rounds: sphereOfRoundSet is sphereOfRounds");
+    }
+
     // Least-squares radius with the centre held: the mean of the distances.
     {
         const gp_XYZ o(0, 0, 0);
@@ -729,6 +762,87 @@ static void caseDissolveNbr() {
            "the remapped torus index is inside the kept list");
 }
 
+// D-gid-8.4. The box corner with only the X and Y rounds accepted. The Z round
+// is facets (an unclaimed provisional), or a certified round that is not
+// tangent, or a certified round through the centre whose body crosses its
+// contact plane.
+enum class PairZ { Facets, NotTangent, ThirdNotEnding };
+
+static int runPair(const Corner& k0, PairZ z, double yAxisLift, Region* out) {
+    Corner k = k0;
+    std::vector<int> zTris = k.roundTris[2];
+    if (z == PairZ::ThirdNotEnding) {
+        // One triangle of the Z round reaches 0.5 past its contact plane z = 0.
+        const int a = k.s.add(gp_XYZ(-1.0, 3.0, 0.5));
+        const int b = k.s.add(gp_XYZ(-1.0, 4.0, -0.5));
+        const int c = k.s.add(gp_XYZ(-2.0, 3.0, -0.5));
+        zTris.push_back(k.s.addTri(a, b, c));
+        k.s.finish();
+    }
+    SegmentWork w;
+    w.accepted.push_back(roundRegion(0, 2.0, k.roundTris[0], Origin::FilletStrip, 0.0));
+    Region ry = roundRegion(1, 2.0, k.roundTris[1], Origin::FilletStrip, 0.0);
+    ry.ax = gp_Ax3(gp_Pnt(0, 0, yAxisLift), ry.ax.Direction(), ry.ax.XDirection());
+    w.accepted.push_back(ry);
+    if (z == PairZ::NotTangent)
+        w.accepted.push_back(roundRegion(2, 2.0 + 3 * kTau, zTris, Origin::FilletStrip, 0.0));
+    else if (z == PairZ::ThirdNotEnding)
+        w.accepted.push_back(roundRegion(2, 2.0, zTris, Origin::FilletStrip, 0.0));
+    Provisional pr;
+    pr.tris = k.sphereTris;
+    std::sort(pr.tris.begin(), pr.tris.end());
+    pr.claim = ProvClaim::Unclaimed;
+    w.provisionals.push_back(pr);
+    if (z == PairZ::Facets) {
+        Provisional pz;
+        pz.tris = zTris;
+        std::sort(pz.tris.begin(), pz.tris.end());
+        pz.claim = ProvClaim::Unclaimed;
+        w.provisionals.push_back(pz);
+    }
+    const MeshView mv = k.s.view();
+    SegmentParams p;
+    DerivedTols tol;
+    if (!claimSphereCorners(mv, p, tol, w)) return -1;
+    int nSph = 0;
+    for (const Region& g : w.accepted)
+        if (g.type == SurfType::Sphere && g.origin == Origin::SphereCorner) {
+            ++nSph;
+            if (out) *out = g;
+        }
+    return nSph;
+}
+
+static void casePairCorner() {
+    const double r = 2.0;
+    const int n = 6;
+    const Corner k = makeCorner(r, n, 5.0, r, 0.0);
+    {
+        Region g;
+        const int ns = runPair(k, PairZ::Facets, 0.0, &g);
+        expect(ns == 1, "pair: two certified rounds whose axes meet, third side facets: one sphere");
+        expect(ns == 1 && (int)g.tris.size() == n * n, "pair: the claim is the whole octant");
+        expect(ns == 1 && std::fabs(g.radius - r) < 1e-12 &&
+                   g.ax.Location().XYZ().Modulus() < 1e-12 && g.maxVertexDev <= kTau,
+               "pair: centre and radius are the rounds', every vertex within tau");
+        const gp_XYZ zd = g.ax.Direction().XYZ();
+        expect(ns == 1 && std::fabs(std::fabs(zd.X()) + std::fabs(zd.Y()) + std::fabs(zd.Z()) - 1.0) <
+                              1e-12,
+               "pair: perpendicular rounds give the polar frame");
+    }
+    expect(runPair(k, PairZ::NotTangent, 0.0, nullptr) == 0,
+           "pair: a certified neighbour not tangent to the sphere refuses (meet rule)");
+    expect(runPair(k, PairZ::ThirdNotEnding, 0.0, nullptr) == 0,
+           "pair: a third round through the centre that is refused keeps the pair refused");
+    expect(runPair(k, PairZ::Facets, 3.0 * kTau, nullptr) == 0,
+           "pair: axes 3 tau apart do not meet: no corner");
+    {
+        const Corner kb = makeCorner(r, n, 5.0, r, 2 * kTau);
+        expect(runPair(kb, PairZ::Facets, 0.0, nullptr) == 0,
+               "pair: one interior vertex 2 tau off the sphere: refused whole");
+    }
+}
+
 int main() {
     casePredicates();
     caseRoundCert();
@@ -736,6 +850,7 @@ int main() {
     caseTorusCorner();
     casePartialRob();
     caseDissolveNbr();
+    casePairCorner();
     std::fprintf(stderr, "relational_sphere_unit: %s (%d failures)\n", gFail ? "FAIL" : "PASS",
                  gFail);
     return gFail ? 1 : 0;

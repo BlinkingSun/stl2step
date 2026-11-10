@@ -1858,10 +1858,24 @@ bool relExtrudePass(const MeshView& mv, const SegmentParams& p, const DerivedTol
             return false;
         };
 
+        // D-fc-1.6.11 with D-fc-4.3: an uncertified region whose triangles the
+        // band takes is robbed and dissolves at the band's commit
+        // (commitBand). It is not a surface the band would duplicate, so it is
+        // not a same-surface neighbour -- however well its vertices sit on the
+        // band's certified circle (the blendPartnerGone reading). An accepted
+        // region the band does not take is tested as before.
         auto sameSurface = [&](const gp_XYZ& axis, const gp_XYZ& center, double radius,
                                const std::vector<char>& inC) -> bool {
-            for (const Region& acc : work.accepted) {
+            for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
+                const Region& acc = work.accepted[(std::size_t)ai];
                 if (acc.type != SurfType::Cylinder || acc.tris.empty()) continue;
+                bool robbedHere = false;
+                for (int t : acc.tris)
+                    if (t >= 0 && t < nTri && inC[t] && uncertOwner[(std::size_t)t] == ai) {
+                        robbedHere = true;
+                        break;
+                    }
+                if (robbedHere) continue;
                 bool adj = false;
                 for (int t : acc.tris) {
                     if (t < 0 || t >= nTri) continue;

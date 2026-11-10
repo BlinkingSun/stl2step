@@ -399,6 +399,15 @@ bool resegmentTorus(const MeshView& mv, const SegmentParams& p, const RegionSet&
 bool buildFaces(const MeshView& mv, RegionSet& rs,
                 const std::vector<TopoDS_Vertex>& verts,   // engine's existing slot array
                 std::vector<TopoDS_Face>& out, WarnFn warn);
+
+// D-gid-8.2 (gz-capown): cap-ownership census of the shipped cylinders. DIAG
+// ONLY, default off: STL2STEP_DIAG_CAPOWN=1 (2 = also one line per triangle).
+// It reads the final state of a successful buildFaces and changes nothing;
+// the caller prints the lines of the build it ships. Never read from product.
+bool capOwnDiagEnabled();
+// Moves out the lines (tagged comp=<comp>) the most recent successful
+// buildFaces on this thread left (empty when none), and clears them.
+void capOwnTake(int comp, std::string& lines);
 }}  // namespace stl2step::refit
 
 #endif  // STL2STEP_REFIT_HPP

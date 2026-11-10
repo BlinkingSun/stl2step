@@ -49,6 +49,7 @@
 
 using stl2step::refit::TorusDevClass;
 using stl2step::refit::circleOnTorusMax;
+using stl2step::refit::pointCircleDist;
 using stl2step::refit::pointTorusDist;
 using stl2step::refit::torusAxialCoord;
 using stl2step::refit::torusDevClassIsExact;
@@ -657,6 +658,50 @@ static void testHornConstruct() {
           "horn: a spindle still has no cylinder contact");
 }
 
+// pointCircleDist (D-gid-8.19): the closed form against a dense sample of the
+// circle, on a tilted frame. A point of the tube a profile angle d off the
+// tangent v-iso is the profile chord 2 r sin(d / 2) from it, though it lies on
+// the torus: the distance a chain on both faces can still be from the circle.
+static void testPointCircleDist() {
+    const gp_Ax2 ax(gp_Pnt(-3, 5, 2), gp_Dir(gp_Vec(0.3, -0.2, 1.0)), gp_Dir(gp_Vec(1.0, 0.0, -0.3)));
+    const double a = 6.0;
+    const gp_Circ c(ax, a);
+    const gp_Vec n(ax.Direction()), e1(ax.XDirection()), e2(ax.YDirection());
+    double worst = 0.0;
+    for (const double rho : {0.0, 2.5, 6.0, 9.0})
+        for (const double h : {0.0, -1.25, 0.75}) {
+            const gp_Pnt p = c.Location().Translated(e1 * (rho * 0.6) + e2 * (rho * 0.8) + n * h);
+            double best = 1e300;
+            for (int k = 0; k < kSamples; ++k) {
+                const double t = 2.0 * kPi * (double)k / (double)kSamples;
+                best = std::min(best, p.Distance(c.Location().Translated(e1 * (a * std::cos(t)) +
+                                                                         e2 * (a * std::sin(t)))));
+            }
+            const double d = pointCircleDist(c, p);
+            worst = std::max(worst, std::fabs(d - std::hypot(rho - a, h)));
+            check(d >= 0.0 && d <= best + 1e-12 && best - d <= a * (2.0 * kPi / kSamples),
+                  "pointCircleDist: closed form <= every sampled circle point, within one step");
+        }
+    check(worst <= 1e-12, "pointCircleDist: hypot(rho - a, h) on a tilted frame");
+    const gp_Ax3 fr(gp_Pnt(1, -2, 4), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    const double R = 12.0, r = 0.75;
+    const gp_Torus tor(fr, R, r);
+    gp_Circ iso;
+    check(torusVIsoCircle(tor, -0.5 * kPi, iso), "pointCircleDist: the bottom v-iso");
+    for (const double dv : {0.0, 1e-6, 4e-6, 1e-3}) {
+        const double v = -0.5 * kPi + dv, u = 0.7;
+        const gp_Pnt p = fr.Location().Translated(
+            gp_Vec(fr.XDirection()) * ((R + r * std::cos(v)) * std::cos(u)) +
+            gp_Vec(fr.YDirection()) * ((R + r * std::cos(v)) * std::sin(u)) +
+            gp_Vec(fr.Direction()) * (r * std::sin(v)));
+        check(std::fabs(pointCircleDist(iso, p) - 2.0 * r * std::sin(0.5 * dv)) <= 1e-12 &&
+                  std::fabs(pointTorusDist(tor, p)) <= 1e-12,
+              "pointCircleDist: a tube point dv off the iso is the chord 2 r sin(dv/2) off it");
+    }
+    const double inf = std::numeric_limits<double>::infinity();
+    check(pointCircleDist(c, gp_Pnt(inf, 0, 0)) == -1.0, "pointCircleDist: a non-finite point is -1");
+}
+
 int main() {
     testParametrisationAndPointDist();
     testTangencyCirclesExactZero();
@@ -665,6 +710,7 @@ int main() {
     testHornConstruct();
     testRefusals();
     testPlacementInvariance();
+    testPointCircleDist();
 
     std::fprintf(stderr, "torus_math_unit: maxAbsErr(closed form vs sampled supremum) = %.3g\n",
                  gMaxAbsErr);

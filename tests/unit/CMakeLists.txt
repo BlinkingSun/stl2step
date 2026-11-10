@@ -996,6 +996,31 @@ set_tests_properties(relational_anchored_round_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# D-gid-8.18: drafted wall about a certified plane normal on
+# synthetic points (certify / refuse cases), the partial-band chord volume with
+# its rim term, and the anchored round on a cone's profile line.
+add_executable(relational_drafted_cone_unit relational_drafted_cone_unit.cpp)
+target_compile_features(relational_drafted_cone_unit PRIVATE cxx_std_17)
+set_target_properties(relational_drafted_cone_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_drafted_cone_unit PRIVATE stl2step::core)
+target_include_directories(relational_drafted_cone_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_drafted_cone_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_drafted_cone_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_drafted_cone_unit)
+endif()
+add_test(NAME relational_drafted_cone_unit COMMAND relational_drafted_cone_unit)
+set_tests_properties(relational_drafted_cone_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 # gid2/gy-honest (D-gid-7.6): RESULT census of the written shape -- face
 # provenance through the guarded unify, counting, describeShippedFaces.
 add_executable(written_census_unit written_census_unit.cpp)
@@ -1090,6 +1115,172 @@ add_test(NAME relational_dvol_exact_unit COMMAND relational_dvol_exact_unit)
 set_tests_properties(relational_dvol_exact_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
+# D-gid-8.8 / D-gid-8.6: exact chord volume of apex cones and ring-certified walls (synthetic).
+add_executable(apex_cone_dvol_unit apex_cone_dvol_unit.cpp)
+target_compile_features(apex_cone_dvol_unit PRIVATE cxx_std_17)
+set_target_properties(apex_cone_dvol_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(apex_cone_dvol_unit PRIVATE stl2step::core)
+target_include_directories(apex_cone_dvol_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(apex_cone_dvol_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(apex_cone_dvol_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(apex_cone_dvol_unit)
+endif()
+add_test(NAME apex_cone_dvol_unit COMMAND apex_cone_dvol_unit)
+set_tests_properties(apex_cone_dvol_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# D-gid-8.3 (R-k31-2): a cylinder region within tau of both its own cylinder and
+# a sphere corner's sphere is owned by the sphere (synthetic).
+add_executable(relational_sphere_owns_unit relational_sphere_owns_unit.cpp)
+target_compile_features(relational_sphere_owns_unit PRIVATE cxx_std_17)
+set_target_properties(relational_sphere_owns_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_sphere_owns_unit PRIVATE stl2step::core)
+target_include_directories(relational_sphere_owns_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_sphere_owns_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_sphere_owns_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_sphere_owns_unit)
+endif()
+add_test(NAME relational_sphere_owns_unit COMMAND relational_sphere_owns_unit)
+set_tests_properties(relational_sphere_owns_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# D-gid-8.2 (gz-capown): only a lateral facet can be part of a wall --
+# releaseCapTriangles on synthetic quarter-round walls with a cap fan.
+add_executable(relational_capown_unit relational_capown_unit.cpp)
+target_compile_features(relational_capown_unit PRIVATE cxx_std_17)
+set_target_properties(relational_capown_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_capown_unit PRIVATE stl2step::core)
+target_include_directories(relational_capown_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_capown_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_capown_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_capown_unit)
+endif()
+add_test(NAME relational_capown_unit COMMAND relational_capown_unit)
+set_tests_properties(relational_capown_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# D-gid-8.4: tess-law decision for a folded closed ring band (synthetic).
+add_executable(relational_ringlaw_unit relational_ringlaw_unit.cpp)
+target_compile_features(relational_ringlaw_unit PRIVATE cxx_std_17)
+set_target_properties(relational_ringlaw_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_ringlaw_unit PRIVATE stl2step::core)
+target_include_directories(relational_ringlaw_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_ringlaw_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_ringlaw_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_ringlaw_unit)
+endif()
+add_test(NAME relational_ringlaw_unit COMMAND relational_ringlaw_unit)
+set_tests_properties(relational_ringlaw_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# D-gid-8.7: the fallback projection keeps the face chart's periodic branch (synthetic).
+add_executable(pcurve_chart_branch_unit pcurve_chart_branch_unit.cpp)
+target_compile_features(pcurve_chart_branch_unit PRIVATE cxx_std_17)
+set_target_properties(pcurve_chart_branch_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(pcurve_chart_branch_unit PRIVATE stl2step::core)
+target_include_directories(pcurve_chart_branch_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(pcurve_chart_branch_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(pcurve_chart_branch_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(pcurve_chart_branch_unit)
+endif()
+add_test(NAME pcurve_chart_branch_unit COMMAND pcurve_chart_branch_unit)
+set_tests_properties(pcurve_chart_branch_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# D-gid-8.4: the late ring-frustum closure (cylinder or cone between two certified
+# coaxial rims) and its profile line (synthetic).
+add_executable(relational_ringfrustum_unit relational_ringfrustum_unit.cpp)
+target_compile_features(relational_ringfrustum_unit PRIVATE cxx_std_17)
+set_target_properties(relational_ringfrustum_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_ringfrustum_unit PRIVATE stl2step::core)
+target_include_directories(relational_ringfrustum_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_ringfrustum_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_ringfrustum_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_ringfrustum_unit)
+endif()
+add_test(NAME relational_ringfrustum_unit COMMAND relational_ringfrustum_unit)
+set_tests_properties(relational_ringfrustum_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
+# D-gid-8.13: a cone/cylinder pair between certified coaxial rims shares its
+# junction circle and one seam half-plane (stagger predicates + a synthetic
+# chamfered through-hole converted end to end).
+add_executable(cone_bore_seam_unit cone_bore_seam_unit.cpp)
+target_compile_features(cone_bore_seam_unit PRIVATE cxx_std_17)
+set_target_properties(cone_bore_seam_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(cone_bore_seam_unit PRIVATE stl2step::core)
+target_include_directories(cone_bore_seam_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(cone_bore_seam_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(cone_bore_seam_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(cone_bore_seam_unit)
+endif()
+add_test(NAME cone_bore_seam_unit COMMAND cone_bore_seam_unit)
+set_tests_properties(cone_bore_seam_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 180)
 
 unset(_stl2step_root)
 unset(_anat)

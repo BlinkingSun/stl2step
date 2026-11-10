@@ -30,6 +30,7 @@
 // Every threshold is tau = 2q or a quantity measured on the certified set.
 
 #include "refit_axis_seam.hpp"
+#include "refit_band_volume.hpp"
 #include "refit_profile_cert.hpp"
 #include "refit_relational.hpp"
 #include "refit_relational_arc.hpp"
@@ -48,6 +49,7 @@
 #include <utility>
 #include <vector>
 
+#include <Standard_Failure.hxx>
 #include <gp.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
@@ -1585,6 +1587,9 @@ int claimRingCylinders(const RMesh& rm, const SegmentParams& p, const DerivedTol
     int claimed = 0;
     const int nProv0 = (int)work.provisionals.size();
     std::vector<char> inB((std::size_t)nTri, 0);
+    // D-gid-8.4: the law samples of work.accepted, re-measured after each claim.
+    std::vector<TessLawSample> lawSamples;
+    bool lawSamplesValid = false;
     for (int pi = 0; pi < nProv0; ++pi) {
         const bool anchorFree = work.provisionals[(std::size_t)pi].claim == ProvClaim::Unclaimed;
         if (!anchorFree && !diagOn()) continue;
@@ -1710,9 +1715,33 @@ int claimRingCylinders(const RMesh& rm, const SegmentParams& p, const DerivedTol
             // Scope: the ring names cylinders B1 cannot seed (every fold under its seed
             // floor). A band that folds at or above it is B1 / NgonWall / tess-law's to
             // decide: its vertices alone cannot tell a prism from a cylinder.
+            // D-gid-8.4: the band is free, so neither B1 nor NgonWall took it; the
+            // tessellation law (D-fc-2.1) decides here. A refuted band is an N-gon and
+            // its walls stay with the plane stages; with no law sample nothing changes
+            // (D-fc-1.9); a sampled circle goes on through the ring certificate below.
             if (!(fold < tol.thetaCylLo)) {
-                refuse("not-blend");
-                continue;
+                if (!lawSamplesValid) {
+                    lawSamples = tessLawSamples(mv, p, tau, work);
+                    lawSamplesValid = true;
+                }
+                double lawStep = 0;
+                int lawK = 0;
+                TessLawDecision law;
+                if (tessLawBandStep(mv, band, gp_Dir(S.A), gp_Pnt(S.C), S.R, tau, lawStep, lawK))
+                    law = tessLawDecide(lawSamples, S.R, lawStep, tau);
+                if (diagOn())
+                    std::fprintf(stderr,
+                                 "DIAG_REL_RING_LAW seed=%d R=%.9g step=%.8g k=%d refRid=%d "
+                                 "refR=%.8g refK=%d refStep=%.8g bound=%.8g verdict=%s\n",
+                                 dg.seed, S.R, lawStep, lawK, law.refRid, law.refR, law.refK,
+                                 law.refStep, law.bound,
+                                 law.verdict == TessLawVerdict::Keep     ? "keep"
+                                 : law.verdict == TessLawVerdict::Refute ? "refute"
+                                                                         : "no-ref");
+                if (law.verdict != TessLawVerdict::Keep) {
+                    refuse("not-blend");
+                    continue;
+                }
             }
             if (!stable || !(dg.maxDev <= tau)) {
                 refuse("vertex-off");
@@ -1761,6 +1790,7 @@ int claimRingCylinders(const RMesh& rm, const SegmentParams& p, const DerivedTol
             dg.nSides = r.nSides;
             dg.dVol = r.dVolPredicted;
             work.accepted.push_back(std::move(r));
+            lawSamplesValid = false;
             ++claimed;
             refuse("accept");
         }
@@ -1810,6 +1840,121 @@ bool certifyRingCycle(const MeshView& mv, const std::vector<int>& cyc, double ta
     return out.planeDev <= tau && out.circDev <= tau && out.R > tau;
 }
 
+// D-fc-6.10 C-1. The ring-wall vertex certificate of chart ch for a cylinder
+// between its two certified rims rg[0], rg[1] (certifyRingCycle): the cylinder
+// is the least-squares fit over the triangles whose three vertices are rim
+// corners, seeded on rg[0]'s normal; every chart vertex then certifies as a
+// corner, a chord vertex (RQ-H1) or an interior vertex within tau, and every
+// triangle is covered (RQ-H2). False when the fit itself fails.
+struct RingWallCyl {
+    std::set<int> cornerV, chordV, chartV;
+    std::vector<int> fitSet;
+    Cyl S;
+    double fr = 0, fres = 0, cornerDev = 0, otherDev = 0;
+    bool off = false;
+};
+
+bool ringWallCylinder(const RMesh& rm, const std::vector<int>& ch, const RwcRing* rg, double tau,
+                      int maxIt, RingWallCyl& o) {
+    const MeshView& mv = *rm.mv;
+    std::set<int>& cornerV = o.cornerV;
+    std::set<int>& chordV = o.chordV;
+    for (int k = 0; k < kAnnulusLoops; ++k) {
+        const int n = (int)rg[k].verts.size();
+        for (int i = 0; i < n; ++i) {
+            const int lv = rg[k].verts[(std::size_t)i];
+            if (rg[k].corner[(std::size_t)i]) cornerV.insert(lv);
+            else chordV.insert(lv);
+        }
+    }
+    std::vector<int>& fitSet = o.fitSet;
+    for (int t : ch) {
+        int nc = 0;
+        for (int k = 0; k < 3; ++k) nc += cornerV.count(rm.localVtx(t, k)) ? 1 : 0;
+        if (nc == 3) fitSet.push_back(t);
+    }
+    gp_Dir fa(0, 0, 1);
+    gp_Pnt fc(0, 0, 0);
+    double fr = 0, fres = 0;
+    const gp_XYZ seedA = rg[0].n;
+    if (!(seedA.Modulus() > 0.0) || fitSet.empty() ||
+        !cylinderFitLS(mv, fitSet, gp_Dir(seedA), fa, fc, fr, fres, maxIt))
+        return false;
+    const Cyl S{fc.XYZ(), fa.XYZ(), fr};
+    double cornerDev = 0, otherDev = 0;
+    bool off = false;
+    std::set<int>& chartV = o.chartV;
+    for (int t : ch)
+        for (int k = 0; k < 3; ++k) chartV.insert(rm.localVtx(t, k));
+    for (int lv : chartV) {
+        if (lv < 0) {
+            off = true;
+            continue;
+        }
+        const bool isCorner = cornerV.count(lv) != 0;
+        const bool isChord = !isCorner && chordV.count(lv) != 0;
+        const double d = radialDev(mv.pts[mv.compVtx[lv]], S);
+        if (isCorner) cornerDev = std::max(cornerDev, d);
+        const RingWallVert cls = classifyRingWallVertex(isCorner, isChord, d, tau);
+        if (cls == RingWallVert::Off) off = true;
+        else if (cls == RingWallVert::OnCylinder) otherDev = std::max(otherDev, d);
+    }
+    // RQ-H2 is the one-corner, two-chord case of the same vertex certificate.
+    for (int t : ch) {
+        RingWallVert tv[3];
+        for (int k = 0; k < 3; ++k) {
+            const int lv = rm.localVtx(t, k);
+            if (lv < 0) {
+                tv[k] = RingWallVert::Off;
+                continue;
+            }
+            const bool isCorner = cornerV.count(lv) != 0;
+            const bool isChord = !isCorner && chordV.count(lv) != 0;
+            const double d = radialDev(mv.pts[mv.compVtx[lv]], S);
+            tv[k] = classifyRingWallVertex(isCorner, isChord, d, tau);
+        }
+        const bool covered = oneVertexChordCover(tv[0], tv[1], tv[2]) ||
+                             ringWallTriangleCovered(tv[0], tv[1], tv[2]);
+        if (!covered) off = true;
+    }
+    o.S = S;
+    o.fr = fr;
+    o.fres = fres;
+    o.cornerDev = cornerDev;
+    o.otherDev = otherDev;
+    o.off = off;
+    return true;
+}
+
+// C-3. The seam generator of a ring-closed wall about axis aw through loc
+// (cornerPairSeamVertex): the region's XDirection is turned onto it. ax is left
+// as it was when no corner pair exists. Returns the picked vertex or -1.
+int ringWallSeam(const MeshView& mv, const RwcRing* rg, double tau, double radius,
+                 const gp_XYZ& aw, gp_Ax3& ax) {
+    const gp_XYZ loc = ax.Location().XYZ();
+    const gp_XYZ x0 = ax.XDirection().XYZ();
+    const gp_XYZ y0 = ax.YDirection().XYZ();
+    auto aziOf = [&](int lv) {
+        gp_XYZ d = mv.pts[mv.compVtx[lv]] - loc;
+        d -= aw * d.Dot(aw);
+        return std::atan2(d.Dot(y0), d.Dot(x0));
+    };
+    std::vector<double> az0(rg[0].verts.size()), az1(rg[1].verts.size());
+    for (std::size_t i = 0; i < rg[0].verts.size(); ++i) az0[i] = aziOf(rg[0].verts[i]);
+    for (std::size_t i = 0; i < rg[1].verts.size(); ++i) az1[i] = aziOf(rg[1].verts[i]);
+    const int pick = cornerPairSeamVertex(rg[0].verts, rg[0].corner, az0, rg[1].verts,
+                                          rg[1].corner, az1, tau, radius);
+    if (pick >= 0) {
+        gp_XYZ xd = mv.pts[mv.compVtx[pick]] - loc;
+        xd -= aw * xd.Dot(aw);
+        if (xd.Modulus() > 0.0 && xd.Crossed(aw).Modulus() > 0.0) {
+            xd /= xd.Modulus();
+            ax = gp_Ax3(ax.Location(), gp_Dir(aw), gp_Dir(xd));
+        }
+    }
+    return pick;
+}
+
 // D-fc-6.10 C-1 + C-3. Hooked from reclaimLine after closeSameSurface.
 // Scope (no new number): either the chart holds at least one accepted
 // cylinder of origin CylGrow or FilletStrip, every such region lies wholly
@@ -1817,7 +1962,12 @@ bool certifyRingCycle(const MeshView& mv, const std::vector<int>& cyc, double ta
 // or the chart has no owner, every triangle is an Unclaimed provisional, and
 // every triangle sits in a cylinder region B1 already refused (a free annulus
 // that was rolled back — the same ring certificate, a new region). A chart
-// held whole by one uncertified region (RQ-H6) is not entered.
+// held whole by one region is entered only when that region does not
+// certify its own surface (robbableUncertified: maxVertexDev > tau and no
+// ring certificate, D-fc-4.3 / D-gid-7.6): the ring certificate re-tests the
+// whole wall and, when it passes, replaces the uncertified fit (D-gid-8.4,
+// heal-not-revert); when it refuses, the region stays as it was. A region
+// within tau is never re-fit.
 int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& tol, double tau,
                    SegmentWork& work) {
     const MeshView& mv = *rm.mv;
@@ -1876,7 +2026,8 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
                     break;
                 }
             if (!refused) continue;
-        } else if (owners.size() == 1 && nFree == 0) {
+        } else if (owners.size() == 1 && nFree == 0 &&
+                   !robbableUncertified(work.accepted[(std::size_t)*owners.begin()], tau)) {
             continue;
         }
         std::set<int> chSet(ch.begin(), ch.end());
@@ -1929,67 +2080,17 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
             report("ring-off", &rg[0], &rg[1]);
             continue;
         }
-        std::set<int> cornerV, chordV;
-        for (int k = 0; k < kAnnulusLoops; ++k) {
-            const int n = (int)rg[k].verts.size();
-            for (int i = 0; i < n; ++i) {
-                const int lv = rg[k].verts[(std::size_t)i];
-                if (rg[k].corner[(std::size_t)i]) cornerV.insert(lv);
-                else chordV.insert(lv);
-            }
-        }
-        std::vector<int> fitSet;
-        for (int t : ch) {
-            int nc = 0;
-            for (int k = 0; k < 3; ++k) nc += cornerV.count(rm.localVtx(t, k)) ? 1 : 0;
-            if (nc == 3) fitSet.push_back(t);
-        }
-        gp_Dir fa(0, 0, 1);
-        gp_Pnt fc(0, 0, 0);
-        double fr = 0, fres = 0;
-        const gp_XYZ seedA = rg[0].n;
-        if (!(seedA.Modulus() > 0.0) || fitSet.empty() ||
-            !cylinderFitLS(mv, fitSet, gp_Dir(seedA), fa, fc, fr, fres, maxIt)) {
+        RingWallCyl rw;
+        if (!ringWallCylinder(rm, ch, rg, tau, maxIt, rw)) {
             report("underdetermined", &rg[0], &rg[1]);
             continue;
         }
-        const Cyl S{fc.XYZ(), fa.XYZ(), fr};
-        double cornerDev = 0, otherDev = 0;
-        bool off = false;
-        std::set<int> chartV;
-        for (int t : ch)
-            for (int k = 0; k < 3; ++k) chartV.insert(rm.localVtx(t, k));
-        for (int lv : chartV) {
-            if (lv < 0) {
-                off = true;
-                continue;
-            }
-            const bool isCorner = cornerV.count(lv) != 0;
-            const bool isChord = !isCorner && chordV.count(lv) != 0;
-            const double d = radialDev(mv.pts[mv.compVtx[lv]], S);
-            if (isCorner) cornerDev = std::max(cornerDev, d);
-            const RingWallVert cls = classifyRingWallVertex(isCorner, isChord, d, tau);
-            if (cls == RingWallVert::Off) off = true;
-            else if (cls == RingWallVert::OnCylinder) otherDev = std::max(otherDev, d);
-        }
-        // RQ-H2 is the one-corner, two-chord case of the same vertex certificate.
-        for (int t : ch) {
-            RingWallVert tv[3];
-            for (int k = 0; k < 3; ++k) {
-                const int lv = rm.localVtx(t, k);
-                if (lv < 0) {
-                    tv[k] = RingWallVert::Off;
-                    continue;
-                }
-                const bool isCorner = cornerV.count(lv) != 0;
-                const bool isChord = !isCorner && chordV.count(lv) != 0;
-                const double d = radialDev(mv.pts[mv.compVtx[lv]], S);
-                tv[k] = classifyRingWallVertex(isCorner, isChord, d, tau);
-            }
-            const bool covered = oneVertexChordCover(tv[0], tv[1], tv[2]) ||
-                                 ringWallTriangleCovered(tv[0], tv[1], tv[2]);
-            if (!covered) off = true;
-        }
+        const std::vector<int>& fitSet = rw.fitSet;
+        const std::set<int>& chartV = rw.chartV;
+        const double fr = rw.fr, fres = rw.fres;
+        const Cyl& S = rw.S;
+        const double cornerDev = rw.cornerDev, otherDev = rw.otherDev;
+        const bool off = rw.off;
         dg.nV = (int)chartV.size();
         dg.radius = fr;
         dg.axis = S.A;
@@ -2036,33 +2137,7 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
         // D-gid-7.6. Every gate above passed: the ring certificate holds for S
         // over ch, whatever the chord sag in maxVertexDev.
         nr.ringCertified = true;
-        {
-            const gp_XYZ loc = nr.ax.Location().XYZ();
-            const gp_XYZ aw = S.A;
-            const gp_XYZ x0 = nr.ax.XDirection().XYZ();
-            const gp_XYZ y0 = nr.ax.YDirection().XYZ();
-            auto aziOf = [&](int lv) {
-                gp_XYZ d = mv.pts[mv.compVtx[lv]] - loc;
-                d -= aw * d.Dot(aw);
-                return std::atan2(d.Dot(y0), d.Dot(x0));
-            };
-            std::vector<double> az0(rg[0].verts.size()), az1(rg[1].verts.size());
-            for (std::size_t i = 0; i < rg[0].verts.size(); ++i)
-                az0[i] = aziOf(rg[0].verts[i]);
-            for (std::size_t i = 0; i < rg[1].verts.size(); ++i)
-                az1[i] = aziOf(rg[1].verts[i]);
-            const int pick = cornerPairSeamVertex(rg[0].verts, rg[0].corner, az0, rg[1].verts,
-                                                  rg[1].corner, az1, tau, S.R);
-            dg.comps = pick;
-            if (pick >= 0) {
-                gp_XYZ xd = mv.pts[mv.compVtx[pick]] - loc;
-                xd -= aw * xd.Dot(aw);
-                if (xd.Modulus() > 0.0 && xd.Crossed(aw).Modulus() > 0.0) {
-                    xd /= xd.Modulus();
-                    nr.ax = gp_Ax3(nr.ax.Location(), gp_Dir(aw), gp_Dir(xd));
-                }
-            }
-        }
+        dg.comps = ringWallSeam(mv, rg, tau, S.R, S.A, nr.ax);
         std::vector<char> inC((std::size_t)nTri, 0);
         for (int t : ch) inC[(std::size_t)t] = 1;
         dg.straddle = trimClaimed(rm, work, inC);
@@ -2093,6 +2168,455 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
         report("accept", &rg[0], &rg[1]);
     }
     eraseRegions(work, erase);
+    return committed;
+}
+
+// An orthonormal frame: origin o, axis a, radial directions e1, e2.
+struct Frame0 {
+    gp_XYZ o, a, e1, e2;
+};
+
+// D-gid-8.4. Late: after every family, before A3, on what they
+// left. A chart whose whole boundary is two rims that each certify as a ring
+// (certifyRingCycle, D-fc-6.10 C-1), and whose rims one axis certifies
+// (jointAxisCertifies, D-fc-4.8 (b)), is the surface its wall certifies as,
+// fewest parameters first:
+//   plane    every chart vertex within tau of both rims' planes: A3's, refused;
+//   cylinder the ring-wall cylinder certificate (ringWallCylinder, as
+//            closeRingWalls applies it);
+//   cone     the profile line about the axis of the certified closed cylinder
+//            across one of its rims, its donor (D-gid-2.5 / D-gid-3.6; profileLine,
+//            every corner and interior vertex within tau of it; chord vertices
+//            covered by RQ-H1/H2), rim radii apart by more than tau. No donor:
+//            refused, the wall stays as it is.
+// Scope: every triangle is an Unclaimed provisional or lies in an uncertified
+// cylinder wholly inside the chart (robbableUncertified, D-fc-4.3: the robbed
+// region dissolves), and at least one triangle is free (a chart held whole by
+// regions is RQ-H6's, not entered). Pass 0 closes cylinders, pass 1 cones, so a
+// cone finds the cylinder pass 0 closed beside it and names it (filletNbrA). No
+// new threshold: tau, minStations(kParamsCircle), kMinAxialLevels.
+int closeRingFrustums(const RMesh& rm, const SegmentParams& p, const DerivedTols& tol, double tau,
+                      SegmentWork& work) {
+    const MeshView& mv = *rm.mv;
+    const int nTri = (int)mv.nTri;
+    if (!mv.compVtx || !mv.compEdges || (int)work.triChart.size() != nTri) return 0;
+    const int maxIt = std::max(1, p.maxRefineIters);
+    std::map<int, std::vector<int>> charts;
+    for (int t = 0; t < nTri; ++t) charts[work.triChart[(std::size_t)t]].push_back(t);
+    std::vector<std::vector<int>> order;
+    order.reserve(charts.size());
+    for (auto& kv : charts) order.push_back(std::move(kv.second));
+    std::sort(order.begin(), order.end(),
+              [](const std::vector<int>& a, const std::vector<int>& b) { return a.front() < b.front(); });
+    std::vector<char> done(order.size(), 0);
+    int committed = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        std::vector<int> owner((std::size_t)nTri, -1), triProv((std::size_t)nTri, -1);
+        for (int i = 0; i < (int)work.accepted.size(); ++i)
+            for (int t : work.accepted[(std::size_t)i].tris)
+                if (t >= 0 && t < nTri) owner[(std::size_t)t] = i;
+        for (int i = 0; i < (int)work.provisionals.size(); ++i)
+            for (int t : work.provisionals[(std::size_t)i].tris)
+                if (t >= 0 && t < nTri) triProv[(std::size_t)t] = i;
+        std::vector<char> dead(work.accepted.size(), 0);
+        for (std::size_t ci = 0; ci < order.size(); ++ci) {
+            if (done[ci]) continue;
+            const std::vector<int>& ch = order[ci];
+            std::set<int> owners;
+            int nFree = 0;
+            bool foreign = false;
+            for (int t : ch) {
+                const int o = owner[(std::size_t)t];
+                if (o >= 0) {
+                    owners.insert(o);
+                    continue;
+                }
+                const int pi = triProv[(std::size_t)t];
+                if (pi < 0 || work.provisionals[(std::size_t)pi].claim != ProvClaim::Unclaimed)
+                    foreign = true;
+                ++nFree;
+            }
+            if (foreign || nFree == 0) {
+                done[ci] = 1;
+                continue;
+            }
+            const std::set<int> chSet(ch.begin(), ch.end());
+            for (int o : owners) {
+                const Region& r = work.accepted[(std::size_t)o];
+                if ((std::size_t)o < dead.size() && dead[(std::size_t)o]) foreign = true;
+                if (!robbableUncertified(r, tau)) foreign = true;
+                for (int t : r.tris)
+                    if (!chSet.count(t)) foreign = true;
+            }
+            std::vector<std::vector<int>> cyc;
+            if (foreign || edgeComponents(rm, ch).size() != 1 || !boundaryCycles(rm, ch, cyc) ||
+                (int)cyc.size() != kAnnulusLoops) {
+                done[ci] = 1;
+                continue;
+            }
+            RwcRing rg[kAnnulusLoops];
+            bool ringsOk = true;
+            for (int k = 0; k < kAnnulusLoops; ++k)
+                if (!certifyRingCycle(mv, cyc[(std::size_t)k], tau, rg[k])) ringsOk = false;
+            BandDiag dg;
+            dg.mode = pass == 0 ? "ringfrustum-cyl" : "ringfrustum-cone";
+            dg.seed = ch.front();
+            dg.members = (int)owners.size();
+            dg.nTri = (int)ch.size();
+            dg.loops = kAnnulusLoops;
+            double axisDev = 0, lineDev = 0, rLo = 0, rHi = 0, hSigned = 0;
+            int donorDiag = -1, rimCylDiag = 0;
+            auto report = [&](const char* why) {
+                dg.why = why;
+                printBand(dg);
+                if (!diagOn()) return;
+                std::fprintf(stderr,
+                             "DIAG_REL_RINGFRUSTUM seed=%d pass=%d nTri=%zu members=%zu free=%d "
+                             "ring0=%d/%d R=%.9g circ=%.4ft ring1=%d/%d R=%.9g circ=%.4ft "
+                             "axisDevTau=%.4f lineDevTau=%.4f Rlo=%.9g Rhi=%.9g h=%.9g "
+                             "donor=%d rimCyl=%d why=%s\n",
+                             ch.front(), pass, ch.size(), owners.size(), nFree, rg[0].corners,
+                             (int)rg[0].verts.size(), rg[0].R, rg[0].circDev / tau, rg[1].corners,
+                             (int)rg[1].verts.size(), rg[1].R, rg[1].circDev / tau, axisDev / tau,
+                             lineDev / tau, rLo, rHi, hSigned, donorDiag, rimCylDiag, why);
+            };
+            if (!ringsOk) {
+                done[ci] = 1;
+                report("ring-off");
+                continue;
+            }
+            std::set<int> cornerV, chordV, chartV;
+            std::vector<std::vector<gp_XYZ>> groups(kAnnulusLoops);
+            for (int k = 0; k < kAnnulusLoops; ++k)
+                for (std::size_t i = 0; i < rg[k].verts.size(); ++i) {
+                    const int lv = rg[k].verts[i];
+                    if (rg[k].corner[i]) {
+                        cornerV.insert(lv);
+                        groups[(std::size_t)k].push_back(mv.pts[mv.compVtx[lv]]);
+                    } else {
+                        chordV.insert(lv);
+                    }
+                }
+            bool badV = false;
+            for (int t : ch)
+                for (int k = 0; k < 3; ++k) {
+                    const int lv = rm.localVtx(t, k);
+                    if (lv < 0) badV = true;
+                    else chartV.insert(lv);
+                }
+            if (badV) {
+                done[ci] = 1;
+                report("degenerate");
+                continue;
+            }
+            dg.nV = (int)chartV.size();
+            // Fewest parameters first: a wall within tau of one plane is a plane.
+            bool planar = true;
+            for (int lv : chartV)
+                for (int k = 0; k < kAnnulusLoops && planar; ++k)
+                    if (!(std::abs((mv.pts[mv.compVtx[lv]] - rg[k].c).Dot(rg[k].n)) <= tau))
+                        planar = false;
+            if (planar) {
+                done[ci] = 1;
+                report("plane");
+                continue;
+            }
+            // Coaxial: one axis certifies both rims' corners (D-fc-4.8 (b)).
+            JointAxisFit ja = jointAxisAbout(groups, rg[0].c, rg[0].n);
+            if (!jointAxisCertifies(ja, tau)) {
+                JointAxisFit g;
+                if (!jointAxisFit(groups, rg[0].c, rg[0].n, maxIt, g) ||
+                    !jointAxisCertifies(g, tau)) {
+                    for (double d : g.maxDev) axisDev = std::max(axisDev, d);
+                    done[ci] = 1;
+                    report("not-coaxial");
+                    continue;
+                }
+                ja = g;
+            }
+            for (double d : ja.maxDev) axisDev = std::max(axisDev, d);
+            if (pass == 0) {
+                RingWallCyl rw;
+                const bool fitted = ringWallCylinder(rm, ch, rg, tau, maxIt, rw);
+                if (!fitted || !(rw.fres <= tau) || !(rw.cornerDev <= tau) || rw.off) {
+                    if (fitted) {
+                        dg.radius = rw.fr;
+                        dg.axis = rw.S.A;
+                        dg.certDevTau = std::max(rw.cornerDev, rw.otherDev) / tau;
+                    }
+                    report("vertex-off");  // pass 1 tries the cone
+                    continue;
+                }
+                const Cyl& S = rw.S;
+                int cols = 0, levels = 0;
+                stationsOf(rm, rw.fitSet, S, tau, cols, levels);
+                dg.radius = rw.fr;
+                dg.axis = S.A;
+                dg.certDevTau = std::max(rw.cornerDev, rw.otherDev) / tau;
+                dg.stations = cols;
+                dg.levels = levels;
+                dg.nI = (int)rw.fitSet.size();
+                dg.nCover = (int)(ch.size() - rw.fitSet.size());
+                rLo = rHi = rw.fr;
+                done[ci] = 1;
+                if (!overDetermined(cols, levels)) {
+                    report("underdetermined");
+                    continue;
+                }
+                CylFields f;
+                if (!closedWallByConstruction(rm, ch, S) || !cylFields(rm, tol, ch, S, f, true)) {
+                    report("not-closed");
+                    continue;
+                }
+                closeRingFields(f);
+                f.closed360 = true;
+                Region nr;
+                int r0 = -1;
+                if (owners.empty()) {
+                    nr.id = 0;
+                    nr.reject = Reject::None;
+                    nr.builtAs = BuiltAs::NotBuilt;
+                } else {
+                    r0 = *owners.begin();
+                    nr = work.accepted[(std::size_t)r0];
+                }
+                nr.type = SurfType::Cylinder;
+                nr.origin = Origin::CylGrow;
+                nr.filletNbrA = nr.filletNbrB = -1;
+                nr.tris = ch;
+                applyCylFields(nr, S, f);
+                // Every gate above passed: the ring certificate holds for S over
+                // ch, whatever the chord sag in maxVertexDev (D-gid-7.6).
+                nr.ringCertified = true;
+                dg.comps = ringWallSeam(mv, rg, tau, S.R, S.A, nr.ax);
+                std::vector<char> inC((std::size_t)nTri, 0);
+                for (int t : ch) inC[(std::size_t)t] = 1;
+                dg.straddle = trimClaimed(rm, work, inC);
+                dg.maxDev = nr.maxVertexDev;
+                dg.maxDevTau = nr.maxVertexDev / tau;
+                dg.nSides = nr.nSides;
+                dg.dVol = nr.dVolPredicted;
+                if (r0 < 0) {
+                    r0 = (int)work.accepted.size();
+                    work.accepted.push_back(std::move(nr));
+                    dead.push_back(0);
+                } else {
+                    work.accepted[(std::size_t)r0] = std::move(nr);
+                    for (int o : owners)
+                        if (o != r0) dead[(std::size_t)o] = 1;
+                }
+                for (int t : ch) owner[(std::size_t)t] = r0;
+                ++committed;
+                report("accept");
+                continue;
+            }
+            // Pass 1: the cone through both rims. A cone relates to a certified
+            // hole wall (D-gid-2.5 / D-gid-3.6): the certified closed cylinders
+            // across its rims (accepted, in scan order); the first is its donor.
+            // The cone face reuses that cylinder's rim circle, whose parameter is
+            // the cylinder's XDirection, so the cone is certified and placed on the
+            // cylinder's own frame (shareSeamFrame's rule, D-fc-4.6 F8), and the
+            // cylinder's axis must certify both rims (D-fc-4.8 (b)). No donor: the
+            // wall stays as it is (no-donor).
+            done[ci] = 1;
+            std::vector<int> rimCyl;
+            for (int t : ch)
+                for (int s = 0; s < 3; ++s) {
+                    const int w = rm.nbr(t, s);
+                    if (w < 0 || chSet.count(w)) continue;
+                    const int o = owner[(std::size_t)w];
+                    if (o < 0 || ((std::size_t)o < dead.size() && dead[(std::size_t)o])) continue;
+                    const Region& rr = work.accepted[(std::size_t)o];
+                    const bool certified = rr.ringCertified || rr.maxVertexDev <= tau;
+                    if (rr.type == SurfType::Cylinder && rr.closed360 && certified &&
+                        std::find(rimCyl.begin(), rimCyl.end(), o) == rimCyl.end())
+                        rimCyl.push_back(o);
+                }
+            const int donor = rimCyl.empty() ? -1 : rimCyl.front();
+            donorDiag = donor;
+            rimCylDiag = (int)rimCyl.size();
+            if (donor < 0) {
+                report("no-donor");
+                continue;
+            }
+            Frame0 fr;
+            {
+                const gp_Ax3& dax = work.accepted[(std::size_t)donor].ax;
+                fr.o = dax.Location().XYZ();
+                fr.a = dax.Direction().XYZ();
+                fr.e1 = dax.XDirection().XYZ();
+                fr.e2 = dax.YDirection().XYZ();
+                const JointAxisFit jd = jointAxisAbout(groups, fr.o, fr.a);
+                axisDev = 0;
+                for (double d : jd.maxDev) axisDev = std::max(axisDev, d);
+                if (!jointAxisCertifies(jd, tau)) {
+                    report("not-coaxial");
+                    continue;
+                }
+            }
+            std::vector<double> rho, zz;
+            for (int lv : chartV) {
+                if (chordV.count(lv)) continue;  // certifies on its chord (RQ-H1)
+                const gp_XYZ d = mv.pts[mv.compVtx[lv]] - fr.o;
+                rho.push_back(std::hypot(d.Dot(fr.e1), d.Dot(fr.e2)));
+                zz.push_back(d.Dot(fr.a));
+            }
+            const ProfileLine L = profileLine(rho, zz);
+            dg.axis = fr.a;
+            if (!L.ok) {
+                report("degenerate");
+                continue;
+            }
+            lineDev = L.maxDev;
+            dg.certDevTau = lineDev / tau;
+            double zMin = zz.front(), zMax = zz.front(), s2 = 0;
+            for (std::size_t i = 0; i < zz.size(); ++i) {
+                zMin = std::min(zMin, zz[i]);
+                zMax = std::max(zMax, zz[i]);
+                const double d = profileLineDist(L, rho[i], zz[i]);
+                s2 += d * d;
+            }
+            const double rzMin = L.rhoAt(zMin), rzMax = L.rhoAt(zMax);
+            const bool loAtMin = rzMin <= rzMax;
+            rLo = loAtMin ? rzMin : rzMax;
+            rHi = loAtMin ? rzMax : rzMin;
+            const double zLo = loAtMin ? zMin : zMax;
+            hSigned = loAtMin ? (zMax - zMin) : -(zMax - zMin);
+            dg.radius = rLo;
+            bool off = !(lineDev <= tau);
+            // RQ-H2 cover: corner / chord / within tau of the cone.
+            for (int t : ch) {
+                RingWallVert tv[3];
+                for (int k = 0; k < 3; ++k) {
+                    const int lv = rm.localVtx(t, k);
+                    const gp_XYZ d = mv.pts[mv.compVtx[lv]] - fr.o;
+                    const double dev = profileLineDist(
+                        L, std::hypot(d.Dot(fr.e1), d.Dot(fr.e2)), d.Dot(fr.a));
+                    const bool isCorner = cornerV.count(lv) != 0;
+                    tv[k] = classifyRingWallVertex(isCorner, !isCorner && chordV.count(lv) != 0,
+                                                   dev, tau);
+                }
+                if (!oneVertexChordCover(tv[0], tv[1], tv[2]) &&
+                    !ringWallTriangleCovered(tv[0], tv[1], tv[2]))
+                    off = true;
+            }
+            const Cyl S{fr.o + fr.a * zLo, fr.a, rLo};
+            int cols = 0, levels = 0;
+            stationsOf(rm, ch, S, tau, cols, levels);
+            dg.stations = cols;
+            dg.levels = levels;
+            if (off) {
+                report("vertex-off");
+                continue;
+            }
+            if (!overDetermined(cols, levels)) {
+                report("underdetermined");
+                continue;
+            }
+            // Both rims off the apex, and apart: a cone, not the cylinder pass 0 refused.
+            if (!(rLo > tau) || !(rHi - rLo > tau)) {
+                report("degenerate");
+                continue;
+            }
+            CylFields f;
+            if (!closedWallByConstruction(rm, ch, S) || !cylFields(rm, tol, ch, S, f, true)) {
+                report("not-closed");
+                continue;
+            }
+            closeRingFields(f);
+            const gp_XYZ loc = S.C;
+            const gp_Ax3 ax(gp_Pnt(loc.X(), loc.Y(), loc.Z()), gp_Dir(fr.a.X(), fr.a.Y(), fr.a.Z()),
+                            gp_Dir(fr.e1.X(), fr.e1.Y(), fr.e1.Z()));
+            const gp_XYZ e1 = ax.XDirection().XYZ(), e2 = ax.YDirection().XYZ();
+            const double slope = (rHi - rLo) / hSigned;
+            double dVol = 0;
+            for (int t : ch)
+                dVol += revolvedChordTerm(vtxOf(mv, t, 0), vtxOf(mv, t, 1), vtxOf(mv, t, 2), loc,
+                                          fr.a, e1, e2, rLo, slope);
+            if (!std::isfinite(dVol)) dVol = 0.0;
+            // A second closed cylinder across the other rim shares the same rim
+            // parameter: it turns onto the neighbour's XDirection (shareSeamFrame).
+            // The neighbour's axis already certifies that rim.
+            for (std::size_t k = 1; k < rimCyl.size(); ++k) {
+                Region& rr = work.accepted[(std::size_t)rimCyl[k]];
+                try {
+                    rr.ax = gp_Ax3(rr.ax.Location(), rr.ax.Direction(), ax.XDirection());
+                } catch (const Standard_Failure&) {
+                }
+            }
+            const int nSides = std::max(f.nSides, 3);
+            Region nr;
+            nr.id = 0;
+            nr.type = SurfType::Cone;
+            nr.origin = Origin::ChamferCone;
+            nr.ax = ax;
+            nr.radius = rLo;
+            nr.uMin = 0;
+            nr.uMax = kTwoPi;
+            nr.vMin = rLo;
+            nr.vMax = rHi;
+            nr.closed360 = true;
+            nr.outwardNormal = f.outward;
+            nr.tris = ch;
+            nr.maxVertexDev = lineDev;
+            nr.rmsVertexDev = std::sqrt(s2 / (double)zz.size());
+            nr.chordSagitta = chordSagitta(rLo, nSides);
+            nr.nSides = nSides;
+            nr.dVolPredicted = (f.outward ? 1.0 : -1.0) * dVol;
+            nr.maxVertexSnap = hSigned;
+            nr.reject = Reject::None;
+            nr.builtAs = BuiltAs::NotBuilt;
+            nr.filletNbrA = donor;
+            nr.filletNbrB = -1;
+            std::vector<char> inC((std::size_t)nTri, 0);
+            for (int t : ch) inC[(std::size_t)t] = 1;
+            dg.straddle = trimClaimed(rm, work, inC);
+            dg.maxDev = lineDev;
+            dg.maxDevTau = lineDev / tau;
+            dg.nSides = nSides;
+            dg.dVol = nr.dVolPredicted;
+            dg.nI = (int)zz.size();
+            int r0 = -1;
+            if (owners.empty()) {
+                r0 = (int)work.accepted.size();
+                work.accepted.push_back(std::move(nr));
+                dead.push_back(0);
+            } else {
+                r0 = *owners.begin();
+                work.accepted[(std::size_t)r0] = std::move(nr);
+                for (int o : owners)
+                    if (o != r0) dead[(std::size_t)o] = 1;
+            }
+            for (int t : ch) owner[(std::size_t)t] = r0;
+            ++committed;
+            report("accept");
+        }
+        // D-fc-4.3: the robbed regions dissolve. ChamferCone and TorusBlend keep
+        // their neighbour as an accepted index; it moves with the compaction.
+        bool anyDead = false;
+        for (char d : dead) anyDead = anyDead || d;
+        if (anyDead) {
+            const int nAcc = (int)work.accepted.size();
+            std::vector<int> newIdx((std::size_t)nAcc, -1);
+            std::vector<Region> keep;
+            keep.reserve((std::size_t)nAcc);
+            for (int i = 0; i < nAcc; ++i) {
+                if (dead[(std::size_t)i]) continue;
+                newIdx[(std::size_t)i] = (int)keep.size();
+                keep.push_back(std::move(work.accepted[(std::size_t)i]));
+            }
+            for (Region& rg2 : keep) {
+                const bool nbr =
+                    rg2.origin == Origin::ChamferCone || rg2.origin == Origin::TorusBlend;
+                if (!nbr || rg2.filletNbrA < 0 || rg2.filletNbrA >= nAcc) continue;
+                rg2.filletNbrA = newIdx[(std::size_t)rg2.filletNbrA];
+            }
+            for (TorusPendingReclaim& pack : work.torusPending)
+                for (int& ai : pack.reclaimAccIdx)
+                    if (ai >= 0 && ai < nAcc) ai = newIdx[(std::size_t)ai];
+            work.accepted.swap(keep);
+        }
+    }
     return committed;
 }
 
@@ -2626,6 +3150,19 @@ bool reclaimRelational(const MeshView& mv, const SegmentParams& p, const Derived
     } catch (...) {
         return true;
     }
+}
+
+// D-gid-8.4. The late ring-frustum closure (closeRingFrustums),
+// run after the torus families and before A3. Silent unless STL2STEP_DIAG_REL.
+bool claimRingFrustums(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
+                       SegmentWork& work) {
+    const double tau = tauOf(mv);
+    if (!(tau > 0.0) || mv.nTri == 0 || !mv.triEdges) return true;
+    const RMesh rm = makeRMesh(mv);
+    const int closed = closeRingFrustums(rm, p, tol, tau, work);
+    if (diagOn())
+        std::fprintf(stderr, "DIAG_REL_SUM stage=reclaim mode=ringfrustum closed=%d\n", closed);
+    return true;
 }
 
 bool certifyMeshRing(const std::vector<gp_XYZ>& pts, double tau, MeshRing& out) {
@@ -3598,6 +4135,14 @@ JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
 //      edge-connected to them that lie on it. Growth that touches the band
 //      joins the band; a piece of chips and the triangles joining them that does
 //      not touch it ships as one face of its own on the band's surface.
+//  (c) D-gid-8.4. An uncertified chip that (b) did not take whole (one of its
+//      triangles is off the torus, e.g. a junction triangle that reaches the
+//      next surface) is still no surface (D-fc-4.3): (a) may fill through its
+//      triangles one by one on the same test, when the chip sits on a junction:
+//      every triangle the fill does not take lies within tau of a certified
+//      plane, cylinder or sphere corner across one of its edges (never a second
+//      torus). A chip the fill enters dissolves and its other triangles are
+//      released to no region (D-fc-4.3); any other chip stays whole.
 // Torus order is accepted order; a triangle or chip goes to the first certified
 // torus that takes it. Withheld triangles (U-3 retry) are never taken.
 bool claimTorusSameSurface(const MeshView& mv, const SegmentParams& p, SegmentWork& work) {
@@ -3651,6 +4196,18 @@ bool claimTorusSameSurface(const MeshView& mv, const SegmentParams& p, SegmentWo
         }
         return countProfPts(P, tau) >= kMinAxialLevels;
     };
+    // A point's distance to an accepted region's own surface (plane, cylinder,
+    // sphere corner, torus); infinite for any other surface (cone, B-spline).
+    auto certSurfaceDev = [](const Region& N, const gp_XYZ& c) {
+        const gp_XYZ o = N.ax.Location().XYZ(), a = N.ax.Direction().XYZ();
+        switch (N.type) {
+            case SurfType::Plane: return std::fabs((c - o).Dot(a));
+            case SurfType::Cylinder: return std::fabs(a.Crossed(c - o).Modulus() - N.radius);
+            case SurfType::Sphere: return std::fabs((c - o).Modulus() - N.radius);
+            case SurfType::Torus: return torusSurfaceDev(N, c);
+            default: return std::numeric_limits<double>::infinity();
+        }
+    };
 
     // (b) Each uncertified chip goes to the first certified torus it lies on.
     std::vector<int> robTo((std::size_t)nAcc, -1);
@@ -3674,6 +4231,23 @@ bool claimTorusSameSurface(const MeshView& mv, const SegmentParams& p, SegmentWo
             break;
         }
     }
+    // (c) D-gid-8.4. An uncertified chip that (b) did not take, because not every
+    // triangle of it lies on one certified torus, is still no surface (D-fc-4.3):
+    // its triangles are candidates of the fill below, triangle by triangle, on the
+    // same vertex + F10 test, under the junction condition at the fill. A chip the
+    // fill enters dissolves; its triangles the fill did not take are released,
+    // owned by no region (D-fc-4.3: back to Unclaimed). No refit, no count, no
+    // subset: each triangle is tested alone against a certified surface. A chip
+    // with a withheld triangle (U-3 retry) is not entered, as in (b).
+    std::vector<char> partialChip((std::size_t)nAcc, 0);
+    for (int ri = 0; ri < nAcc; ++ri) {
+        const Region& R = work.accepted[(std::size_t)ri];
+        if (robTo[(std::size_t)ri] >= 0 || !torusAtom(R) || !robbableUncertified(R, tau)) continue;
+        bool usable = true;
+        for (int t : R.tris)
+            if (t < 0 || t >= nTri || withheld[(std::size_t)t]) usable = false;
+        if (usable) partialChip[(std::size_t)ri] = 1;
+    }
 
     std::vector<char> dead((std::size_t)nAcc, 0);
     std::vector<Region> born;
@@ -3692,23 +4266,111 @@ bool claimTorusSameSurface(const MeshView& mv, const SegmentParams& p, SegmentWo
                 ++nChipTri;
             }
         }
-        // (a) Unclaimed triangles edge-connected to the band or its chips.
+        // (a) Unclaimed triangles edge-connected to the band or its chips, and
+        // (c) the triangles of an uncertified chip (b) did not take.
         const Region& T = work.accepted[(std::size_t)s];
-        std::vector<int> fill, stack = seeds;
-        while (!stack.empty()) {
-            const int t = stack.back();
-            stack.pop_back();
+        // (c) The fill may split a chip only at a junction with a surface of
+        // another kind: every triangle it does not take must lie within tau of
+        // this torus or of a certified plane, cylinder or sphere corner across one
+        // of its edges. Never of a second torus: one chip goes to one torus, as in
+        // (b). A chip that fails stays whole and the fill runs again without it.
+        std::vector<char> enter = partialChip;
+        auto onCertAcross = [&](int t, int chip) {
             for (int k = 0; k < 3; ++k) {
                 const int o = across(t, k);
-                if (o < 0 || grow[(std::size_t)o] || owner[(std::size_t)o] >= 0 ||
-                    withheld[(std::size_t)o] || !onTorus(T, o))
-                    continue;
-                grow[(std::size_t)o] = 1;
-                fill.push_back(o);
-                stack.push_back(o);
+                if (o < 0) continue;
+                const Region* N = nullptr;
+                if (grow[(std::size_t)o]) {
+                    N = &T;
+                } else {
+                    const int ow = owner[(std::size_t)o];
+                    if (ow < 0 || ow >= nAcc || ow == chip || dead[(std::size_t)ow]) continue;
+                    N = &work.accepted[(std::size_t)ow];
+                }
+                if (!(N->maxVertexDev <= tau) && !N->ringCertified) continue;
+                if (N != &T && N->type == SurfType::Torus) continue;
+                bool all = true;
+                for (int kk = 0; kk < 3 && all; ++kk)
+                    all = certSurfaceDev(*N, cornerOf(mv, t, kk)) <= tau;
+                if (all) return true;
             }
+            return false;
+        };
+        const std::vector<char> grow0 = grow;
+        std::vector<int> fill, entered;
+        for (;;) {
+            grow = grow0;
+            fill.clear();
+            entered.clear();
+            std::vector<int> stack = seeds;
+            while (!stack.empty()) {
+                const int t = stack.back();
+                stack.pop_back();
+                for (int k = 0; k < 3; ++k) {
+                    const int o = across(t, k);
+                    if (o < 0 || grow[(std::size_t)o] || withheld[(std::size_t)o]) continue;
+                    const int ow = owner[(std::size_t)o];
+                    if (ow >= 0 && !(ow < nAcc && enter[(std::size_t)ow] && !dead[(std::size_t)ow]))
+                        continue;
+                    if (!onTorus(T, o)) continue;
+                    grow[(std::size_t)o] = 1;
+                    fill.push_back(o);
+                    stack.push_back(o);
+                    if (ow >= 0) entered.push_back(ow);
+                }
+            }
+            std::sort(entered.begin(), entered.end());
+            entered.erase(std::unique(entered.begin(), entered.end()), entered.end());
+            bool again = false;
+            for (int ri : entered) {
+                for (int t : work.accepted[(std::size_t)ri].tris) {
+                    if (t < 0 || t >= nTri || grow[(std::size_t)t] || onCertAcross(t, ri)) continue;
+                    if (diag)
+                        std::fprintf(stderr,
+                                     "DIAG_REL_TORUS_HOLD region=%d into=%d tri=%d why=no-certified-"
+                                     "neighbour\n",
+                                     ri, s, t);
+                    enter[(std::size_t)ri] = 0;
+                    again = true;
+                    break;
+                }
+            }
+            if (!again) break;
         }
         if (nChips == 0 && fill.empty()) continue;
+        // (c) A chip the fill entered dissolves; what the fill did not take of
+        // it is released (owned by no region).
+        {
+            for (int ri : entered) {
+                const Region& R = work.accepted[(std::size_t)ri];
+                int nStolen = 0, nReleased = 0;
+                for (int t : R.tris) {
+                    if (t < 0 || t >= nTri) continue;
+                    if (grow[(std::size_t)t]) {
+                        ++nStolen;
+                        continue;
+                    }
+                    owner[(std::size_t)t] = -1;
+                    ++nReleased;
+                    if (diag) {
+                        double dv = 0.0;
+                        for (int k = 0; k < 3; ++k)
+                            dv = std::max(dv, torusSurfaceDev(T, cornerOf(mv, t, k)));
+                        std::fprintf(stderr,
+                                     "DIAG_REL_TORUS_RELEASE region=%d into=%d tri=%d "
+                                     "maxDevTau=%.4f\n",
+                                     ri, s, t, dv / tau);
+                    }
+                }
+                dead[(std::size_t)ri] = 1;
+                if (diag)
+                    std::fprintf(stderr,
+                                 "DIAG_REL_ROB stage=torusgrow region=%d into=%d radius=%.9g "
+                                 "devTau=%.9g nTri=%zu stolen=%d released=%d dVolStored=%.9g\n",
+                                 ri, s, R.radius, R.maxVertexDev / tau, R.tris.size(), nStolen,
+                                 nReleased, R.dVolPredicted);
+            }
+        }
         for (int t : fill) {
             owner[(std::size_t)t] = s;
             claimedFill.push_back(t);

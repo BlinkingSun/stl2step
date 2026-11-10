@@ -165,6 +165,49 @@ inline bool robbableUncertified(const Region& r, double tau) {
            r.type == SurfType::Cylinder && !r.ringCertified && r.maxVertexDev > tau;
 }
 
+// F-3 (D-fc-4.12) with D-gid-8.19. An OPEN chain between torus T and a partner
+// that holds T's tangent v-iso (torusPlaneContactCircle /
+// torusCylinderContactCircle) takes that circle as its edge. A partial torus
+// takes it on the partner's hold alone. A closed torus takes it only when T
+// is certified, one cap of T is the D-gid-5.15 mesh polyline (the facets its
+// τ-preimage left interrupt that rim, so the chains there are open), and every
+// chain vertex is within τ of the circle: chainDev is their largest distance
+// to it, < 0 when not measured.
+inline bool openChainTakesTorusContact(const Region& T, double tau, double chainDev) {
+    if (!T.closed360) return true;
+    return T.meshPolylineCap && anchorCertified(tau, T.maxVertexDev) && chainDev >= 0.0 &&
+           chainDev <= tau;
+}
+
+// D-fc-4.3. A dissolved region leaves the accepted list (the sphere-corner
+// stage's compaction, refit_relational_sphere.cpp). Indices into it -- a
+// chamfer cone's or a torus blend's neighbour, a pending torus's absorbed
+// regions -- follow the regions that stay; a dissolved slot clears the link.
+inline void compactDissolved(SegmentWork& work, const std::vector<int>& dissolved) {
+    if (dissolved.empty()) return;
+    const int nAcc = (int)work.accepted.size();
+    std::vector<char> gone((std::size_t)nAcc, 0);
+    for (int ai : dissolved)
+        if (ai >= 0 && ai < nAcc) gone[(std::size_t)ai] = 1;
+    std::vector<int> newIdx((std::size_t)nAcc, -1);
+    std::vector<Region> keep;
+    keep.reserve((std::size_t)nAcc);
+    for (int i = 0; i < nAcc; ++i) {
+        if (gone[(std::size_t)i]) continue;
+        newIdx[(std::size_t)i] = (int)keep.size();
+        keep.push_back(std::move(work.accepted[(std::size_t)i]));
+    }
+    for (Region& rg : keep) {
+        const bool nbr = rg.origin == Origin::ChamferCone || rg.origin == Origin::TorusBlend;
+        if (!nbr || rg.filletNbrA < 0 || rg.filletNbrA >= nAcc) continue;
+        rg.filletNbrA = newIdx[(std::size_t)rg.filletNbrA];
+    }
+    for (TorusPendingReclaim& pack : work.torusPending)
+        for (int& ai : pack.reclaimAccIdx)
+            if (ai >= 0 && ai < nAcc) ai = newIdx[(std::size_t)ai];
+    work.accepted.swap(keep);
+}
+
 // D-fc-4.3 with D-fc-1.6.10. A prior strip the band robs dissolves at its commit,
 // and a strip an earlier band dissolved holds no triangle: neither is a blend
 // partner at a corner of the band. robs is sorted.

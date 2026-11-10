@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <numeric>
@@ -2405,6 +2406,234 @@ bool commitPlanesA3(const MeshView& mv, const SegmentParams&, const DerivedTols&
     if (p1DiagOn())
         std::fprintf(stderr, "A3: committed=%zu island-skip=%d areaMin=%.5g\n",
                      work.accepted.size(), nIsland, areaMin);
+    sortRegions(work.accepted);
+    return true;
+}
+
+// D-gid-8.2 (gz-capown) -- ONLY A LATERAL FACET CAN BE PART OF A WALL.
+//
+// A cap triangle can have all three vertices on the rim circle, so the vertex
+// test of a cylinder (every vertex within tau) passes on it although its facet
+// normal is parallel to the axis, a normal no point of a cylinder has. The
+// law-band absorb (D-130-12), the same-surface islands (D-130-13(2)), the F1
+// island absorb (D-fc-6.1(d)) and the union already refuse such a triangle with
+// the B1 member quantity |n . a| >= sin(thetaSharp). Two entries do not: the
+// law-band strip growth (a one-facet cap strip whose vertices are rim vertices
+// leaves the band's chain law unchanged) and the relational-extrude membership,
+// whose section-ear rule (fewer than two axial levels within tau) does not see
+// a cap plane that is not exactly perpendicular to the strip's axis. This pass
+// applies the same law once, to every committed cylinder, after every stage that
+// commits one (after A3 and the torus same-surface growth, before D):
+//   * a cylinder region does not own a triangle with |n . a| >= sin(thetaSharp)
+//     (n = facet normal, a = the region's own axis);
+//   * each edge-connected set of such triangles of one cylinder moves, whole,
+//     to the ONE edge-adjacent committed plane that certifies it: the plane is
+//     tau-certified (anchorCertified: maxVertexDev <= tau) and every vertex
+//     of every triangle of the set lies within tau of that plane as it stands
+//     (no refit). No plane, an uncertified plane, a vertex off it, or two
+//     planes that qualify: the set stays where it is (refused, never split);
+//   * heal-not-revert: once its caps are gone the cylinder builds against the
+//     surfaces across its lateral triangles, so no cap set of a cylinder moves
+//     while any of those surfaces misses its own tau certificate (maxVertexDev
+//     > tau and not ringCertified). Measured (S29_hex_law): a released corner
+//     strip shipped its contact generator onto an uncertified wall cylinder
+//     2995 tau off it; that pcurve fell back to a projection outside the wall's
+//     u window, a 2*pi jump in the wire, and the wall face closed on its
+//     complement (raw shell volume -137043).
+// The cylinder keeps its fit and its fields: its remaining triangles are a
+// subset of a certified set on the same surface, and stage D recomputes its
+// prediction from what it owns. The plane keeps its fit; its deviation, side
+// and prediction are measured again over what it then owns. Thresholds:
+// tauOf(mv) = 2q and sin(tol.thetaSharp); nothing else.
+bool releaseCapTriangles(const MeshView& mv, const DerivedTols& tol, SegmentWork& work) {
+    // tauOf(mv) (D-fc-1.6(1)), written out: a P1 TU includes no relational
+    // header (D5.3), as refit_chains.cpp's F1 absorb does.
+    const double tau = (mv.quantFloor > 0.0) ? 2.0 * mv.quantFloor : 0.0;
+    if (!(tau > 0.0) || mv.nTri == 0 || !mv.triEdges) return true;
+    const int nTri = static_cast<int>(mv.nTri);
+    const double latBound = std::sin(tol.thetaSharp);
+    const char* dv = std::getenv("STL2STEP_DIAG_CAPOWN");
+    const bool diag = dv && dv[0] && dv[0] != '0';
+    std::vector<int> owner(static_cast<size_t>(nTri), -1);
+    for (size_t ai = 0; ai < work.accepted.size(); ++ai)
+        for (int t : work.accepted[ai].tris)
+            if (t >= 0 && t < nTri) owner[static_cast<size_t>(t)] = static_cast<int>(ai);
+    const EdgeAdj ea = buildEdgeAdj(mv);
+    auto across = [&](int t, int s) -> int {
+        const int e = mv.triEdges[t][s];
+        return ea.tri[e][0] == t ? ea.tri[e][1] : ea.tri[e][0];
+    };
+    auto planeDev = [&](const Region& pl, const gp_XYZ& v) {
+        const gp_XYZ n = pl.ax.Direction().XYZ();
+        return std::abs((v - pl.ax.Location().XYZ()).Dot(n));
+    };
+    struct Move {
+        int from = -1, to = -1;
+        std::vector<int> tris;
+    };
+    std::vector<Move> moves;
+    int nCap = 0, nMoved = 0, nRefused = 0;
+    for (size_t ci = 0; ci < work.accepted.size(); ++ci) {
+        const Region& cyl = work.accepted[ci];
+        if (cyl.type != SurfType::Cylinder) continue;
+        const gp_XYZ a = cyl.ax.Direction().XYZ();
+        std::vector<char> isCap(static_cast<size_t>(nTri), 0);
+        std::vector<int> caps;
+        for (int t : cyl.tris) {
+            if (t < 0 || t >= nTri) continue;
+            const gp_Dir nd = triNormalLocal(mv, t);
+            if (std::abs(gp_XYZ(nd.X(), nd.Y(), nd.Z()).Dot(a)) < latBound) continue;
+            isCap[static_cast<size_t>(t)] = 1;
+            caps.push_back(t);
+        }
+        if (caps.empty()) continue;
+        nCap += static_cast<int>(caps.size());
+        std::sort(caps.begin(), caps.end());
+        const bool allCap = caps.size() == cyl.tris.size();
+        // The surfaces the cylinder closes against once its caps are gone: the
+        // owners across the edges of its lateral triangles. A surface that does
+        // not hold its own tau certificate cannot carry the contact a buildable
+        // cylinder constructs against it (D-fc-1.6.5: a partner that misses tau
+        // is not a blend partner), so no cap set of this cylinder moves.
+        int uncertNbr = -1;
+        double uncertDevTau = 0.0;
+        for (int t : cyl.tris) {
+            if (t < 0 || t >= nTri || isCap[static_cast<size_t>(t)]) continue;
+            for (int s = 0; s < 3; ++s) {
+                const int u = across(t, s);
+                if (u < 0) continue;
+                const int ow = owner[static_cast<size_t>(u)];
+                if (ow < 0 || ow == static_cast<int>(ci)) continue;
+                const Region& nb = work.accepted[static_cast<size_t>(ow)];
+                if (nb.maxVertexDev <= tau || nb.ringCertified) continue;
+                if (nb.maxVertexDev > uncertDevTau) {
+                    uncertDevTau = nb.maxVertexDev;
+                    uncertNbr = nb.tris.empty() ? -1 : nb.tris.front();
+                }
+            }
+        }
+        std::vector<char> seen(static_cast<size_t>(nTri), 0);
+        for (int t0 : caps) {
+            if (seen[static_cast<size_t>(t0)]) continue;
+            std::vector<int> comp, stk{t0};
+            seen[static_cast<size_t>(t0)] = 1;
+            while (!stk.empty()) {
+                const int x = stk.back();
+                stk.pop_back();
+                comp.push_back(x);
+                for (int s = 0; s < 3; ++s) {
+                    const int u = across(x, s);
+                    if (u < 0 || !isCap[static_cast<size_t>(u)] || seen[static_cast<size_t>(u)])
+                        continue;
+                    seen[static_cast<size_t>(u)] = 1;
+                    stk.push_back(u);
+                }
+            }
+            std::sort(comp.begin(), comp.end());
+            std::vector<int> cands;
+            for (int x : comp)
+                for (int s = 0; s < 3; ++s) {
+                    const int u = across(x, s);
+                    if (u < 0) continue;
+                    const int ow = owner[static_cast<size_t>(u)];
+                    if (ow < 0 || ow == static_cast<int>(ci)) continue;
+                    if (work.accepted[static_cast<size_t>(ow)].type != SurfType::Plane) continue;
+                    cands.push_back(ow);
+                }
+            std::sort(cands.begin(), cands.end());
+            cands.erase(std::unique(cands.begin(), cands.end()), cands.end());
+            int to = -1, nOk = 0;
+            double bestDev = -1.0;
+            const char* why = cands.empty() ? "no-plane" : "vertex-off";
+            for (int ow : cands) {
+                const Region& pl = work.accepted[static_cast<size_t>(ow)];
+                if (!(pl.maxVertexDev <= tau)) {  // anchorCertified(tau, maxVertexDev)
+                    if (std::strcmp(why, "vertex-off") == 0 && nOk == 0) why = "plane-uncert";
+                    continue;
+                }
+                double dev = 0.0;
+                for (int x : comp)
+                    for (int k = 0; k < 3; ++k) dev = std::max(dev, planeDev(pl, localTriVert(mv, x, k)));
+                if (dev > tau) continue;
+                ++nOk;
+                to = ow;
+                bestDev = dev;
+            }
+            if (allCap) why = "all-cap";
+            else if (nOk > 1) why = "ambiguous";
+            else if (nOk == 1 && uncertNbr >= 0) why = "uncert-partner";
+            else if (nOk == 1) why = "move";
+            const bool take = !allCap && nOk == 1 && uncertNbr < 0;
+            if (take) {
+                Move m;
+                m.from = static_cast<int>(ci);
+                m.to = to;
+                m.tris = comp;
+                moves.push_back(std::move(m));
+                nMoved += static_cast<int>(comp.size());
+            } else {
+                nRefused += static_cast<int>(comp.size());
+            }
+            if (diag) {
+                double area = 0.0;
+                for (int x : comp) area += triAreaLocal(mv, x);
+                std::fprintf(stderr,
+                             "DIAG_CAPOWN_RELEASE cyl=%d origin=%d R=%.6g cylTri=%zu set=%zu "
+                             "area=%.6g t0=%d planes=%zu ok=%d to=%d planeDevTau=%.4g "
+                             "uncertNbr=%d uncertDevTau=%.4g why=%s\n",
+                             cyl.tris.empty() ? -1 : cyl.tris.front(), static_cast<int>(cyl.origin),
+                             cyl.radius, cyl.tris.size(), comp.size(), area, comp.front(),
+                             cands.size(), nOk,
+                             take ? (work.accepted[static_cast<size_t>(to)].tris.empty()
+                                         ? -1
+                                         : work.accepted[static_cast<size_t>(to)].tris.front())
+                                  : -1,
+                             take ? bestDev / tau : -1.0, uncertNbr, uncertDevTau / tau, why);
+            }
+        }
+    }
+    if (diag && nCap > 0)
+        std::fprintf(stderr, "DIAG_CAPOWN_RELEASE_SUM nTri=%d capTris=%d moved=%d refused=%d\n",
+                     nTri, nCap, nMoved, nRefused);
+    if (moves.empty()) return true;
+    std::vector<char> touchedPlane(work.accepted.size(), 0);
+    for (const Move& m : moves) {
+        Region& from = work.accepted[static_cast<size_t>(m.from)];
+        Region& to = work.accepted[static_cast<size_t>(m.to)];
+        std::vector<int> keep;
+        keep.reserve(from.tris.size());
+        std::set_difference(from.tris.begin(), from.tris.end(), m.tris.begin(), m.tris.end(),
+                            std::back_inserter(keep));
+        if (!std::is_sorted(from.tris.begin(), from.tris.end())) {
+            std::vector<int> sorted = from.tris;
+            std::sort(sorted.begin(), sorted.end());
+            keep.clear();
+            std::set_difference(sorted.begin(), sorted.end(), m.tris.begin(), m.tris.end(),
+                                std::back_inserter(keep));
+        }
+        from.tris = std::move(keep);
+        to.tris.insert(to.tris.end(), m.tris.begin(), m.tris.end());
+        std::sort(to.tris.begin(), to.tris.end());
+        to.tris.erase(std::unique(to.tris.begin(), to.tris.end()), to.tris.end());
+        touchedPlane[static_cast<size_t>(m.to)] = 1;
+    }
+    for (size_t pi = 0; pi < work.accepted.size(); ++pi) {
+        if (!touchedPlane[pi]) continue;
+        Region& pl = work.accepted[pi];
+        double sumSq = 0.0, maxD = 0.0;
+        int nPts = 0;
+        for (int t : pl.tris)
+            for (int k = 0; k < 3; ++k) {
+                const double d = planeDev(pl, localTriVert(mv, t, k));
+                maxD = std::max(maxD, d);
+                sumSq += d * d;
+                ++nPts;
+            }
+        pl.maxVertexDev = maxD;
+        pl.rmsVertexDev = nPts > 0 ? std::sqrt(sumSq / nPts) : 0.0;
+        pl.outwardNormal = computeOutwardPlane(mv, pl.tris, pl.ax);
+        pl.dVolPredicted = dVolPlaneRegion(mv, pl.tris, pl.ax);
+    }
     sortRegions(work.accepted);
     return true;
 }

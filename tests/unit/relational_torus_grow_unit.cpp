@@ -3,8 +3,12 @@
 // vertex, a one-station cap chord and a withheld triangle stay out; (b) an
 // uncertified B1 chip lying wholly on the torus becomes one face with the
 // unclaimed tau-triangles joining it, a certified or off-surface chip stays;
-// the heal-not-revert helpers name a grown band's growth first. Generic
-// quarter-round geometry only; no training mesh.
+// the heal-not-revert helpers name a grown band's growth first; (c) the fill
+// enters an uncertified junction chip triangle by triangle when its off-torus
+// triangle lies on a certified plane across an edge, the chip dissolves and that
+// triangle is released; an uncertified neighbour, no neighbour or a withheld
+// triangle keeps the chip whole (D-gid-8.4). Generic quarter-round geometry
+// only; no training mesh.
 // SPDX-License-Identifier: MIT
 
 #include "mesh_harness.hpp"
@@ -307,6 +311,144 @@ static void caseChipOff() {
     expect(tori(p.work).size() == 1 && cyl == 1, "chip off: a chip with a vertex off tau stays");
 }
 
+// (c) D-gid-8.4 fixtures. The quarter round ends at station kRows tangent to the
+// plane z = kZ0 - kRmin; a skirt ring at rho = kRmaj + kSkirt on that plane
+// gives two triangles per sector that lie on the plane and are off the torus.
+constexpr double kSkirt = 0.5;
+
+static std::vector<std::array<int, 2>> addSkirt(Part& p) {
+    std::vector<int> P;
+    for (int i = 0; i < kCols; ++i) {
+        const double th = 2.0 * kPi * (double)i / (double)kCols;
+        const double rho = kRmaj + kSkirt;
+        P.push_back(p.mesh.add(gp_XYZ(rho * std::cos(th), rho * std::sin(th), kZ0 - kRmin)));
+    }
+    std::vector<std::array<int, 2>> sk;
+    const auto& b = p.ring[(std::size_t)kRows];
+    for (int i = 0; i < kCols; ++i) {
+        const int i1 = (i + 1) % kCols;
+        const int s0 = p.mesh.addTri(b[(std::size_t)i], P[(std::size_t)i], b[(std::size_t)i1]);
+        const int s1 = p.mesh.addTri(b[(std::size_t)i1], P[(std::size_t)i], P[(std::size_t)i1]);
+        sk.push_back({s0, s1});
+    }
+    return sk;
+}
+
+static Region skirtPlane(const std::vector<int>& tris, double maxDev) {
+    Region r = plane(tris);
+    r.ax = gp_Ax3(gp_Pnt(0, 0, kZ0 - kRmin), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    r.maxVertexDev = maxDev;
+    return r;
+}
+
+// Band on sectors 0..7; an uncertified chip (100 tau) = torus sectors 8..13 plus
+// the skirt triangle s0 of sector 12 (on the plane, off the torus); a plane owns
+// every other skirt triangle. Torus sectors 14..23 are unclaimed.
+struct Junction {
+    Part p;
+    int jtri = -1;
+};
+static Junction junction(double planeDev) {
+    Junction j;
+    j.p = quarterRound();
+    const auto sk = addSkirt(j.p);
+    j.p.mesh.finish();
+    j.jtri = sk[12][0];
+    std::vector<int> chipTris = sectors(j.p, 8, 13), planeTris;
+    chipTris.push_back(j.jtri);
+    std::sort(chipTris.begin(), chipTris.end());
+    for (const auto& pr : sk)
+        for (int t : pr)
+            if (t != j.jtri) planeTris.push_back(t);
+    std::sort(planeTris.begin(), planeTris.end());
+    j.p.work.accepted.push_back(band(sectors(j.p, 0, 7)));
+    j.p.work.accepted.push_back(chip(chipTris, 100.0 * 2e-6));
+    j.p.work.accepted.push_back(skirtPlane(planeTris, planeDev));
+    return j;
+}
+
+static int countOrigin(const SegmentWork& w, Origin o) {
+    int n = 0;
+    for (const Region& r : w.accepted)
+        if (r.origin == o) ++n;
+    return n;
+}
+
+// The fill enters the junction chip, takes its torus triangles; the skirt
+// triangle is within tau of the certified plane across its edge and is released.
+static void caseChipJunction() {
+    const double tau = 2e-6;
+    Junction j = junction(0.0);
+    MeshView mv = j.p.mesh.view();
+    SegmentParams sp{};
+    expect(claimTorusSameSurface(mv, sp, j.p.work), "junction: stage returns true");
+    const auto ts = tori(j.p.work);
+    expect(ts.size() == 1, "junction: one torus, no new piece");
+    if (ts.size() != 1) return;
+    std::vector<int> got = ts[0]->tris;
+    std::sort(got.begin(), got.end());
+    expect(got == sectors(j.p, 0, kCols - 1), "junction: the band takes every torus triangle");
+    expect(ts[0]->maxVertexDev <= tau && ts[0]->radius == kRmaj && ts[0]->radius2 == kRmin,
+           "junction: band within tau, surface unchanged");
+    expect(countOrigin(j.p.work, Origin::CylGrow) == 0, "junction: the chip dissolves");
+    bool owned = false;
+    for (const Region& r : j.p.work.accepted) owned = owned || has(r.tris, j.jtri);
+    expect(!owned, "junction: the off-torus triangle is released to no region");
+    expect(countOrigin(j.p.work, Origin::PlaneGrow) == 1, "junction: the plane is untouched");
+}
+
+// Same, but the plane does not certify (3 tau): no certified surface explains the
+// skirt triangle, so the chip stays whole and the band cannot pass it.
+static void caseChipJunctionUncertified() {
+    Junction j = junction(3.0 * 2e-6);
+    MeshView mv = j.p.mesh.view();
+    SegmentParams sp{};
+    claimTorusSameSurface(mv, sp, j.p.work);
+    const auto ts = tori(j.p.work);
+    int cylTris = -1;
+    for (const Region& r : j.p.work.accepted)
+        if (r.origin == Origin::CylGrow) cylTris = (int)r.tris.size();
+    expect(cylTris == 6 * 2 * kRows + 1, "junction uncertified: the chip stays whole");
+    bool chipTaken = false;
+    for (const Region* t : ts) chipTaken = chipTaken || has(t->tris, j.p.tri[0][8][0]);
+    expect(!chipTaken, "junction uncertified: no chip triangle joins the torus");
+}
+
+// A chip whose off-torus triangles have no certified neighbour (one vertex 10 tau
+// off, inside the chip) stays whole.
+static void caseChipOffNoNeighbour() {
+    const double tau = 2e-6;
+    Part p = quarterRound(3, 12, 10.0 * tau);
+    p.mesh.finish();
+    p.work.accepted.push_back(band(sectors(p, 0, 7)));
+    p.work.accepted.push_back(chip(sectors(p, 8, 13), 100.0 * tau));
+    p.work.accepted.push_back(plane(sectors(p, 14, 23)));
+    MeshView mv = p.mesh.view();
+    SegmentParams sp{};
+    claimTorusSameSurface(mv, sp, p.work);
+    const auto ts = tori(p.work);
+    expect(ts.size() == 1 && ts[0]->tris.size() == 8u * 2u * kRows &&
+               countOrigin(p.work, Origin::CylGrow) == 1,
+           "off no neighbour: the chip stays whole, the band does not grow");
+}
+
+// (c) under U-3: the junction chip with a withheld triangle is not entered.
+static void caseChipJunctionWithheld() {
+    Junction j = junction(0.0);
+    MeshView mv = j.p.mesh.view();
+    SegmentParams sp{};
+    sp.torusWithheldTris = {j.p.tri[5][13][1]};
+    claimTorusSameSurface(mv, sp, j.p.work);
+    const auto ts = tori(j.p.work);
+    int cylTris = -1;
+    for (const Region& r : j.p.work.accepted)
+        if (r.origin == Origin::CylGrow) cylTris = (int)r.tris.size();
+    expect(cylTris == 6 * 2 * kRows + 1, "junction withheld: the chip stays whole");
+    bool chipTaken = false;
+    for (const Region* t : ts) chipTaken = chipTaken || has(t->tris, j.p.tri[0][8][0]);
+    expect(!chipTaken, "junction withheld: the band does not enter the chip");
+}
+
 // The stage does nothing without a certified torus (an uncertified torus counts as none).
 static void caseNoCert() {
     const double tau = 2e-6;
@@ -346,6 +488,10 @@ int main() {
     caseWithheld();
     caseChipPiece();
     caseChipOff();
+    caseChipJunction();
+    caseChipJunctionUncertified();
+    caseChipOffNoNeighbour();
+    caseChipJunctionWithheld();
     caseNoCert();
     caseFailedNames();
     if (gFail) std::fprintf(stderr, "relational_torus_grow_unit: %d failure(s)\n", gFail);

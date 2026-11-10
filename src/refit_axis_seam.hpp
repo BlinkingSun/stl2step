@@ -2,7 +2,9 @@
 // family -- closed-360 cylinders, chamfer cones, closed tori -- shares one frame
 // XDirection, and every closed rim of the family starts at the exact circle
 // point on that half-plane, so every seam of the family is one generator /
-// meridian through exact rim points. Every threshold is tau = 2q.
+// meridian through exact rim points. D-gid-8.13: a closed-360 cylinder and the
+// closed chamfer cones sharing its closed rims form the same kind of family when
+// a cone's two rims stagger (coneRimsStagger). Every threshold is tau = 2q.
 // SPDX-License-Identifier: MIT
 
 #ifndef STL2STEP_REFIT_AXIS_SEAM_HPP
@@ -135,6 +137,35 @@ inline double rimSeamOffset(const gp_Ax1& axis, const gp_Dir& refX, const std::v
     const gp_Vec d(axis.Location(), pts[(std::size_t)k]);
     const double x = d.Dot(h.x), y = d.Dot(h.y);
     return 2.0 * std::hypot(x, y) * std::sin(0.5 * std::fabs(std::atan2(y, x)));
+}
+
+// D-gid-8.13. The signed azimuth, about the family axis from the half-plane, of a
+// rim's azimuth-nearest point: the point each face would stand its seam on. False
+// when the rim has no point off the axis.
+inline bool rimSeamAzimuth(const gp_Ax1& axis, const gp_Dir& refX, const std::vector<gp_Pnt>& pts,
+                           double& phi) {
+    const gp_Circ unit(gp_Ax2(axis.Location(), axis.Direction()), 1.0);
+    SeamHalfPlane h;
+    if (!seamHalfPlaneOn(unit, refX, h)) return false;
+    const int k = nearestToSeamHalfPlane(unit, h, pts);
+    if (k < 0) return false;
+    const gp_Vec d(axis.Location(), pts[(std::size_t)k]);
+    const double x = d.Dot(h.x), y = d.Dot(h.y);
+    if (!(std::hypot(x, y) > Precision::Confusion())) return false;
+    phi = std::atan2(y, x);
+    return true;
+}
+
+// D-gid-8.13. A cone's two rims stagger when their seam points stand further apart
+// in azimuth than the cone's own rim-start tolerance, tau / R_lo: the angle within
+// which the builder binds a rim's start to the seam with the certified circle-on-cone
+// pcurve. Beyond it a seam corner carries the gap in its vertex tolerance (D-fc-4.6 F8).
+inline bool coneRimsStagger(double phiA, double phiB, double rLo, double tau) {
+    if (!(tau > 0.0) || !(rLo > 0.0)) return false;
+    const double twoPi = 2.0 * std::acos(-1.0);
+    double d = std::fmod(std::fabs(phiA - phiB), twoPi);
+    d = std::min(d, twoPi - d);
+    return d > tau / rLo;
 }
 
 // The builder builds closed-360 cylinders first, then regions in id order. A rim
@@ -620,8 +651,25 @@ bool healInvalidPartialTrimChart(TopoDS_Face& face, double cap, double tau = 0);
 // measured 3D distance from the vertex to the crossing, and only when that
 // distance is <= tau. A larger distance is refused, not clamped. The saved
 // tolerance is restored unless BRepCheck then passes. True only when an
-// invalid face became valid.
-bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau);
+// invalid face became valid. `allowReverse` false: a face that passes only
+// with its orientation flipped is refused and restored -- a face that is
+// already in a shell keeps the orientation the shell gave it.
+bool raiseMeasuredCornerTol(TopoDS_Face& face, double tau, bool allowReverse = true);
+
+// D-gid-8.23. The D-fc-7.10 corner measure for a partial-cylinder face that
+// is already in a closed shell and fails BRepCheck there. A face that BRepCheck
+// passed when it was built can fail after the shell's forced SameParameter:
+// that call re-measures every edge by sampling and may lower a cap edge's
+// tolerance below the bound the face was built with, and a corner whose two
+// pcurves cross just outside 1.1 times the vertex tolerance then fails the
+// checker's self-intersection test. The heal is the D-fc-7.10 fallback,
+// unchanged: the shared corner's vertex tolerance becomes the MEASURED
+// distance from the vertex to the crossing, only when that distance is <= tau
+// (tauOf, 2q), and the face keeps the orientation the shell gave it. No
+// pcurve, edge tolerance or orientation is written. A valid face, a face whose
+// surface is not a cylinder, or a refused measure leaves the face exactly as
+// it was. True only when an invalid face became valid.
+bool healShellPartialCylCorner(TopoDS_Face& face, double tau);
 
 // D-fc-7.16. Either trim bound lies within Precision::PConfusion() of the
 // periodic seam (0 and 2π are the same angle). The tolerance is OCCT's

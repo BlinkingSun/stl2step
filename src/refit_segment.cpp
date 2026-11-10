@@ -134,10 +134,31 @@ bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTol
     if (!claimAnchoredRounds(mv, p, tol, work)) return false;
     // D-fc-5.11 F8: a corner of three certified rounds is a sphere.
     if (!claimSphereCorners(mv, p, tol, work)) return false;
+    // D-gid-8.4: late, the wall between two certified coaxial rims.
+    if (!claimRingFrustums(mv, p, tol, work)) return false;
+    // D-gid-8.18: a drafted wall about a certified plane normal, then the round
+    // that takes it as its donor. The cone's axis is only a direction from a
+    // plane: it runs after every family a certified round or donor anchors
+    // (stage T, H1, the anchored rounds, the sphere corners), on what they
+    // left, so it never takes the first row of a corner sphere or a torus
+    // band; and before A3, which would commit its chord quads as planes.
+    if (!claimDraftedCones(mv, p, tol, work)) return false;
+    if (!claimAnchoredRounds(mv, p, tol, work, true)) return false;
 
     if (!commitPlanesA3(mv, p, tol, work)) return false;
     // D-gid-7.12: a certified torus grows over its own surface on what A3 left.
     if (!claimTorusSameSurface(mv, p, work)) return false;
+    // D-gid-8.3 (R-k31-1): a corner whose torus anchor that stage grew or made
+    // (a piece of a ring split at rib junctions) sees it now. The unchanged
+    // relation and certificate run again on what is still free (the D-gid-5.17
+    // re-run pattern). The re-run is for the anchors that stage made, so it
+    // runs only when a torus grew.
+    {
+        bool grew = false;
+        for (const Region& r : work.accepted) grew = grew || !r.torusGrowTris.empty();
+        if (grew && !claimSphereCorners(mv, p, tol, work)) return false;
+    }
+    if (!releaseCapTriangles(mv, tol, work)) return false;
 
     TorusTopologySnapshot torusRevertSnap;
     bool torusRevertValidSnap = false;
@@ -148,7 +169,9 @@ bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTol
         SegmentWork revW = preTorus;
         // The pre-T topology keeps the sphere corners of its own rounds.
         if (!claimSphereCorners(mv, p, tol, revW)) return false;
+        if (!claimRingFrustums(mv, p, tol, revW)) return false;
         if (!commitPlanesA3(mv, p, tol, revW)) return false;
+        if (!releaseCapTriangles(mv, tol, revW)) return false;
         RegionSet revRs;
         revRs.compRoot = out.compRoot;
         if (!buildTopologyD(mv, p, tol, revW, revRs)) return false;

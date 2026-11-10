@@ -1852,6 +1852,15 @@ Result Converter::run() {
                                      nShip, sSwept, sPred, sSwept - sPred, sArea, sArea * tauL);
                     }
                 }
+                // D-gid-8.2 diag only: the census of the build this component ships.
+                if (refit::capOwnDiagEnabled()) {
+                    std::string coLines;
+                    refit::capOwnTake(root, coLines);
+                    static std::mutex coMu;
+                    std::lock_guard<std::mutex> coLk(coMu);
+                    if (ok) std::fputs(coLines.c_str(), stderr);
+                    else std::fprintf(stderr, "DIAG_CAPOWN_COMP comp=%d path=reverted\n", root);
+                }
                 if (!ok) {
                     if (classBRevertNamed)
                         warn("smooth: analytic rebuild reverted on one component "

@@ -6,6 +6,12 @@
 #ifndef STL2STEP_REFIT_EDGE_BOUND_HPP
 #define STL2STEP_REFIT_EDGE_BOUND_HPP
 
+#include <algorithm>
+#include <vector>
+
+#include <TopExp.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -86,6 +92,75 @@ inline bool reverseInsideOutWire(TopoDS_Face& f) {
     } catch (const Standard_Failure&) {
         return false;
     }
+}
+
+// D-gid-8.28. The tolerance an edge carries into the shell's forced
+// SameParameter is the one the builder wrote for it (the binder's exact
+// curve-on-surface bound, a measured seam gap, ... but also a placeholder such
+// as the sewing tolerance a pcurve is bound with). SameParameter re-measures the
+// edge on its own samples and can write less than the edge's exact deviation,
+// and a valid face can then fail its wire check (D-fc-6.9: a tolerance below
+// its measured value is forbidden). One row per edge TShape: `before` is the
+// tolerance it carried in, `after` the one SameParameter left, `kept` the one
+// the edge leaves with (filled by keepSnapshotEdgeTolerances).
+struct EdgeTolRow {
+    TopoDS_Edge e;
+    double before = 0.0;
+    double after = 0.0;
+    double kept = 0.0;
+    double measured = -1.0;
+};
+
+inline std::vector<EdgeTolRow> snapshotEdgeTolerances(const TopoDS_Shape& s) {
+    std::vector<EdgeTolRow> rows;
+    if (s.IsNull()) return rows;
+    TopTools_IndexedMapOfShape emap;
+    TopExp::MapShapes(s, TopAbs_EDGE, emap);
+    rows.reserve((size_t)emap.Extent());
+    for (int i = 1; i <= emap.Extent(); i++) {
+        const TopoDS_Edge& e = TopoDS::Edge(emap(i));
+        const double t = BRep_Tool::Tolerance(e);
+        rows.push_back({e, t, t, t, -1.0});
+    }
+    return rows;
+}
+
+// After the shell's SameParameter, every edge SameParameter lowered keeps
+//   max(its tolerance now, min(the tolerance it carried in, measure(e))),
+// where measure(e) is the edge's measured deviation (< 0: not measurable, the
+// edge is left as SameParameter wrote it). A measure that always returns +inf
+// keeps the carried-in tolerance itself. Tolerances only rise, never past the
+// value the edge already had; no curve, pcurve, range or vertex is touched.
+// Returns every edge SameParameter lowered, raised or not (kept == after when
+// it was not raised).
+template <class Measure>
+inline std::vector<EdgeTolRow> keepSnapshotEdgeTolerances(const std::vector<EdgeTolRow>& snap,
+                                                          Measure&& measure) {
+    std::vector<EdgeTolRow> lowered;
+    BRep_Builder B;
+    for (const EdgeTolRow& r : snap) {
+        if (r.e.IsNull()) continue;
+        const double now = BRep_Tool::Tolerance(r.e);
+        if (!(r.before > now)) continue;
+        const double m = measure(r.e);
+        const double keep = (m >= 0.0) ? std::min(r.before, m) : now;
+        if (keep > now) B.UpdateEdge(r.e, keep);
+        lowered.push_back({r.e, r.before, now, BRep_Tool::Tolerance(r.e), m});
+    }
+    return lowered;
+}
+
+// The measure the builder bounds an edge with (boundEdgesExactOnFace): the
+// exact curve-on-surface maximum on every face of `faces` that the edge bounds,
+// plus Precision::Confusion(). -1 when no face measures it.
+inline double exactEdgeDeviationOnFaces(const TopoDS_Edge& e, const TopTools_ListOfShape& faces) {
+    double m = -1.0;
+    for (TopTools_ListOfShape::Iterator it(faces); it.More(); it.Next()) {
+        if (it.Value().ShapeType() != TopAbs_FACE) continue;
+        const double d = exactEdgeDeviationOnFace(e, TopoDS::Face(it.Value()));
+        if (d > m) m = d;
+    }
+    return m;
 }
 
 }  // namespace refit

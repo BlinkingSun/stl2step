@@ -10,6 +10,7 @@
 #include <gp_Circ.hxx>
 #include <gp_XYZ.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -178,6 +179,63 @@ inline int cornerPairSeamVertex(const std::vector<int>& id0, const std::vector<c
         }
     }
     return pick;
+}
+
+// D-gid-8.4. The total-least-squares line of profile points (rho_i, z_i) about
+// an axis: through their mean, normal (nr, nz) the least-variance direction
+// (profileLineMaxResid's line). maxDev is the largest perpendicular distance,
+// which for a point in the profile half-plane is its distance to the cone (or
+// cylinder) the line revolves into. ok is false for fewer than two points, a
+// non-finite input, or a line at constant z (nr == 0): that line revolves into
+// an annulus, not a frustum.
+struct ProfileLine {
+    bool ok = false;
+    double mr = 0, mz = 0, nr = 0, nz = 0, maxDev = 0;
+    // The line's radius at axial height z.
+    double rhoAt(double z) const { return mr - (z - mz) * nz / nr; }
+};
+
+inline ProfileLine profileLine(const std::vector<double>& rho, const std::vector<double>& z) {
+    ProfileLine L;
+    const std::size_t n = rho.size();
+    if (n < 2 || z.size() != n) return L;
+    double sr = 0, sz = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        sr += rho[i];
+        sz += z[i];
+    }
+    L.mr = sr / (double)n;
+    L.mz = sz / (double)n;
+    double srr = 0, srz = 0, szz = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        const double dr = rho[i] - L.mr, dz = z[i] - L.mz;
+        srr += dr * dr;
+        srz += dr * dz;
+        szz += dz * dz;
+    }
+    const double tr = srr + szz, det = srr * szz - srz * srz;
+    const double disc = std::max(0.0, 0.25 * tr * tr - det);
+    const double lmin = 0.5 * tr - std::sqrt(disc);
+    double nr = srz, nz = lmin - srr;
+    double nm = std::hypot(nr, nz);
+    if (!(nm > 0.0)) {
+        nr = lmin - szz;
+        nz = srz;
+        nm = std::hypot(nr, nz);
+    }
+    if (!(nm > 0.0) || !std::isfinite(nm)) return L;
+    L.nr = nr / nm;
+    L.nz = nz / nm;
+    if (!(std::fabs(L.nr) > 0.0)) return L;
+    for (std::size_t i = 0; i < n; ++i)
+        L.maxDev = std::max(L.maxDev, std::fabs((rho[i] - L.mr) * L.nr + (z[i] - L.mz) * L.nz));
+    L.ok = std::isfinite(L.maxDev);
+    return L;
+}
+
+// Perpendicular distance of (rho, z) from the line.
+inline double profileLineDist(const ProfileLine& L, double rho, double z) {
+    return std::fabs((rho - L.mr) * L.nr + (z - L.mz) * L.nz);
 }
 
 }  // namespace refit

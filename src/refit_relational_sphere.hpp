@@ -63,6 +63,15 @@ struct SphereCornerFit {
 };
 SphereCornerFit sphereOfRounds(const std::array<RoundSpine, 3>& rounds, double tau);
 
+// D-gid-8.4. The same anchor sphere for a corner of two or three rounds. Two
+// certified cylinder rounds of one radius whose axes meet already fix all four
+// sphere parameters: the centre is the axes' point and the radius is theirs.
+// The tests are those of sphereOfRounds (radii within tau, the centre within
+// tau of every line spine and within tanDistTol(tau, tau) of every circle
+// spine); the anchor radius is the mean of the rounds' radii. Fewer than two
+// or more than three rounds is underdetermined.
+SphereCornerFit sphereOfRoundSet(const std::vector<RoundSpine>& rounds, double tau);
+
 // D-fc-7.3 RQ-HUB-6. Least-squares radius of a sphere whose centre is held:
 // the mean of the distances from the centre to the vertices. Empty, or a
 // non-finite distance, returns a non-finite radius (no fit).
@@ -72,6 +81,16 @@ double sphereRadiusLeastSquares(const gp_XYZ& centre, const std::vector<gp_XYZ>&
 // uses sphereCylinderContact; a circle spine uses sphereTorusContact. tol at
 // the call is tau.
 bool sphereRoundContact(const gp_XYZ& c, double r, const RoundSpine& s, double tol);
+
+// D-gid-8.3 (R-k31-2), certificate order "fewest parameters first". The
+// triangles of a cylinder region (spine `cyl`, a line) are owned by the sphere
+// (c, r) when every vertex is within tau of BOTH surfaces: the region's own
+// cylinder (five parameters) and the corner's sphere (four, its centre fixed by
+// three certified tangent rounds). Two certified surfaces then claim the same
+// triangles and the one with fewer parameters wins. False when tau is not a
+// positive finite number, the spine is a circle, or there are no triangles.
+bool sphereOutranksCylinder(const gp_XYZ& c, double r, const RoundSpine& cyl,
+                            const std::vector<std::array<gp_XYZ, 3>>& tris, double tau);
 
 // Largest distance of the points from their own least-squares plane (0 for
 // fewer than four points). HUGE_VAL when the eigensolve fails or the normal

@@ -4854,8 +4854,9 @@ bool coaxialSameRadius(const JointAxisFit& fit, std::size_t nFamily, double tau)
     return false;
 }
 
-// D-gid-7.6 / D-gid-7.15 / D-gid-7.17. The exact chord volume of a FilletStrip
-// cylinder, a tau-certified CylGrow cylinder or a torus, summed over the
+// D-gid-7.6 / D-gid-7.15 / D-gid-7.17 / D-gid-8.6 / D-gid-8.8. The exact chord
+// volume of a FilletStrip cylinder, a tau-certified or ring-certified CylGrow
+// cylinder, a torus or a tau-certified closed apex cone, summed over the
 // region's own triangles
 // (refit_band_volume.hpp): no side count, so a cylinder whose rows are not
 // equal, or whose side count the normal clustering over-counts, is not
@@ -4868,12 +4869,51 @@ bool dVolExactOfRegion(const MeshView& mv, const Region& r, double& out,
     // D-gid-7.17: a CylGrow cylinder takes the exact volume only when its own
     // vertex certificate holds (maxVertexDev <= tau). Over tau its triangles do
     // not lie on the surface, so the volume between them is not a chord gap and
-    // not a prediction; the region keeps its stage estimate.
-    const bool grownCertified = r.origin == Origin::CylGrow && std::isfinite(r.maxVertexDev) &&
-                                r.maxVertexDev <= tauOf(mv);
+    // not a prediction; the region keeps its stage estimate. D-gid-8.6: a wall
+    // that passed the ring certificate (ringCertified, D-gid-7.6) qualifies the
+    // same way: its maxVertexDev is the chord sag that certificate excuses, and
+    // its vertices lie on the surface (corners within tau, chord vertices on
+    // their chords).
+    const bool grownCertified =
+        r.origin == Origin::CylGrow &&
+        (r.ringCertified || (std::isfinite(r.maxVertexDev) && r.maxVertexDev <= tauOf(mv)));
     const bool strip = r.type == SurfType::Cylinder &&
                        (r.origin == Origin::FilletStrip || grownCertified);
     const bool torus = r.type == SurfType::Torus;
+    // D-gid-8.8: a closed cone on its own apex (a drill point; emitApexCone puts
+    // Location on the apex, radius = 0, vMax = R at the mouth, maxVertexSnap =
+    // the signed apex-to-mouth height along +Direction) whose own vertex
+    // certificate holds (maxVertexDev <= tau) takes the exact chord volume of
+    // its fan (apexConeChordTerm: the apex vertex needs no azimuth). Every other
+    // cone keeps its stage estimate.
+    const bool apexCone = r.type == SurfType::Cone && r.origin == Origin::ChamferCone &&
+                          r.closed360 && !(r.radius > 0.0) && std::isfinite(r.maxVertexDev) &&
+                          r.maxVertexDev <= tauOf(mv);
+    if (apexCone) {
+        const double h = r.maxVertexSnap, rMouth = r.vMax;
+        if (!std::isfinite(h) || !(std::fabs(h) > 0.0) || !std::isfinite(rMouth) ||
+            !(rMouth > 0.0))
+            return false;
+        const gp_XYZ ca = r.ax.Direction().XYZ();
+        const gp_XYZ c1 = r.ax.XDirection().XYZ();
+        const gp_XYZ c2 = ca.Crossed(c1);
+        const gp_XYZ apex = r.ax.Location().XYZ();
+        std::vector<int> cids = r.tris;
+        std::sort(cids.begin(), cids.end());
+        cids.erase(std::unique(cids.begin(), cids.end()), cids.end());
+        double cvol = 0.0;
+        for (int t : cids) {
+            if (t < 0 || static_cast<std::size_t>(t) >= mv.nTri) continue;
+            const int* gt = mv.tris[mv.compTris[t]];
+            cvol += apexConeChordTerm(mv.pts[gt[0]], mv.pts[gt[1]], mv.pts[gt[2]], apex, ca, c1,
+                                      c2, rMouth / h);
+        }
+        // cvol is signed by the facets' winding (out of the material): positive
+        // where the cone adds material. dVolPredicted = sigma * |exact| (D-gid-7.15).
+        if (physicalOut) *physicalOut = cvol;
+        out = (r.outwardNormal ? 1.0 : -1.0) * std::fabs(cvol);
+        return std::isfinite(out);
+    }
     if (!strip && !torus) return false;
     const gp_XYZ axis = r.ax.Direction().XYZ();
     const gp_XYZ e1 = r.ax.XDirection().XYZ();

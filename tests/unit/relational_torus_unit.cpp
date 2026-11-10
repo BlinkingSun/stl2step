@@ -868,6 +868,66 @@ static void caseContactCircle() {
     expect(!torusPlaneContactCircle(tor, top, -1.0, c), "contact: a negative tol admits nothing");
 }
 
+// D-gid-8.19: an OPEN chain of a closed torus. The certified closed torus whose
+// cap is the D-gid-5.15 mesh polyline takes the tangent contact when every
+// chain vertex is within tau of the v-iso. Without that cap, uncertified, or
+// with one vertex on both surfaces but more than tau off the iso (the
+// near-tangent pair), it keeps the polyline. A partial torus still takes the
+// contact on the partner's hold alone (F-3 unchanged).
+static void caseClosedTorusContact() {
+    const double tau = 2e-6;
+    const gp_Ax3 frame(gp_Pnt(-4, 7, 2), gp_Dir(0, 0, 1), gp_Dir(1, 0, 0));
+    const double R = 25.0, r = 1.5;
+    const gp_Torus tor(frame, R, r);
+    // The base plane at the tube's bottom, normal away from the tube.
+    const gp_Pln base(gp_Ax3(gp_Pnt(0, 0, 2.0 - r), gp_Dir(0, 0, -1)));
+    gp_Circ c;
+    expect(torusPlaneContactCircle(tor, base, 2.0 * tau, c) && std::fabs(c.Radius() - R) < 1e-12,
+           "closed contact: the plane holds the bottom v-iso");
+    // A rim chain over a quarter turn: tube points a profile angle dv[k] off
+    // the iso, each on the torus and within r dv^2 / 2 of the plane.
+    auto chainDev = [&](const std::vector<double>& dv) {
+        double worst = 0.0;
+        for (std::size_t k = 0; k < dv.size(); ++k) {
+            const double u = 0.5 * kPi * (double)k / (double)(dv.size() - 1);
+            const double v = -0.5 * kPi + dv[k];
+            const gp_Pnt p = frame.Location().Translated(
+                gp_Vec(frame.XDirection()) * ((R + r * std::cos(v)) * std::cos(u)) +
+                gp_Vec(frame.YDirection()) * ((R + r * std::cos(v)) * std::sin(u)) +
+                gp_Vec(frame.Direction()) * (r * std::sin(v)));
+            worst = std::max(worst, pointCircleDist(c, p));
+        }
+        return worst;
+    };
+    const double onIso = chainDev({0.0, 0.2 * tau / r, -0.4 * tau / r, 0.1 * tau / r, 0.0});
+    const double offIso = chainDev({0.0, 0.2 * tau / r, 3.0 * tau / r, 0.1 * tau / r, 0.0});
+    expect(onIso <= 0.4 * tau + 1e-12 && offIso > 2.9 * tau,
+           "closed contact: chainDev is the largest vertex distance to the iso");
+    Region t;
+    t.type = SurfType::Torus;
+    t.origin = Origin::TorusBlend;
+    t.closed360 = true;
+    t.meshPolylineCap = true;
+    t.maxVertexDev = 0.3 * tau;
+    expect(openChainTakesTorusContact(t, tau, onIso),
+           "closed contact: certified, mesh-polyline cap, chain within tau: takes the iso");
+    expect(!openChainTakesTorusContact(t, tau, offIso),
+           "closed contact: a chain vertex more than tau off the iso keeps the polyline");
+    expect(!openChainTakesTorusContact(t, tau, -1.0),
+           "closed contact: an unmeasured chain takes nothing");
+    t.meshPolylineCap = false;
+    expect(!openChainTakesTorusContact(t, tau, onIso),
+           "closed contact: a closed torus without the mesh-polyline cap keeps the polyline");
+    t.meshPolylineCap = true;
+    t.maxVertexDev = 1.5 * tau;
+    expect(!openChainTakesTorusContact(t, tau, onIso),
+           "closed contact: an uncertified torus keeps the polyline");
+    t.closed360 = false;
+    t.meshPolylineCap = false;
+    expect(openChainTakesTorusContact(t, tau, offIso) && openChainTakesTorusContact(t, tau, -1.0),
+           "closed contact: a partial torus takes the iso on the partner's hold (F-3)");
+}
+
 // D-fc-4.11 (a): a band holding a withheld triangle is gathered but not emitted;
 // its triangles and its atom keep their pre-T state.
 static void caseWithheld() {
@@ -1086,6 +1146,7 @@ int main(int argc, char** argv) {
     caseRingsOf();
     caseStationCands();
     caseContactCircle();
+    caseClosedTorusContact();
     caseWithheld();
     caseWindowOverlap();
     caseJointTorus();

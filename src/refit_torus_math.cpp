@@ -203,6 +203,15 @@ double pointTorusDist(const gp_Torus& torus, const gp_Pnt& p) {
     return std::fabs(std::hypot(rho - R, z) - r);
 }
 
+double pointCircleDist(const gp_Circ& c, const gp_Pnt& p) {
+    const gp_Vec n(c.Axis().Direction());
+    const gp_Vec d(c.Location(), p);
+    const double h = d.Dot(n);
+    const double rho = (d - n * h).Magnitude();
+    const double dist = std::hypot(rho - c.Radius(), h);
+    return std::isfinite(dist) ? dist : -1.0;
+}
+
 // Supremum over the circle of the distance to the untrimmed ring torus.
 //
 // Exact formula per point (the identity at the head of this file):

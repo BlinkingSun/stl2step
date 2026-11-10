@@ -159,6 +159,19 @@ bool torusCylinderContactCircle(const gp_Torus& torus, const gp_Cylinder& cyl, d
 // refused torus or a non-finite point.
 double pointTorusDist(const gp_Torus& torus, const gp_Pnt& p);
 
+// Exact distance from p to the full circle c (centre C, axis n, radius a):
+//
+//     d(p) = hypot(rho_p - a, h_p),   h_p = (p - C) . n,  rho_p = |p - C - h_p n|
+//
+// PROOF.  A circle point Q at angle phi in the circle's plane gives
+//   |p - Q|^2 = h_p^2 + rho_p^2 + a^2 - 2 a rho_p cos(phi - phi_p)
+//            >= h_p^2 + (rho_p - a)^2,
+// with equality at phi = phi_p (any phi when rho_p = 0).  This is the
+// meridian identity above with the profile circle shrunk to its centre.  It
+// is how a chain's vertices are measured against a v-iso contact
+// (D-gid-8.19).  Returns -1.0 on a non-finite point or radius.
+double pointCircleDist(const gp_Circ& c, const gp_Pnt& p);
+
 // ---------------------------------------------------------------------------
 // 4. THE SUPREMUM — circle on torus  (SPEC-torus B.1, D-140-6 §3(4))
 // ---------------------------------------------------------------------------

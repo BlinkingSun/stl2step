@@ -377,8 +377,19 @@ AnchoredRoundCert certifyAnchoredRound(const std::vector<ProfPt>& P,
 // The band ships as one closed TorusBlend when it is one annulus about the axis
 // (two boundary loops, each winding once) and certifyAnchoredRound accepts it
 // with every vertex of the band within tau.
+//
+// D-gid-8.18 (coneDonors: a second pass after the drafted walls). Donor: a
+// certified cone; its anchor is its profile line. A B1 region whose own
+// residual exceeds tau is no claim (D-fc-4.3): its triangles are candidates,
+// one at a time (D-gid-8.11), and it dissolves when robbed; a triangle the band
+// does not take stays a facet. The band is grown from the atoms beside the
+// donor (each alone, then with each neighbour; a robbable region beside the
+// donor whole, without its triangles on a certified plane's rim) while it keeps
+// the anchored certificate, then goes through every step above. One boundary
+// cycle that does not wind about the axis ships as a partial torus, bounded at
+// its ends by the mesh polyline.
 bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const DerivedTols& tol,
-                         SegmentWork& work) {
+                         SegmentWork& work, bool coneDonors) {
     try {
         const double tau = tauOf(mv);
         if (!(tau > 0.0) || !mv.pts || !mv.tris || !mv.triEdges || mv.nTri == 0) return true;
@@ -404,9 +415,37 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
         for (int t : p.torusWithheldTris)
             if (t >= 0 && t < nTri) withheld[(std::size_t)t] = 1;
         std::vector<char> taken((std::size_t)nTri, 0);
+        // D-gid-8.18 with D-fc-4.3: a B1 region whose own residual exceeds tau
+        // (robbableUncertified; a B1 region is certified by its own residual
+        // alone) is no claim. Its triangles are candidates and the region is
+        // one atom. A relational strip is certified on its tau-preimage and
+        // stays a claim.
+        std::vector<char> robbable(work.accepted.size(), 0);
+        for (int ai = 0; ai < (int)work.accepted.size(); ++ai) {
+            const Region& A = work.accepted[(std::size_t)ai];
+            robbable[(std::size_t)ai] = A.origin == Origin::CylGrow && robbableUncertified(A, tau);
+        }
+        auto robbableAt = [&](int ai) {
+            return ai >= 0 && ai < (int)robbable.size() && robbable[(std::size_t)ai];
+        };
+        // The atom of a candidate triangle: its provisional (>= 0). A robbable
+        // region has no claim, so its triangles join one at a time (D-gid-8.11):
+        // each is its own atom (-(t + 2)).
+        auto atomKey = [&](int t) -> int {
+            if (triAcc[(std::size_t)t] >= 0) return -(t + 2);
+            return triProv[(std::size_t)t];
+        };
+        auto atomTris = [&](int key) -> std::vector<int> {
+            if (key >= 0) return work.provisionals[(std::size_t)key].tris;
+            return std::vector<int>{-key - 2};
+        };
+        // D-gid-8.18 rules the round on a cone donor; a cylinder donor keeps
+        // the D-gid-2.6 band (free triangles, one closed ring).
+        bool robOk = false;
         auto candidate = [&](int t) -> bool {
-            if (t < 0 || t >= nTri || taken[(std::size_t)t] || triAcc[(std::size_t)t] >= 0)
-                return false;
+            if (t < 0 || t >= nTri || taken[(std::size_t)t]) return false;
+            const int ai = triAcc[(std::size_t)t];
+            if (ai >= 0) return robOk && robbableAt(ai);
             const int pi = triProv[(std::size_t)t];
             return pi >= 0 && work.provisionals[(std::size_t)pi].claim == ProvClaim::Unclaimed &&
                    !provPlane[(std::size_t)pi];
@@ -462,19 +501,25 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
         };
 
         int nDonors = 0, nBands = 0, nAccept = 0, nRefused = 0;
+        std::vector<int> dissolved;
         const int nAcc0 = (int)work.accepted.size();
         for (int di = 0; di < nAcc0; ++di) {
             // A copy: the claims below append to work.accepted.
             const Region D = work.accepted[(std::size_t)di];
-            if (D.type != SurfType::Cylinder || D.tris.empty()) continue;
+            // D-gid-8.18: a certified cone is a donor as a certified cylinder is;
+            // its anchor is its profile line.
+            const bool coneDonor = D.type == SurfType::Cone && D.origin == Origin::ChamferCone;
+            if ((D.type != SurfType::Cylinder && !coneDonor) || D.tris.empty()) continue;
+            if (coneDonor != coneDonors) continue;
             if (!(D.radius > tau)) continue;
+            robOk = coneDonor;
             // D-fc-1.4: the donor certifies its surface. A relational band's
             // surface is certified on its tau-preimage I; its chord-bounded cover
             // does not un-certify it (D-fc-3.2.7). A B1 region is certified by
             // its own residual alone (D-fc-4.3). The sphere corners' rule.
             bool donorCert = anchorCertified(tau, D.maxVertexDev);
             RoundCert rc;
-            if (!donorCert && D.origin != Origin::CylGrow) {
+            if (!donorCert && D.origin != Origin::CylGrow && !coneDonor) {
                 RoundSpine sp;
                 sp.circle = false;
                 sp.o = D.ax.Location().XYZ();
@@ -533,64 +578,46 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                 std::sort(free.begin(), free.end());
             }
             ++nDonors;
-            std::vector<std::vector<int>> queue = components(free);
-            // Per queue entry: the band an atom-off came from (its triangles are
-            // the candidates of the tau-preimage below), and whether the entry IS
-            // that preimage (it splits atoms by construction, D-gid-5.15).
-            std::vector<std::vector<int>> parentOf(queue.size());
-            std::vector<char> preimageOf(queue.size(), 0);
-            auto enqueue = [&](std::vector<int> tris, const std::vector<int>& parent, bool pre) {
-                queue.push_back(std::move(tris));
-                parentOf.push_back(parent);
-                preimageOf.push_back(pre ? 1 : 0);
-            };
-            for (std::size_t qi = 0; qi < queue.size(); ++qi) {
-                std::vector<int> band = queue[qi];
-                const std::vector<int> parent = parentOf[qi];
-                const bool preimage = preimageOf[qi] != 0;
-                ++nBands;
-                std::vector<char> inBand((std::size_t)nTri, 0);
-                for (int t : band) inBand[(std::size_t)t] = 1;
-                std::vector<char> inParent((std::size_t)nTri, 0);
-                for (int t : parent) inParent[(std::size_t)t] = 1;
-                // Atoms join only whole.
-                if (!preimage) {
-                    std::vector<int> keep;
-                    bool drop = false;
-                    for (int t : band) {
-                        const Provisional& pr =
-                            work.provisionals[(std::size_t)triProv[(std::size_t)t]];
-                        bool whole = true;
-                        for (int u : pr.tris)
-                            if (u < 0 || u >= nTri || !inBand[(std::size_t)u]) whole = false;
-                        if (whole) keep.push_back(t);
-                        else drop = true;
-                    }
-                    if (drop) {
-                        for (auto& s : components(keep)) enqueue(std::move(s), parent, false);
-                        continue;
-                    }
-                }
-                // Profile of every band vertex about the donor axis.
+            // The band's profile about the donor axis and its anchors: the donor
+            // and the certified planes normal to its axis that the band touches.
+            struct BandView {
                 std::vector<int> gv;
+                std::vector<ProfPt> P;
+                double rhoMax = 0.0;
+                std::vector<ProfileAnchor> anchors;
+                bool touchDonor = false;
+                std::vector<int> rimOwner, rimTri, anchorOwner;
+            };
+            auto analyse = [&](const std::vector<int>& band, const std::vector<char>& inBand,
+                               BandView& bv) {
+                std::vector<int>& gv = bv.gv;
+                std::vector<ProfPt>& P = bv.P;
+                double& rhoMax = bv.rhoMax;
+                std::vector<ProfileAnchor>& anchors = bv.anchors;
+                bool& touchDonor = bv.touchDonor;
+                std::vector<int>& rimOwner = bv.rimOwner;
+                std::vector<int>& rimTri = bv.rimTri;
+                std::vector<int>& anchorOwner = bv.anchorOwner;
+                // Profile of every band vertex about the donor axis.
+                gv.clear();
                 for (int t : band)
                     for (int k = 0; k < 3; ++k) gv.push_back(gidOf(mv, t, k));
                 std::sort(gv.begin(), gv.end());
                 gv.erase(std::unique(gv.begin(), gv.end()), gv.end());
-                std::vector<ProfPt> P;
+                P.clear();
                 P.reserve(gv.size());
-                double rhoMax = 0.0;
+                rhoMax = 0.0;
                 for (int g : gv) {
                     P.push_back(profOf(fr, mv.pts[g], g));
                     rhoMax = std::max(rhoMax, P.back().rho);
                 }
                 // Anchors: the donor and the certified planes normal to its axis
                 // that the band touches.
-                std::vector<ProfileAnchor> anchors;
-                bool touchDonor = false;
-                std::vector<int> rimOwner;  // per boundary edge: acc idx, -(prov + 2), or -1
-                std::vector<int> rimTri;    // per boundary edge: the triangle across it, or -1
-                std::vector<int> anchorOwner = {di};
+                anchors.clear();
+                touchDonor = false;
+                rimOwner.clear();  // per boundary edge: acc idx, -(prov + 2), or -1
+                rimTri.clear();    // per boundary edge: the triangle across it, or -1
+                anchorOwner.assign(1, di);
                 {
                     std::vector<int> accN, provN;
                     for (int t : band)
@@ -646,9 +673,215 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                                      pr.maxVertexDev))
                             anchorOwner.push_back(-(pi + 2));
                     }
-                    anchors.insert(anchors.begin(), ProfileAnchor{1.0, 0.0, D.radius});
+                    if (coneDonor) {
+                        // rho = R_lo + slope z about the cone's frame (its Location
+                        // on the R_lo rim, chamferHeightOf the signed height).
+                        const double hS = (std::fabs(D.maxVertexSnap) > gp::Resolution())
+                                              ? D.maxVertexSnap
+                                              : std::fabs(D.vMax - D.vMin);
+                        const double Rhi = D.vMax;
+                        const double slope = (std::fabs(hS) > gp::Resolution())
+                                                 ? (Rhi - D.radius) / hS
+                                                 : 0.0;
+                        const double sc = std::sqrt(1.0 + slope * slope);
+                        anchors.insert(anchors.begin(),
+                                       ProfileAnchor{1.0 / sc, -slope / sc, D.radius / sc});
+                    } else {
+                        anchors.insert(anchors.begin(), ProfileAnchor{1.0, 0.0, D.radius});
+                    }
                 }
+            };
+            std::vector<std::vector<int>> queue;
+            if (!coneDonor) {
+                queue = components(free);
+            } else {
+                // D-gid-8.18: the round on a cone donor is grown, whole atoms
+                // at a time, from each atom beside the donor while the band keeps
+                // the anchored certificate (the cone stage's hypothesis rule).
+                // A free set that runs on past the round (junctions, walls) is
+                // never fitted as one: its fit would carry them.
+                std::vector<char> inFree((std::size_t)nTri, 0);
+                for (int t : free) inFree[(std::size_t)t] = 1;
+                std::map<int, std::vector<int>> keyTris;
+                for (int t : free) keyTris[atomKey(t)].push_back(t);
+                std::map<int, int> keyMin;
+                for (auto& kv : keyTris) {
+                    std::sort(kv.second.begin(), kv.second.end());
+                    keyMin[kv.first] = kv.second.front();
+                }
+                std::map<int, std::vector<int>> keyNbr;
+                // Seeds: each atom beside the donor, and each robbable region
+                // beside it whole (its triangles are one-at-a-time atoms; the
+                // region is the hypothesis B1 formed).
+                std::vector<std::vector<int>> seeds;
+                {
+                    std::vector<char> inDonor((std::size_t)nTri, 0);
+                    for (int t : D.tris)
+                        if (t >= 0 && t < nTri) inDonor[(std::size_t)t] = 1;
+                    std::vector<int> seedKeys, seedRegs;
+                    for (int t : free)
+                        for (int s = 0; s < 3; ++s) {
+                            const int o = otherTri(mv.triEdges[t][s], t);
+                            if (o < 0) continue;
+                            if (inDonor[(std::size_t)o]) {
+                                if (triAcc[(std::size_t)t] >= 0) seedRegs.push_back(triAcc[(std::size_t)t]);
+                                else seedKeys.push_back(atomKey(t));
+                            }
+                            if (inFree[(std::size_t)o] && atomKey(o) != atomKey(t))
+                                keyNbr[atomKey(t)].push_back(atomKey(o));
+                        }
+                    std::sort(seedKeys.begin(), seedKeys.end());
+                    seedKeys.erase(std::unique(seedKeys.begin(), seedKeys.end()), seedKeys.end());
+                    std::sort(seedKeys.begin(), seedKeys.end(), [&](int a, int b) {
+                        if (keyMin[a] != keyMin[b]) return keyMin[a] < keyMin[b];
+                        return a < b;
+                    });
+                    std::sort(seedRegs.begin(), seedRegs.end());
+                    seedRegs.erase(std::unique(seedRegs.begin(), seedRegs.end()), seedRegs.end());
+                    // An atom beside the donor seeds alone, then with each of its
+                    // neighbours (the cone stage's pair seed): a one- or
+                    // two-row atom is under-determined alone.
+                    for (int k : seedKeys) {
+                        seeds.push_back({k});
+                        std::vector<int> nb = keyNbr[k];
+                        std::sort(nb.begin(), nb.end());
+                        nb.erase(std::unique(nb.begin(), nb.end()), nb.end());
+                        std::sort(nb.begin(), nb.end(), [&](int a, int b) {
+                            if (keyMin[a] != keyMin[b]) return keyMin[a] < keyMin[b];
+                            return a < b;
+                        });
+                        for (int b : nb) seeds.push_back({k, b});
+                    }
+                    // A seed is a hypothesis only (D-gid-1.2): the band it grows is
+                    // certified on its own. A robbable region seeds without its
+                    // triangles on a certified plane's rim -- the plane, a
+                    // second anchor, then enters only through growth, so a
+                    // chord facet across the tangency (a vertex on the plane,
+                    // off the round) does not sink the seed.
+                    auto onPlaneRim = [&](int t) {
+                        for (int s = 0; s < 3; ++s) {
+                            const int o = otherTri(mv.triEdges[t][s], t);
+                            if (o < 0) continue;
+                            const int ao = triAcc[(std::size_t)o];
+                            if (ao >= 0) {
+                                const Region& A = work.accepted[(std::size_t)ao];
+                                if (A.type == SurfType::Plane && anchorCertified(tau, A.maxVertexDev))
+                                    return true;
+                            } else if (triProv[(std::size_t)o] >= 0 &&
+                                       provPlane[(std::size_t)triProv[(std::size_t)o]]) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    };
+                    for (int ri : seedRegs) {
+                        std::vector<int> ks;
+                        for (int t : work.accepted[(std::size_t)ri].tris)
+                            if (t >= 0 && t < nTri && inFree[(std::size_t)t] && !onPlaneRim(t))
+                                ks.push_back(atomKey(t));
+                        if (!ks.empty()) seeds.push_back(ks);
+                    }
+                }
+                auto byMin = [&](int a, int b) {
+                    if (keyMin[a] != keyMin[b]) return keyMin[a] < keyMin[b];
+                    return a < b;
+                };
+                (void)byMin;
+                std::vector<char> inTrial((std::size_t)nTri, 0);
+                auto certOk = [&](const std::vector<int>& trial) {
+                    for (int t : trial) inTrial[(std::size_t)t] = 1;
+                    BandView bvT;
+                    analyse(trial, inTrial, bvT);
+                    for (int t : trial) inTrial[(std::size_t)t] = 0;
+                    if (!bvT.touchDonor) return false;
+                    const AnchoredRoundCert c = certifyAnchoredRound(bvT.P, bvT.anchors, tau);
+                    return c.ok;
+                };
+                std::map<int, char> used;
+                for (const std::vector<int>& sd : seeds) {
+                    bool anyUsed = false;
+                    for (int k : sd) anyUsed = anyUsed || used[k];
+                    if (anyUsed) continue;
+                    std::vector<int> band;
+                    for (int k : sd) band.insert(band.end(), keyTris[k].begin(), keyTris[k].end());
+                    std::sort(band.begin(), band.end());
+                    std::vector<int> members = sd;
+                    const int sk = sd.front();
+                    if (!certOk(band)) continue;
+                    for (bool grew = true; grew;) {
+                        grew = false;
+                        std::vector<int> front;
+                        for (int m : members)
+                            for (int o : keyNbr[m])
+                                if (!used[o] && std::find(members.begin(), members.end(), o) ==
+                                                    members.end())
+                                    front.push_back(o);
+                        std::sort(front.begin(), front.end(), byMin);
+                        front.erase(std::unique(front.begin(), front.end()), front.end());
+                        for (int o : front) {
+                            std::vector<int> trial = band;
+                            trial.insert(trial.end(), keyTris[o].begin(), keyTris[o].end());
+                            std::sort(trial.begin(), trial.end());
+                            if (!certOk(trial)) continue;
+                            band.swap(trial);
+                            members.push_back(o);
+                            grew = true;
+                        }
+                    }
+                    for (int m : members) used[m] = 1;
+                    if (dg)
+                        diagPrintf("DIAG_REL_ANCHORED_GROW donor=%d seed=%d atoms=%zu nTri=%zu\n",
+                                   di, keyMin[sk], members.size(), band.size());
+                    queue.push_back(std::move(band));
+                }
+            }
+            // Per queue entry: the band an atom-off came from (its triangles are
+            // the candidates of the tau-preimage below), and whether the entry IS
+            // that preimage (it splits atoms by construction, D-gid-5.15).
+            std::vector<std::vector<int>> parentOf(queue.size());
+            std::vector<char> preimageOf(queue.size(), 0);
+            auto enqueue = [&](std::vector<int> tris, const std::vector<int>& parent, bool pre) {
+                queue.push_back(std::move(tris));
+                parentOf.push_back(parent);
+                preimageOf.push_back(pre ? 1 : 0);
+            };
+            for (std::size_t qi = 0; qi < queue.size(); ++qi) {
+                std::vector<int> band = queue[qi];
+                const std::vector<int> parent = parentOf[qi];
+                const bool preimage = preimageOf[qi] != 0;
+                ++nBands;
+                std::vector<char> inBand((std::size_t)nTri, 0);
+                for (int t : band) inBand[(std::size_t)t] = 1;
+                std::vector<char> inParent((std::size_t)nTri, 0);
+                for (int t : parent) inParent[(std::size_t)t] = 1;
+                // Atoms join only whole.
+                if (!preimage) {
+                    std::vector<int> keep;
+                    bool drop = false;
+                    for (int t : band) {
+                        bool whole = true;
+                        for (int u : atomTris(atomKey(t)))
+                            if (u < 0 || u >= nTri || !inBand[(std::size_t)u]) whole = false;
+                        if (whole) keep.push_back(t);
+                        else drop = true;
+                    }
+                    if (drop) {
+                        for (auto& s : components(keep)) enqueue(std::move(s), parent, false);
+                        continue;
+                    }
+                }
+                BandView bv;
+                analyse(band, inBand, bv);
+                std::vector<int>& gv = bv.gv;
+                std::vector<ProfPt>& P = bv.P;
+                std::vector<ProfileAnchor>& anchors = bv.anchors;
+                bool& touchDonor = bv.touchDonor;
+                std::vector<int>& rimOwner = bv.rimOwner;
+                std::vector<int>& rimTri = bv.rimTri;
+                std::vector<int>& anchorOwner = bv.anchorOwner;
+                (void)gv;
                 AnchoredRoundCert cert;
+                bool partial = false;
                 const char* why = "accept";
                 int loops = 0, wind0 = 0, wind1 = 0;
                 double dVol = 0.0;
@@ -657,11 +890,11 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                     diagPrintf("DIAG_REL_BAND stage=anchored mode=round seed=%d nTri=%zu nV=%zu "
                                "stations=%d cols=%d params=%d anchors=%d donor=%d donorR=%.9g "
                                "radii=%.9g/%.9g z0=%.9g maxDev=%.6g maxDevTau=%.4f "
-                               "loops=%d winding=%d,%d dVol=%.9g why=%s\n",
+                               "loops=%d winding=%d,%d partial=%d dVol=%.9g why=%s\n",
                                band.front(), band.size(), gv.size(), cert.stations, cert.cols,
                                cert.params, (int)anchors.size(), di, D.radius, cert.Rmaj,
                                cert.Rmin, cert.z0, cert.maxDev, cert.maxDev / tau, loops, wind0,
-                               wind1, dVol, w);
+                               wind1, partial ? 1 : 0, dVol, w);
                 };
                 if (!touchDonor) {
                     ++nRefused;
@@ -677,11 +910,11 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                     bool dropped = false;
                     std::map<int, bool> off;
                     for (int t : band) {
-                        const int pi = triProv[(std::size_t)t];
+                        const int pi = atomKey(t);
                         auto it = off.find(pi);
                         if (it == off.end()) {
                             bool o = false;
-                            for (int u : work.provisionals[(std::size_t)pi].tris)
+                            for (int u : atomTris(pi))
                                 for (int k = 0; k < 3 && !o; ++k)
                                     if (circDevOf(profOf(fr, ptOf(mv, u, k), -1), cert.Rmaj,
                                                   cert.z0, cert.Rmin) > tau)
@@ -751,7 +984,7 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                 // anchored station count.
                 {
                     std::vector<int> atoms;
-                    for (int t : band) atoms.push_back(triProv[(std::size_t)t]);
+                    for (int t : band) atoms.push_back(atomKey(t));
                     std::sort(atoms.begin(), atoms.end());
                     atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
                     bool det = true;
@@ -759,7 +992,7 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                         for (int a : atoms) {
                             std::vector<int> g2;
                             for (int t : band)
-                                if (triProv[(std::size_t)t] != a)
+                                if (atomKey(t) != a)
                                     for (int k = 0; k < 3; ++k) g2.push_back(gidOf(mv, t, k));
                             std::sort(g2.begin(), g2.end());
                             g2.erase(std::unique(g2.begin(), g2.end()), g2.end());
@@ -832,7 +1065,10 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                     loops = (int)winds.size();
                     wind0 = loops > 0 ? winds[0] : 0;
                     wind1 = loops > 1 ? winds[1] : 0;
-                    if (pinch || !annulusAboutAxis(1, winds)) {
+                    // D-gid-8.18: on a cone donor the round may be a partial torus,
+                    // one boundary cycle that does not wind about the axis.
+                    partial = coneDonor && !pinch && loops == 1 && wind0 == 0;
+                    if (!partial && (pinch || !annulusAboutAxis(1, winds))) {
                         ++nRefused;
                         emitDiag("not-annulus");
                         continue;
@@ -845,17 +1081,22 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                 // D-gid-5.15: the one exception is a preimage's own remainder -- a
                 // triangle of the parent band whose atom the preimage split. It
                 // stays a facet and the face is bounded there by its mesh polyline.
-                std::vector<char> splitAtom(work.provisionals.size(), 0);
+                std::vector<int> splitKeys;
                 if (preimage)
-                    for (int t : band) splitAtom[(std::size_t)triProv[(std::size_t)t]] = 1;
+                    for (int t : band) splitKeys.push_back(atomKey(t));
+                std::sort(splitKeys.begin(), splitKeys.end());
+                splitKeys.erase(std::unique(splitKeys.begin(), splitKeys.end()), splitKeys.end());
                 int foreign = 0, facetRim = 0;
                 for (std::size_t ei = 0; ei < rimOwner.size(); ++ei) {
                     const int ow = rimOwner[ei];
                     if (std::find(anchorOwner.begin(), anchorOwner.end(), ow) != anchorOwner.end())
                         continue;
                     const int o = ei < rimTri.size() ? rimTri[ei] : -1;
-                    if (preimage && o >= 0 && inParent[(std::size_t)o] && triAcc[(std::size_t)o] < 0 &&
-                        triProv[(std::size_t)o] >= 0 && splitAtom[(std::size_t)triProv[(std::size_t)o]])
+                    const bool freeO = o >= 0 && (triAcc[(std::size_t)o] < 0
+                                                      ? triProv[(std::size_t)o] >= 0
+                                                      : robOk && robbableAt(triAcc[(std::size_t)o]));
+                    if (preimage && freeO && inParent[(std::size_t)o] &&
+                        std::binary_search(splitKeys.begin(), splitKeys.end(), atomKey(o)))
                         ++facetRim;
                     else
                         ++foreign;
@@ -864,7 +1105,10 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                     diagPrintf("DIAG_REL_ANCHORED_RIM seed=%d rimEdges=%zu foreign=%d facetRim=%d "
                                "anchors=%zu\n",
                                band.front(), rimOwner.size(), foreign, facetRim, anchorOwner.size());
-                if (foreign > 0) {
+                // A partial torus is bounded at its ends by what it meets there:
+                // the mesh polyline (D-gid-5.15, P3 "at a round the analytic
+                // face's boundary is the mesh polyline").
+                if (foreign > 0 && !partial) {
                     ++nRefused;
                     if (dg)
                         diagPrintf("DIAG_REL_ANCHORED_RIM seed=%d rimEdges=%zu foreign=%d "
@@ -938,7 +1182,25 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                     while (vHi <= -kPi) vHi += kTwoPi;
                     if (vHi < vLo) vHi += kTwoPi;
                 }
-                const int nSides = torusSidesOf(cert.cols, kTwoPi, true);
+                double uLo = 0.0, uHi = kTwoPi;
+                if (partial) {
+                    // The admitted arc: the complement of the largest azimuth gap.
+                    std::vector<double> a;
+                    a.reserve(P.size());
+                    for (const ProfPt& pp : P) a.push_back(pp.psi);
+                    std::sort(a.begin(), a.end());
+                    std::size_t ig = a.size() - 1;
+                    double maxGap = (a.front() + kTwoPi) - a.back();
+                    for (std::size_t i = 0; i + 1 < a.size(); ++i)
+                        if (a[i + 1] - a[i] > maxGap) {
+                            maxGap = a[i + 1] - a[i];
+                            ig = i;
+                        }
+                    uLo = a[(ig + 1) % a.size()];
+                    uHi = a[ig];
+                    if (uHi < uLo) uHi += kTwoPi;
+                }
+                const int nSides = torusSidesOf(cert.cols, partial ? uHi - uLo : kTwoPi, !partial);
                 const gp_XYZ centre = fr.o + fr.a * cert.z0;
                 Region r;
                 r.id = 0;
@@ -949,11 +1211,11 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                               gp_Dir(fr.e1.X(), fr.e1.Y(), fr.e1.Z()));
                 r.radius = cert.Rmaj;
                 r.radius2 = cert.Rmin;
-                r.uMin = 0.0;
-                r.uMax = kTwoPi;
+                r.uMin = uLo;
+                r.uMax = uHi;
                 r.vMin = vLo;
                 r.vMax = vHi;
-                r.closed360 = true;
+                r.closed360 = !partial;
                 r.outwardNormal = sigma >= 0.0;
                 r.tris = band;
                 r.maxVertexDev = cert.maxDev;
@@ -965,19 +1227,43 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
                 r.builtAs = BuiltAs::NotBuilt;
                 r.filletNbrA = di;
                 r.filletNbrB = -1;
-                r.publishRimFirst = true;
-                r.meshPolylineCap = facetRim > 0;
+                r.publishRimFirst = !partial;
+                r.meshPolylineCap = !partial && facetRim > 0;
                 // Every atom is whole inside the band: each provisional is taken
                 // as a pending torus (A3 skips it; U-3 commits or reverts).
                 TorusPendingReclaim pend;
                 {
                     std::vector<int> atoms;
-                    for (int t : band) atoms.push_back(triProv[(std::size_t)t]);
+                    for (int t : band) atoms.push_back(atomKey(t));
                     std::sort(atoms.begin(), atoms.end());
                     atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
+                    std::vector<int> robbed;
                     for (int a : atoms) {
-                        work.provisionals[(std::size_t)a].claim = ProvClaim::PendingTorus;
-                        pend.provIdx.push_back(a);
+                        if (a >= 0) {
+                            work.provisionals[(std::size_t)a].claim = ProvClaim::PendingTorus;
+                            pend.provIdx.push_back(a);
+                            continue;
+                        }
+                        robbed.push_back(triAcc[(std::size_t)(-a - 2)]);
+                    }
+                    std::sort(robbed.begin(), robbed.end());
+                    robbed.erase(std::unique(robbed.begin(), robbed.end()), robbed.end());
+                    for (int ri : robbed) {
+                        // D-fc-4.3: the robbed region dissolves. A triangle the band
+                        // did not take keeps no region (its provisional stays
+                        // consumed): a facet, as D-gid-8.11's leftovers.
+                        if (ri < 0 || ri >= (int)work.accepted.size()) continue;
+                        Region& rr = work.accepted[(std::size_t)ri];
+                        if (dg)
+                            diagPrintf("DIAG_REL_ROB stage=anchored seed=%d region=%d "
+                                       "radius=%.9g devTau=%.4f nTri=%zu\n",
+                                       band.front(), ri, rr.radius, rr.maxVertexDev / tau,
+                                       rr.tris.size());
+                        for (int t : rr.tris)
+                            if (t >= 0 && t < nTri && triAcc[(std::size_t)t] == ri)
+                                triAcc[(std::size_t)t] = -1;
+                        rr.tris.clear();
+                        dissolved.push_back(ri);
                     }
                 }
                 r.torusPending = (int)work.torusPending.size();
@@ -995,6 +1281,7 @@ bool claimAnchoredRounds(const MeshView& mv, const SegmentParams& p, const Deriv
         if (dg)
             diagPrintf("DIAG_REL_SUM stage=anchored donors=%d bands=%d accept=%d refused=%d\n",
                        nDonors, nBands, nAccept, nRefused);
+        compactDissolved(work, dissolved);
         return true;
     } catch (...) {
         return false;
