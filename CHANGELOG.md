@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-09
+
+TrueForm finishes more of the corpus part handle-pickup and the remaining hole and strip details of plate
+parts, and RESULT now describes the solid that is written. On handle-pickup the output drops from 341 to
+218 faces: three more corner spheres certify (8 of the 9 corners), two certified tori grow onto the
+adjacent triangles and uncertified cylinder chips that lie on them (6 tori, the ground-truth count), and
+the facet area falls to 0.3 % of the part. Every corpus and Passed training file other than handle-pickup
+converts to the same STEP as 1.9.0.
+
+### Added
+
+- Same-surface growth of a certified torus: adjacent unclaimed triangles whose every vertex is within the
+  mesh tolerance τ of the torus join its face, and an uncertified grown-cylinder chip that lies wholly on
+  the torus becomes part of it. A torus face that later fails to build releases only what it grew.
+- Corner spheres also form where the sphere's certified tangent neighbours were found by the torus stage.
+- A refused hole ring whose wall certifies on its own cylinder closes as one cylinder face; the seam repair
+  runs only for a face that would otherwise fail its validity check.
+- A mixed fillet strip whose pieces are mesh-disjoint builds each certified piece as its own face instead
+  of dissolving the whole strip.
+
 ### Changed
 
 - RESULT `smoothPlanes`, `smoothCylinders`, `smoothFacetFaces`, `smoothBuiltPlanes` and `smoothBuiltFillets`
@@ -19,6 +39,16 @@ All notable changes to this project are documented here. The format follows
   only these five values move, and only where the plan and the written solid differed (for example the
   corpus part handle-lock ships all 23 plane regions as 20 planar faces). `smoothFillets` is still the
   plan's fillet-strip count. Gate labels and header comments now use the same wording.
+- `dVolPredicted` of fillet strips, tori and τ-certified grown cylinders is the exact chord volume over the
+  region's own triangles (it under-counted convex strips about 3× and tori about 6×). Shell budgets read
+  the same values or better; no budget decision changed on the corpus.
+- A cylinder that passed the ring-wall certificate is not treated as uncertified by later stages (the
+  late pole pass, the torus and sphere stages, the class-B heal); its chord sag is what the certificate
+  already excused.
+- Gates: handle-pickup census.torus 4 → 6 and census.sphere 5 → 8 (ground truth 6 and 9); the open-shell
+  tightBudget ceiling is the measured three-platform maximum (the closed-shell material change equals the
+  predicted cap and torus volumes); hosted ubuntu-26.04 ratchet values recorded (runner drift, engine
+  unchanged); ellipse unit bitwise asserts carry a stated ulp bound.
 
 ## [1.9.0] - 2026-11-07
 
