@@ -20,15 +20,20 @@ inline double classBVolumeBound(double dVolPredicted, double area, double tau) {
     return pred + floor;
 }
 
-inline bool classBOwnCertFails(double maxVertexDev, double tau) {
-    return tau > 0.0 && std::isfinite(maxVertexDev) && maxVertexDev > tau;
+// Own certificate fails: vertex residual over τ. D-gid-7.13: a ring-certified
+// wall (Region::ringCertified, D-gid-7.6) passed the ring certificate in
+// closeRingWalls; its maxVertexDev is the chord sagitta that certificate
+// excuses, so it does not fail here.
+inline bool classBOwnCertFails(double maxVertexDev, bool ringCertified, double tau) {
+    return !ringCertified && tau > 0.0 && std::isfinite(maxVertexDev) && maxVertexDev > tau;
 }
 
 // dissolve(r) ⇔ shipped ∧ cert fails ∧ |swept| > bound.
-inline bool classBDissolveQualifies(bool shippedAnalytic, double maxVertexDev, double tau,
-                                    double swept, double dVolPredicted, double area) {
+inline bool classBDissolveQualifies(bool shippedAnalytic, double maxVertexDev,
+                                    bool ringCertified, double tau, double swept,
+                                    double dVolPredicted, double area) {
     if (!shippedAnalytic || !(tau > 0.0)) return false;
-    if (!classBOwnCertFails(maxVertexDev, tau)) return false;
+    if (!classBOwnCertFails(maxVertexDev, ringCertified, tau)) return false;
     if (!std::isfinite(swept)) return false;
     const double bound = classBVolumeBound(dVolPredicted, area, tau);
     return std::fabs(swept) > bound;
@@ -47,13 +52,14 @@ inline bool classBNoQualCertFailPass(int nQualifying) {
     return nQualifying == 0;
 }
 
-// Member of that one pass: shipped analytic and own vertex residual over τ.
-// nQualifying is the finished swept-test count. The pass cannot be selected
-// while that count is still positive, and it does not rank or subset the ids.
-inline bool classBCertFailPassMember(bool shippedAnalytic, double maxVertexDev, double tau,
-                                     int nQualifying) {
+// Member of that one pass: shipped analytic and own certificate fails
+// (classBOwnCertFails). nQualifying is the finished swept-test count. The pass
+// cannot be selected while that count is still positive, and it does not rank
+// or subset the ids.
+inline bool classBCertFailPassMember(bool shippedAnalytic, double maxVertexDev,
+                                     bool ringCertified, double tau, int nQualifying) {
     return classBNoQualCertFailPass(nQualifying) && shippedAnalytic &&
-           classBOwnCertFails(maxVertexDev, tau);
+           classBOwnCertFails(maxVertexDev, ringCertified, tau);
 }
 
 }  // namespace refit

@@ -404,17 +404,24 @@ and default to zero.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `smoothPlanes` | int | Planar regions recovered as `Geom_Plane` |
-| `smoothCylinders` | int | Cylindrical regions recovered |
+| `smoothPlanes` | int | Plane regions with a face in the written solid |
+| `smoothCylinders` | int | Shipped cylinder regions: cylinder regions with a face in the written solid (fillet strips excluded) |
 | `smoothFillets` | int | Fillet strips recovered as cylinders |
 | `smoothDistinctRadii` | int | Distinct cylinder radii accepted |
 | `smoothRejected` | int | Candidate regions rejected by gates |
-| `smoothFacetFaces` | int | Faceted faces left after the smooth pass |
+| `smoothFacetFaces` | int | Written faces made only of mesh triangles (one triangle, or coplanar triangles merged into one face) |
 | `facesAfterSmooth` | int | Total face count after the smooth pass |
 | `smoothSkippedComponents` | int | Dirty components not refit |
 | `smoothMaxDevMM` | number | Max vertex deviation from fit (mm) |
 | `smoothMaxEdgeTolMM` | number | Max edge tolerance written (mm) |
 | `smoothVolPredictedMM3` | number | Predicted volume from analytic fits (mm³) |
+
+`smoothPlanes`, `smoothCylinders` and `smoothFacetFaces`, like the later
+`smoothBuiltPlanes` (written planar faces from analytic regions) and
+`smoothBuiltFillets` (written faces from fillet strips), describe the solid
+that is written, not the segment plan, over the components whose analytic
+build shipped. On a file whose components all shipped,
+`smoothBuiltPlanes + smoothFacetFaces` equals the planar faces of the STEP.
 
 The B-Rep validity check runs on shapes of up to 50,000 faces. Above that it is
 skipped and RESULT ends with `"validityCheck":"skipped"`. The skip is not a

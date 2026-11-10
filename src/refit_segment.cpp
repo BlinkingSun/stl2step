@@ -136,6 +136,8 @@ bool runTorusStages(const MeshView& mv, const SegmentParams& p, const DerivedTol
     if (!claimSphereCorners(mv, p, tol, work)) return false;
 
     if (!commitPlanesA3(mv, p, tol, work)) return false;
+    // D-gid-7.12: a certified torus grows over its own surface on what A3 left.
+    if (!claimTorusSameSurface(mv, p, work)) return false;
 
     TorusTopologySnapshot torusRevertSnap;
     bool torusRevertValidSnap = false;

@@ -997,7 +997,9 @@ static void caseResegment(const char* stl) {
             }
             if (n == r.tris.size()) ++nOne;
         }
-        expect(nArc == 2 && nOne == 2, "regather: two arc tori, each one edge-connected band");
+        // D-gid-7.18: same-surface growth adds the 26-triangle K28 piece as a third
+        // certified arc torus; each arc torus is still one edge-connected band.
+        expect(nArc == 3 && nOne == 3, "regather: three arc tori, each one edge-connected band");
     }
     SegmentParams hp = sp;
     hp.torusWithheldTris = held;

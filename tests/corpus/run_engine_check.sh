@@ -125,9 +125,9 @@ live = sc.get("live") or []
 floor = max((int(row.get("builtCylindersFloor", 0)) for row in live), default=0)
 smooth_cyl = int(r.get("smoothCylinders", 0))
 if rec_cyl >= 0 and smooth_cyl != rec_cyl:
-    print(f"NOTE {id} smooth: smoothCylinders recognised={smooth_cyl} (sidecar {rec_cyl})")
+    print(f"NOTE {id} smooth: smoothCylinders shipped cylinder regions={smooth_cyl} (sidecar smoothRecognisedCylinders {rec_cyl})")
 if ok:
-    print(f"OK {id} smooth exit={rc} warnings={nw} solids={exp_sol} recognisedCyl={smooth_cyl} floor={floor}")
+    print(f"OK {id} smooth exit={rc} warnings={nw} solids={exp_sol} shippedCylRegions={smooth_cyl} floor={floor}")
 sys.exit(0 if ok else 1)
 PY
     if [[ -n "$CENSUS" && -x "$CENSUS" ]]; then

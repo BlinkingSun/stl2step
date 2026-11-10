@@ -1518,6 +1518,36 @@ static bool buildTopologyDDrop(const MeshView& mv, const SegmentParams& p, const
         out.rejected[i] = std::move(rr);
     }
 
+    // --- D-gid-7.6 / D-gid-7.15 / D-gid-7.17: exact prediction of FilletStrip
+    // cylinders, tau-certified CylGrow cylinders and tori. Each stage's regular-N estimate stays what it used
+    // inside segment(); the committed region carries the exact chord volume over
+    // its own triangles, which is what every budget after segment() reads.
+    {
+        const char* dv = std::getenv("STL2STEP_DIAG_CLASSB");
+        const bool diagDv = dv && dv[0] && dv[0] != '0';
+        for (Region& r : out.regions) {
+            double exact = 0.0, physical = 0.0;
+            if (!dVolExactOfRegion(mv, r, exact, &physical)) continue;
+            if (diagDv) {
+                double area = 0.0;
+                for (int t : r.tris) area += triArea(mv, t);
+                double nEff = 0.0;
+                if (r.type == SurfType::Cylinder && area > 0.0 && r.radius > 0.0 &&
+                    std::fabs(exact) > 0.0)
+                    nEff = 2.0 * 3.14159265358979323846 /
+                           std::sqrt(12.0 * std::fabs(exact) / (area * r.radius));
+                std::fprintf(stderr,
+                             "DIAG_DVOL_EXACT rid=%d origin=%d type=%d R=%.6f r2=%.6f nSides=%d "
+                             "nSidesEff=%.2f nTri=%zu area=%.6f regularN=%.9f exact=%.9f "
+                             "physical=%.9f maxDev=%.6g\n",
+                             r.id, (int)r.origin, (int)r.type, r.radius, r.radius2, r.nSides,
+                             nEff, r.tris.size(), area, r.dVolPredicted, exact, physical,
+                             r.maxVertexDev);
+            }
+            r.dVolPredicted = exact;
+        }
+    }
+
     // --- RefitStats -------------------------------------------------------
     // dVolPredicted here is the SIGNED sum (D4.5 / RESULT). The budget that
     // sums magnitudes is not a RegionSet field; P2/P3 compute it from the

@@ -493,7 +493,10 @@ def check_g2(ctx: GateContext) -> GateOutcome:
         )
 
     violations: List[str] = []
-    recognised = int(run.result.get("smoothCylinders") or 0)
+    # D-gid-7.6: smoothCylinders = shipped cylinder regions (distinct cylinder
+    # regions with a face in the written solid); smoothBuiltCylinders = written
+    # cylindrical faces.
+    shipped_cyl_regions = int(run.result.get("smoothCylinders") or 0)
     built = int(run.result.get("smoothBuiltCylinders") or 0)
 
     expected_cyl = sum(
@@ -503,7 +506,7 @@ def check_g2(ctx: GateContext) -> GateOutcome:
     )
 
     details: Dict[str, Any] = {
-        "smoothCylinders": recognised,
+        "smoothCylinders": shipped_cyl_regions,
         "smoothBuiltCylinders": built,
         "expectedRecoverableCylinders": expected_cyl,
         "violations": violations,
@@ -575,7 +578,8 @@ def check_g2(ctx: GateContext) -> GateOutcome:
         gate_id,
         ctx.fixture.id,
         "PASS",
-        f"G2: recognition ok (smoothCylinders={recognised}, built={built})",
+        f"G2: recognition ok (smoothCylinders shipped cylinder regions="
+        f"{shipped_cyl_regions}, smoothBuiltCylinders faces={built})",
         details=details,
     )
 

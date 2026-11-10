@@ -493,8 +493,22 @@ static void testTo2dParamPreservation() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. the shipped case: exact plane section -> 0.0 bitwise
+// 2. the shipped case: exact plane section -> 0.0 up to product rounding
 // ---------------------------------------------------------------------------
+// D-gid-7.1 (D-130-24): with u2 = U, a2 = a, v2 = V, b2 = b the residuals
+// A = U a - U2 a2 and B = V b - V2 b2 are exactly 0 only when every product is
+// rounded before the subtraction. A compiler that contracts them into
+// fma(U_i, a, -(U_i a)) (GCC's default -ffp-contract=fast on an FMA target —
+// hosted ubuntu-26.04 is amd64v3) returns each product's rounding error,
+// |e_i| <= ulp(a) / 2 (|U_i|, |V_i| <= 1, b <= a). The supremum is then
+// <= sigma_max([A B]) <= ||[A B]||_F <= sqrt(6) / 2 ulp(a), and kOverSlack
+// covers the rounding of that norm. Measured: 0.0 unfused; 1.06e-16 fused
+// (= 0.24 ulp(a); hosted ubuntu-26.04 and macOS -ffp-contract=fast alike).
+static double shippedCaseBound(double a) {
+    const double ulpA = std::nextafter(a, std::numeric_limits<double>::infinity()) - a;
+    return std::sqrt(6.0) / 2.0 * ulpA * (1.0 + kOverSlack);
+}
+
 static void testShippedCase() {
     const gp_Pln tilted(gp_Ax3(gp_Pnt(-3.25, 7.5, 11.0), gp_Dir(0.3, -0.5, 0.81), gp_Dir(0.81, 0.0, -0.3)));
     const gp_Pln located(gp_Ax3(gp_Pnt(12.0, -40.0, 3.0), gp_Dir(0, 0, 1), gp_Dir(0.6, 0.8, 0)));
@@ -510,16 +524,17 @@ static void testShippedCase() {
         const double v = ellipseOnPlaneMax(pl, el, 5.497787143782, 7.068583470577, el.Location(),
                                            el.XAxis().Direction(), el.YAxis().Direction(),
                                            el.MajorRadius(), el.MinorRadius(), &cls, &clause);
+        const double bound = shippedCaseBound(el.MajorRadius());
         char nm[160];
-        std::snprintf(nm, sizeof nm, "shipped case (%s): A = B = W = 0 -> 0.0 bitwise", names[k]);
-        checkSameBits(v, 0.0, nm);
+        std::snprintf(nm, sizeof nm, "shipped case (%s): A = B = W = 0 -> 0.0 within sqrt(6)/2 ulp(a)", names[k]);
+        checkNear(v, 0.0, bound, nm);
         std::snprintf(nm, sizeof nm, "shipped case (%s): class ellipse-on-plane", names[k]);
         checkStr(clause, "ellipse-on-plane", nm);
         check(cls == EllipseDevClass::OnPlane && ellipseDevClassIsExact(cls), "shipped case: exact class");
         // full period, same inputs
         const double v2 = ellipseOnPlaneMax(pl, el, 0.0, 2.0 * kPi, el.Location(), el.XAxis().Direction(),
                                             el.YAxis().Direction(), el.MajorRadius(), el.MinorRadius());
-        checkSameBits(v2, 0.0, "shipped case, full period: 0.0 bitwise (W = 0 branch)");
+        checkNear(v2, 0.0, bound, "shipped case, full period: 0.0 within sqrt(6)/2 ulp(a) (W = 0 branch)");
         // (ii) the real To2d round trip: the DIAG_PCDEV 1.3e-15 measurement reproduced
         PlaneRun r = runPlane(pl, el, 5.497787143782, 7.068583470577);
         std::snprintf(nm, sizeof nm, "shipped case (%s): To2d round trip <= 1e-13 (measured 1.29e-15)", names[k]);

@@ -219,6 +219,16 @@ double dVolCylinderSector(double areaReg, double radius, int nSides, bool outwar
 
 double dVolPlaneRegion(const MeshView& mv, const std::vector<int>& tris, const gp_Ax3& ax);
 
+// D-gid-7.6 / D-gid-7.15 / D-gid-7.17: exact chord volume of a FilletStrip
+// cylinder, a CylGrow cylinder with maxVertexDev <= tauOf(mv), or a torus, over
+// its own triangles (refit_relational_revolve.cpp,
+// which owns refit_band_volume.hpp; the P1 include allowlist keeps it out of
+// refit_math.cpp). false otherwise. out is signed by outwardNormal (I9) with
+// the exact magnitude (D-gid-7.15); physicalOut, when given, receives the net
+// signed volume (it can oppose I9's sign on the saddle side of a torus).
+bool dVolExactOfRegion(const MeshView& mv, const Region& r, double& out,
+                       double* physicalOut = nullptr);
+
 // Large-R arc strip (lane F): monotonic normal rotation about a common axis, or a
 // static-normal vertex ring on coarse tessellation. Used by peelLargeArcStripsA2b.
 struct ArcStripDetect {
@@ -335,6 +345,10 @@ bool claimAnchoredRounds(const MeshView&, const SegmentParams&, const DerivedTol
 // D-fc-5.11 F8. Sphere corners (src/refit_relational_sphere.cpp): after every
 // stage that certifies a round (H1), before A3.
 bool claimSphereCorners(const MeshView&, const SegmentParams&, const DerivedTols&, SegmentWork&);
+
+// D-gid-7.12. Same-surface growth of the certified tori (src/refit_relational_reclaim.cpp):
+// after A3, on the triangles every other stage left.
+bool claimTorusSameSurface(const MeshView&, const SegmentParams&, SegmentWork&);
 
 bool tryPlaneLoopCircles(RegionSet& rs, const MeshView& mv, double sewTol);
 

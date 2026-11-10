@@ -996,6 +996,101 @@ set_tests_properties(relational_anchored_round_unit PROPERTIES
     LABELS "unit;fc-contract"
     TIMEOUT 60)
 
+# gid2/gy-honest (D-gid-7.6): RESULT census of the written shape -- face
+# provenance through the guarded unify, counting, describeShippedFaces.
+add_executable(written_census_unit written_census_unit.cpp)
+target_compile_features(written_census_unit PRIVATE cxx_std_17)
+set_target_properties(written_census_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(written_census_unit PRIVATE stl2step::core)
+target_include_directories(written_census_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(written_census_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(written_census_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(written_census_unit)
+endif()
+add_test(NAME written_census_unit COMMAND written_census_unit)
+set_tests_properties(written_census_unit PROPERTIES
+    LABELS "unit"
+    TIMEOUT 60)
+# D-gid-4.1: mixed FilletStrip splits per mesh-component.
+# Synthetic two-piece strip on one cylinder. No training mesh.
+add_executable(fillet_strip_split_unit fillet_strip_split_test.cpp)
+target_compile_features(fillet_strip_split_unit PRIVATE cxx_std_17)
+set_target_properties(fillet_strip_split_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(fillet_strip_split_unit PRIVATE stl2step::harness stl2step::core)
+target_include_directories(fillet_strip_split_unit PRIVATE
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/harness"
+    "${_stl2step_root}/tests/support")
+if(MSVC)
+    target_compile_definitions(fillet_strip_split_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(fillet_strip_split_unit)
+endif()
+add_test(NAME fillet_strip_split_unit COMMAND fillet_strip_split_unit)
+set_tests_properties(fillet_strip_split_unit PROPERTIES
+    LABELS "unit;gid-fillet-strip"
+    TIMEOUT 180)
+# gid2/gy-pktori (D-gid-7.12): same-surface growth of a certified torus --
+# adjacent unclaimed tau-triangles join the band, an uncertified B1 chip wholly
+# on the torus becomes one face of it; heal-not-revert names a band's growth.
+add_executable(relational_torus_grow_unit relational_torus_grow_unit.cpp)
+target_compile_features(relational_torus_grow_unit PRIVATE cxx_std_17)
+set_target_properties(relational_torus_grow_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_torus_grow_unit PRIVATE stl2step::core stl2step::harness)
+target_include_directories(relational_torus_grow_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src"
+    "${_stl2step_root}/tests/support"
+    "${_stl2step_root}/tests/harness")
+if(MSVC)
+    target_compile_definitions(relational_torus_grow_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_torus_grow_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_torus_grow_unit)
+endif()
+add_test(NAME relational_torus_grow_unit COMMAND relational_torus_grow_unit)
+set_tests_properties(relational_torus_grow_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+# D-gid-7.6: exact dVolPredicted of FilletStrip cylinders and tori (synthetic).
+add_executable(relational_dvol_exact_unit relational_dvol_exact_unit.cpp)
+target_compile_features(relational_dvol_exact_unit PRIVATE cxx_std_17)
+set_target_properties(relational_dvol_exact_unit PROPERTIES
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+target_link_libraries(relational_dvol_exact_unit PRIVATE stl2step::core)
+target_include_directories(relational_dvol_exact_unit PRIVATE
+    "${_stl2step_root}/include"
+    "${_stl2step_root}/src")
+if(MSVC)
+    target_compile_definitions(relational_dvol_exact_unit PRIVATE _USE_MATH_DEFINES NOMINMAX)
+    target_compile_options(relational_dvol_exact_unit PRIVATE /EHsc)
+endif()
+if(COMMAND stl2step_adhoc_sign)
+    stl2step_adhoc_sign(relational_dvol_exact_unit)
+endif()
+add_test(NAME relational_dvol_exact_unit COMMAND relational_dvol_exact_unit)
+set_tests_properties(relational_dvol_exact_unit PROPERTIES
+    LABELS "unit;fc-contract"
+    TIMEOUT 60)
+
 unset(_stl2step_root)
 unset(_anat)
 unset(_stl)

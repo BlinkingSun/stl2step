@@ -249,6 +249,14 @@ gp_Cylinder cylForIntersect(const Region& r) {
 // because convert() fans out components.
 thread_local std::vector<char> gEPrimeDemoted;
 
+bool eprimeDemoted(int id) {
+    return id >= 0 && (size_t)id < gEPrimeDemoted.size() && gEPrimeDemoted[(size_t)id] != 0;
+}
+
+void clearEPrimeDemoted(int id) {
+    if (id >= 0 && (size_t)id < gEPrimeDemoted.size()) gEPrimeDemoted[(size_t)id] = 0;
+}
+
 bool isAnalytic(const Region* r) {
     if (!r) return false;
     const bool planeOrCyl = (r->type == SurfType::Plane || r->type == SurfType::Cylinder);
@@ -1542,9 +1550,12 @@ void commitTorusPendingReclaim(RegionSet& rs, int torId) {
     // driver withholds it alone (per-torus U-3), the shipped tori stay.
 }
 
-// U-3 per torus (D-fc-4.11 (a)): name a torus region that failed to ship.
+// U-3 per torus (D-fc-4.11 (a)): name a torus region that failed to ship. A
+// band that grew by the same-surface stage names its growth first (D-gid-7.12
+// heal-not-revert): the retry ships the band as it was certified.
 void noteTorusFailed(RegionSet& rs, const Region& tor) {
-    rs.torusFailedTris.insert(rs.torusFailedTris.end(), tor.tris.begin(), tor.tris.end());
+    const std::vector<int>& named = torusFailedTrisOf(tor);
+    rs.torusFailedTris.insert(rs.torusFailedTris.end(), named.begin(), named.end());
 }
 
 void revertTorusPendingReclaim(RegionSet& /*rs*/, Region& /*tor*/) {}
@@ -15108,6 +15119,19 @@ bool buildRuledQuadFace(const Region& r, const RegionSet& rs, const MeshView& mv
     return fail("face-invalid");
 }
 
+namespace {
+// D-gid-4.1. One rebuild per mixed strip whose pieces do not all certify.
+// Keyed by the Region object; buildFaces clears the set on entry. thread_local
+// because convert() builds components on worker threads.
+std::unordered_set<const void*>& filletSplitRetrySet() {
+    static thread_local std::unordered_set<const void*> keys;
+    return keys;
+}
+bool filletSplitRetried(const void* key) { return filletSplitRetrySet().count(key) != 0; }
+void markFilletSplitRetried(const void* key) { filletSplitRetrySet().insert(key); }
+void clearFilletSplitRetried() { filletSplitRetrySet().clear(); }
+}  // namespace
+
 // D-130-14 / D-fc-3.2.10. A relational FilletStrip is one surface and one face
 // per edge-component. The chain stitch keeps every component on this region and
 // tags only the largest loop Outer, so one partial-cylinder face treats the
@@ -15115,10 +15139,15 @@ bool buildRuledQuadFace(const Region& r, const RegionSet& rs, const MeshView& mv
 // opens. 0 = single component (caller keeps the existing path). 1 = faces
 // appended. -1 = several components and a face could not be built; the caller
 // must not ship the single-face path (R1 explodes this region only).
-int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
+// 2 = D-gid-4.1: a mixed strip has both a certifying piece and a piece that
+// facets. collapseBanned is set on the failing piece's chains; the caller
+// rebuilds once so those chains stay mesh polylines and the piece's triangles
+// can facet without opening the shell. closed360 is unchanged (return -1).
+int buildFilletStripFaces(Region& r, RegionSet& rs, const MeshView& mv,
                           const std::vector<ChainGeom>& geom, const std::vector<char>& collapsed,
                           const std::vector<TopoDS_Edge>& meshE, const std::vector<char>& edgeOk,
-                          double sewTol, std::vector<TopoDS_Face>& acc) {
+                          double sewTol, std::vector<TopoDS_Face>& acc,
+                          std::vector<char>* collapseBanned) {
     if (r.origin != Origin::FilletStrip || r.type != SurfType::Cylinder) return 0;
     if (r.tris.size() < 2 || !mv.triEdges) return 0;
     std::unordered_map<int, int> parent;
@@ -15193,9 +15222,233 @@ int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
                      r.maxVertexDev);
     // A closed-360 fillet has cap loops, not an outer wire. Several components
     // of one closed band are not a partial-cylinder trim. Explode the region.
-    if (mixed || r.closed360) return -1;
-    for (const auto& g : groups)
-        if (g.empty()) return -1;
+    if (r.closed360) return -1;
+    // E″ residue demotion looks at the whole strip. A non-mixed strip keeps
+    // that gate (return 0 → caller explodes). A mixed strip is certified per
+    // piece below; one off piece must not demote the piece that is on τ.
+    if (!mixed && eprimeDemoted(r.id)) return 0;
+    // D-gid-4.1. mixed=1: one loop's chains touch two mesh-disjoint pieces
+    // (heal split). Split the loop into per-piece chain runs. Each piece is
+    // the strip's existing cylinder (no re-fit). Vertices of that piece ≤ τ
+    // and at least 3 triangles → its own face. Anything else facets alone.
+    // A strip with no certifying piece still explodes whole (the B0 path).
+    const bool splitMixed = mixed;
+    std::vector<char> facetPiece((size_t)nComp, 0);
+    // Chains whose mesh edges sit in one piece. A faceted piece bans these
+    // even when they do not form a shippable wire. A chain that touches two
+    // pieces is not a boundary of either piece.
+    std::vector<std::vector<int>> pieceChains((size_t)nComp);
+    std::vector<int> spanningChains;
+    if (splitMixed) {
+        // The mixed loop walks both pieces, and the two walks can interleave.
+        // A contiguous slice of that loop is not a closed wire (rid 149 shipped
+        // a face and the shell-open healer exploded the strip). Rebuild each
+        // piece's loops from the chains its own triangles own, linked by
+        // shared mesh vertices. No closed cycle → that piece facets.
+        auto chainPiece = [&](int ci) -> int {
+            if (ci < 0 || (size_t)ci >= rs.chains.size()) return -1;
+            int cc = -1;
+            bool any = false;
+            for (int eid : rs.chains[(size_t)ci].meshEdges) {
+                auto it = edgeOwner.find(eid);
+                if (it == edgeOwner.end()) continue;
+                auto rit = rootIndex.find(find(it->second));
+                if (rit == rootIndex.end()) continue;
+                any = true;
+                if (cc < 0) cc = rit->second;
+                else if (cc != rit->second) return -2;
+            }
+            return any ? cc : -1;
+        };
+        std::unordered_set<int> seenChain;
+        for (const Loop& lp : r.loops) {
+            for (int ci : lp.chainIdx) {
+                if (!seenChain.insert(ci).second) continue;
+                const int cc = chainPiece(ci);
+                if (cc == -2) spanningChains.push_back(ci);
+                else if (cc >= 0 && cc < nComp) pieceChains[(size_t)cc].push_back(ci);
+            }
+        }
+        std::vector<std::vector<Loop>> splitGroups((size_t)nComp);
+        for (int gi = 0; gi < nComp; ++gi) {
+            struct Half {
+                int ci;
+                int end;
+            };
+            std::unordered_map<int, std::vector<Half>> at;
+            std::vector<int> openChains;
+            bool bad = false;
+            for (int ci : pieceChains[(size_t)gi]) {
+                if (ci < 0 || (size_t)ci >= rs.chains.size()) {
+                    bad = true;
+                    break;
+                }
+                const BoundaryChain& ch = rs.chains[(size_t)ci];
+                const bool self =
+                    ch.closedLoop || ch.meshVerts.size() < 2 ||
+                    ch.meshVerts.size() == ch.meshEdges.size() ||
+                    ch.meshVerts.front() == ch.meshVerts.back();
+                if (self) {
+                    if (ch.meshVerts.size() < 2 && ch.meshEdges.empty()) {
+                        bad = true;
+                        break;
+                    }
+                    Loop sub;
+                    sub.role = LoopRole::Inner;
+                    sub.chainIdx.push_back(ci);
+                    sub.reversed.push_back(0);
+                    splitGroups[(size_t)gi].push_back(std::move(sub));
+                    continue;
+                }
+                at[ch.meshVerts.front()].push_back({ci, 0});
+                at[ch.meshVerts.back()].push_back({ci, 1});
+                openChains.push_back(ci);
+            }
+            for (const auto& kv : at) {
+                if (kv.second.size() != 2) bad = true;
+            }
+            std::unordered_set<int> used;
+            if (!bad) {
+                for (int seed : openChains) {
+                    if (used.count(seed)) continue;
+                    std::vector<int> order;
+                    std::vector<uint8_t> revs;
+                    int ci = seed;
+                    int rev = 0;
+                    bool closed = false;
+                    for (size_t step = 0; step < openChains.size(); ++step) {
+                        if (used.count(ci)) {
+                            bad = true;
+                            break;
+                        }
+                        used.insert(ci);
+                        order.push_back(ci);
+                        revs.push_back((uint8_t)rev);
+                        const BoundaryChain& ch = rs.chains[(size_t)ci];
+                        const int leave = rev ? ch.meshVerts.front() : ch.meshVerts.back();
+                        auto vit = at.find(leave);
+                        if (vit == at.end()) {
+                            bad = true;
+                            break;
+                        }
+                        int nci = -1, nend = -1;
+                        for (const Half& h : vit->second) {
+                            if (h.ci == ci) continue;
+                            nci = h.ci;
+                            nend = h.end;
+                        }
+                        if (nci < 0) {
+                            bad = true;
+                            break;
+                        }
+                        if (nci == seed) {
+                            closed = (nend == 0);
+                            bad = !closed;
+                            break;
+                        }
+                        ci = nci;
+                        rev = (nend == 1) ? 1 : 0;
+                    }
+                    if (bad || !closed) {
+                        bad = true;
+                        break;
+                    }
+                    Loop sub;
+                    sub.role = LoopRole::Inner;
+                    sub.chainIdx = std::move(order);
+                    sub.reversed = std::move(revs);
+                    splitGroups[(size_t)gi].push_back(std::move(sub));
+                }
+            }
+            if (bad || used.size() != openChains.size()) splitGroups[(size_t)gi].clear();
+            else if (!splitGroups[(size_t)gi].empty()) {
+                size_t best = 0;
+                for (size_t i = 1; i < splitGroups[(size_t)gi].size(); ++i)
+                    if (splitGroups[(size_t)gi][i].chainIdx.size() >
+                        splitGroups[(size_t)gi][best].chainIdx.size())
+                        best = i;
+                splitGroups[(size_t)gi][best].role = LoopRole::Outer;
+            }
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder comp=%d "
+                             "nChain=%zu nLoop=%zu closed=%d\n",
+                             r.id, gi, pieceChains[(size_t)gi].size(),
+                             splitGroups[(size_t)gi].size(),
+                             splitGroups[(size_t)gi].empty() ? 0 : 1);
+        }
+        groups.swap(splitGroups);
+
+        std::vector<std::vector<int>> compTris((size_t)nComp);
+        for (int t : r.tris) {
+            if (!parent.count(t)) continue;
+            const auto rit = rootIndex.find(find(t));
+            if (rit == rootIndex.end()) continue;
+            compTris[(size_t)rit->second].push_back(t);
+        }
+        const double tau = tauOf(mv);
+        auto pieceDev = [&](int gi) -> double {
+            double md = 0.0;
+            if (gi < 0 || gi >= nComp || !mv.compTris || !mv.tris || !mv.pts) return md;
+            for (int t : compTris[(size_t)gi]) {
+                if (t < 0 || (size_t)t >= mv.nTri) continue;
+                const int gt = mv.compTris[t];
+                if (gt < 0) continue;
+                for (int k = 0; k < 3; ++k) {
+                    const int gv = mv.tris[gt][k];
+                    if (gv < 0) continue;
+                    md = std::max(md, cylRadialDev(r, gp_Pnt(mv.pts[gv])));
+                }
+            }
+            return md;
+        };
+        int nCert = 0;
+        for (int gi = 0; gi < nComp; ++gi) {
+            const int nTriC = (int)compTris[(size_t)gi].size();
+            const double dev = pieceDev(gi);
+            const bool under = nTriC < 3;
+            const bool hasLoop = !groups[(size_t)gi].empty();
+            const bool cert = !under && hasLoop && tau > 0.0 && dev <= tau;
+            if (!cert) facetPiece[(size_t)gi] = 1;
+            else ++nCert;
+            const char* whyPiece = "cert";
+            if (!cert)
+                whyPiece = under ? "underdetermined" : (!hasLoop ? "no-loop" : "vertex-off");
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder comp=%d "
+                             "nTri=%d maxDev=%.6g tau=%.6g why=%s\n",
+                             r.id, gi, nTriC, dev, tau, whyPiece);
+        }
+        if (nCert == 0) return -1;
+        const bool retrying = filletSplitRetried(&r);
+        bool anyFacet = false;
+        for (char f : facetPiece)
+            if (f) anyFacet = true;
+        // The residue gate may already have refused the whole strip, so this
+        // pass collapsed every chain to a mesh polyline. Drop the demotion and
+        // rebuild once: certifying pieces collapse, a failing piece stays banned.
+        const bool demoted = eprimeDemoted(r.id);
+        if (!retrying && (anyFacet || demoted)) {
+            if (demoted) clearEPrimeDemoted(r.id);
+            if (anyFacet && collapseBanned) {
+                auto banCi = [&](int ci) {
+                    if (ci < 0 || (size_t)ci >= collapseBanned->size()) return;
+                    (*collapseBanned)[(size_t)ci] = 1;
+                };
+                for (int gi = 0; gi < nComp; ++gi) {
+                    if (!facetPiece[(size_t)gi]) continue;
+                    for (int ci : pieceChains[(size_t)gi]) banCi(ci);
+                }
+                for (int ci : spanningChains) banCi(ci);
+            }
+            markFilletSplitRetried(&r);
+            return 2;
+        }
+    } else {
+        for (const auto& g : groups)
+            if (g.empty()) return -1;
+    }
 
     auto dumpFaceCheck = [&](const TopoDS_Face& f, int comp) {
         if (!diagRelEnabled()) return;
@@ -15250,9 +15503,15 @@ int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
     };
 
     const std::vector<Loop> saved = r.loops;
+    const std::vector<int> savedTris = r.tris;
+    const double savedDvol = r.dVolPredicted;
+    const double savedMaxDev = r.maxVertexDev;
     std::vector<TopoDS_Face> faces;
+    // D-gid-7.4. The loops each shipped piece was built from.
+    std::vector<Loop> shippedLoops;
     bool ok = true;
     for (size_t gi = 0; gi < groups.size(); ++gi) {
+        if (splitMixed && gi < facetPiece.size() && facetPiece[gi]) continue;
         std::vector<Loop> loops = groups[gi];
         int iOuter = -1;
         for (size_t i = 0; i < loops.size(); ++i)
@@ -15306,6 +15565,29 @@ int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
         TopoDS_Face f;
         if (!buildPartialCylinder(r, rs, mv, geom, collapsed, meshE, edgeOk, sewTol, f) ||
             f.IsNull()) {
+            if (splitMixed) {
+                dumpFaceCheck(f, (int)gi);
+                if (diagRelEnabled())
+                    std::fprintf(stderr,
+                                 "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder "
+                                 "builtAs=NotBuilt why=component-face nComp=%d comp=%zu\n",
+                                 r.id, nComp, gi);
+                if (!filletSplitRetried(&r)) {
+                    if (collapseBanned && gi < pieceChains.size()) {
+                        auto banCi = [&](int ci) {
+                            if (ci < 0 || (size_t)ci >= collapseBanned->size()) return;
+                            (*collapseBanned)[(size_t)ci] = 1;
+                        };
+                        for (int ci : pieceChains[gi]) banCi(ci);
+                        for (int ci : spanningChains) banCi(ci);
+                    }
+                    r.loops = saved;
+                    markFilletSplitRetried(&r);
+                    return 2;
+                }
+                if (gi < facetPiece.size()) facetPiece[gi] = 1;
+                continue;
+            }
             ok = false;
             dumpFaceCheck(f, (int)gi);
             if (diagRelEnabled())
@@ -15317,9 +15599,96 @@ int buildFilletStripFaces(Region& r, const RegionSet& rs, const MeshView& mv,
         }
         dumpFaceCheck(f, (int)gi);
         faces.push_back(f);
+        if (splitMixed) shippedLoops.insert(shippedLoops.end(), loops.begin(), loops.end());
     }
     r.loops = std::move(saved);
     if (!ok) return -1;
+    if (splitMixed) {
+        bool anyFacet = false;
+        for (char bit : facetPiece)
+            if (bit) anyFacet = true;
+        if (anyFacet) {
+            std::vector<std::vector<int>> compTris((size_t)nComp);
+            for (int t : savedTris) {
+                if (!parent.count(t)) continue;
+                const auto rit = rootIndex.find(find(t));
+                if (rit == rootIndex.end()) continue;
+                compTris[(size_t)rit->second].push_back(t);
+            }
+            std::vector<int> drop;
+            for (int gi = 0; gi < nComp; ++gi) {
+                if (gi >= (int)facetPiece.size() || !facetPiece[(size_t)gi]) continue;
+                for (int t : compTris[(size_t)gi]) drop.push_back(t);
+            }
+            bool canMark = !drop.empty() && !faces.empty();
+            for (int t : drop) {
+                if (t < 0 || (size_t)t >= rs.triIsland.size() ||
+                    (size_t)t >= rs.triRegion.size())
+                    canMark = false;
+            }
+            if (!canMark) {
+                r.tris = savedTris;
+                r.dVolPredicted = savedDvol;
+                r.maxVertexDev = savedMaxDev;
+                return -1;
+            }
+            const int islandId = rs.nIslands;
+            for (int t : drop) {
+                rs.triIsland[(size_t)t] = islandId;
+                rs.triRegion[(size_t)t] = -1;
+            }
+            std::vector<int> kept;
+            kept.reserve(savedTris.size());
+            for (int t : savedTris) {
+                if (std::find(drop.begin(), drop.end(), t) == drop.end()) kept.push_back(t);
+            }
+            auto areaOf = [&](const std::vector<int>& tris) {
+                double a = 0.0;
+                if (!mv.compTris || !mv.tris || !mv.pts) return a;
+                for (int t : tris) {
+                    if (t < 0 || (size_t)t >= mv.nTri) continue;
+                    const int gt = mv.compTris[t];
+                    if (gt < 0) continue;
+                    const gp_XYZ& A = mv.pts[mv.tris[gt][0]];
+                    const gp_XYZ& B = mv.pts[mv.tris[gt][1]];
+                    const gp_XYZ& C = mv.pts[mv.tris[gt][2]];
+                    a += 0.5 * (B - A).Crossed(C - A).Modulus();
+                }
+                return a;
+            };
+            const double aAll = areaOf(savedTris);
+            const double aKept = areaOf(kept);
+            r.tris = std::move(kept);
+            // D-gid-7.4. The loops follow the tris. A later rebuild (a site-B
+            // cascade explodes a neighbour) sees only the shipped pieces. With the
+            // mixed loop restored it built one face on the whole old boundary, the
+            // shipped piece was left a hole, and the shell-open healer exploded the
+            // strip. Each piece's own loops rebuild the same face.
+            r.loops = shippedLoops;
+            if (aAll > 0.0) r.dVolPredicted = savedDvol * (aKept / aAll);
+            double shippedDev = 0.0;
+            for (int gi = 0; gi < nComp; ++gi) {
+                if (gi < (int)facetPiece.size() && facetPiece[(size_t)gi]) continue;
+                for (int t : compTris[(size_t)gi]) {
+                    if (t < 0 || (size_t)t >= mv.nTri || !mv.compTris || !mv.tris || !mv.pts)
+                        continue;
+                    const int gt = mv.compTris[t];
+                    if (gt < 0) continue;
+                    for (int k = 0; k < 3; ++k) {
+                        const int gv = mv.tris[gt][k];
+                        if (gv < 0) continue;
+                        shippedDev = std::max(shippedDev, cylRadialDev(r, gp_Pnt(mv.pts[gv])));
+                    }
+                }
+            }
+            r.maxVertexDev = shippedDev;
+            if (diagRelEnabled())
+                std::fprintf(stderr,
+                             "DIAG_RELFACE rid=%d origin=FilletStrip type=cylinder "
+                             "why=piece-split faces=%zu facetTris=%zu\n",
+                             r.id, faces.size(), drop.size());
+        }
+    }
     for (auto& f : faces) acc.push_back(f);
     if (diagRelEnabled())
         std::fprintf(stderr,
@@ -15814,6 +16183,94 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         }
     };
 
+    // D-gid-7.3 (see the call in finishFace). The seam is re-laid as the straight
+    // segment between the points where the two caps' own edges end at the seam
+    // vertices, with each pcurve copy the (u,v) segment between those points'
+    // surface parameters: every edge end at a seam vertex then coincides, so no
+    // tolerance carries the join (STEP keeps none). Refused when a cap's edge ends
+    // disagree at a vertex, or when the far end stands off the generator through
+    // the near end by more than tau (then the seam is not one generator and the
+    // mint, D-fc-7.6, owns it). The segment's distance from the cylinder is the
+    // stand-off's sagitta, R(1 - cos(du/2)).
+    auto relaySeamOnCapEnds = [&](const TopoDS_Face& f) -> bool {
+        try {
+            const double tau = tauOf(mv);
+            if (!(tau > 0.0)) return false;
+            const TopoDS_Edge eF = TopoDS::Edge(gSeamE.Oriented(TopAbs_FORWARD));
+            const TopoDS_Edge eR = TopoDS::Edge(gSeamE.Oriented(TopAbs_REVERSED));
+            TopoDS_Vertex sv[2];
+            TopExp::Vertices(eF, sv[0], sv[1]);
+            gp_Pnt P[2];
+            for (int k = 0; k < 2; ++k) {
+                if (sv[k].IsNull()) return false;
+                bool have = false;
+                for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next()) {
+                    const TopoDS_Edge& e = TopoDS::Edge(ex.Current());
+                    if (e.IsSame(gSeamE)) continue;
+                    TopoDS_Vertex a, b;
+                    TopExp::Vertices(e, a, b);
+                    Standard_Real c0 = 0, c1 = 0;
+                    Handle(Geom_Curve) c3 = BRep_Tool::Curve(e, c0, c1);
+                    if (c3.IsNull()) continue;
+                    for (int end = 0; end < 2; ++end) {
+                        const TopoDS_Vertex& w = end == 0 ? a : b;
+                        if (w.IsNull() || !w.IsSame(sv[k])) continue;
+                        const gp_Pnt q = c3->Value(end == 0 ? c0 : c1);
+                        if (!have) {
+                            P[k] = q;
+                            have = true;
+                        } else if (P[k].Distance(q) > Precision::Confusion()) {
+                            return false;
+                        }
+                    }
+                }
+                if (!have) return false;
+            }
+            const gp_Cylinder cyl = surf->Cylinder();
+            double u[2], v[2];
+            for (int k = 0; k < 2; ++k) ElSLib::Parameters(cyl, P[k], u[k], v[k]);
+            auto wrapPi = [](double x) {
+                while (x > kPi) x -= 2.0 * kPi;
+                while (x <= -kPi) x += 2.0 * kPi;
+                return x;
+            };
+            const double standOff = cyl.Radius() * std::fabs(wrapPi(u[1] - u[0]));
+            if (standOff > tau) return false;
+            const double len = P[0].Distance(P[1]);
+            if (!(len > Precision::Confusion())) return false;
+            Standard_Real f0 = 0, l0 = 0;
+            Handle(Geom2d_Curve) pF = BRep_Tool::CurveOnSurface(eF, surf, TopLoc_Location(), f0, l0);
+            Handle(Geom2d_Curve) pR = BRep_Tool::CurveOnSurface(eR, surf, TopLoc_Location(), f0, l0);
+            if (pF.IsNull() || pR.IsNull()) return false;
+            auto onChart = [&](const Handle(Geom2d_Curve)& pc) -> Handle(Geom2d_Curve) {
+                const double uc = pc->Value(f0).X();
+                TColgp_Array1OfPnt2d poles(1, 2);
+                poles(1) = gp_Pnt2d(uc + wrapPi(u[0] - uc), v[0]);
+                poles(2) = gp_Pnt2d(uc + wrapPi(u[1] - uc), v[1]);
+                TColStd_Array1OfReal knots(1, 2);
+                knots(1) = 0.0;
+                knots(2) = len;
+                TColStd_Array1OfInteger mults(1, 2);
+                mults(1) = 2;
+                mults(2) = 2;
+                return new Geom2d_BSplineCurve(poles, knots, mults, 1);
+            };
+            Handle(Geom2d_Curve) sF = onChart(pF), sR = onChart(pR);
+            Handle(Geom_Line) line = new Geom_Line(P[0], gp_Dir(gp_Vec(P[0], P[1])));
+            const double tol = BRep_Tool::Tolerance(gSeamE);
+            BRep_Builder B;
+            B.UpdateEdge(gSeamE, line, TopLoc_Location(), tol);
+            B.UpdateEdge(gSeamE, sF, sR, surf, TopLoc_Location(), tol);
+            B.Range(gSeamE, 0.0, len);
+            if (diagP2Enabled())
+                std::fprintf(stderr, "DIAG_SEAMRELAY rid=%d standOff=%.4g tau=%.4g\n", r.id,
+                             standOff, tau);
+            return true;
+        } catch (const Standard_Failure&) {
+            return false;
+        }
+    };
+
     auto finishFace = [&](TopoDS_Face got, bool publishSimple, int ciL, int ciH,
                           const TopoDS_Edge& eL, const TopoDS_Edge& eH) -> bool {
         if (got.IsNull()) return false;
@@ -15904,7 +16361,18 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
         // edge then carries its own measured deviation from the face (capped).
         if ((crossingCap || seamMinted || !inners.empty()) && !faceIsValid(got))
             fitEdgeTolerancesToFace(got, faceCap);
-        if (!faceIsValid(got) && !ensureFaceValid(got, faceCap)) {
+        // D-gid-7.3: a mint-refused rim keeps its own mesh vertex, so the two seam
+        // vertices may stand off one generator by up to tau (D-fc-7.6 keeps ONE
+        // generator below tau). The seam generator's end and the other cap's circle
+        // then meet the shared vertex from opposite sides, farther apart than the
+        // vertex tolerance: BRepCheck reads SelfIntersectingWire and the certified
+        // wall explodes to facets. The seam is re-laid on the caps' own edge ends --
+        // only when ensureFaceValid cannot rescue the face (the explode state), so a
+        // face that ensureFaceValid already ships keeps its seam (D-gid-7.11).
+        bool faceOk = faceIsValid(got) || ensureFaceValid(got, faceCap);
+        if (!faceOk && mintRefused && gSeamSet && !gSeamE.IsNull() && relaySeamOnCapEnds(got))
+            faceOk = faceIsValid(got) || ensureFaceValid(got, faceCap);
+        if (!faceOk) {
             if (diagP2Enabled() || diagPlatesEnabled()) {
                 char faceSt[256] = "[]", wireSt[256] = "[]";
                 try {
@@ -15927,6 +16395,57 @@ bool trySeamed360(const Region& r, const RegionSet& rs, const MeshView& mv,
                 std::fprintf(stderr,
                              "DIAG_SEAM360FAIL rid=%d R=%.4f inners=%zu faceSt=%s wireSt=%s\n",
                              r.id, r.radius, inners.size(), faceSt, wireSt);
+                // D-gid-7.3 census: the failed face's UV wire in wire order (orientation
+                // in face context), the edge pair BRepCheck's self-intersection test
+                // names, and those edges' vertex tolerances and 3d end gaps.
+                try {
+                    for (TopExp_Explorer wx(got, TopAbs_WIRE); wx.More(); wx.Next()) {
+                        const TopoDS_Wire ww = TopoDS::Wire(wx.Current());
+                        int ei = 0;
+                        for (BRepTools_WireExplorer ex(ww, got); ex.More(); ex.Next(), ++ei) {
+                            const TopoDS_Edge ee = ex.Current();
+                            Standard_Real a2 = 0, b2 = 0;
+                            Handle(Geom2d_Curve) pc = BRep_Tool::CurveOnSurface(ee, got, a2, b2);
+                            if (pc.IsNull()) continue;
+                            const bool rev = ee.Orientation() == TopAbs_REVERSED;
+                            const gp_Pnt2d p0 = pc->Value(rev ? b2 : a2);
+                            const gp_Pnt2d p1 = pc->Value(rev ? a2 : b2);
+                            std::fprintf(stderr,
+                                         "DIAG_SEAM360UV rid=%d e=%d ori=%s tol=%.3g "
+                                         "uv=(%.7f,%.5f)->(%.7f,%.5f)\n",
+                                         r.id, ei, rev ? "R" : "F", BRep_Tool::Tolerance(ee),
+                                         p0.X(), p0.Y(), p1.X(), p1.Y());
+                        }
+                        TopoDS_Edge x1, x2;
+                        Handle(BRepCheck_Wire) bw = new BRepCheck_Wire(ww);
+                        const BRepCheck_Status sst = bw->SelfIntersect(got, x1, x2, Standard_False);
+                        auto idxOf = [&](const TopoDS_Edge& x) {
+                            int k = 0;
+                            for (BRepTools_WireExplorer ex(ww, got); ex.More(); ex.Next(), ++k)
+                                if (!x.IsNull() && ex.Current().IsSame(x)) return k;
+                            return -1;
+                        };
+                        std::fprintf(stderr, "DIAG_SEAM360XING rid=%d st=%d e=%d,%d\n", r.id,
+                                     (int)sst, idxOf(x1), idxOf(x2));
+                        for (const TopoDS_Edge* xe : {&x1, &x2}) {
+                            if (xe->IsNull()) continue;
+                            Standard_Real c0 = 0, c1 = 0;
+                            Handle(Geom_Curve) c3 = BRep_Tool::Curve(*xe, c0, c1);
+                            TopoDS_Vertex a, b;
+                            TopExp::Vertices(*xe, a, b);
+                            if (c3.IsNull() || a.IsNull() || b.IsNull()) continue;
+                            std::fprintf(stderr,
+                                         "DIAG_SEAM360XV rid=%d e=%d tolE=%.3g tolA=%.3g tolB=%.3g "
+                                         "gapA=%.3g gapB=%.3g closed=%d\n",
+                                         r.id, idxOf(*xe), BRep_Tool::Tolerance(*xe),
+                                         BRep_Tool::Tolerance(a), BRep_Tool::Tolerance(b),
+                                         c3->Value(c0).Distance(BRep_Tool::Pnt(a)),
+                                         c3->Value(c1).Distance(BRep_Tool::Pnt(b)),
+                                         a.IsSame(b) ? 1 : 0);
+                        }
+                    }
+                } catch (const Standard_Failure&) {
+                }
                 for (const Loop& lp : r.loops)
                     for (int ci : lp.chainIdx) {
                         if (ci < 0 || (size_t)ci >= rs.chains.size() || (size_t)ci >= geom.size())
@@ -19062,6 +19581,7 @@ void measureClassBShipMetrics(const MeshView& mv, const RegionSet& rs,
         ClassBRegionMetric row;
         row.rid = r.id;
         row.maxVertexDev = r.maxVertexDev;
+        row.ringCertified = r.ringCertified;
         row.dVolPredicted = r.dVolPredicted;
         row.shippedAnalytic = regionShippedAnalytic(r, exploded);
         double A = 0.0;
@@ -19201,8 +19721,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
     out.clear();
     rs.torusFailedTris.clear();
     rs.classBMetrics.clear();
+    rs.shipFaceRid.clear();
+    rs.shipFaceFacet.clear();
     try {
         gCompNTri = (int)mv.nTri;
+        clearFilletSplitRetried();
         gReconnectFires = 0;
         gOriNotDetermined = 0;
         lastCanonClearPass = -1;
@@ -19235,6 +19758,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             std::vector<ChainGeom> noGeom(rs.chains.size());
             std::vector<char> noCol(rs.chains.size(), 0);
             dumpBoundCredCensus(mv, rs, noGeom, noCol, sewTol);
+            // D-gid-7.6: stage-P faces come from profiles, not regions.
+            rs.shipFaceRid.assign(out.size(), -1);
+            rs.shipFaceFacet.assign(out.size(), 0);
             return true;
         }
 
@@ -19333,6 +19859,9 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         int rounds = 0;
         int fallbackGuardPass = 0;
         int j6UncollapsePass = 0;
+        // D-gid-4.1. One rebuild when a mixed FilletStrip facets a piece alone.
+        bool filletResplit = false;
+        bool filletResplitUsed = false;
         // One local-explode attempt for a relational FilletStrip whose contact
         // edges are free. Same containment as a failed chamfer cone: the region
         // becomes facets, the component does not revert.
@@ -23370,14 +23899,21 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                                                           : Reject::TorusNYI;
                 return false;
             }
-            if (r.type == SurfType::Cylinder && !isAnalytic(&r)) {
-                if (r.id >= 0 && (size_t)r.id < eprimeFill.size()) eprimeFill[(size_t)r.id] = 1;
-                r.builtAs = BuiltAs::ExplodedToFacets;
-                return true;
-            }
             if (r.origin == Origin::FilletStrip && r.type == SurfType::Cylinder) {
                 const int split = buildFilletStripFaces(r, rs, mv, geom, collapsed, meshE, edgeOk,
-                                                        sewTol, acc);
+                                                        sewTol, acc, &collapseBanned);
+                // D-gid-4.1: failing piece's chains are banned. Rebuild once so
+                // neighbours and the faceted piece share mesh edges. A second
+                // request explodes the region rather than shipping no face.
+                // split == 0 falls through (single component, or a non-mixed
+                // strip the residue gate still owns).
+                if (split == 2) {
+                    if (!filletResplitUsed) {
+                        filletResplit = true;
+                        return true;
+                    }
+                    return false;
+                }
                 if (split > 0) {
                     r.builtAs = BuiltAs::Single;
                     return true;
@@ -23385,6 +23921,11 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 // Several components and a face failed. A single outer face would
                 // drop the others and open the shell. R1 explodes this region.
                 if (split < 0) return false;
+            }
+            if (r.type == SurfType::Cylinder && !isAnalytic(&r)) {
+                if (r.id >= 0 && (size_t)r.id < eprimeFill.size()) eprimeFill[(size_t)r.id] = 1;
+                r.builtAs = BuiltAs::ExplodedToFacets;
+                return true;
             }
             if (r.closed360 && r.type == SurfType::Cylinder) {
                 TopoDS_Face f360;
@@ -23598,6 +24139,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         };
         std::vector<TopoDS_Face> built;
         std::vector<int> builtRid;
+        std::vector<uint8_t> builtFacet;  // D-gid-7.6: parallel to built; 1 = makeFacet
         TopoDS_Shell sh;
         int closureHealIter = 0;
         int closureHealTotal = 0;
@@ -23616,12 +24158,14 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         unstable = false;
         built.clear();
         builtRid.clear();
+        builtFacet.clear();
         const int kMaxRounds = 2;
         while (true) {
             correctCylMeetSurfaces(rs, mv, exploded);
             rebuildCollapsed();
             built.clear();
             builtRid.clear();
+            builtFacet.clear();
             bool anyFail = false;
             std::vector<int> failedIds;
             std::vector<size_t> buildOrder(rs.regions.size());
@@ -23712,6 +24256,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         for (auto& f : acc) {
                             built.push_back(f);
                             builtRid.push_back(r.id);
+                            builtFacet.push_back(0);
                     }
                 }
             }
@@ -23737,6 +24282,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             // MakeEdge-fail that still yields a BRepCheck-valid mixed face is
             // the legal polyline fallback (IA_* empty/same, IDENTIC_POINTS)
             // and is not exploded. Cap 2 rounds, then R2.
+            if (filletResplit && !filletResplitUsed && !anyFail) {
+                filletResplit = false;
+                filletResplitUsed = true;
+                restoreShared();
+                continue;
+            }
+            filletResplit = false;
             if (!anyFail) break;
             std::sort(failedIds.begin(), failedIds.end());
             failedIds.erase(std::unique(failedIds.begin(), failedIds.end()), failedIds.end());
@@ -23765,6 +24317,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                 rebuildCollapsed();
                 built.clear();
                 builtRid.clear();
+                builtFacet.clear();
                 anyFail = false;
                 failedIds.clear();
                 clipTangentChords();
@@ -23783,6 +24336,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                         for (auto& f : acc) {
                             built.push_back(f);
                             builtRid.push_back(r.id);
+                            builtFacet.push_back(0);
                         }
                     }
                 }
@@ -23892,11 +24446,13 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
             explodeAll();
             built.clear();
             builtRid.clear();
+            builtFacet.clear();
             for (size_t k = 0; k < mv.nTri; k++) {
                 TopoDS_Face f = makeFacet(mv, verts, meshE, edgeOk, k);
                 if (!f.IsNull()) {
                     built.push_back(f);
                     builtRid.push_back(-1);
+                    builtFacet.push_back(1);
                 }
             }
             if (built.empty()) {
@@ -23940,6 +24496,7 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
                     }
                     built.push_back(f);
                     builtRid.push_back((exp || efill) ? rid : -1);
+                    builtFacet.push_back(1);
                 }
             }
         }
@@ -24767,6 +25324,8 @@ bool buildFaces(const MeshView& mv, RegionSet& rs, const std::vector<TopoDS_Vert
         measureClassBShipMetrics(mv, rs, built, builtRid, exploded, rs.classBMetrics);
         std::fprintf(stderr, "DIAG_RECONNECT_SUM fires=%d nTri=%d notDetermined=%d\n",
                      gReconnectFires, (int)mv.nTri, gOriNotDetermined);
+        rs.shipFaceRid = builtRid;
+        rs.shipFaceFacet = builtFacet;
         out = std::move(built);
         return true;
     } catch (const Standard_Failure&) {

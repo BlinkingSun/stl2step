@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- RESULT `smoothPlanes`, `smoothCylinders`, `smoothFacetFaces`, `smoothBuiltPlanes` and `smoothBuiltFillets`
+  now describe the solid that is written instead of the segment plan. Each written face is classified by
+  where it came from (an analytic region face or mesh triangles) and followed through the coplanar merge:
+  `smoothBuiltPlanes` counts planar faces with an analytic source, `smoothFacetFaces` faces made only of
+  mesh triangles, `smoothBuiltFillets` faces from fillet strips, and `smoothPlanes` / `smoothCylinders` the
+  plane and cylinder regions that have a face in the written solid. A region dissolved to facets after
+  planning now counts as facets, and on a file whose components all shipped `smoothBuiltPlanes +
+  smoothFacetFaces` equals the planar faces of the STEP. Keys, key order and STEP output are unchanged;
+  only these five values move, and only where the plan and the written solid differed (for example the
+  corpus part handle-lock ships all 23 plane regions as 20 planar faces). `smoothFillets` is still the
+  plan's fillet-strip count. Gate labels and header comments now use the same wording.
+
 ## [1.9.0] - 2026-11-07
 
 TrueForm stops giving up on whole parts and finishes the drilled and rounded details of plate parts

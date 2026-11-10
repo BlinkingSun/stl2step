@@ -20,9 +20,13 @@ Cells:
       <= ratcheted ceiling
   (c) unique faces matching live-region GT equations <= sumNFacesCeiling
 
-Anti-confusion (mandatory): print RESULT smoothBuiltPlanes (regions) beside
-the per-plane face counts. Regions and faces move in opposite directions
-under consolidation.
+Anti-confusion (mandatory): print RESULT smoothBuiltPlanes beside the
+per-plane face counts. smoothBuiltPlanes counts the written solid's planar
+faces that have an analytic source (an analytic region face, not mesh
+triangles) over the whole part; planar faces made only of mesh triangles are
+smoothFacetFaces, and the plane-region count is smoothPlanes (D-gid-7.6). It
+is not the per-GT-plane nFaces: recovering a plane from facets raises it while
+STEP PLANE faces fall, and merging split pieces of one plane lowers both.
 
 Usage:
   plane_census_gate.py --self-test
@@ -48,8 +52,11 @@ DEFAULT_GT = REPO / "tests" / "diag" / "handle-pickup" / "ground-truth.json"
 DEFAULT_RATCHET = REPO / "tests" / "gates" / "baseline" / "plane-census-ratchet.json"
 RATCHET_NAME = "plane-census-ratchet.json"
 ANTI_CONFUSION = (
-    "regions and faces move in opposite directions under consolidation; "
-    "do not read a falling region count as regression"
+    "smoothBuiltPlanes = whole-part planar faces with an analytic source "
+    "(facet-only planar faces are smoothFacetFaces, plane regions are "
+    "smoothPlanes); recovering a plane from facets raises it while STEP PLANE "
+    "faces fall, merging split pieces lowers both; do not read either count "
+    "alone as regression"
 )
 
 REF_RE = re.compile(r"#(\d+)\b")
@@ -604,7 +611,7 @@ def run_trueform(binary: Path, stl: Path, step: Path, threads: int) -> Dict[str,
 def format_report(details: Dict[str, Any]) -> str:
     lines = [
         f"plane_census_gate  STEP PLANE faces={details['nStepPlanes']}  "
-        f"smoothBuiltPlanes(regions)={details['smoothBuiltPlanes']}",
+        f"smoothBuiltPlanes(analytic planar faces)={details['smoothBuiltPlanes']}",
         f"  {ANTI_CONFUSION}",
         f"  epsPlaneMM={details['epsPlaneMM']} (planeMatch.epsPlaneMM)  "
         f"normalAgreeMin={details['normalAgreeMin']}  "

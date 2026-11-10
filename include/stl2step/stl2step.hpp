@@ -192,12 +192,33 @@ struct Result {
     // character-identical to 1.0.0. Keys are omitted when the feature is off,
     // never emitted as zeros.
 
-    int smoothPlanes = 0;              // planar regions recovered as Geom_Plane
-    int smoothCylinders = 0;           // cylindrical regions recovered
-    int smoothFillets = 0;             // fillet strips recovered as cylinders
+    // D-gid-7.6: smoothPlanes, smoothCylinders, smoothFacetFaces,
+    // smoothBuiltPlanes and smoothBuiltFillets describe the solid that is
+    // written, not the segment plan. Each written face is classified by where
+    // it came from (an analytic region face or mesh triangles), followed
+    // through the coplanar unify, so a merged face counts once and a region
+    // dissolved to facets after planning counts as facets. Only components
+    // whose analytic build shipped (smoothBuiltComponents) are counted;
+    // reverted and skipped components add nothing. On a file whose components
+    // all shipped, smoothBuiltPlanes + smoothFacetFaces = the planar faces of
+    // the STEP. smoothFillets is still the plan's fillet-strip count.
+
+    // Distinct plane regions with at least one face in the written solid (a
+    // planar face of the prismatic 2.5D build counts as its own region). Each
+    // region counts once, also when the unify merges it with another region
+    // into one face; the planar face count is smoothBuiltPlanes.
+    int smoothPlanes = 0;
+    // Shipped cylinder regions: distinct cylinder regions with at least one
+    // face in the written solid (fillet strips excluded; a cylindrical face of
+    // the prismatic 2.5D build counts as its own region). The cylindrical
+    // face count is smoothBuiltCylinders.
+    int smoothCylinders = 0;
+    int smoothFillets = 0;             // fillet strips recovered as cylinders (plan count)
     int smoothDistinctRadii = 0;       // distinct cylinder radii accepted
     int smoothRejected = 0;            // candidate regions rejected by gates
-    int smoothFacetFaces = 0;          // faceted faces left after smooth pass
+    // Written faces made only of mesh triangles: one triangle, or several
+    // coplanar triangles the unify merged into one face.
+    int smoothFacetFaces = 0;
     int facesAfterSmooth = 0;          // total face count after smooth pass
     int smoothSkippedComponents = 0;   // dirty components not refit
 
@@ -205,6 +226,9 @@ struct Result {
     double smoothMaxEdgeTolMM = 0.0;   // max edge tolerance written (mm)
     double smoothVolPredictedMM3 = 0.0; // predicted volume from analytic fits (mm^3)
 
+    // Written planar faces with at least one analytic source (a plane region
+    // face or a planar face of the prismatic 2.5D build); a mesh triangle the
+    // unify merged into such a face counts here, not in smoothFacetFaces.
     int smoothBuiltPlanes = 0;
     int smoothBuiltCylinders = 0;
     // D-130-10(1): conical faces actually shipped on built components. Reads 0
@@ -212,6 +236,8 @@ struct Result {
     // comparing RESULT identity across this commit compares modulo it.
     int smoothBuiltCones = 0;
     int smoothBuiltTori = 0;
+    // Written faces with a fillet-strip region source (a strip that ships as
+    // two faces counts twice).
     int smoothBuiltFillets = 0;
     int smoothBuiltComponents = 0;
     int smoothRevertedComponents = 0;

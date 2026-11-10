@@ -1,5 +1,6 @@
 // D-fc-6.10. Chord vertex (RQ-H1), one-vertex cover (RQ-H2), plane|cylinder
-// rim certificate (RQ-H4), corner-pair seam (C-3). Synthetic geometry only.
+// rim certificate (RQ-H4), corner-pair seam (C-3), a ring-certified wall is
+// not robbable (D-gid-7.6). Synthetic geometry only.
 // SPDX-License-Identifier: MIT
 
 #include "refit_relational.hpp"
@@ -11,6 +12,7 @@
 #include <gp_Pnt.hxx>
 #include <gp_XYZ.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -155,11 +157,82 @@ static void testCornerPairSeam() {
            "c3: tau <= 0 pairs nothing");
 }
 
+// D-gid-7.6. A closed wall whose rims carry a chord vertex in every chord
+// passes the ring certificate, yet its cylinder residual is the chord
+// sagitta, many tau. The certified wall is not robbable by a later pass; the
+// same wall without the certificate is (D-fc-4.3).
+static void testCertifiedWallNotRobbable() {
+    const double tau = 1e-4;
+    const double kPi = 3.14159265358979323846;
+    const int n = 8;
+    const double R = 1.0, H = 1.0;
+    std::vector<gp_XYZ> rim[2];
+    for (int k = 0; k < 2; ++k)
+        for (int i = 0; i < n; ++i) {
+            const double a0 = i * 2.0 * kPi / n, a1 = (i + 1) * 2.0 * kPi / n;
+            const gp_XYZ c0 = xyz(R * std::cos(a0), R * std::sin(a0), k * H);
+            const gp_XYZ c1 = xyz(R * std::cos(a1), R * std::sin(a1), k * H);
+            rim[k].push_back(c0);
+            rim[k].push_back(0.5 * (c0 + c1));
+        }
+    std::vector<RingWallVert> cls[2];
+    double cornerDev = 0, sag = 0;
+    int corners[2] = {0, 0};
+    for (int k = 0; k < 2; ++k) {
+        const int m = (int)rim[k].size();
+        for (int j = 0; j < m; ++j) {
+            const gp_XYZ& P = rim[k][(std::size_t)j];
+            const bool chord = isChordVertex(P, rim[k][(std::size_t)((j + m - 1) % m)],
+                                             rim[k][(std::size_t)((j + 1) % m)], tau);
+            const double d = std::fabs(std::hypot(P.X(), P.Y()) - R);
+            cls[k].push_back(classifyRingWallVertex(!chord, chord, d, tau));
+            if (chord) sag = std::max(sag, d);
+            else {
+                cornerDev = std::max(cornerDev, d);
+                ++corners[k];
+            }
+        }
+    }
+    // Sector i: corners A, B and chord vertex M between them on each rim.
+    bool covered = true;
+    for (int i = 0; i < n; ++i) {
+        const int a = 2 * i, mm = 2 * i + 1, b = (2 * i + 2) % (2 * n);
+        const RingWallVert A0 = cls[0][a], M0 = cls[0][mm], B0 = cls[0][b];
+        const RingWallVert A1 = cls[1][a], M1 = cls[1][mm], B1 = cls[1][b];
+        covered = covered && ringWallTriangleCovered(A0, M0, A1) &&
+                  ringWallTriangleCovered(M0, M1, A1) && ringWallTriangleCovered(M0, B0, M1) &&
+                  ringWallTriangleCovered(B0, B1, M1);
+    }
+    const bool certified = covered && cornerDev <= tau &&
+                           corners[0] >= minStations(kParamsCircle) &&
+                           corners[1] >= minStations(kParamsCircle);
+    expect(certified, "d-gid-7.6: chord-vertex wall passes the ring certificate");
+    expect(sag > 100 * tau, "d-gid-7.6: its cylinder residual is the chord sag, many tau");
+
+    Region w;
+    w.id = 0;
+    w.type = SurfType::Cylinder;
+    w.origin = Origin::CylGrow;
+    w.radius = R;
+    w.closed360 = true;
+    w.nSides = n;
+    w.maxVertexDev = std::max(cornerDev, sag);
+    w.ringCertified = certified;
+    expect(!robbableUncertified(w, tau), "d-gid-7.6: a ring-certified wall is not robbable");
+    Region u = w;
+    u.ringCertified = false;
+    expect(robbableUncertified(u, tau), "d-gid-7.6: the same wall without the certificate is");
+    Region f = w;
+    f.origin = Origin::FilletStrip;
+    expect(!robbableUncertified(f, tau), "d-gid-7.6: the certificate holds whatever the origin");
+}
+
 int main() {
     testChordVertex();
     testOneVertexCover();
     testRimCertificate();
     testCornerPairSeam();
+    testCertifiedWallNotRobbable();
     if (gFail) std::fprintf(stderr, "relational_ringwall_unit: %d FAIL\n", gFail);
     return gFail ? 1 : 0;
 }

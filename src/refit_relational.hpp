@@ -158,10 +158,11 @@ inline bool annulusAboutAxis(int edgeComponents, const std::vector<int>& cycleWi
 // own maxVertexDev exceeds τ does not certify its surface (D-fc-1.4: B1
 // phantoms, and plane|plane strips of the segment's fillet stage that miss τ),
 // so a certified relational band may rob it; the robbed region dissolves. A
-// region within τ is never touched.
+// region within τ is never touched. D-gid-7.6: nor is a wall that passed the
+// ring certificate; its maxVertexDev is the chord sag that certificate excuses.
 inline bool robbableUncertified(const Region& r, double tau) {
     return (r.origin == Origin::CylGrow || r.origin == Origin::FilletStrip) &&
-           r.type == SurfType::Cylinder && r.maxVertexDev > tau;
+           r.type == SurfType::Cylinder && !r.ringCertified && r.maxVertexDev > tau;
 }
 
 // D-fc-4.3 with D-fc-1.6.10. A prior strip the band robs dissolves at its commit,

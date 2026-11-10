@@ -29,6 +29,7 @@
 #include "refit_cyl_meet.hpp"
 #include "shell_volume.hpp"
 #include "stl_quant.hpp"
+#include "written_census.hpp"
 
 #include <algorithm>
 #include <array>
@@ -671,8 +672,13 @@ void tallyWrittenBodies(const TopoDS_Shape& written, int& solids, int& openShell
 // A dropped face is rebuilt with KeepShape on each of its edges (KeepShape on
 // the face itself does not keep it). The free-edge guard then runs. No-op
 // when the history drops nothing and the free-edge count does not rise.
+// D-gid-7.6: histOut receives the history of the run that produced the
+// returned shape (null when the guard kept the input), so the RESULT census
+// can follow each written face back to the faces it was merged from. It is
+// read only; the returned shape is the same as before.
 TopoDS_Shape unifySameDomainGuarded(const TopoDS_Shape& shape, double angleDeg,
-                                    const std::vector<TopoDS_Face>* keep) {
+                                    const std::vector<TopoDS_Face>* keep,
+                                    Handle(BRepTools_History)& histOut) {
     constexpr double kPi = 3.14159265358979323846;
     std::vector<TopoDS_Face> inputFaces;
     for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next())
@@ -699,18 +705,23 @@ TopoDS_Shape unifySameDomainGuarded(const TopoDS_Shape& shape, double angleDeg,
     Built first = run(nullptr);
     std::vector<TopoDS_Face> dropped = facesRemovedWithoutImage(first.hist, inputFaces);
     TopoDS_Shape unified = first.shape;
+    Handle(BRepTools_History) unifiedHist = first.hist;
     if (!dropped.empty()) {
         std::vector<TopoDS_Shape> keepEdges;
         for (const auto& f : dropped)
             for (TopExp_Explorer ex(f, TopAbs_EDGE); ex.More(); ex.Next())
                 keepEdges.push_back(ex.Current());
         try {
-            unified = run(&keepEdges).shape;
+            Built second = run(&keepEdges);
+            unified = second.shape;
+            unifiedHist = second.hist;
         } catch (...) {
             unified = first.shape;
+            unifiedHist = first.hist;
         }
     }
     TopoDS_Shape chosen = keepIfFreeEdgesNotIncreased(shape, unified);
+    histOut = chosen.IsSame(unified) ? unifiedHist : Handle(BRepTools_History)();
     const char* env = std::getenv("STL2STEP_DIAG_UNIFY");
     if (env && env[0] == '1' &&
         (!dropped.empty() || !chosen.IsSame(unified))) {
@@ -720,6 +731,64 @@ TopoDS_Shape unifySameDomainGuarded(const TopoDS_Shape& shape, double angleDeg,
                      countFreeEdges(unified), chosen.IsSame(unified) ? 0 : 1);
     }
     return chosen;
+}
+
+TopoDS_Shape unifySameDomainGuarded(const TopoDS_Shape& shape, double angleDeg,
+                                    const std::vector<TopoDS_Face>* keep) {
+    Handle(BRepTools_History) unused;
+    return unifySameDomainGuarded(shape, angleDeg, keep, unused);
+}
+
+// D-gid-7.6 (written_census.hpp). The origins and types are the ones the plan
+// counters used (refit_chains.cpp RefitStats): Plane / Cylinder regions of
+// origin PlaneGrow, CylGrow or NgonWall, FilletStrip as fillets. A stage-P
+// face has no region; its own surface type names it and it is its own unit.
+void describeShippedFaces(const refit::RegionSet& rs, const std::vector<TopoDS_Face>& built,
+                          std::vector<uint8_t>& kind, std::vector<int>& unit) {
+    const size_t n = built.size();
+    kind.assign(n, 0);
+    unit.assign(n, -1);
+    if (rs.shipFaceRid.size() != n || rs.shipFaceFacet.size() != n) return;
+    std::unordered_map<int, const refit::Region*> byId;
+    for (const refit::Region& r : rs.regions) byId.emplace(r.id, &r);
+    for (size_t i = 0; i < n; ++i) {
+        if (rs.shipFaceFacet[i]) {
+            kind[i] = kFaceSrcFacet;
+            continue;
+        }
+        const int rid = rs.shipFaceRid[i];
+        if (rid >= 0) {
+            unit[i] = rid;
+            auto it = byId.find(rid);
+            if (it == byId.end()) {
+                kind[i] = kFaceSrcOther;
+                continue;
+            }
+            const refit::Region& r = *it->second;
+            switch (r.origin) {
+                case refit::Origin::FilletStrip:
+                    kind[i] = kFaceSrcFillet;
+                    break;
+                case refit::Origin::PlaneGrow:
+                case refit::Origin::CylGrow:
+                case refit::Origin::NgonWall:
+                    kind[i] = r.type == refit::SurfType::Plane      ? kFaceSrcPlane
+                              : r.type == refit::SurfType::Cylinder ? kFaceSrcCylinder
+                                                                    : kFaceSrcOther;
+                    break;
+                default:
+                    kind[i] = kFaceSrcOther;
+                    break;
+            }
+            continue;
+        }
+        if (built[i].IsNull()) continue;
+        const GeomAbs_SurfaceType t = BRepAdaptor_Surface(built[i], Standard_False).GetType();
+        kind[i] = t == GeomAbs_Plane      ? kFaceSrcPlane
+                  : t == GeomAbs_Cylinder ? kFaceSrcCylinder
+                                          : kFaceSrcOther;
+        unit[i] = -2 - (int)i;
+    }
 }
 
 }  // namespace detail
@@ -1353,6 +1422,10 @@ Result Converter::run() {
         struct CompOut {
             std::vector<TopoDS_Shape> parts;
             std::vector<TopoDS_Face> keepShapes;
+            // D-gid-7.6: per keepShapes face, its detail::FaceSrc bit and unit
+            // (written_census.hpp). Filled only when the analytic build shipped.
+            std::vector<uint8_t> keepSrc;
+            std::vector<int> keepUnit;
             refit::RefitStats refitSt{};
             double refitDVolAbs = 0;
             int solids = 0, openShells = 0;
@@ -1473,9 +1546,12 @@ Result Converter::run() {
                                    withheld.end());
                     // Lossless prune: a pass that withholds every torus of this set
                     // leaves none (or keeps one it cannot withhold), so it ends here.
+                    // A band that grew (D-gid-7.12) is free while only its growth
+                    // is withheld: the retry ships it as it was certified.
                     bool anyFree = false;
                     for (const auto& reg : rs.regions)
-                        if (reg.origin == refit::Origin::TorusBlend && !heldTorus(reg))
+                        if (reg.origin == refit::Origin::TorusBlend &&
+                            !refit::torusBandHeld(reg, withheld))
                             anyFree = true;
                     if (!anyFree) break;
                     refit::SegmentParams heldp = segp;
@@ -1504,6 +1580,24 @@ Result Converter::run() {
                         shellChecked = true;
                     }
                 }
+                // D-gid-7.13 diag: a class-B dissolve set as it is applied, and the
+                // shipped ring-certified rows over τ that classBOwnCertFails spared.
+                auto diagClassBSet = [&](const char* pass, int nQual,
+                                         const std::vector<int>& dissolve, double tauD) {
+                    const char* dv = std::getenv("STL2STEP_DIAG_CLASSB");
+                    if (!dv || !dv[0] || dv[0] == '0') return;
+                    std::string ids, spared;
+                    for (int id : dissolve)
+                        ids += (ids.empty() ? "" : ",") + std::to_string(id);
+                    for (const auto& w : rs.classBMetrics)
+                        if (w.shippedAnalytic && w.ringCertified &&
+                            refit::classBOwnCertFails(w.maxVertexDev, false, tauD))
+                            spared += (spared.empty() ? "" : ",") + std::to_string(w.rid);
+                    std::fprintf(stderr,
+                                 "DIAG_CLASSB_SET pass=%s nQual=%d nDissolve=%zu dissolve=[%s] "
+                                 "ringSpared=[%s]\n",
+                                 pass, nQual, dissolve.size(), ids.c_str(), spared.c_str());
+                };
                 // D-gid-2.2. The swept test qualified nobody on this shell (the
                 // post-T shell when a torus probe is in force). Dissolve every
                 // shipped analytic region that fails its own τ certificate, in
@@ -1517,15 +1611,16 @@ Result Converter::run() {
                     if (tauE > 0.0) {
                         for (const auto& w : rs.classBMetrics)
                             if (refit::classBDissolveQualifies(
-                                    w.shippedAnalytic, w.maxVertexDev, tauE, w.swept,
-                                    w.dVolPredicted, w.area))
+                                    w.shippedAnalytic, w.maxVertexDev, w.ringCertified, tauE,
+                                    w.swept, w.dVolPredicted, w.area))
                                 ++nQual;
                     }
                     std::vector<int> certFail;
                     if (refit::classBNoQualCertFailPass(nQual)) {
                         for (const auto& w : rs.classBMetrics) {
                             if (!refit::classBCertFailPassMember(
-                                    w.shippedAnalytic, w.maxVertexDev, tauE, nQual))
+                                    w.shippedAnalytic, w.maxVertexDev, w.ringCertified, tauE,
+                                    nQual))
                                 continue;
                             certFail.push_back(w.rid);
                         }
@@ -1534,6 +1629,7 @@ Result Converter::run() {
                         std::sort(certFail.begin(), certFail.end());
                         certFail.erase(std::unique(certFail.begin(), certFail.end()),
                                        certFail.end());
+                        diagClassBSet("certfail", nQual, certFail, tauE);
                         rs = healBase;
                         rs.classBExplode = certFail;
                         parallelFor(subThreads, nV, [&](size_t i) {
@@ -1672,8 +1768,8 @@ Result Converter::run() {
                             std::vector<int> add;
                             for (const auto& w : rs.classBMetrics) {
                                 if (!refit::classBDissolveQualifies(
-                                        w.shippedAnalytic, w.maxVertexDev, tauH, w.swept,
-                                        w.dVolPredicted, w.area))
+                                        w.shippedAnalytic, w.maxVertexDev, w.ringCertified,
+                                        tauH, w.swept, w.dVolPredicted, w.area))
                                     continue;
                                 if (!std::binary_search(healed.begin(), healed.end(), w.rid))
                                     add.push_back(w.rid);
@@ -1687,6 +1783,7 @@ Result Converter::run() {
                                     healed.push_back(id);
                             }
                             std::sort(healed.begin(), healed.end());
+                            diagClassBSet("swept", static_cast<int>(add.size()), healed, tauH);
                             rs = healBase;
                             rs.classBExplode = healed;
                             parallelFor(subThreads, nV, [&](size_t i) {
@@ -1712,8 +1809,48 @@ Result Converter::run() {
                     out.keepShapes = built;
                     out.usedRefit = true;
                     out.refitSt = rs.stats;
+                    detail::describeShippedFaces(rs, built, out.keepSrc, out.keepUnit);
                     for (const auto& reg : rs.regions)
                         out.refitDVolAbs += std::fabs(reg.dVolPredicted);
+                    // D-gid-7.6 ledger (diag only): per shipped curved region, the
+                    // prediction against the measured swept volume of buildFaces.
+                    if (const char* dv = std::getenv("STL2STEP_DIAG_CLASSB");
+                        dv && dv[0] && dv[0] != '0') {
+                        static const char* kOrig[] = {"PlaneGrow",  "CylGrow",     "FilletStrip",
+                                                      "NgonWall",   "ChamferCone", "TorusBlend",
+                                                      "RuledQuad",  "SphereCorner"};
+                        const double tauL = refit::tauOf(mv);
+                        double sSwept = 0.0, sPred = 0.0, sArea = 0.0;
+                        int nShip = 0;
+                        for (const auto& w : rs.classBMetrics) {
+                            if (!w.shippedAnalytic) continue;
+                            sSwept += w.swept;
+                            sPred += w.dVolPredicted;
+                            sArea += w.area;
+                            ++nShip;
+                            const refit::Region* rg = nullptr;
+                            for (const auto& reg : rs.regions)
+                                if (reg.id == w.rid) {
+                                    rg = &reg;
+                                    break;
+                                }
+                            if (!rg || rg->type == refit::SurfType::Plane) continue;
+                            const unsigned oi = static_cast<unsigned>(rg->origin);
+                            std::fprintf(stderr,
+                                         "DIAG_DVOL_REGION rid=%d origin=%s R=%.6f r2=%.6f "
+                                         "outward=%d nTri=%zu area=%.6f pred=%.9f swept=%.9f "
+                                         "resid=%.9g areaTau=%.9g maxDev=%.6g\n",
+                                         w.rid, oi < 8 ? kOrig[oi] : "?", rg->radius,
+                                         rg->radius2, rg->outwardNormal ? 1 : 0,
+                                         rg->tris.size(), w.area, w.dVolPredicted, w.swept,
+                                         w.swept - w.dVolPredicted, w.area * tauL,
+                                         w.maxVertexDev);
+                        }
+                        std::fprintf(stderr,
+                                     "DIAG_DVOL_LEDGER nShipped=%d sumSwept=%.9f sumPred=%.9f "
+                                     "resid=%.9g area=%.6f areaTau=%.9g\n",
+                                     nShip, sSwept, sPred, sSwept - sPred, sArea, sArea * tauL);
+                    }
                 }
                 if (!ok) {
                     if (classBRevertNamed)
@@ -1875,12 +2012,17 @@ Result Converter::run() {
 
         std::vector<TopoDS_Shape> parts;
         std::vector<const std::vector<TopoDS_Face>*> partKeep;
+        // D-gid-7.6: per part, written face -> shipped build faces, carried
+        // through every unify pass below (written_census.hpp).
+        std::vector<detail::FaceSources> partSrc;
         long long skipped = 0;
         bool anyRefitUsed = false;
         for (auto& o : outs) {
             for (auto& p : o.parts) {
                 parts.push_back(p);
                 partKeep.push_back(o.keepShapes.empty() ? nullptr : &o.keepShapes);
+                partSrc.emplace_back();
+                if (smooth && o.usedRefit) detail::seedFaceSources(o.keepShapes, partSrc.back());
             }
             solidsOut += o.solids;
             openShellsOut += o.openShells;
@@ -1939,9 +2081,10 @@ Result Converter::run() {
             // D-gid-2.1: rebuild when the history drops a face, then refuse a
             // unify that opens free edges. Helpers live in detail:: so the
             // unit test calls the same functions.
-            auto unifyOne = [&](TopoDS_Shape& s, const std::vector<TopoDS_Face>* keep,
-                                double angleDeg) {
-                s = detail::unifySameDomainGuarded(s, angleDeg, keep);
+            auto unifyOne = [&](TopoDS_Shape& s, size_t partIdx, double angleDeg) {
+                Handle(BRepTools_History) hist;
+                s = detail::unifySameDomainGuarded(s, angleDeg, partKeep[partIdx], hist);
+                detail::remapFaceSources(hist, partSrc[partIdx]);
             };
             auto unifyAll = [&](double angleDeg, const char* label) {
                 const int before = countShapes(shape, TopAbs_FACE);
@@ -1954,7 +2097,7 @@ Result Converter::run() {
                         for (;;) {
                             size_t i = nextPart.fetch_add(1);
                             if (i >= parts.size()) break;
-                            try { unifyOne(parts[i], partKeep[i], angleDeg); }
+                            try { unifyOne(parts[i], i, angleDeg); }
                             catch (...) { anyFail = true; }   // that body keeps its facets
                         }
                     });
@@ -1970,7 +2113,7 @@ Result Converter::run() {
                          label, fmtInt(before).c_str(), fmtInt(facesAfter).c_str(),
                          uThreads, timer.lap());
                 } else {
-                    unifyOne(shape, partKeep.empty() ? nullptr : partKeep[0], angleDeg);
+                    unifyOne(shape, 0, angleDeg);
                     parts[0] = shape;
                     facesAfter = countShapes(shape, TopAbs_FACE);
                     note("  %s     %s -> %s faces  [%.2fs]\n",
@@ -2005,12 +2148,31 @@ Result Converter::run() {
         }
 
         int builtPl = 0, builtCy = 0, builtCn = 0, builtTo = 0, builtFi = 0, builtCo = 0, revCo = 0;
+        // D-gid-7.6: smoothPlanes / smoothCylinders / smoothFacetFaces of the
+        // written shape (written_census.hpp has the definitions). refitTotals
+        // keeps the plan's figures for the tolerance and regularity steps.
+        int wrPlanes = 0, wrCyls = 0, wrFacet = 0;
+        const char* diagHonestEnv = std::getenv("STL2STEP_DIAG_HONEST");
+        const bool diagHonest = diagHonestEnv && diagHonestEnv[0] == '1';
         if (smooth) {
             size_t pi = 0;
             for (size_t ci = 0; ci < order.size(); ++ci) {
                 const CompOut& o = outs[ci];
                 int cyls = 0, cones = 0, tori = 0;
+                detail::WrittenFaceCounts wc;
                 for (size_t k = 0; k < o.parts.size(); ++k) {
+                    if (o.usedRefit) {
+                        const detail::WrittenFaceCounts p = detail::countWrittenFaces(
+                            parts[pi], partSrc[pi], o.keepSrc, o.keepUnit);
+                        wc.analyticPlanes += p.analyticPlanes;
+                        wc.facetFaces += p.facetFaces;
+                        wc.filletFaces += p.filletFaces;
+                        wc.planeUnits += p.planeUnits;
+                        wc.cylinderUnits += p.cylinderUnits;
+                        wc.faces += p.faces;
+                        wc.unknownFaces += p.unknownFaces;
+                        wc.mixedFaces += p.mixedFaces;
+                    }
                     for (TopExp_Explorer ex(parts[pi], TopAbs_FACE); ex.More(); ex.Next()) {
                         // D-130-10(1): the shipped cone faces are counted the
                         // same way the shipped cylinders are -- off the written
@@ -2032,11 +2194,25 @@ Result Converter::run() {
                 // off the written shape) without the component having reverted.
                 if (o.usedRefit) {
                     builtCo++;
-                    builtPl += st.planes;
+                    builtPl += wc.analyticPlanes;
                     builtCy += cyls;
                     builtCn += cones;
                     builtTo += tori;
-                    builtFi += st.fillets;
+                    builtFi += wc.filletFaces;
+                    wrPlanes += wc.planeUnits;
+                    wrCyls += wc.cylinderUnits;
+                    wrFacet += wc.facetFaces;
+                    if (diagHonest)
+                        std::fprintf(stderr,
+                                     "DIAG_HONEST comp=%d faces=%d analyticPlanes=%d facetFaces=%d "
+                                     "filletFaces=%d planeUnits=%d cylUnits=%d cyls=%d cones=%d "
+                                     "tori=%d unknown=%d mixed=%d planPlanes=%d planCyls=%d "
+                                     "planFillets=%d planFacetTris=%d shipped=%zu\n",
+                                     order[ci], wc.faces, wc.analyticPlanes, wc.facetFaces,
+                                     wc.filletFaces, wc.planeUnits, wc.cylinderUnits, cyls,
+                                     cones, tori, wc.unknownFaces, wc.mixedFaces, st.planes,
+                                     st.cylinders, st.fillets, st.facetTriangles,
+                                     o.keepShapes.size());
                 } else
                     revCo++;
             }
@@ -2215,12 +2391,12 @@ Result Converter::run() {
         r.warnings = warnings;
         std::sort(r.warnings.begin(), r.warnings.end());
         if (smooth) {
-            r.smoothPlanes = refitTotals.planes;
-            r.smoothCylinders = refitTotals.cylinders;
+            r.smoothPlanes = wrPlanes;
+            r.smoothCylinders = wrCyls;
             r.smoothFillets = refitTotals.fillets;
             r.smoothDistinctRadii = refitTotals.distinctRadii;
             r.smoothRejected = refitTotals.rejected;
-            r.smoothFacetFaces = refitTotals.facetTriangles;
+            r.smoothFacetFaces = wrFacet;
             r.facesAfterSmooth = facesAfter;
             r.smoothSkippedComponents = smoothSkippedComponents;
             r.smoothMaxDevMM = refitTotals.maxVertexDev;

@@ -417,8 +417,9 @@ double triAreaNormal(const MeshView& mv, int t, gp_XYZ& n) {
 
 // D-fc-4.3. An accepted CylGrow region whose own maxVertexDev exceeds tau does
 // not certify its surface (D-fc-1.4); a certified band may rob it.
+// D-gid-7.6: a ring-certified wall is certified, whatever its chord sag.
 bool uncertifiedCylGrow(const Region& r, double tau) {
-    return r.origin == Origin::CylGrow && r.maxVertexDev > tau;
+    return r.origin == Origin::CylGrow && !r.ringCertified && r.maxVertexDev > tau;
 }
 
 // D-fc-7.1 measurement, print-only. revolvedChordTerm summed over the region's
@@ -487,6 +488,190 @@ struct Round {
     bool certified = false;
     RoundCert cert;
 };
+
+// Print-only (STL2STEP_DIAG_REL). Algebraic sphere of an unclaimed component:
+// |p-c|^2 = r^2 written 2 c·p + g = p·p, g = r^2 - |c|^2. Not a certificate.
+bool diagAlgebraicSphere(const std::vector<gp_XYZ>& pts, gp_XYZ& c, double& r) {
+    if (pts.size() < 4) return false;
+    double A[4][4] = {};
+    double b[4] = {};
+    for (const gp_XYZ& p : pts) {
+        const double row[4] = {2.0 * p.X(), 2.0 * p.Y(), 2.0 * p.Z(), 1.0};
+        const double rhs = p.Dot(p);
+        for (int i = 0; i < 4; ++i) {
+            b[i] += row[i] * rhs;
+            for (int j = 0; j < 4; ++j) A[i][j] += row[i] * row[j];
+        }
+    }
+    double M[4][5];
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) M[i][j] = A[i][j];
+        M[i][4] = b[i];
+    }
+    for (int col = 0; col < 4; ++col) {
+        int piv = col;
+        for (int row = col + 1; row < 4; ++row)
+            if (std::fabs(M[row][col]) > std::fabs(M[piv][col])) piv = row;
+        if (!(std::fabs(M[piv][col]) > 1e-18)) return false;
+        if (piv != col)
+            for (int k = col; k < 5; ++k) std::swap(M[col][k], M[piv][k]);
+        const double div = M[col][col];
+        for (int k = col; k < 5; ++k) M[col][k] /= div;
+        for (int row = 0; row < 4; ++row) {
+            if (row == col) continue;
+            const double f = M[row][col];
+            for (int k = col; k < 5; ++k) M[row][k] -= f * M[col][k];
+        }
+    }
+    c = gp_XYZ(M[0][4], M[1][4], M[2][4]);
+    const double g = M[3][4];
+    const double r2 = g + c.Dot(c);
+    if (!(r2 > 0.0) || !std::isfinite(r2)) return false;
+    r = std::sqrt(r2);
+    return std::isfinite(r);
+}
+
+// Why SphereCorner's 3-round enumerator left a patch faceted. Free-fit numbers
+// are measurements; a line here is not an accept.
+void diagResidueSpheres(const MeshView& mv, const SegmentWork& work, double tau) {
+    if (!diagOn() || !(tau > 0.0)) return;
+    const int nTri = (int)mv.nTri;
+    const int nEdge = (int)mv.nEdge;
+    std::vector<int> triAcc((std::size_t)nTri, -1);
+    for (int ai = 0; ai < (int)work.accepted.size(); ++ai)
+        for (int t : work.accepted[(std::size_t)ai].tris)
+            if (t >= 0 && t < nTri) triAcc[(std::size_t)t] = ai;
+    std::vector<int> triProv((std::size_t)nTri, -1);
+    for (int pi = 0; pi < (int)work.provisionals.size(); ++pi)
+        for (int t : work.provisionals[(std::size_t)pi].tris)
+            if (t >= 0 && t < nTri) triProv[(std::size_t)t] = pi;
+    auto freeTri = [&](int t) -> bool {
+        if (t < 0 || t >= nTri) return false;
+        const int ai = triAcc[(std::size_t)t];
+        if (ai >= 0) return uncertifiedCylGrow(work.accepted[(std::size_t)ai], tau);
+        const int pi = triProv[(std::size_t)t];
+        return pi >= 0 && work.provisionals[(std::size_t)pi].claim == ProvClaim::Unclaimed;
+    };
+    std::vector<std::array<int, 2>> edgeTris((std::size_t)std::max(nEdge, 0),
+                                             std::array<int, 2>{{-1, -1}});
+    for (int t = 0; t < nTri; ++t)
+        for (int s = 0; s < 3; ++s) {
+            const int e = mv.triEdges[t][s];
+            if (e < 0 || e >= nEdge) continue;
+            auto& et = edgeTris[(std::size_t)e];
+            if (et[0] < 0) et[0] = t;
+            else if (et[0] != t) et[1] = t;
+        }
+    auto otherTri = [&](int e, int t) -> int {
+        if (e < 0 || e >= nEdge) return -1;
+        const auto& et = edgeTris[(std::size_t)e];
+        if (et[0] == t) return et[1];
+        if (et[1] == t) return et[0];
+        return -1;
+    };
+    std::vector<char> seen((std::size_t)nTri, 0);
+    int printed = 0;
+    for (int t0 = 0; t0 < nTri; ++t0) {
+        if (seen[(std::size_t)t0] || !freeTri(t0)) continue;
+        std::vector<int> cc, st = {t0};
+        seen[(std::size_t)t0] = 1;
+        while (!st.empty()) {
+            const int u = st.back();
+            st.pop_back();
+            cc.push_back(u);
+            for (int s = 0; s < 3; ++s) {
+                const int o = otherTri(mv.triEdges[u][s], u);
+                if (o >= 0 && freeTri(o) && !seen[(std::size_t)o]) {
+                    seen[(std::size_t)o] = 1;
+                    st.push_back(o);
+                }
+            }
+        }
+        if (cc.size() < 4 || cc.size() > 200) continue;
+        std::vector<int> gv;
+        for (int t : cc) {
+            const int gt = mv.compTris ? mv.compTris[t] : t;
+            for (int k = 0; k < 3; ++k) gv.push_back(mv.tris[gt][k]);
+        }
+        std::sort(gv.begin(), gv.end());
+        gv.erase(std::unique(gv.begin(), gv.end()), gv.end());
+        std::vector<gp_XYZ> vp;
+        vp.reserve(gv.size());
+        for (int g : gv) vp.push_back(mv.pts[g]);
+        gp_XYZ c;
+        double r = 0.0;
+        if (!diagAlgebraicSphere(vp, c, r)) continue;
+        double maxDev = 0.0;
+        for (const gp_XYZ& x : vp) maxDev = std::max(maxDev, std::fabs((x - c).Modulus() - r));
+        if (!(maxDev <= 2.0 * tau)) continue;
+        const double planeRes = planeResidual(vp);
+        if (!(planeRes > tau)) continue;
+        gp_Ax3 pl;
+        int stations = 0;
+        if (pcaPlane(mv, cc, pl)) {
+            std::vector<double> z;
+            z.reserve(vp.size());
+            const gp_XYZ n = pl.Direction().XYZ();
+            const gp_XYZ o = pl.Location().XYZ();
+            for (const gp_XYZ& x : vp) z.push_back((x - o).Dot(n));
+            stations = countLevels(std::move(z), tau);
+        }
+        std::vector<int> nbrAcc, nbrN;
+        for (int t : cc)
+            for (int s = 0; s < 3; ++s) {
+                const int o = otherTri(mv.triEdges[t][s], t);
+                if (o < 0 || freeTri(o)) continue;
+                const int ai = triAcc[(std::size_t)o];
+                if (ai < 0) continue;
+                int slot = -1;
+                for (int i = 0; i < (int)nbrAcc.size(); ++i)
+                    if (nbrAcc[(std::size_t)i] == ai) slot = i;
+                if (slot < 0) {
+                    nbrAcc.push_back(ai);
+                    nbrN.push_back(1);
+                } else {
+                    ++nbrN[(std::size_t)slot];
+                }
+            }
+        diagPrintf("DIAG_REL_SPHERE_RESIDUE nTri=%zu nV=%zu R=%.9g centre=%.4f,%.4f,%.4f "
+                   "maxDevTau=%.6g planeTau=%.6g stations=%d nNbr=%zu\n",
+                   cc.size(), gv.size(), r, c.X(), c.Y(), c.Z(), maxDev / tau, planeRes / tau,
+                   stations, nbrAcc.size());
+        for (int i = 0; i < (int)nbrAcc.size(); ++i) {
+            const Region& nb = work.accepted[(std::size_t)nbrAcc[(std::size_t)i]];
+            RoundSpine sp;
+            sp.o = nb.ax.Location().XYZ();
+            sp.a = nb.ax.Direction().XYZ();
+            double spineTau = -1.0, dRTau = -1.0;
+            if (nb.type == SurfType::Cylinder) {
+                sp.circle = false;
+                sp.r = nb.radius;
+                const double d = spineDistance(sp, c);
+                spineTau = d / tau;
+                dRTau = std::fabs(nb.radius - r) / tau;
+            } else if (nb.type == SurfType::Torus) {
+                sp.circle = true;
+                sp.R = nb.radius;
+                sp.r = nb.radius2;
+                const double d = spineDistance(sp, c);
+                spineTau = d / tau;
+                dRTau = std::fabs(nb.radius2 - r) / tau;
+            } else if (nb.type == SurfType::Plane) {
+                const double d = std::fabs((c - nb.ax.Location().XYZ()).Dot(nb.ax.Direction().XYZ()));
+                spineTau = d / tau;
+                dRTau = std::fabs(d - r) / tau;
+            }
+            diagPrintf("DIAG_REL_SPHERE_NBR centre=%.4f,%.4f,%.4f acc=%d origin=%d type=%d "
+                       "radius=%.9g radius2=%.9g devTau=%.6g certified=%d edges=%d "
+                       "spineTau=%.6g dRTau=%.6g\n",
+                       c.X(), c.Y(), c.Z(), nbrAcc[(std::size_t)i], (int)nb.origin, (int)nb.type,
+                       nb.radius, nb.radius2, nb.maxVertexDev / tau,
+                       anchorCertified(tau, nb.maxVertexDev) ? 1 : 0, nbrN[(std::size_t)i], spineTau,
+                       dRTau);
+        }
+        if (++printed >= 40) break;
+    }
+}
 
 }  // namespace
 
@@ -576,9 +761,11 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
 
         int nAccept = 0, nRefused = 0;
         if (corners.empty()) {
-            if (dg)
+            if (dg) {
+                diagResidueSpheres(mv, work, tau);
                 diagPrintf("DIAG_REL_SUM stage=sphere rounds=%zu corners=0 accept=0 refused=0\n",
                            rounds.size());
+            }
             return true;
         }
 
@@ -706,6 +893,23 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                 if (in) band.push_back(t);
             }
             if (band.empty()) {
+                if (dg) {
+                    int nNear = 0, nNotCand = 0, nNotSector = 0;
+                    for (int t = 0; t < nTri; ++t) {
+                        bool near = true;
+                        for (int k = 0; k < 3 && near; ++k)
+                            if (std::fabs((ptOf(mv, t, k) - c).Modulus() - r) > tau) near = false;
+                        if (!near) continue;
+                        ++nNear;
+                        if (!candidate(t)) ++nNotCand;
+                        else ++nNotSector;
+                    }
+                    if (nNear > 0)
+                        diagPrintf("DIAG_REL_SPHERE_EMPTY centre=%.4f,%.4f,%.4f R=%.9g "
+                                   "nNear=%d nNotCand=%d nNotSector=%d rounds=%d,%d,%d\n",
+                                   c.X(), c.Y(), c.Z(), r, nNear, nNotCand, nNotSector, accIdx[0],
+                                   accIdx[1], accIdx[2]);
+                }
                 refuse("underdetermined");
                 continue;
             }
@@ -905,9 +1109,116 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
                     refuse("same-surface");
                     continue;
                 }
+                if (dg && (foreign != 0 || touch[0] == 0 || touch[1] == 0 || touch[2] == 0)) {
+                    std::vector<int> facc, fn;
+                    for (int t : band)
+                        for (int s = 0; s < 3; ++s) {
+                            const int o = otherTri(mv.triEdges[t][s], t);
+                            if (o >= 0 && inBand[(std::size_t)o]) continue;
+                            const int ai = o >= 0 ? triAcc[(std::size_t)o] : -1;
+                            bool isRound = false;
+                            for (int q = 0; q < 3; ++q)
+                                if (ai >= 0 && ai == rd[q]->acc) isRound = true;
+                            if (isRound) continue;
+                            int slot = -1;
+                            for (int i = 0; i < (int)facc.size(); ++i)
+                                if (facc[(std::size_t)i] == ai) slot = i;
+                            if (slot < 0) {
+                                facc.push_back(ai);
+                                fn.push_back(1);
+                            } else {
+                                ++fn[(std::size_t)slot];
+                            }
+                        }
+                    for (int i = 0; i < (int)facc.size(); ++i) {
+                        const int ai = facc[(std::size_t)i];
+                        if (ai < 0) {
+                            diagPrintf("DIAG_REL_SPHERE_FOREIGN centre=%.4f,%.4f,%.4f acc=-1 "
+                                       "edges=%d\n",
+                                       c.X(), c.Y(), c.Z(), fn[(std::size_t)i]);
+                            continue;
+                        }
+                        const Region& nb = work.accepted[(std::size_t)ai];
+                        int on = 0, off = 0;
+                        for (int t2 : nb.tris)
+                            for (int k = 0; k < 3; ++k)
+                                if (std::fabs((ptOf(mv, t2, k) - c).Modulus() - r) <= tau) ++on;
+                                else ++off;
+                        double planeTau = -1.0;
+                        if (nb.type == SurfType::Plane) {
+                            const double d = std::fabs(
+                                (c - nb.ax.Location().XYZ()).Dot(nb.ax.Direction().XYZ()));
+                            planeTau = std::fabs(d - r) / tau;
+                        }
+                        diagPrintf("DIAG_REL_SPHERE_FOREIGN centre=%.4f,%.4f,%.4f acc=%d "
+                                   "origin=%d type=%d radius=%.9g devTau=%.4g certified=%d "
+                                   "edges=%d on=%d off=%d planeTau=%.4g\n",
+                                   c.X(), c.Y(), c.Z(), ai, (int)nb.origin, (int)nb.type, nb.radius,
+                                   nb.maxVertexDev / tau, anchorCertified(tau, nb.maxVertexDev) ? 1 : 0,
+                                   fn[(std::size_t)i], on, off, planeTau);
+                    }
+                }
             }
-            if (comps != 1 || chi != 1 || foreign != 0 || touch[0] == 0 || touch[1] == 0 ||
-                touch[2] == 0) {
+            // The historical corner is one disk bounded by all three rounds.
+            // D-gid-4.4: a round that only concurs (touch 0) is still an anchor,
+            // and a foreign edge is allowed when that neighbour is not a
+            // certified surface or is a certified surface tangent to this
+            // sphere. Uncertified residue is not an anchor. Plane stations > 2
+            // refuse two coaxial rims (the existing plane-station rule).
+            const bool classic = comps == 1 && chi == 1 && foreign == 0 && touch[0] > 0 &&
+                                 touch[1] > 0 && touch[2] > 0;
+            bool meetOk = false;
+            if (!classic && comps == 1 && chi == 1 && contactOff == 0) {
+                const int nTouch = (touch[0] > 0 ? 1 : 0) + (touch[1] > 0 ? 1 : 0) +
+                                   (touch[2] > 0 ? 1 : 0);
+                bool nbrOk = nTouch >= 1;
+                for (int t : band) {
+                    for (int s = 0; s < 3 && nbrOk; ++s) {
+                        const int o = otherTri(mv.triEdges[t][s], t);
+                        if (o >= 0 && inBand[(std::size_t)o]) continue;
+                        const int ai = o >= 0 ? triAcc[(std::size_t)o] : -1;
+                        bool isRound = false;
+                        for (int q = 0; q < 3; ++q)
+                            if (ai >= 0 && ai == rd[q]->acc) isRound = true;
+                        if (isRound || ai < 0) continue;
+                        const Region& nb = work.accepted[(std::size_t)ai];
+                        if (!anchorCertified(tau, nb.maxVertexDev)) continue;
+                        if (nb.type == SurfType::Plane) {
+                            const double d = std::fabs(
+                                (c - nb.ax.Location().XYZ()).Dot(nb.ax.Direction().XYZ()));
+                            if (std::fabs(d - r) > tau) nbrOk = false;
+                        } else if (nb.type == SurfType::Cylinder || nb.type == SurfType::Torus) {
+                            RoundSpine sp;
+                            sp.circle = nb.type == SurfType::Torus;
+                            sp.o = nb.ax.Location().XYZ();
+                            sp.a = nb.ax.Direction().XYZ();
+                            sp.R = nb.radius;
+                            sp.r = sp.circle ? nb.radius2 : nb.radius;
+                            if (!sphereRoundContact(c, r, sp, tau)) nbrOk = false;
+                        } else {
+                            nbrOk = false;
+                        }
+                    }
+                }
+                int stations = 0;
+                if (nbrOk) {
+                    gp_Ax3 pln;
+                    if (pcaPlane(mv, band, pln)) {
+                        std::vector<double> hz;
+                        hz.reserve(vp.size());
+                        const gp_XYZ nn = pln.Direction().XYZ();
+                        const gp_XYZ oo = pln.Location().XYZ();
+                        for (const gp_XYZ& x : vp) hz.push_back((x - oo).Dot(nn));
+                        stations = countLevels(std::move(hz), tau);
+                    }
+                    if (stations > 2) meetOk = true;
+                }
+                if (dg)
+                    diagPrintf("DIAG_REL_SPHERE_MEET centre=%.4f,%.4f,%.4f nTouch=%d "
+                               "foreign=%d stations=%d meet=%d\n",
+                               c.X(), c.Y(), c.Z(), nTouch, foreign, stations, meetOk ? 1 : 0);
+            }
+            if (!classic && !meetOk) {
                 refuse("not-blend");
                 continue;
             }
@@ -1220,10 +1531,12 @@ bool claimSphereCorners(const MeshView& mv, const SegmentParams& p, const Derive
             }
         }
 
-        if (dg)
+        if (dg) {
+            diagResidueSpheres(mv, work, tau);
             diagPrintf("DIAG_REL_SUM stage=sphere rounds=%zu corners=%zu accept=%d refused=%d "
                        "dissolved=%zu\n",
                        rounds.size(), corners.size(), nAccept, nRefused, dissolved.size());
+        }
 
         // D-fc-4.3. A dissolved region leaves the accepted list. Indices into
         // it (a chamfer cone's cylinder, a pending torus's absorbed regions)

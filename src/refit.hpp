@@ -7,6 +7,7 @@
 #ifndef STL2STEP_REFIT_HPP
 #define STL2STEP_REFIT_HPP
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -233,7 +234,42 @@ struct Region {
     // Anchored quarter-round only (D-gid-5.15). A cap of the closed torus runs
     // against the facets its tau-preimage left; that cap is the mesh polyline.
     bool   meshPolylineCap = false;
+    // D-gid-7.6. closeRingWalls committed this cylinder on the ring
+    // certificate (D-fc-6.10 C-1/C-3, owned chart or free annulus): both rims
+    // tau-certified circles, every corner and interior vertex within tau of
+    // the surface, every chord vertex covered. Its maxVertexDev holds the
+    // chord sagitta the certificate excuses, so maxVertexDev > tau does not
+    // make it uncertified. Cleared by any refit of the cylinder's fields.
+    bool   ringCertified = false;
+    // Origin::TorusBlend only (D-gid-7.12): the triangles the same-surface stage
+    // (claimTorusSameSurface) added to this torus, sorted. Empty otherwise.
+    std::vector<int> torusGrowTris;
 };
+
+// D-gid-7.12 heal-not-revert. The triangles a torus face that failed to ship
+// names for the U-3 retry (RegionSet::torusFailedTris). A band that grew by the
+// same-surface stage (torusGrowTris a strict subset of its triangles) names only
+// what it grew, so the retry ships the band as it was certified; any other torus
+// (a piece that is all growth included) names every one of its triangles.
+inline const std::vector<int>& torusFailedTrisOf(const Region& tor) {
+    const bool grewBand = !tor.torusGrowTris.empty() && tor.torusGrowTris.size() < tor.tris.size();
+    return grewBand ? tor.torusGrowTris : tor.tris;
+}
+
+// The U-3 retry with `withheld` (sorted) held back keeps a torus only when none
+// of the triangles it would keep is withheld: its band, when it grew
+// (torusFailedTrisOf named the growth), else all of its triangles. True when
+// the torus does not survive the retry. A torus that did not grow is held as
+// soon as any of its triangles is withheld.
+inline bool torusBandHeld(const Region& tor, const std::vector<int>& withheld) {
+    const bool grewBand = !tor.torusGrowTris.empty() && tor.torusGrowTris.size() < tor.tris.size();
+    for (int t : tor.tris) {
+        if (grewBand && std::binary_search(tor.torusGrowTris.begin(), tor.torusGrowTris.end(), t))
+            continue;
+        if (std::binary_search(withheld.begin(), withheld.end(), t)) return true;
+    }
+    return false;
+}
 
 struct BoundaryChain {
     int  regA = -1, regB = -1;      // region ids; -1 => faceted island
@@ -305,6 +341,7 @@ struct ClassBRegionMetric {
     double maxVertexDev = 0;
     double dVolPredicted = 0;
     bool shippedAnalytic = false;
+    bool ringCertified = false;  // Region::ringCertified (D-gid-7.13)
 };
 
 struct RegionSet {                  // exactly one per CLEAN component
@@ -332,6 +369,14 @@ struct RegionSet {                  // exactly one per CLEAN component
     // after applying. classBMetrics is filled on each successful buildFaces return.
     std::vector<int> classBExplode;
     std::vector<ClassBRegionMetric> classBMetrics;
+    // D-gid-7.6: provenance of each face buildFaces returned, parallel to its
+    // `out` (set only when it returns true). shipFaceRid = the region the face
+    // was built for (-1: an island facet, an R2-fallback facet or a stage-P
+    // face); shipFaceFacet = 1 when the face is one mesh triangle (makeFacet),
+    // including the triangles of exploded and E′-filled regions, which keep
+    // their region id. The caller counts RESULT off these, not off `stats`.
+    std::vector<int> shipFaceRid;
+    std::vector<uint8_t> shipFaceFacet;
 };
 
 // P1 entry point. Pure math. Links no OCCT topology: gp_ value types and math_ solvers

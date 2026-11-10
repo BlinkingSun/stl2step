@@ -104,12 +104,12 @@ character-identical to 1.0.0.
 
 | Field | Default | Units / notes |
 |---|---|---|
-| `smoothPlanes` | 0 | Planar regions recovered as `Geom_Plane`. |
-| `smoothCylinders` | 0 | Cylindrical regions recovered. |
+| `smoothPlanes` | 0 | Plane regions with a face in the written solid. |
+| `smoothCylinders` | 0 | Shipped cylinder regions: cylinder regions with a face in the written solid (fillet strips excluded). |
 | `smoothFillets` | 0 | Fillet strips recovered as cylinders. |
 | `smoothDistinctRadii` | 0 | Distinct cylinder radii accepted. |
 | `smoothRejected` | 0 | Candidate regions rejected by gates. |
-| `smoothFacetFaces` | 0 | Faceted faces left after the smooth pass. |
+| `smoothFacetFaces` | 0 | Written faces made only of mesh triangles (one triangle, or coplanar triangles merged into one face). |
 | `facesAfterSmooth` | 0 | Total face count after the smooth pass. |
 | `smoothSkippedComponents` | 0 | Dirty components not refit. |
 | `smoothMaxDevMM` | 0 | Max vertex deviation from fit (mm). |

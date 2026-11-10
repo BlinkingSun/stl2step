@@ -402,6 +402,7 @@ void applyCylFields(Region& r, const Cyl& s, const CylFields& f) {
     r.dVolPredicted = dVolCylinderSector(f.area, s.R, f.nSides, f.outward);
     r.maxVertexDev = f.maxDev;
     r.rmsVertexDev = f.rmsDev;
+    r.ringCertified = false;  // a new fit carries its own certificate (D-gid-7.6)
 }
 
 std::vector<std::vector<int>> edgeComponents(const RMesh& rm, const std::vector<int>& ts);
@@ -2032,6 +2033,9 @@ int closeRingWalls(const RMesh& rm, const SegmentParams& p, const DerivedTols& t
         }
         nr.tris = ch;
         applyCylFields(nr, S, f);
+        // D-gid-7.6. Every gate above passed: the ring certificate holds for S
+        // over ch, whatever the chord sag in maxVertexDev.
+        nr.ringCertified = true;
         {
             const gp_XYZ loc = nr.ax.Location().XYZ();
             const gp_XYZ aw = S.A;
@@ -3578,6 +3582,287 @@ JointTorusCert jointTorusCertify(const std::vector<std::vector<gp_XYZ>>& donors,
     }
     out.ok = jointAxisCertifies(out.family, tau) && out.chain.ok;
     return out;
+}
+
+// D-gid-7.12. Same-surface growth of the certified tori, after A3, on what
+// every other stage left. A triangle lies on a torus when its three vertices
+// are within tau of it and it spans two profile stations (F10: a chord across
+// one ring is a cap polygon, which every vertex test passes). No refit: the
+// surface is the band's own certified one, so its certificate -- and the
+// leave-one-region-out count it was taken on -- is unchanged.
+//  (b) An uncertified B1 chip (torusAtom and robbableUncertified: its own
+//      maxVertexDev exceeds tau) whose every triangle lies on a certified torus
+//      is that torus's surface. The torus takes the chip whole and the chip
+//      dissolves: the uncertified surface is replaced by the certified one.
+//  (a) A certified torus, and the chips it took, claim the unclaimed triangles
+//      edge-connected to them that lie on it. Growth that touches the band
+//      joins the band; a piece of chips and the triangles joining them that does
+//      not touch it ships as one face of its own on the band's surface.
+// Torus order is accepted order; a triangle or chip goes to the first certified
+// torus that takes it. Withheld triangles (U-3 retry) are never taken.
+bool claimTorusSameSurface(const MeshView& mv, const SegmentParams& p, SegmentWork& work) {
+    const double tau = tauOf(mv);
+    if (!(tau > 0.0) || !mv.pts || !mv.tris || !mv.triEdges || mv.nTri == 0) return true;
+    const int nTri = (int)mv.nTri;
+    const int nEdge = (int)mv.nEdge;
+    const int nAcc = (int)work.accepted.size();
+    std::vector<int> cert;
+    for (int s = 0; s < nAcc; ++s) {
+        const Region& T = work.accepted[(std::size_t)s];
+        if (T.origin == Origin::TorusBlend && T.type == SurfType::Torus && !T.tris.empty() &&
+            T.maxVertexDev <= tau)
+            cert.push_back(s);
+    }
+    if (cert.empty()) return true;
+    const bool diag = torusDiagOn();
+
+    std::vector<std::array<int, 2>> edgeTris((std::size_t)std::max(nEdge, 0),
+                                             std::array<int, 2>{-1, -1});
+    for (int t = 0; t < nTri; ++t)
+        for (int k = 0; k < 3; ++k) {
+            const int e = mv.triEdges[t][k];
+            if (e < 0 || e >= nEdge) continue;
+            if (edgeTris[(std::size_t)e][0] < 0) edgeTris[(std::size_t)e][0] = t;
+            else if (edgeTris[(std::size_t)e][1] < 0) edgeTris[(std::size_t)e][1] = t;
+        }
+    auto across = [&](int t, int k) {
+        const int e = mv.triEdges[t][k];
+        if (e < 0 || e >= nEdge) return -1;
+        return edgeTris[(std::size_t)e][0] == t ? edgeTris[(std::size_t)e][1]
+                                                : edgeTris[(std::size_t)e][0];
+    };
+    std::vector<int> owner((std::size_t)nTri, -1);
+    for (int i = 0; i < nAcc; ++i)
+        for (int t : work.accepted[(std::size_t)i].tris)
+            if (t >= 0 && t < nTri) owner[(std::size_t)t] = i;
+    std::vector<char> withheld((std::size_t)nTri, 0);
+    for (int t : p.torusWithheldTris)
+        if (t >= 0 && t < nTri) withheld[(std::size_t)t] = 1;
+
+    auto onTorus = [&](const Region& T, int t) {
+        const gp_XYZ o = T.ax.Location().XYZ(), a = T.ax.Direction().XYZ();
+        std::vector<ProfPt> P(3);
+        for (int k = 0; k < 3; ++k) {
+            const gp_XYZ c = cornerOf(mv, t, k);
+            if (!(torusSurfaceDev(T, c) <= tau)) return false;
+            const gp_XYZ d = c - o;
+            P[(std::size_t)k].z = d.Dot(a);
+            P[(std::size_t)k].rho = (d - a * P[(std::size_t)k].z).Modulus();
+        }
+        return countProfPts(P, tau) >= kMinAxialLevels;
+    };
+
+    // (b) Each uncertified chip goes to the first certified torus it lies on.
+    std::vector<int> robTo((std::size_t)nAcc, -1);
+    for (int ri = 0; ri < nAcc; ++ri) {
+        const Region& R = work.accepted[(std::size_t)ri];
+        if (!torusAtom(R) || !robbableUncertified(R, tau)) continue;
+        bool usable = true;
+        for (int t : R.tris)
+            if (t < 0 || t >= nTri || withheld[(std::size_t)t]) usable = false;
+        if (!usable) continue;
+        for (int s : cert) {
+            const Region& T = work.accepted[(std::size_t)s];
+            bool all = true;
+            for (int t : R.tris)
+                if (!onTorus(T, t)) {
+                    all = false;
+                    break;
+                }
+            if (!all) continue;
+            robTo[(std::size_t)ri] = s;
+            break;
+        }
+    }
+
+    std::vector<char> dead((std::size_t)nAcc, 0);
+    std::vector<Region> born;
+    std::vector<int> claimedFill;
+    int nGrown = 0;
+    for (int s : cert) {
+        std::vector<char> grow((std::size_t)nTri, 0);
+        std::vector<int> seeds = work.accepted[(std::size_t)s].tris;
+        int nChips = 0, nChipTri = 0;
+        for (int ri = 0; ri < nAcc; ++ri) {
+            if (robTo[(std::size_t)ri] != s) continue;
+            ++nChips;
+            for (int t : work.accepted[(std::size_t)ri].tris) {
+                grow[(std::size_t)t] = 1;
+                seeds.push_back(t);
+                ++nChipTri;
+            }
+        }
+        // (a) Unclaimed triangles edge-connected to the band or its chips.
+        const Region& T = work.accepted[(std::size_t)s];
+        std::vector<int> fill, stack = seeds;
+        while (!stack.empty()) {
+            const int t = stack.back();
+            stack.pop_back();
+            for (int k = 0; k < 3; ++k) {
+                const int o = across(t, k);
+                if (o < 0 || grow[(std::size_t)o] || owner[(std::size_t)o] >= 0 ||
+                    withheld[(std::size_t)o] || !onTorus(T, o))
+                    continue;
+                grow[(std::size_t)o] = 1;
+                fill.push_back(o);
+                stack.push_back(o);
+            }
+        }
+        if (nChips == 0 && fill.empty()) continue;
+        for (int t : fill) {
+            owner[(std::size_t)t] = s;
+            claimedFill.push_back(t);
+        }
+        // Edge-components of the growth; one that touches the band joins it.
+        std::vector<char> seen((std::size_t)nTri, 0);
+        std::vector<int> joined;
+        int nPieces = 0;
+        std::vector<int> grown;
+        for (int ri = 0; ri < nAcc; ++ri)
+            if (robTo[(std::size_t)ri] == s)
+                grown.insert(grown.end(), work.accepted[(std::size_t)ri].tris.begin(),
+                             work.accepted[(std::size_t)ri].tris.end());
+        grown.insert(grown.end(), fill.begin(), fill.end());
+        std::sort(grown.begin(), grown.end());
+        for (int t0 : grown) {
+            if (seen[(std::size_t)t0]) continue;
+            std::vector<int> comp, st{t0};
+            seen[(std::size_t)t0] = 1;
+            bool touches = false;
+            while (!st.empty()) {
+                const int t = st.back();
+                st.pop_back();
+                comp.push_back(t);
+                for (int k = 0; k < 3; ++k) {
+                    const int o = across(t, k);
+                    if (o < 0) continue;
+                    if (owner[(std::size_t)o] == s && !grow[(std::size_t)o]) touches = true;
+                    if (!grow[(std::size_t)o] || seen[(std::size_t)o]) continue;
+                    seen[(std::size_t)o] = 1;
+                    st.push_back(o);
+                }
+            }
+            std::sort(comp.begin(), comp.end());
+            if (touches) {
+                joined.insert(joined.end(), comp.begin(), comp.end());
+                continue;
+            }
+            // A piece of its own on the band's surface (fresh region, emitTorus's
+            // fields; the material side from its own triangles).
+            Region n;
+            n.id = 0;
+            n.type = SurfType::Torus;
+            n.origin = Origin::TorusBlend;
+            n.ax = T.ax;
+            n.radius = T.radius;
+            n.radius2 = T.radius2;
+            n.nSides = T.nSides;
+            n.chordSagitta = T.chordSagitta;
+            n.closed360 = false;
+            n.filletNbrA = T.filletNbrA;
+            n.filletNbrB = -1;
+            n.reject = Reject::None;
+            n.builtAs = BuiltAs::NotBuilt;
+            {
+                const gp_XYZ o = T.ax.Location().XYZ(), a = T.ax.Direction().XYZ();
+                double sigma = 0.0;
+                for (int t : comp) {
+                    const gp_XYZ p0 = cornerOf(mv, t, 0), p1 = cornerOf(mv, t, 1),
+                                 p2 = cornerOf(mv, t, 2);
+                    const gp_XYZ nn = (p1 - p0).Crossed(p2 - p0);  // 2 * area * normal
+                    const gp_XYZ d = (p0 + p1 + p2) / 3.0 - o;
+                    const double zc = d.Dot(a);
+                    gp_XYZ rad = d - a * zc;
+                    const double rc = rad.Modulus();
+                    if (!(rc > gp::Resolution())) continue;
+                    rad /= rc;
+                    const gp_XYZ m = rad * (rc - T.radius) + a * zc;
+                    const double mm = m.Modulus();
+                    if (mm > gp::Resolution()) sigma += 0.5 * nn.Dot(m / mm);
+                }
+                n.outwardNormal = sigma >= 0.0;
+            }
+            n.tris = comp;
+            n.torusGrowTris = comp;
+            refreshTorusRegion(mv, n);
+            int pieceChips = 0;
+            for (int ri = 0; ri < nAcc; ++ri)
+                if (robTo[(std::size_t)ri] == s &&
+                    std::binary_search(comp.begin(), comp.end(),
+                                       minTriOf(work.accepted[(std::size_t)ri].tris)))
+                    ++pieceChips;
+            if (diag)
+                std::fprintf(stderr,
+                             "DIAG_REL_TORUS_PIECE acc=%d Rmaj=%.6f Rmin=%.6f chips=%d nTri=%zu "
+                             "maxDevTau=%.4f outward=%d bandOutward=%d u=[%.6f,%.6f] "
+                             "v=[%.6f,%.6f]\n",
+                             s, n.radius, n.radius2, pieceChips, n.tris.size(),
+                             n.maxVertexDev / tau, n.outwardNormal ? 1 : 0,
+                             T.outwardNormal ? 1 : 0, n.uMin, n.uMax, n.vMin, n.vMax);
+            ++nPieces;
+            born.push_back(std::move(n));
+        }
+        for (int ri = 0; ri < nAcc; ++ri)
+            if (robTo[(std::size_t)ri] == s) dead[(std::size_t)ri] = 1;
+        Region& B = work.accepted[(std::size_t)s];
+        if (!joined.empty()) {
+            B.tris.insert(B.tris.end(), joined.begin(), joined.end());
+            B.torusGrowTris.insert(B.torusGrowTris.end(), joined.begin(), joined.end());
+            std::sort(B.torusGrowTris.begin(), B.torusGrowTris.end());
+            refreshTorusRegion(mv, B);
+        }
+        ++nGrown;
+        if (diag)
+            std::fprintf(stderr,
+                         "DIAG_REL_TORUS_GROW acc=%d Rmaj=%.6f Rmin=%.6f chips=%d chipTri=%d "
+                         "fill=%zu joined=%zu pieces=%d nTri=%zu maxDevTau=%.4f\n",
+                         s, B.radius, B.radius2, nChips, nChipTri, fill.size(), joined.size(),
+                         nPieces, B.tris.size(), B.maxVertexDev / tau);
+    }
+    if (nGrown == 0) return true;
+
+    // The claimed triangles leave the Unclaimed provisionals A3 left (the
+    // shatter grain), so no provisional names a torus it was never part of.
+    if (!claimedFill.empty()) {
+        std::sort(claimedFill.begin(), claimedFill.end());
+        for (Provisional& pr : work.provisionals) {
+            if (pr.claim != ProvClaim::Unclaimed) continue;
+            pr.tris.erase(std::remove_if(pr.tris.begin(), pr.tris.end(),
+                                         [&](int t) {
+                                             return std::binary_search(claimedFill.begin(),
+                                                                       claimedFill.end(), t);
+                                         }),
+                          pr.tris.end());
+        }
+    }
+
+    // A dissolved chip leaves the accepted list; indices into it follow the
+    // regions that stay (the sphere stage's rule, D-fc-5.20).
+    bool anyDead = false;
+    for (char d : dead) anyDead = anyDead || d;
+    if (anyDead) {
+        std::vector<int> newIdx((std::size_t)nAcc, -1);
+        std::vector<Region> keep;
+        keep.reserve((std::size_t)nAcc + born.size());
+        for (int i = 0; i < nAcc; ++i) {
+            if (dead[(std::size_t)i]) continue;
+            newIdx[(std::size_t)i] = (int)keep.size();
+            keep.push_back(std::move(work.accepted[(std::size_t)i]));
+        }
+        for (Region& rg : born) keep.push_back(std::move(rg));
+        for (Region& rg : keep) {
+            const bool nbr = rg.origin == Origin::ChamferCone || rg.origin == Origin::TorusBlend;
+            if (!nbr || rg.filletNbrA < 0 || rg.filletNbrA >= nAcc) continue;
+            rg.filletNbrA = newIdx[(std::size_t)rg.filletNbrA];
+        }
+        for (TorusPendingReclaim& pack : work.torusPending)
+            for (int& ai : pack.reclaimAccIdx)
+                if (ai >= 0 && ai < nAcc) ai = newIdx[(std::size_t)ai];
+        work.accepted.swap(keep);
+    } else {
+        for (Region& rg : born) work.accepted.push_back(std::move(rg));
+    }
+    return true;
 }
 
 }  // namespace refit

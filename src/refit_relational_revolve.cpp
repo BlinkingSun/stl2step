@@ -4854,5 +4854,111 @@ bool coaxialSameRadius(const JointAxisFit& fit, std::size_t nFamily, double tau)
     return false;
 }
 
+// D-gid-7.6 / D-gid-7.15 / D-gid-7.17. The exact chord volume of a FilletStrip
+// cylinder, a tau-certified CylGrow cylinder or a torus, summed over the
+// region's own triangles
+// (refit_band_volume.hpp): no side count, so a cylinder whose rows are not
+// equal, or whose side count the normal clustering over-counts, is not
+// under-predicted, and a torus carries its profile (minor-circle) chords as
+// well as its major-circle ones. Signed per I9 by outwardNormal (material on
+// the axis side / inside the tube); the net signed volume goes to physicalOut.
+// Returns false for every other region, which keeps its own prediction.
+bool dVolExactOfRegion(const MeshView& mv, const Region& r, double& out,
+                       double* physicalOut) {
+    // D-gid-7.17: a CylGrow cylinder takes the exact volume only when its own
+    // vertex certificate holds (maxVertexDev <= tau). Over tau its triangles do
+    // not lie on the surface, so the volume between them is not a chord gap and
+    // not a prediction; the region keeps its stage estimate.
+    const bool grownCertified = r.origin == Origin::CylGrow && std::isfinite(r.maxVertexDev) &&
+                                r.maxVertexDev <= tauOf(mv);
+    const bool strip = r.type == SurfType::Cylinder &&
+                       (r.origin == Origin::FilletStrip || grownCertified);
+    const bool torus = r.type == SurfType::Torus;
+    if (!strip && !torus) return false;
+    const gp_XYZ axis = r.ax.Direction().XYZ();
+    const gp_XYZ e1 = r.ax.XDirection().XYZ();
+    const gp_XYZ e2 = axis.Crossed(e1);  // right-handed, whatever the Ax3's sense
+    const gp_XYZ origin = r.ax.Location().XYZ();
+    if (!(r.radius > 0.0) || !std::isfinite(r.radius)) return false;
+    if (torus && (!(r.radius2 > 0.0) || !std::isfinite(r.radius2))) return false;
+    std::vector<int> ids = r.tris;
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    double vol = 0.0, param = 0.0;
+    // Torus rim: every directed edge (point ids), kept to find the edges used once.
+    struct DirEdge {
+        int lo, hi, from, to;
+    };
+    std::vector<DirEdge> dir;
+    if (torus) dir.reserve(3 * ids.size());
+    // The band's half of the tube: +1 when every triangle centroid lies outside
+    // the major circle's cylinder (rho > Rmaj), -1 when every one lies inside,
+    // else 0 (a band over the profile's top or bottom: each vertex its own).
+    // A rim on the top or bottom circle then maps every rim vertex to the band's
+    // half, whatever side of Rmaj its own noise puts it.
+    int side = 0;
+    if (torus) {
+        int nOut = 0, nIn = 0;
+        for (int t : ids) {
+            if (t < 0 || static_cast<std::size_t>(t) >= mv.nTri) continue;
+            const int* gt = mv.tris[mv.compTris[t]];
+            const gp_XYZ c = (mv.pts[gt[0]] + mv.pts[gt[1]] + mv.pts[gt[2]]) / 3.0 - origin;
+            const double rho = std::hypot(c.Dot(e1), c.Dot(e2));
+            if (rho > r.radius) ++nOut;
+            else if (rho < r.radius) ++nIn;
+            else ++nOut, ++nIn;
+        }
+        side = (nIn == 0 && nOut > 0) ? 1 : ((nOut == 0 && nIn > 0) ? -1 : 0);
+    }
+    for (int t : ids) {
+        if (t < 0 || static_cast<std::size_t>(t) >= mv.nTri) continue;
+        const int* gt = mv.tris[mv.compTris[t]];
+        const gp_XYZ a = mv.pts[gt[0]], b = mv.pts[gt[1]], c = mv.pts[gt[2]];
+        if (strip) {
+            vol += revolvedChordTerm(a, b, c, origin, axis, e1, e2, r.radius, 0.0);
+        } else {
+            const TorusChordTerm k = torusChordTerm(a, b, c, origin, axis, e1, e2, r.radius,
+                                                    r.radius2, side);
+            vol += k.vol;
+            param += k.paramArea;
+            for (int e = 0; e < 3; ++e) {
+                const int f = gt[e], h = gt[(e + 1) % 3];
+                dir.push_back({std::min(f, h), std::max(f, h), f, h});
+            }
+        }
+    }
+    if (torus) {
+        std::sort(dir.begin(), dir.end(), [](const DirEdge& x, const DirEdge& y) {
+            if (x.lo != y.lo) return x.lo < y.lo;
+            if (x.hi != y.hi) return x.hi < y.hi;
+            return x.from < y.from;
+        });
+        for (std::size_t i = 0; i < dir.size();) {
+            std::size_t j = i + 1;
+            while (j < dir.size() && dir[j].lo == dir[i].lo && dir[j].hi == dir[i].hi) ++j;
+            if (j - i == 1)
+                vol += torusRimTerm(mv.pts[dir[i].from], mv.pts[dir[i].to], origin, axis, e1, e2,
+                                    r.radius, r.radius2, side);
+            i = j;
+        }
+    }
+    // A torus sum is signed by the triangles' winding; the band's (phi, psi)
+    // area turns it into the volume of the surface beyond the chords along the
+    // outward tube normal. A strip's terms already are (revolvedChordTerm).
+    if (torus && param < 0.0) vol = -vol;
+    const double sigma = r.outwardNormal ? 1.0 : -1.0;
+    // physicalOut: the net material the surface adds. On the saddle side of a
+    // tube (rho < Rmaj) the major-circle chords lie on the other side of the
+    // surface from the profile chords, so the net can oppose sigma. Ruling
+    // D-gid-7.15 (OPEN-2 of gy-dvolpred): dVolPredicted = sigma * |exact|. I9
+    // (and the I-checker that enforces it) signs dVolPredicted by sigma; every
+    // budget reads |dVolPredicted|, which is exact either way; the signed truth
+    // is printed as DIAG_DVOL_EXACT physical= (STL2STEP_DIAG_CLASSB=1).
+    if (physicalOut) *physicalOut = sigma * vol;
+    out = sigma * std::fabs(vol);
+    if (!std::isfinite(out)) return false;
+    return true;
+}
+
 }  // namespace refit
 }  // namespace stl2step

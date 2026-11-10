@@ -87,8 +87,9 @@ bool isClosedCyl(const Region& r) {
     return r.origin == Origin::NgonWall || r.origin == Origin::CylGrow;
 }
 
+// D-gid-7.6: a ring-certified wall is certified, whatever its chord sag.
 bool eligibleCylGrow(const Region& r, double tau) {
-    return r.origin == Origin::CylGrow && r.maxVertexDev > tau;
+    return r.origin == Origin::CylGrow && !r.ringCertified && r.maxVertexDev > tau;
 }
 
 bool axisDonor(const Region& r, double tau) {
