@@ -6,6 +6,45 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-10
+
+TrueForm recognises more of what a CAD user selects: chamfered bores between two exact rims, drafted
+walls, and corner spheres fixed by two rounds. Several certified faces that the B-Rep builder used to
+explode back to facets now ship. On the corpus, handle-pickup drops from 218 to 180 faces with all 9
+corner spheres (the ground-truth count), S16-R2-ChainUnstable from 44 to 22 faces with no facets left,
+and S26_funnel_rev ships its neck as one cylinder with no over-cap edges. The three uncertified holes of
+shelf_bracket now ship at their exact design radii.
+
+### Added
+
+- A wall between two ring-certified coaxial rims ships as one cylinder or cone frustum with no free
+  parameter; chamfer cones and the bore share their exact junction circles and one seam.
+- A drafted wall whose axis is a certified plane's normal ships as a cone (the plane section and the
+  draft angle, certified on every vertex over more than two height levels). A band that also certifies as
+  a plane, an axis-anchored cylinder or a sphere is ambiguous and is not claimed.
+- A corner sphere also forms where two certified rounds of one radius meet with no third round, and the
+  sphere-corner relation runs again after a torus grows the anchor it needed.
+- A closed certified torus whose rim is otherwise a mesh polyline takes its open tangent chains as its
+  exact tangent circle when every chain vertex lies within the mesh tolerance of it.
+
+### Changed
+
+- An uncertified region no longer blocks the certified surface that would replace it; a certified torus
+  takes an uncertified chip's on-torus triangles one at a time.
+- A ring-certified hole whose single region was fitted slightly undersize is re-tested by the ring
+  closure and ships at the ring's radius; a free, ring-certified closed band that the blend test refused
+  goes to the tessellation-law decision (a polygon stays a polygon).
+- The builder keeps certified faces it used to explode: an edge that `SameParameter` lowered regains its
+  own measured curve-on-surface deviation (never more than it carried in), a partial cylinder whose cap and
+  generator pcurves cross just outside the vertex window gets the measured corner tolerance, and the
+  fallback projection of an edge onto a periodic surface keeps the face chart's own branch.
+- Cap triangles inside a certified cylinder stay with it while any lateral neighbour is uncertified.
+- `dVolPredicted` of ring-certified walls and drill-point cones is the exact chord volume.
+- Gates: handle-pickup census.sphere 8 → 9 (ground truth 9); the open-shell tightBudget ceiling is the
+  measured three-platform maximum (the closed-shell material change equals the predictions); Body28
+  polylineTier2 ceiling for the new sphere's facet-bounded edges; S16-R2's two plate-corner joins move
+  from over-cap to over-tolerance with their tolerance halved.
+
 ## [1.10.0] - 2026-11-09
 
 TrueForm finishes more of the corpus part handle-pickup and the remaining hole and strip details of plate
